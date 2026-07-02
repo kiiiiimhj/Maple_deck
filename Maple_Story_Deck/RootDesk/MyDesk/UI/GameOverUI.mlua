@@ -1,0 +1,66 @@
+@Logic
+script GameOverUI extends Logic
+
+	-- UI 바인딩 (클라이언트 전용)
+	property Entity gameOverGroup = "b9492c26-9cc9-4719-b52b-01045e8aa925"
+	property TextComponent statsText = "1f4dd02c-dcf3-4a2f-9f01-27939d3ad424"
+	property ButtonComponent btnRestart = "64ea7c86-3aad-4013-a052-cd9303048b86"
+	property ButtonComponent btnContinue = "fe47e2f9-a3d9-4dc3-a1f0-11907891ae05"
+
+	-- 내부 상태
+	property boolean _prevGameOver = false
+	property any _restartHandler = nil
+	property any _continueHandler = nil
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		-- 게임오버 패널을 숨기고 버튼 클릭 이벤트를 연결한다
+		self.gameOverGroup.Enable = false
+		self._restartHandler = self.btnRestart.Entity:ConnectEvent(ButtonClickEvent, self.OnRestartClicked)
+		self._continueHandler = self.btnContinue.Entity:ConnectEvent(ButtonClickEvent, self.OnContinueClicked)
+		log("GameOverUI started")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUpdate(number delta)
+		-- GameManager.GameOver는 @Sync지만 OnSyncProperty는 자기 자신의 속성에만 호출되므로 매 프레임 폴링한다
+		local isOver = _GameManager.GameOver
+		if isOver ~= self._prevGameOver then
+			self._prevGameOver = isOver
+			if isOver then
+				self:ShowGameOver()
+			else
+				self.gameOverGroup.Enable = false
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ShowGameOver()
+		-- 최종 웨이브/레벨 정보를 표시하고 패널을 연다
+		self.statsText.Text = "Wave " .. _GameManager.Wave .. "  |  Lv." .. _GameManager.Level
+		self.gameOverGroup.Enable = true
+		log("GameOverUI: shown (Wave " .. _GameManager.Wave .. ", Lv." .. _GameManager.Level .. ")")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnRestartClicked()
+		-- 처음부터 다시 시작
+		log("GameOverUI: Restart clicked")
+		_GameManager:RequestRestart()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnContinueClicked()
+		-- 현재 진행 상태를 유지한 채 이어하기
+		log("GameOverUI: Continue clicked")
+		_GameManager:RequestContinue()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		if self._restartHandler then self.btnRestart.Entity:DisconnectEvent(ButtonClickEvent, self._restartHandler) end
+		if self._continueHandler then self.btnContinue.Entity:DisconnectEvent(ButtonClickEvent, self._continueHandler) end
+	end
+
+end

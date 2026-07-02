@@ -1,0 +1,98 @@
+@Component
+script DamageNumberAI extends Component
+
+	method void OnBeginPlay()
+		if self:IsServer() then
+			_TimerService:SetTimerOnce(function()
+				if isvalid(self) and isvalid(self.Entity) then
+					self.Entity:Destroy()
+				end
+			end, 1.0)
+		end
+		if self:IsClient() then
+			self:StartFloatAnimation()
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void StartFloatAnimation()
+		local elapsed    = 0.0
+		local lifeTime   = 0.8         -- 총 표시 시간
+		local floatSpeed = 2.0         -- 초당 Y 이동 (월드 유닛)
+		local popDur     = 0.14        -- 팝 애니메이션 길이 (scale 1.35 → 1.0)
+		local startPos   = self.Entity.TransformComponent.Position
+		local renderer   = self.Entity.TextRendererComponent
+		local prevTime   = _UtilLogic.ElapsedSeconds
+		local timerId    = nil
+		-- 서버 @Sync 색상이 도착하기 전 기본값; 실제 색은 sync 수신 후 덮어씀
+		local baseR      = 1.0
+		local baseG      = 0.95
+		local baseB      = 0.0
+		local colorReady = false
+
+		timerId = _TimerService:SetTimerRepeat(function()
+			if not isvalid(self) or not isvalid(self.Entity) then
+				if timerId ~= nil then _TimerService:ClearTimer(timerId) end
+				return
+			end
+
+			local now = _UtilLogic.ElapsedSeconds
+			local dt  = now - prevTime
+			prevTime  = now
+			elapsed   = elapsed + dt
+
+			-- @Sync FontColor 도착 여부 감지: 검정(기본값)이 아닌 순간 캡처
+			if not colorReady and renderer ~= nil then
+				local c = renderer.FontColor
+				if c.r + c.g + c.b > 0.3 then
+					baseR      = c.r
+					baseG      = c.g
+					baseB      = c.b
+					colorReady = true
+				end
+			end
+
+			-- 팝 스케일: 1.35 → 1.0 (ease-out quad)
+			local scale = 1.0
+			if elapsed < popDur then
+				local t = elapsed / popDur
+				scale = 1.35 - 0.35 * (t * (2.0 - t))  -- ease-out
+			end
+			self.Entity.TransformComponent.Scale = Vector3(scale, scale, 1.0)
+
+			-- 위로 떠오르기 (팝 구간은 절반 속도로 시작)
+			local floatFactor = 1.0
+			if elapsed < popDur then floatFactor = 0.4 end
+			local yOffset = floatSpeed * math.max(0, elapsed - popDur * 0.5) * floatFactor
+			if elapsed >= popDur then
+				yOffset = floatSpeed * (elapsed - popDur * 0.5)
+			end
+			self.Entity.TransformComponent.Position = Vector3(
+				startPos.x,
+				startPos.y + yOffset,
+				startPos.z
+			)
+
+			-- 후반 35%에서 페이드 아웃
+			local alpha    = 1.0
+			local fadeStart = lifeTime * 0.65
+			if elapsed > fadeStart then
+				alpha = 1.0 - (elapsed - fadeStart) / (lifeTime - fadeStart)
+				alpha = math.max(0.0, alpha)
+			end
+
+			if renderer ~= nil then
+				renderer.FontColor = Color(baseR, baseG, baseB, alpha)
+			end
+
+			if elapsed >= lifeTime then
+				_TimerService:ClearTimer(timerId)
+				timerId = nil
+			end
+		end, 1.0 / 60.0)
+	end
+
+	method void OnEndPlay()
+	end
+
+end

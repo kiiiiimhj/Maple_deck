@@ -1,0 +1,476 @@
+@Logic
+script GameManager extends Logic
+
+	-- 플레이어 스탯
+	@Sync property integer PlayerHp = 100
+	@Sync property integer PlayerMaxHp = 100
+
+	-- 경험치 / 레벨
+	@Sync property integer Level = 1
+	@Sync property number Exp = 0
+	@Sync property number ExpNeeded = 100
+
+	-- 골드
+	@Sync property integer Gold = 0
+
+	-- 웨이브
+	@Sync property integer Wave = 1
+
+	-- 게임 상태
+	@Sync property boolean GameOver = false
+
+	-- 몬스터 처치당 경험치/골드
+	property number ExpPerKill = 20
+	property integer GoldPerKill = 5
+	property number ExpGrowthRate = 1.3   -- 레벨업마다 필요 경험치 ×1.3
+
+	-- 클라이언트 전용: 화면 흔들림 판정을 위한 이전 HP 기억
+	property integer _prevPlayerHp = 100
+
+	-- 피격 무적 (동시 다중 피격 방지)
+	property boolean _hitImmune = false
+
+	-- UI 바인딩 (클라이언트 전용)
+	property SliderComponent hpBar = "da3cd53f-f7a1-4345-b09b-2f0e7d0b658e"
+	property SpriteGUIRendererComponent expBarFill = "f611e821-754b-437f-9633-2b26ea571c8d"
+	property TextComponent expLevelText = "7e10b488-7eb5-44c2-98b0-87c80f1f38ec"
+	property TextComponent expText = "998eb743-a64b-4cf3-af6c-f9dc870c315c"
+	property TextComponent goldText = "96a9909e-7c1c-43e4-928f-1e97f0dcc8a3"
+
+	-- 일반 몬스터 처치 시 회복 포션 드롭 연출용 아이콘 (월드 사망 위치 → HP바로 포물선 비행)
+	property SpriteGUIRendererComponent potionFlyIcon = "831d845f-6b01-459e-9724-3c7e26bf1af0"
+
+	-- 회복 포션 드롭 확률 (배타적 — 빨강 5%, 흰색 2%, 나머지 93%는 드롭 없음)
+	property number RedPotionDropChance = 0.05
+	property number WhitePotionDropChance = 0.02
+
+	-- 아이템 드롭 등장 Y 좌표 보정 (죽은 위치를 화면 좌표로 환산한 값에 더해 살짝 위로 띄운다)
+	property number DropYOffset = 60
+
+	-- 회복 포션 RUID (CardManager의 포션 강화 아이콘과 동일한 스프라이트 재사용 — 빨간 포션/하얀 포션)
+	property string RedPotionRUID = "234aca1a4ce946119b68e3717991e775"
+	property string WhitePotionRUID = "289c7bdcbdc8484ab7bad688b2519ca7"
+
+	-- 포션별 회복량 (최대 HP 비율)
+	property number RedPotionHealPercent = 0.08
+	property number WhitePotionHealPercent = 0.15
+
+	-- HP바 비행 도착 지점 — ui/DefaultGroup.ui HPBar(anchoredPosition 20,265 + size 200,28)의 중심을
+	-- 화면 중앙 기준 좌표(DropFlyIcon과 동일한 좌표계)로 환산한 값
+	property Vector2 HpBarFlyTargetUI = Vector2(-840, -261)
+
+	-- 포션이 HP바에 도착했을 때 재생하는 반짝이 파티클
+	property UIBasicParticleComponent hpSparkle = "e0306988-7548-462c-aae9-8a3d82664c99"
+
+	-- 드롭 팝 연출(PlayDropPop 내부 3단계 홉 0.32+0.16+0.11)과 HP바 비행(FlyPotionToHpBar) 시간 합 —
+	-- 서버가 회복을 "포션이 HP바에 실제로 도착하는 시점"에 맞춰 적용하기 위한 기준값
+	property number PotionPopDuration = 0.59
+	property number PotionFlyDuration = 0.5
+
+	-- 클라이언트 전용: 포션 드롭 연출이 진행 중이면 true — 공용 potionFlyIcon을 덮어쓰지 않도록 가드
+	property boolean _potionFlyActive = false
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		self.PlayerHp = self.PlayerMaxHp
+		self.Exp = 0
+		self.ExpNeeded = 100
+		self.Gold = 0
+		self.Level = 1
+		self.Wave = 1
+		self.GameOver = false
+		log("GameManager started")
+	end
+
+	-- HP/EXP 동기화 → UI 갱신
+	@ExecSpace("ClientOnly")
+	method void OnSyncProperty(string name, any value)
+		if name == "PlayerHp" or name == "PlayerMaxHp" then
+			self.hpBar.MaxValue = self.PlayerMaxHp
+			self.hpBar.Value = self.PlayerHp
+			if name == "PlayerHp" and self.PlayerHp < self._prevPlayerHp then
+				self:ShakeCameraOnHit()
+			end
+			self._prevPlayerHp = self.PlayerHp
+		elseif name == "Level" or name == "Exp" or name == "ExpNeeded" then
+			local ratio = self.Exp / self.ExpNeeded
+			ratio = math.max(0, math.min(1, ratio))
+			self.expBarFill.FillAmount = ratio
+			self.expLevelText.Text = "Lv." .. self.Level
+			self.expText.Text = math.floor(self.Exp) .. " / " .. math.floor(self.ExpNeeded)
+		elseif name == "Gold" then
+			self.goldText.Text = ": " .. self.Gold
+		end
+	end
+
+	-- 플레이어 피격 시 화면을 살짝 흔든다
+	@ExecSpace("ClientOnly")
+	method void ShakeCameraOnHit()
+		local cam = _CameraService:GetCurrentCameraComponent()
+		if cam == nil then return end
+		cam:ShakeCamera(0.2, 0.15)
+		log("ShakeCameraOnHit triggered")
+	end
+
+	-- 몬스터 처치 시 MonsterAI가 호출
+	@ExecSpace("ServerOnly")
+	method void OnMonsterKilled()
+		if self.GameOver then return end
+
+		self.Gold = self.Gold + self.GoldPerKill
+		self.Exp = self.Exp + self.ExpPerKill
+		log("Kill! EXP:" .. self.Exp .. "/" .. self.ExpNeeded .. " Gold:" .. self.Gold)
+
+		if self.Exp >= self.ExpNeeded then
+			self:LevelUp()
+		end
+	end
+
+	-- 웨이브별 몬스터 공격력 반환 (Wave 10 보스, 10 이후 고정)
+	@ExecSpace("ServerOnly")
+	method integer GetWaveAttack(integer wave)
+		-- 달팽이→파란달팽이→스포아→빨간달팽이→슬라임→돼지→주니어부기→스텀프→옥토퍼스→리본돼지(보스)
+		-- Card1 쿨타임 0.8s 기준 1회 공격당 대미지 (플레이어 HP=100)
+		local attacks = {3, 5, 8, 11, 14, 17, 20, 23, 27, 35}
+		local idx = math.min(wave, #attacks)
+		return attacks[idx]
+	end
+
+	-- 웨이브별 몬스터 체력 반환 (Card1 데미지=100 기준 설계, Wave 10 보스, 이후 고정)
+	@ExecSpace("ServerOnly")
+	method integer GetWaveHp(integer wave)
+		-- Wave 4(520)부터 도달 시작, Wave 10 보스는 접근 속도가 느려 15초 교전 창 확보
+		local hps = {60, 80, 100, 150, 230, 340, 500, 720, 1000, 1800}
+		local idx = math.min(wave, #hps)
+		return hps[idx]
+	end
+
+	-- 웨이브별 몬스터 접근 속도 반환 (Wave 10 보스는 느리게 접근)
+	@ExecSpace("ServerOnly")
+	method number GetWaveApproachSpeed(integer wave)
+		-- Wave 10 보스: (1.5-0.3)/0.08 = 15초 교전 창 → 카드 풀업그레이드 시 도달 전 처치 가능
+		if wave >= 10 then return 0.08 end
+		return 0.3
+	end
+
+	-- 웨이브별 몬스터 hit1 애니메이션 RUID
+	@ExecSpace("ServerOnly")
+	method string GetWaveHitRUID(integer wave)
+		local ruids = {
+			"a3feafdb656943baa3f8897a7042b21f",  -- Wave  1: 달팽이
+			"938c814d2142406c8a6480ee2b025ac3",  -- Wave  2: 파란 달팽이
+			"1f539560199e40bb8bb2dbfe3a26cb89",  -- Wave  3: 스포아
+			"a9c736c7e74544c18740d6eb36b2f103",  -- Wave  4: 빨간 달팽이
+			"61c27025a8f14c478f30ede1b49758bc",  -- Wave  5: 슬라임
+			"60e42a918a0342478903cc71adba1dc5",  -- Wave  6: 돼지
+			"2358e38b0c9b4d9da987387deba59de0",  -- Wave  7: 주니어 부기
+			"755abcabb6504879ad91a62797756950",  -- Wave  8: 스텀프
+			"c3cf643b618346c7bfa6574187b396f9",  -- Wave  9: 옥토퍼스
+			"ee7bf6fc53fc48df82db872d8827310a",  -- Wave 10: 리본 돼지
+		}
+		local idx = math.max(1, math.min(wave, #ruids))
+		return ruids[idx]
+	end
+
+	-- 웨이브별 몬스터 die1 애니메이션 RUID
+	@ExecSpace("ServerOnly")
+	method string GetWaveDieRUID(integer wave)
+		local ruids = {
+			"a25ed762135448ccb2307604f3179565",  -- Wave  1: 달팽이      (9프레임)
+			"af2e35a7899d4cc18e4f4aec7f8e9f06",  -- Wave  2: 파란 달팽이  (3프레임)
+			"301b5cb17c3b46e68f3e420a603be564",  -- Wave  3: 스포아      (4프레임)
+			"d5fad1d29d4d4254855d8ee1c4bda507",  -- Wave  4: 빨간 달팽이  (3프레임)
+			"31ecb6c7cbc24599881f00cb01599f09",  -- Wave  5: 슬라임      (4프레임)
+			"0644beff80a44ec7acc011ea0961df57",  -- Wave  6: 돼지        (3프레임)
+			"7a65348d68394332ba5b5aa7761c98cd",  -- Wave  7: 주니어 부기  (8프레임)
+			"61a099877bda46309d038afe28acf9f0",  -- Wave  8: 스텀프      (3프레임)
+			"a88d9b3d60f941e4890dc89a6ccaa8ee",  -- Wave  9: 옥토퍼스    (4프레임)
+			"77f8f34df8cc4ba6ae188fd2f1b28bc4",  -- Wave 10: 리본 돼지   (3프레임)
+		}
+		local idx = math.max(1, math.min(wave, #ruids))
+		return ruids[idx]
+	end
+
+	-- 웨이브별 die1 애니메이션 1회 재생 시간 (프레임 수 × ~100ms + 여유)
+	@ExecSpace("ServerOnly")
+	method number GetWaveDieDuration(integer wave)
+		local durations = {
+			0.95,  -- Wave  1: 달팽이      9프레임
+			0.35,  -- Wave  2: 파란 달팽이  3프레임
+			0.45,  -- Wave  3: 스포아      4프레임
+			0.35,  -- Wave  4: 빨간 달팽이  3프레임
+			0.45,  -- Wave  5: 슬라임      4프레임
+			0.35,  -- Wave  6: 돼지        3프레임
+			0.85,  -- Wave  7: 주니어 부기  8프레임
+			0.35,  -- Wave  8: 스텀프      3프레임
+			0.45,  -- Wave  9: 옥토퍼스    4프레임
+			0.35,  -- Wave 10: 리본 돼지   3프레임
+		}
+		local idx = math.max(1, math.min(wave, #durations))
+		return durations[idx]
+	end
+
+	-- 웨이브별 몬스터 stand 애니메이션 RUID (MapleStory 원본 리소스)
+	@ExecSpace("ServerOnly")
+	method string GetWaveStandRUID(integer wave)
+		local ruids = {
+			"2db94405cf0445f5be2b60a02c21dda5",  -- Wave  1: 달팽이
+			"0c69164656d24f64bd1a1f6ee4019dff",  -- Wave  2: 파란 달팽이
+			"f84d50d06d1c45308d8497e8bf226308",  -- Wave  3: 스포아
+			"ffb9e9fba641457c818e9bf9d724461a",  -- Wave  4: 빨간 달팽이
+			"50faf654ee5d479cb2958edce9feaef0",  -- Wave  5: 슬라임
+			"528a8638b12f41b8b5781a05360d2949",  -- Wave  6: 돼지
+			"5a7096472ffd4ac388fa826071a435a5",  -- Wave  7: 주니어 부기
+			"cf2a470436cd4b2aa265648e15198c45",  -- Wave  8: 스텀프
+			"d8f014043ce8418f96700c2b6c9ebf6c",  -- Wave  9: 옥토퍼스
+			"6a699b8c31b94474bb795c7394c3af3b",  -- Wave 10: 리본 돼지 (보스)
+		}
+		local idx = math.min(wave, #ruids)
+		return ruids[idx]
+	end
+
+	-- 몬스터가 플레이어에게 도달했을 때 MonsterAI가 호출 (엘리트는 dmgMultiplier로 공격력 가산)
+	@ExecSpace("ServerOnly")
+	method void OnMonsterReached(number dmgMultiplier)
+		if self.GameOver then return end
+		if self._hitImmune then return end
+
+		self._hitImmune = true
+		local dmg = math.floor(self:GetWaveAttack(self.Wave) * dmgMultiplier)
+		self.PlayerHp = self.PlayerHp - dmg
+		log("Player hit! HP:" .. self.PlayerHp .. " (Wave " .. self.Wave .. " dmg:" .. dmg .. ")")
+
+		_TimerService:SetTimerOnce(function()
+			if isvalid(self) then self._hitImmune = false end
+		end, 0.8)
+
+		if self.PlayerHp <= 0 then
+			self.PlayerHp = 0
+			self:TriggerGameOver()
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void LevelUp()
+		self.Level = self.Level + 1
+		self.Exp = self.Exp - self.ExpNeeded
+		self.ExpNeeded = math.floor(self.ExpNeeded * self.ExpGrowthRate)
+		self.Wave = self.Wave + 1
+		self.PlayerMaxHp = self.PlayerMaxHp + 15
+		self.PlayerHp = math.min(self.PlayerHp + 15, self.PlayerMaxHp)
+		log("Level Up! Lv." .. self.Level .. " | Wave:" .. self.Wave .. " | MaxHP:" .. self.PlayerMaxHp)
+		_CardManager:GenerateLevelUpChoices()
+	end
+
+	@ExecSpace("ServerOnly")
+	method void TriggerGameOver()
+		self.GameOver = true
+		_MonsterSpawner:StopSpawning()
+		log("Game Over!")
+	end
+
+	-- 클라이언트의 "다시하기" 버튼 요청
+	@ExecSpace("Server")
+	method void RequestRestart()
+		self:RestartGame()
+	end
+
+	-- 클라이언트의 "이어하기" 버튼 요청
+	@ExecSpace("Server")
+	method void RequestContinue()
+		self:ContinueGame()
+	end
+
+	@ExecSpace("ServerOnly")
+	method void RestartGame()
+		-- 처음부터 다시 시작: 모든 상태를 초기화
+		self.PlayerMaxHp = 100
+		self.PlayerHp = 100
+		self.Level = 1
+		self.Exp = 0
+		self.ExpNeeded = 100
+		self.Gold = 0
+		self.Wave = 1
+		self.GameOver = false
+		self._hitImmune = false
+		_CardManager:ResetAllCards()
+		_MonsterSpawner:ClearAllMonsters()
+		_MonsterSpawner:ResetEliteTracking()
+		_MonsterSpawner:RestartSpawning()
+		log("Game restarted (full reset)")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ContinueGame()
+		-- 이어하기: 레벨/경험치/골드/웨이브 유지, 체력 회복
+		self.PlayerHp = self.PlayerMaxHp
+		self.GameOver = false
+		-- 버프 카드(7/8) 상태 초기화 → 이어하기 직후 즉시 재발동
+		_CardManager:ResetBuffsForContinue()
+		-- 기존 몬스터를 제거하지 않고 스폰 위치로 밀어냄 (먼지 이펙트 포함)
+		_MonsterSpawner:PushAllMonstersBack()
+		-- 타이머 리셋 없이 재개 → 이어하기 직후 추가 스폰 배치 없음
+		_MonsterSpawner:ResumeSpawning()
+		log("Game continued (Wave " .. self.Wave .. ", Lv." .. self.Level .. ")")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void HealPlayer(integer amount)
+		-- 포션 사용 시 체력 회복 (최대 HP 초과 불가)
+		if self.GameOver then return end
+		self.PlayerHp = math.min(self.PlayerHp + amount, self.PlayerMaxHp)
+		log("Player healed " .. amount .. " -> HP:" .. self.PlayerHp)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void TryDropHealPotion(Vector3 worldPos)
+		-- 일반 몬스터 처치 시 가끔 회복 포션을 드롭한다 (빨강/흰색은 배타적 — 합쳐서 15% 확률)
+		if self.GameOver then return end
+
+		local r = _UtilLogic:RandomDouble()
+		local potionType = 0
+		if r < self.RedPotionDropChance then
+			potionType = 1
+		elseif r < self.RedPotionDropChance + self.WhitePotionDropChance then
+			potionType = 2
+		end
+		if potionType == 0 then return end
+
+		local healPercent = (potionType == 1) and self.RedPotionHealPercent or self.WhitePotionHealPercent
+		local healAmount = math.floor(self.PlayerMaxHp * healPercent)
+		log("HealPotion dropped: type=" .. potionType .. " heal=" .. healAmount)
+
+		-- 클라이언트가 보여줄 연출과 서버가 정확히 같은 시간을 쓰도록 groundDelay를 서버에서 굴려 함께 전달한다.
+		-- 회복 자체는 "포션이 HP바에 실제로 도착하는 시점"(팝 연출 + 대기 + 비행 시간 합)에 맞춰 적용한다 —
+		-- 즉시 회복하면 HP가 먼저 차고 한참 뒤에 포션이 도착하는 어색한 시차가 생긴다.
+		local groundDelay = 0.6 + _UtilLogic:RandomDouble() * 0.6
+		local arrivalDelay = self.PotionPopDuration + groundDelay + self.PotionFlyDuration
+		_TimerService:SetTimerOnce(function()
+			if isvalid(self) then self:HealPlayer(healAmount) end
+		end, arrivalDelay)
+
+		self:PlayPotionDropVisual(Vector2(worldPos.x, worldPos.y), potionType, groundDelay)
+	end
+
+	@ExecSpace("Multicast")
+	method void PlayPotionDropVisual(Vector2 worldPos, integer potionType, number groundDelay)
+		-- 사망 위치에 포션이 떨어진 것처럼 보여준 뒤, 잠시 멈췄다가 HP바로 날아간다
+		if self:IsServer() then return end
+		-- 이전 드롭 연출이 아직 진행 중이면 스킵 (회복은 서버에서 별도로 처리됨)
+		if self._potionFlyActive then return end
+
+		self._potionFlyActive = true
+		local rawUI = _UILogic:ScreenToUIPosition(_UILogic:WorldToScreenPosition(worldPos))
+		local startUI = Vector2(rawUI.x, rawUI.y + self.DropYOffset)
+		local icon = self.potionFlyIcon
+		icon.ImageRUID = (potionType == 1) and self.RedPotionRUID or self.WhitePotionRUID
+		icon.Color = Color(1, 1, 1, 1)
+		icon.Entity:SetEnable(true)
+		local tc = icon.Entity.UITransformComponent
+		tc.anchoredPosition = startUI
+		tc.Scale = Vector3(1, 1, 1)
+
+		-- 메이플식 드롭: 좌우 랜덤 방향으로 포물선 홉 → 점점 작아지는 바운스 2회로 바닥에 안착한 뒤,
+		-- 서버와 동일한 groundDelay만큼 머물렀다가 HP바로 날아간다
+		self:PlayDropPop(icon, startUI, function(landUI)
+			_TimerService:SetTimerOnce(function()
+				self:FlyPotionToHpBar(icon, landUI)
+			end, groundDelay)
+		end)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayDropPop(SpriteGUIRendererComponent icon, Vector2 startUI, any onLanded)
+		-- 메이플 아이템 드롭 특유의 "톡 튀어나와 바닥에 안착" 모션: 좌우 랜덤 방향 큰 홉 1회 + 점점 작아지는 제자리 바운스 2회
+		if not isvalid(icon) then return end
+		local dir = (_UtilLogic:RandomDouble() < 0.5) and -1 or 1
+		local landUI = Vector2(startUI.x + dir * (45 + _UtilLogic:RandomDouble() * 45), startUI.y)
+
+		self:PlayHop(icon, startUI, landUI, 70, 0.32, function()
+			self:PlayHop(icon, landUI, landUI, 24, 0.16, function()
+				self:PlayHop(icon, landUI, landUI, 10, 0.11, function()
+					if onLanded ~= nil then onLanded(landUI) end
+				end)
+			end)
+		end)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayHop(SpriteGUIRendererComponent icon, Vector2 fromUI, Vector2 toUI, number height, number duration, any onDone)
+		-- fromUI → toUI 로 포물선(사인 아치)을 그리며 한 번 홉. fromUI==toUI면 제자리 바운스
+		_TweenLogic:PlayTween(0.0, 1.0, duration, EaseType.QuadEaseOut, function(t)
+			if not isvalid(icon) then return end
+			local x = fromUI.x + (toUI.x - fromUI.x) * t
+			local y = fromUI.y + (toUI.y - fromUI.y) * t + math.sin(t * math.pi) * height
+			icon.Entity.UITransformComponent.anchoredPosition = Vector2(x, y)
+		end)
+		_TimerService:SetTimerOnce(function()
+			if onDone ~= nil then onDone() end
+		end, duration)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void FlyPotionToHpBar(SpriteGUIRendererComponent icon, Vector2 startUI)
+		-- 포물선을 그리며 HP바 위치로 날아가는 동안 점점 작아지고 투명해진 뒤 사라지고, HP바를 살짝 펀치 + 반짝임 연출
+		if not isvalid(icon) then return end
+		local endUI = self.HpBarFlyTargetUI
+		local arcHeight = 150
+
+		_TweenLogic:PlayTween(0.0, 1.0, self.PotionFlyDuration, EaseType.QuadEaseOut, function(t)
+			if not isvalid(icon) then return end
+			local x = startUI.x + (endUI.x - startUI.x) * t
+			local y = startUI.y + (endUI.y - startUI.y) * t + math.sin(t * math.pi) * arcHeight
+			icon.Entity.UITransformComponent.anchoredPosition = Vector2(x, y)
+			local scale = 1.0 - 0.5 * t
+			icon.Entity.UITransformComponent.Scale = Vector3(scale, scale, 1)
+			icon.Color = Color(1, 1, 1, 1.0 - 0.6 * t)
+		end)
+
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(icon) then return end
+			icon.Entity:SetEnable(false)
+			self._potionFlyActive = false
+			self:PunchHpBar()
+		end, self.PotionFlyDuration)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PunchHpBar()
+		-- 포션 도착 시 HP바를 잠깐 확대-축소시키고 반짝이 파티클을 재생해 도착감을 준다
+		_TweenLogic:ScaleTo(self.hpBar.Entity, Vector2(1.06, 1.15), 0.12, EaseType.BackEaseOut)
+		self:PlayHpSparkle()
+		_TimerService:SetTimerOnce(function()
+			if isvalid(self.hpBar) then
+				_TweenLogic:ScaleTo(self.hpBar.Entity, Vector2(1, 1), 0.15, EaseType.QuadEaseOut)
+			end
+		end, 0.12)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayHpSparkle()
+		-- 반짝이 파티클을 재생하고, 재생 시간 동안 알파를 1→0으로 서서히 줄여 자연스럽게 사라지게 한다
+		if self.hpSparkle == nil then return end
+		self.hpSparkle.Color = Color(1, 0.9137254901960784, 0.6588235294117647, 1)
+		self.hpSparkle:Play()
+		_TweenLogic:PlayTween(1.0, 0.0, 0.5, EaseType.QuadEaseIn, function(a)
+			if not isvalid(self.hpSparkle) then return end
+			local c = self.hpSparkle.Color
+			self.hpSparkle.Color = Color(c.r, c.g, c.b, a)
+		end)
+		_TimerService:SetTimerOnce(function()
+			if isvalid(self.hpSparkle) then self.hpSparkle:Stop() end
+		end, 0.5)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void AddGold(integer amount)
+		-- 엘리트 몬스터 드롭 등 카드 강화와 무관한 보상에 사용
+		self.Gold = self.Gold + amount
+		log("Gold +" .. amount .. " -> " .. self.Gold)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnEndPlay()
+	end
+
+end

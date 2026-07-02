@@ -1,0 +1,70 @@
+@Logic
+script MapManager extends Logic
+
+	-- 현재 플레이어가 있는 맵 번호 (map01~03 = 1~3)
+	@Sync property integer CurrentMapIndex = 1
+
+	property integer MinMapIndex = 1
+	property integer MaxMapIndex = 3
+
+	-- 가장 멀리 도달한(=몬스터가 활성 스폰 중인) 맵 번호. 좌로 후퇴해도 줄어들지 않는다
+	property integer _frontierMapIndex = 1
+
+	-- 맵 이동 시 플레이어를 위치시킬 좌표. Y는 DefaultUserEnterLeaveLogic이 원래 스폰시키는 높이(0.2)와
+	-- 반드시 맞춰야 한다 — 다르면 카메라가 그 차이만큼 밀려서 몬스터가 화면 아래(UI 위)로 잘못 표시된다
+	property Vector3 SpawnPosition = Vector3(0, 0.2, 0)
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		self.CurrentMapIndex = 1
+		self._frontierMapIndex = 1
+		log("MapManager started at map0" .. self.CurrentMapIndex)
+	end
+
+	-- 클라이언트의 좌측 이동 버튼 요청
+	@ExecSpace("Server")
+	method void RequestMoveLeft()
+		self:MoveToMap(self.CurrentMapIndex - 1)
+	end
+
+	-- 클라이언트의 우측 이동 버튼 요청
+	@ExecSpace("Server")
+	method void RequestMoveRight()
+		self:MoveToMap(self.CurrentMapIndex + 1)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void MoveToMap(integer targetIndex)
+		-- 범위를 벗어나면 무시 (map1에서 좌 / 마지막 맵에서 우 — 아무 반응 없음)
+		if targetIndex < self.MinMapIndex or targetIndex > self.MaxMapIndex then return end
+		if targetIndex == self.CurrentMapIndex then return end
+
+		local mapName = "map0" .. targetIndex
+		local mapEntity = _EntityService:GetEntityByPath("/maps/" .. mapName)
+		if mapEntity == nil then
+			log_error("MapManager: " .. mapName .. " not found")
+			return
+		end
+
+		for _, userEntity in pairs(_UserService.UserEntities) do
+			_TeleportService:TeleportToMapPosition(userEntity, self.SpawnPosition, mapName)
+		end
+
+		self.CurrentMapIndex = targetIndex
+		if targetIndex > self._frontierMapIndex then
+			self._frontierMapIndex = targetIndex
+		end
+
+		if targetIndex == self._frontierMapIndex then
+			-- 프론티어(가장 앞선 진행 지점)에 도착 → 이 맵에서 스폰 재개
+			_MonsterSpawner:SetMap(mapEntity)
+			_MonsterSpawner:ResumeSpawning()
+			log("MapManager: moved to " .. mapName .. " (frontier, spawning resumed)")
+		else
+			-- 이미 지나온 맵으로 후퇴 → 스폰 중단 (기존 몬스터는 그대로 방치)
+			_MonsterSpawner:StopSpawning()
+			log("MapManager: moved to " .. mapName .. " (cleared map, spawning stopped)")
+		end
+	end
+
+end

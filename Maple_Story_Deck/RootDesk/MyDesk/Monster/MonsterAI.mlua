@@ -1,0 +1,509 @@
+@Component
+script MonsterAI extends Component
+
+	-- 몬스터 스탯
+	property number MaxHp = 100
+	property number CurrentHp = 100
+
+	-- 웨이브별 스프라이트 동기화 (서버 → 클라이언트)
+	@Sync property string MonsterSprite = ""
+
+	-- 접근 속도: 초당 스케일 증가량 (0.3 → 1.5까지 약 4초)
+	property number ApproachSpeed = 0.3
+	-- 도착 타이밍 분산: 개체별로 ApproachSpeed를 ±이 값만큼 무작위로 흔들어
+	-- 같은 타이밍에 스폰된 몬스터들이 동시에 도착하지 않게 한다
+	property number ApproachSpeedVariance = 0.08
+
+	-- 정면 도착 후 공격 간격 (초)
+	property number AttackInterval = 1.0
+
+	-- 내부 상태
+	property boolean _dead = false
+	property number _currentScale = 0.3
+	property boolean _reachedPlayer = false
+	property number _attackTimer = 0
+
+	-- 슬로우 상태 (콜드 빔)
+	property boolean _isSlowed = false
+	property integer _slowTimerId = 0
+
+	-- 감전(스턴) 상태 (썬더볼트)
+	property boolean _isStunned = false
+	property integer _stunTimerId = 0
+	property number _stunSavedSpeed = 0
+
+	-- 도트 데미지 상태 (메테오)
+	property number _dotDamage = 0
+	property integer _dotTicksLeft = 0
+	property integer _dotTimerId = 0
+
+	-- 엘리트 상태 (5웨이브마다 스폰 그룹 중 1마리)
+	property boolean _isElite = false
+	property number _scaleMultiplier = 1.0
+
+	-- 스폰 시점 웨이브의 die1 / hit1 애니메이션 RUID 및 재생 시간
+	property string _dieRUID = ""
+	property number _dieDuration = 0.5
+	property string _hitRUID = ""
+
+	-- 이어하기 밀려나는 중 OnUpdate 스킵 플래그
+	property boolean _isPushingBack = false
+
+	-- 빙결 스택 (프리징 이펙트 패시브)
+	@Sync property integer FreezeStack = 0
+	property Entity _freezeIndicator = nil
+	property boolean _freezeSlowed = false
+
+	method void OnBeginPlay()
+		if self:IsServer() then
+			-- 현재 웨이브에 맞는 체력과 접근 속도로 초기화
+			local wave = _GameManager.Wave
+			local hp = _GameManager:GetWaveHp(wave)
+			self.MaxHp = hp
+			self.CurrentHp = hp
+			self.ApproachSpeed = _GameManager:GetWaveApproachSpeed(wave)
+
+			-- 보스(Wave 10+)는 속도 분산 없이 일정하게 접근, 일반 몬스터는 도착 타이밍 분산
+			if wave < 10 then
+				local variance = (_UtilLogic:RandomDouble() * 2 - 1) * self.ApproachSpeedVariance
+				self.ApproachSpeed = self.ApproachSpeed + variance
+			else
+				-- 보스는 임팩트를 위해 비주얼 스케일을 5배 키운다 (엘리트와 곱연산으로 같이 적용됨)
+				self._scaleMultiplier = self._scaleMultiplier * 5
+			end
+
+			-- 웨이브에 맞는 스프라이트 RUID 동기화 (OnSyncProperty → 클라이언트 렌더러 교체)
+			self.MonsterSprite = _GameManager:GetWaveStandRUID(wave)
+			self._dieRUID = _GameManager:GetWaveDieRUID(wave)
+			self._dieDuration = _GameManager:GetWaveDieDuration(wave)
+			self._hitRUID = _GameManager:GetWaveHitRUID(wave)
+
+			self._currentScale = 0.85
+			self.Entity.TransformComponent.Scale = Vector3(0.85 * self._scaleMultiplier, 0.85 * self._scaleMultiplier, 1.0)
+			self:UpdateDepth()
+			log("MonsterAI: Wave=" .. wave .. " HP=" .. self.CurrentHp .. " Speed=" .. self.ApproachSpeed)
+		else
+			-- 클라이언트: @Sync MonsterSprite가 도착하기 전에 Monster.model 기본 SpriteRUID가
+			-- 잠깐 보이는 현상(스프라이트 깜빡임) 방지 — OnSyncProperty에서 올바른 RUID로 교체됨
+			local renderer = self.Entity.SpriteRendererComponent
+			if renderer ~= nil then
+				renderer.SpriteRUID = ""
+			end
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void MarkElite()
+		-- 엘리트 승급: 체력/공격력 +15%, 비주얼 스케일 확대. OnBeginPlay에서 웨이브 스탯이 잡힌 직후(스폰 직후) 호출된다.
+		if self._isElite then return end
+		self._isElite = true
+		-- 보스(웨이브10+)의 x10 스케일과 곱연산으로 같이 적용되도록 덮어쓰지 않고 곱한다
+		self._scaleMultiplier = self._scaleMultiplier * 1.15
+		self.MaxHp = self.MaxHp * 1.15
+		self.CurrentHp = self.MaxHp
+		self.Entity.TransformComponent.Scale = Vector3(self._currentScale * self._scaleMultiplier, self._currentScale * self._scaleMultiplier, 1.0)
+		log("MonsterAI: promoted to ELITE (HP=" .. math.floor(self.MaxHp) .. ")")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnSyncProperty(string name, any value)
+		-- MonsterSprite가 동기화되면 SpriteRendererComponent의 RUID를 교체한다
+		if name == "MonsterSprite" and self.MonsterSprite ~= "" then
+			local renderer = self.Entity.SpriteRendererComponent
+			if renderer ~= nil then
+				renderer.SpriteRUID = self.MonsterSprite
+			else
+				log_warning("MonsterAI: SpriteRendererComponent nil")
+			end
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnUpdate(number delta)
+		if self._dead then return end
+		if _GameManager.GameOver then return end
+		if self._isPushingBack then return end
+
+		-- 빙결 스택 UI 지표 위치 추적
+		if isvalid(self._freezeIndicator) then
+			local fpos = self.Entity.TransformComponent.Position
+			self._freezeIndicator.TransformComponent.Position = Vector3(fpos.x + 0.45, fpos.y - 0.40, fpos.z - 0.05)
+		end
+
+		if self._reachedPlayer then
+			-- 정면에 멈춰서 일정 간격으로 계속 공격
+			self._attackTimer = self._attackTimer - delta
+			if self._attackTimer <= 0 then
+				self:OnReachPlayer()
+				self._attackTimer = self.AttackInterval
+			end
+			return
+		end
+
+		-- 스케일 증가 (카메라 접근 연출)
+		self._currentScale = self._currentScale + self.ApproachSpeed * delta
+
+		if self._currentScale >= 1.5 then
+			-- 플레이어 정면에 도착 → 소멸하지 않고 자리에서 계속 공격 시작
+			self._currentScale = 1.5
+			self.Entity.TransformComponent.Scale = Vector3(1.5 * self._scaleMultiplier, 1.5 * self._scaleMultiplier, 1.0)
+			self:UpdateDepth()
+			self._reachedPlayer = true
+			self._attackTimer = self.AttackInterval
+			self:OnReachPlayer()
+		else
+			self.Entity.TransformComponent.Scale = Vector3(self._currentScale * self._scaleMultiplier, self._currentScale * self._scaleMultiplier, 1.0)
+			self:UpdateDepth()
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void UpdateDepth()
+		-- 스케일이 작을수록(멀리 있을수록) Z를 크게 해서 뒤로 깔리고,
+		-- 스케일이 커질수록(가까이 다가올수록) Z를 작게 해서 앞으로 나오게 한다
+		local pos = self.Entity.TransformComponent.Position
+		local depth = 1.5 - self._currentScale
+		self.Entity.TransformComponent.Position = Vector3(pos.x, pos.y, depth)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void TakeDamage(number damage)
+		-- 카드 공격 시 호출
+		if self._dead then return end
+		self.CurrentHp = self.CurrentHp - damage
+		log("Monster HP: " .. self.CurrentHp .. "/" .. self.MaxHp)
+		self:SpawnDamageNumber(damage)
+		self:PlayHitAnimation(self._hitRUID, self.MonsterSprite)
+		if self.CurrentHp <= 0 then
+			self:Die()
+		end
+	end
+
+	@ExecSpace("Multicast")
+	method void PlayHitAnimation(string hitRUID, string standRUID)
+		if self:IsServer() then return end
+		if self._dead then return end
+		local renderer = self.Entity.SpriteRendererComponent
+		if renderer == nil or hitRUID == "" then return end
+		renderer.SpriteRUID = hitRUID
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) then return end
+			-- hit1 상태일 때만 stand로 복원 — die1로 전환된 뒤라면 그대로 둔다
+			if renderer.SpriteRUID == hitRUID then
+				renderer.SpriteRUID = standRUID
+			end
+		end, 0.15)
+	end
+
+
+	@ExecSpace("ServerOnly")
+	method void SpawnDamageNumber(number damage)
+		-- 데미지 숫자 엔티티를 몬스터 위에 스폰 (X를 랜덤 분산해 겹침 방지)
+		local map = self.Entity.CurrentMap
+		if map == nil then return end
+		local pos = self.Entity.TransformComponent.Position
+		local rx = (_UtilLogic:RandomDouble() - 0.5) * 1.2  -- ±0.6 월드유닛 분산
+		local spawnPos = Vector3(pos.x + rx, pos.y + 1.2, pos.z - 0.1)
+		local e = _SpawnService:SpawnByModelId("damagenumber", "DmgNum", spawnPos, map)
+		if e == nil then
+			log_warning("MonsterAI: SpawnDamageNumber failed")
+			return
+		end
+		local renderer = e.TextRendererComponent
+		if renderer ~= nil then
+			renderer.Text = tostring(math.floor(damage))
+			-- 메이플 스타일 색상: 노랑(기본) → 주황(중) → 핫핑크/빨강(고)
+			if damage >= 400 then
+				renderer.FontColor = Color(1.0, 0.15, 0.15, 1.0)  -- 빨강 (고데미지)
+			elseif damage >= 150 then
+				renderer.FontColor = Color(1.0, 0.55, 0.0, 1.0)   -- 주황 (중데미지)
+			else
+				renderer.FontColor = Color(1.0, 1.0, 0.0, 1.0)    -- 순노랑 (기본)
+			end
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void TakeDamageCrit(number damage)
+		if self._dead then return end
+		self.CurrentHp = self.CurrentHp - damage
+		log("Monster HP (CRIT): " .. self.CurrentHp .. "/" .. self.MaxHp)
+		self:SpawnDamageNumberCrit(damage)
+		self:PlayHitAnimation(self._hitRUID, self.MonsterSprite)
+		if self.CurrentHp <= 0 then
+			self:Die()
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SpawnDamageNumberCrit(number damage)
+		local map = self.Entity.CurrentMap
+		if map == nil then return end
+		local pos = self.Entity.TransformComponent.Position
+		local rx = (_UtilLogic:RandomDouble() - 0.5) * 1.2
+		local spawnPos = Vector3(pos.x + rx, pos.y + 1.5, pos.z - 0.1)
+		local e = _SpawnService:SpawnByModelId("damagenumber", "DmgNum", spawnPos, map)
+		if e == nil then return end
+		local tc = e.TransformComponent
+		if tc ~= nil then tc.Scale = Vector3(1.5, 1.5, 1.0) end
+		local renderer = e.TextRendererComponent
+		if renderer ~= nil then
+			renderer.Text = tostring(math.floor(damage))
+			renderer.FontColor = Color(1.0, 0.05, 0.05, 1.0)  -- 크리티컬 강렬한 빨강
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ApplySlow(number duration)
+		-- 이동속도를 50% 감소. 중복 적용 시 타이머만 갱신 (속도 이중 감소 방지)
+		if not self._isSlowed then
+			self.ApproachSpeed = self.ApproachSpeed * 0.5
+			self._isSlowed = true
+			-- 슬로우 상태를 눈에 보이게 하늘색으로 틴트 (SpriteRendererComponent.Color는 @Sync라 서버에서 바꾸면 클라이언트에 자동 반영)
+			local renderer = self.Entity.SpriteRendererComponent
+			if renderer ~= nil then renderer.Color = Color(0.6, 0.85, 1.0, 0.7) end
+		end
+		if self._slowTimerId ~= 0 then
+			_TimerService:ClearTimer(self._slowTimerId)
+		end
+		self._slowTimerId = _TimerService:SetTimerOnce(function()
+			if not isvalid(self) or not isvalid(self.Entity) then return end
+			self._slowTimerId = 0
+			if not self._isSlowed then return end
+			if self._freezeSlowed then return end  -- 빙결이 슬로우 유지 중
+			self.ApproachSpeed = self.ApproachSpeed * 2.0
+			self._isSlowed = false
+			local renderer = self.Entity.SpriteRendererComponent
+			if renderer ~= nil then renderer.Color = Color(1, 1, 1, 1) end
+		end, duration)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ApplyStun(number duration)
+		-- 썬더볼트 감전: 잠깐 완전히 멈췄다가 원래 속도로 돌아온다. 중복 적용 시 타이머만 갱신
+		if not self._isStunned then
+			self._stunSavedSpeed = self.ApproachSpeed
+			self.ApproachSpeed = 0
+			self._isStunned = true
+			local renderer = self.Entity.SpriteRendererComponent
+			if renderer ~= nil then renderer.Color = Color(1.0, 1.0, 0.3, 0.85) end
+		end
+		if self._stunTimerId ~= 0 then
+			_TimerService:ClearTimer(self._stunTimerId)
+		end
+		self._stunTimerId = _TimerService:SetTimerOnce(function()
+			if isvalid(self) and isvalid(self.Entity) and self._isStunned then
+				self.ApproachSpeed = self._stunSavedSpeed
+				self._isStunned = false
+				self._stunTimerId = 0
+				local renderer = self.Entity.SpriteRendererComponent
+				if renderer ~= nil then renderer.Color = Color(1, 1, 1, 1) end
+			end
+		end, duration)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void AddFreezeStack()
+		-- 프리징 이펙트 패시브가 활성화된 경우에만 동작
+		if _CardManager.FreezingEffectLevel <= 0 then return end
+		if self._dead then return end
+		if self.FreezeStack >= 5 then return end
+		self.FreezeStack = self.FreezeStack + 1
+		-- 첫 스택에서 슬로우 적용 (아직 freeze-slow가 없을 때만)
+		if self.FreezeStack == 1 and not self._freezeSlowed then
+			if not self._isSlowed then
+				self.ApproachSpeed = self.ApproachSpeed * 0.5
+				self._isSlowed = true
+				local renderer = self.Entity.SpriteRendererComponent
+				if renderer ~= nil then renderer.Color = Color(0.6, 0.85, 1.0, 0.7) end
+			end
+			self._freezeSlowed = true
+		end
+		self:UpdateFreezeIndicator()
+		log("AddFreezeStack: stack=" .. self.FreezeStack)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetFreezeStack()
+		if self.FreezeStack <= 0 then return end
+		self.FreezeStack = 0
+		if self._freezeSlowed then
+			self._freezeSlowed = false
+			-- ColdBeam 슬로우 타이머가 없으면 freeze slow 직접 해제
+			if self._slowTimerId == 0 and self._isSlowed then
+				self.ApproachSpeed = self.ApproachSpeed * 2.0
+				self._isSlowed = false
+				local renderer = self.Entity.SpriteRendererComponent
+				if renderer ~= nil then renderer.Color = Color(1, 1, 1, 1) end
+			end
+			-- _slowTimerId != 0이면 타이머가 _freezeSlowed=false를 보고 자동 해제
+		end
+		self:UpdateFreezeIndicator()
+	end
+
+	@ExecSpace("ServerOnly")
+	method void UpdateFreezeIndicator()
+		local map = self.Entity.CurrentMap
+		if map == nil then return end
+		local pos = self.Entity.TransformComponent.Position
+		local iPos = Vector3(pos.x + 0.45, pos.y - 0.40, pos.z - 0.05)
+		if self.FreezeStack <= 0 then
+			if isvalid(self._freezeIndicator) then
+				self._freezeIndicator:Destroy()
+				self._freezeIndicator = nil
+			end
+			return
+		end
+		if not isvalid(self._freezeIndicator) then
+			self._freezeIndicator = _SpawnService:SpawnByModelId("stackindicator-model-id", "FreezeStack", iPos, map)
+			if isvalid(self._freezeIndicator) then
+				local t = self._freezeIndicator.TextRendererComponent
+				if t ~= nil then
+					t.FontColor = Color(0.4, 0.8, 1.0, 1.0)
+					t.Text = tostring(self.FreezeStack)
+				end
+			end
+		else
+			self._freezeIndicator.TransformComponent.Position = iPos
+			local t = self._freezeIndicator.TextRendererComponent
+			if t ~= nil then t.Text = tostring(self.FreezeStack) end
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ApplyDot(number damagePerTick, integer ticks, number tickInterval)
+		-- 도트 데미지 적용. 중복 시 이전 도트를 취소하고 새 도트로 덮어씀
+		if self._dotTimerId ~= 0 then
+			_TimerService:ClearTimer(self._dotTimerId)
+			self._dotTimerId = 0
+		end
+		self._dotDamage = damagePerTick
+		self._dotTicksLeft = ticks
+		self._dotTimerId = _TimerService:SetTimerRepeat(function()
+			if not isvalid(self) or not isvalid(self.Entity) or self._dead then
+				if self._dotTimerId ~= 0 then _TimerService:ClearTimer(self._dotTimerId) end
+				self._dotTimerId = 0
+				return
+			end
+			self:TakeDamage(self._dotDamage)
+			self._dotTicksLeft = self._dotTicksLeft - 1
+			if self._dotTicksLeft <= 0 then
+				_TimerService:ClearTimer(self._dotTimerId)
+				self._dotTimerId = 0
+			end
+		end, tickInterval)
+	end
+
+	-- 이어하기 시 호출: 현재 스케일에서 0.85로 서버 트윈 (OnUpdate 잠금 후 복구)
+	@ExecSpace("ServerOnly")
+	method void PushBack()
+		if self._dead then return end
+		-- 상태이상 타이머 정리
+		if self._slowTimerId ~= 0 then _TimerService:ClearTimer(self._slowTimerId) ; self._slowTimerId = 0 end
+		if self._stunTimerId ~= 0 then _TimerService:ClearTimer(self._stunTimerId) ; self._stunTimerId = 0 end
+		if self._dotTimerId ~= 0 then _TimerService:ClearTimer(self._dotTimerId) ; self._dotTimerId = 0 end
+		self._reachedPlayer = false
+		self._isPushingBack = true
+		-- 먼지 이펙트 스폰 — 몬스터 바닥(y 최하단)에 붙도록 y 오프셋 적용
+		local map = self.Entity.CurrentMap
+		local pos = self.Entity.TransformComponent.Position
+		if map ~= nil then
+			local dustPos = Vector3(pos.x, pos.y - 0.35, pos.z + 0.1)
+			local dust = _SpawnService:SpawnByModelId("skilleffect", "Dust", dustPos, map)
+			if dust ~= nil then
+				local r = dust.SpriteRendererComponent
+				if r ~= nil then r.SpriteRUID = "98262e9a441d41abb19a6d519f74aec7" end
+				dust:Destroy(0.5)
+			end
+		end
+		-- 서버에서 직접 트윈: 현재 스케일 → 0.85 (TransformComponent.Scale이 클라에 자동 동기화)
+		local fromScale = self._currentScale
+		local toScale = 0.85
+		local mult = self._scaleMultiplier
+		_TweenLogic:PlayTween(0.0, 1.0, 0.7, EaseType.QuadEaseOut, function(t)
+			if not isvalid(self) or not isvalid(self.Entity) then return end
+			local s = fromScale + (toScale - fromScale) * t
+			self._currentScale = s
+			self.Entity.TransformComponent.Scale = Vector3(s * mult, s * mult, 1.0)
+			self:UpdateDepth()
+		end)
+		-- 트윈 완료 후 OnUpdate 재개 + 속도 복구
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) then return end
+			self._currentScale = 0.85
+			self.ApproachSpeed = _GameManager:GetWaveApproachSpeed(_GameManager.Wave)
+			self._isPushingBack = false
+		end, 0.75)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void Die()
+		if self._dead then return end
+		self._dead = true
+		-- 상태이상 타이머 즉시 정리 (죽는 연출 중 색상 간섭 방지)
+		if self._slowTimerId ~= 0 then _TimerService:ClearTimer(self._slowTimerId) ; self._slowTimerId = 0 end
+		if self._stunTimerId ~= 0 then _TimerService:ClearTimer(self._stunTimerId) ; self._stunTimerId = 0 end
+		if self._dotTimerId ~= 0 then _TimerService:ClearTimer(self._dotTimerId) ; self._dotTimerId = 0 end
+		self.FreezeStack = 0
+		self._freezeSlowed = false
+		if isvalid(self._freezeIndicator) then
+			self._freezeIndicator:Destroy()
+			self._freezeIndicator = nil
+		end
+		log("Monster died")
+		_GameManager:OnMonsterKilled()
+		if self._isElite then
+			_CardManager:OnEliteKilled(self.Entity.TransformComponent.Position)
+		else
+			_GameManager:TryDropHealPotion(self.Entity.TransformComponent.Position)
+		end
+		self:PlayDeathAnimation(self._dieRUID, self._dieDuration)
+		self.Entity:Destroy(self._dieDuration + 0.2)
+	end
+
+	@ExecSpace("Multicast")
+	method void PlayDeathAnimation(string dieRUID, number dieDuration)
+		if self:IsServer() then return end
+		local renderer = self.Entity.SpriteRendererComponent
+		if renderer == nil then return end
+		-- 상태이상 색상 제거 + die1 스프라이트로 전환해 메이플 원본 죽는 연출 재생
+		renderer.Color = Color(1, 1, 1, 1)
+		if dieRUID ~= "" then renderer.SpriteRUID = dieRUID end
+		-- die1 정확한 1사이클 후 알파 0으로 설정해 루프 방지
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) or not isvalid(self.Entity) then return end
+			local r = self.Entity.SpriteRendererComponent
+			if r ~= nil then r.Color = Color(1, 1, 1, 0) end
+		end, dieDuration)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnReachPlayer()
+		-- 플레이어 HP 감소 (엘리트는 공격력 15% 추가)
+		log("Monster reached player!")
+		local dmgMultiplier = self._isElite and 1.15 or 1.0
+		_GameManager:OnMonsterReached(dmgMultiplier)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnEndPlay()
+		-- 슬로우·스턴·도트 타이머 정리
+		if self._slowTimerId ~= 0 then
+			_TimerService:ClearTimer(self._slowTimerId)
+			self._slowTimerId = 0
+		end
+		if self._stunTimerId ~= 0 then
+			_TimerService:ClearTimer(self._stunTimerId)
+			self._stunTimerId = 0
+		end
+		if self._dotTimerId ~= 0 then
+			_TimerService:ClearTimer(self._dotTimerId)
+			self._dotTimerId = 0
+		end
+		if isvalid(self._freezeIndicator) then
+			self._freezeIndicator:Destroy()
+			self._freezeIndicator = nil
+		end
+	end
+
+end

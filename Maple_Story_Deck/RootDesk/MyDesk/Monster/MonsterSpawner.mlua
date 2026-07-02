@@ -1,0 +1,169 @@
+@Logic
+script MonsterSpawner extends Logic
+
+	-- 스폰 설정
+	property string MonsterModelId = "monster" -- Monster.model EntryKey
+	property number SpawnInterval = 4.0       -- 첫 스폰 간격 (초)
+	property number MinInterval = 0.6         -- 최소 간격
+	property number IntervalDecay = 0.1       -- 웨이브마다 빨라지는 양
+
+	-- 무리 스폰 설정 (한 번에 여러 마리)
+	property integer BaseSpawnCount = 2       -- 기본 최소 스폰 수 (Wave 1부터)
+	property integer SpawnCountVariance = 2   -- 추가 랜덤 범위 (0~variance)
+	property integer SpawnCountPerWaves = 2   -- 이 웨이브마다 스폰 수 +1
+	property integer MaxSpawnCount = 6        -- 한 번에 최대 스폰 수
+
+	-- 내부
+	property number _timer = 0
+	property boolean _running = false
+	property Entity _map = nil
+	property integer _lastEliteWave = 0  -- 이 웨이브엔 이미 엘리트를 냈다 (같은 웨이브에서 중복 스폰 방지)
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		self._timer = self.SpawnInterval
+		self._running = true
+		self:ResolveMap()
+	end
+
+	-- 하드코딩된 "/maps/map01" 대신, 실제로 플레이어가 있는 맵을 찾아서 스폰 대상으로 삼는다
+	-- (map02/03/04 등 다른 맵에서 플레이해도 그 맵에 스폰되도록)
+	@ExecSpace("ServerOnly")
+	method void ResolveMap()
+		for _, userEntity in pairs(_UserService.UserEntities) do
+			if userEntity.CurrentMap ~= nil then
+				self._map = userEntity.CurrentMap
+				return
+			end
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnUpdate(number delta)
+		if not self._running then return end
+		if self._map == nil then
+			self:ResolveMap()
+			if self._map == nil then return end
+		end
+		if self.MonsterModelId == "" then return end
+
+		self._timer = self._timer - delta
+		if self._timer <= 0 then
+			self:SpawnMonster()
+			-- Wave 10 보스는 20초 간격(15초 접근 + 여유), 일반은 점점 빨라짐
+			if _GameManager.Wave >= 10 then
+				self._timer = 20.0
+			else
+				self._timer = math.max(self.MinInterval, self.SpawnInterval - self.IntervalDecay * _GameManager.Wave)
+			end
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SpawnMonster()
+		-- Wave 10은 보스 1마리만, 일반 웨이브는 점점 더 많이 몰려나옴
+		local wave = _GameManager.Wave
+		local count = 1
+		if wave < 10 then
+			local variance = math.floor(_UtilLogic:RandomDouble() * (self.SpawnCountVariance + 1))
+			count = self.BaseSpawnCount + variance + math.floor((wave - 1) / self.SpawnCountPerWaves)
+			count = math.min(count, self.MaxSpawnCount)
+		end
+
+		local spawned = {}
+		for i = 1, count do
+			-- 화면 X 범위: ±5 월드유닛 (카메라 12.8 너비 기준). 보스(Wave 10+)는 임팩트를 위해 항상 가운데(0)에 스폰
+			local rx = (_UtilLogic:RandomDouble() * 10) - 5
+			if wave >= 10 then rx = 0 end
+			local pos = Vector3(rx, 0, 0)
+
+			local entity = _SpawnService:SpawnByModelId(
+				self.MonsterModelId,
+				"Monster",
+				pos,
+				self._map
+			)
+			if entity == nil then
+				log_error("MonsterSpawner: SpawnByModelId failed")
+			else
+				table.insert(spawned, entity)
+			end
+		end
+
+		-- 웨이브 5, 15, 25... (10마다 한 번, 보스 웨이브 10/20/30...은 제외) 마다 딱 한 번만,
+		-- 그 웨이브의 첫 스폰 그룹 중 1마리를 엘리트로 승급한다 (같은 웨이브에 머무는 동안 반복 스폰 방지)
+		if wave % 10 == 5 and wave ~= self._lastEliteWave and #spawned > 0 then
+			self._lastEliteWave = wave
+			local eliteIdx = _UtilLogic:RandomIntegerRange(1, #spawned)
+			---@type MonsterAI
+			local ai = spawned[eliteIdx]:GetComponent("script.MonsterAI")
+			if ai ~= nil then ai:MarkElite() end
+		end
+
+		local label = (wave >= 10) and "BOSS" or "monster(s)"
+		log("MonsterSpawner: spawned " .. count .. " " .. label .. " (Wave " .. wave .. ")")
+	end
+
+	-- GameManager가 호출: 스폰 멈추기 (게임 종료 시)
+	@ExecSpace("ServerOnly")
+	method void StopSpawning()
+		self._running = false
+	end
+
+	-- MapManager가 호출: 맵 이동 시 스폰 대상 맵을 직접 지정 (프론티어 맵으로 복귀/진입할 때)
+	@ExecSpace("ServerOnly")
+	method void SetMap(Entity map)
+		self._map = map
+	end
+
+	-- GameManager가 호출: 다시하기/이어하기 시 스폰 재개
+	@ExecSpace("ServerOnly")
+	method void RestartSpawning()
+		self._timer = self.SpawnInterval
+		self._running = true
+		log("MonsterSpawner: spawning restarted")
+	end
+
+	-- 이어하기 전용: 타이머를 건드리지 않고 _running만 재개 (기존 스폰 스케줄 유지)
+	@ExecSpace("ServerOnly")
+	method void ResumeSpawning()
+		self._running = true
+		log("MonsterSpawner: spawning resumed (timer preserved)")
+	end
+
+	-- GameManager.RestartGame()(처음부터 다시하기)에서만 호출 — 이어하기는 같은 웨이브의 엘리트 기록을 유지해야 한다
+	@ExecSpace("ServerOnly")
+	method void ResetEliteTracking()
+		self._lastEliteWave = 0
+	end
+
+	-- GameManager가 호출: 다시하기/이어하기 시 남아있는 몬스터 전부 제거
+	@ExecSpace("ServerOnly")
+	method void ClearAllMonsters()
+		if self._map == nil then return end
+		local monsters = self._map:GetChildComponentsByTypeName("script.MonsterAI", false)
+		for i = 1, #monsters do
+			monsters[i].Entity:Destroy()
+		end
+		log("MonsterSpawner: cleared " .. #monsters .. " monster(s)")
+	end
+
+	-- 이어하기 전용: 몬스터를 제거하지 않고 스폰 위치로 밀어냄
+	@ExecSpace("ServerOnly")
+	method void PushAllMonstersBack()
+		if self._map == nil then return end
+		local monsters = self._map:GetChildComponentsByTypeName("script.MonsterAI", false)
+		for i = 1, #monsters do
+			---@type MonsterAI
+			local ai = monsters[i].Entity:GetComponent("script.MonsterAI")
+			if ai ~= nil then ai:PushBack() end
+		end
+		log("MonsterSpawner: pushed back " .. #monsters .. " monster(s)")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnEndPlay()
+		self._running = false
+	end
+
+end
