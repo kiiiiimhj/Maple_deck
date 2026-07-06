@@ -5,41 +5,60 @@ script MapManager extends Logic
 	@Sync property integer CurrentMapIndex = 1
 
 	property integer MinMapIndex = 1
-	property integer MaxMapIndex = 3
-
-	-- 가장 멀리 도달한(=몬스터가 활성 스폰 중인) 맵 번호. 좌로 후퇴해도 줄어들지 않는다
-	property integer _frontierMapIndex = 1
+	property integer MaxMapIndex = 10
 
 	-- 맵 이동 시 플레이어를 위치시킬 좌표. Y는 DefaultUserEnterLeaveLogic이 원래 스폰시키는 높이(0.2)와
 	-- 반드시 맞춰야 한다 — 다르면 카메라가 그 차이만큼 밀려서 몬스터가 화면 아래(UI 위)로 잘못 표시된다
 	property Vector3 SpawnPosition = Vector3(0, 0.2, 0)
 
+	-- 게임을 시작할 맵 번호. DefaultUserEnterLeaveLogic.StartPoint(Maker 전용 설정, 기본 /maps/map01)를
+	-- 직접 바꾸기 전까지의 코드측 임시 우회 — 유저 접속이 확인되는 즉시 이 맵으로 이동시킨다
+	property integer DesiredStartMapIndex = 2
+
+	property boolean _startRedirectDone = false
+
+	-- 맵 인덱스 → 파일/엔티티 이름 변환. "map0" .. idx 식 단순 접합은 idx가 두 자리(10)가 되는 순간
+	-- "map010"이 되어 존재하지 않는 경로를 조회하게 되므로, 항상 2자리로 0-패딩한다(map01~map10).
+	method string GetMapName(integer mapIndex)
+		return string.format("map%02d", mapIndex)
+	end
+
 	@ExecSpace("ServerOnly")
 	method void OnBeginPlay()
-		self.CurrentMapIndex = 1
-		self._frontierMapIndex = 1
+		self.CurrentMapIndex = self:ResolveCurrentMapIndex()
+		_MonsterSpawner:ActivateMap(self.CurrentMapIndex)
 		log("MapManager started at map0" .. self.CurrentMapIndex)
 	end
 
-	-- 클라이언트의 좌측 이동 버튼 요청
-	@ExecSpace("Server")
-	method void RequestMoveLeft()
-		self:MoveToMap(self.CurrentMapIndex - 1)
-	end
-
-	-- 클라이언트의 우측 이동 버튼 요청
-	@ExecSpace("Server")
-	method void RequestMoveRight()
-		self:MoveToMap(self.CurrentMapIndex + 1)
-	end
-
+	-- DesiredStartMapIndex로 1회 리다이렉트. 월드 시작 직후에는 _UserService.UserEntities가 아직
+	-- 비어있을 수 있어(OnBeginPlay 시점 유저 미접속) 매 프레임 재시도하다가, 유저가 실제로 확인되는
+	-- 첫 프레임에 MoveToMap으로 옮긴다. 이미 원하는 맵이면(또는 나중에 StartPoint를 Maker에서 직접
+	-- 고치면) 아무 것도 하지 않고 바로 종료한다.
 	@ExecSpace("ServerOnly")
-	method void MoveToMap(integer targetIndex)
-		-- 범위를 벗어나면 무시 (map1에서 좌 / 마지막 맵에서 우 — 아무 반응 없음)
-		if targetIndex < self.MinMapIndex or targetIndex > self.MaxMapIndex then return end
-		if targetIndex == self.CurrentMapIndex then return end
+	method void OnUpdate(number delta)
+		if self._startRedirectDone then return end
+		if self.CurrentMapIndex == self.DesiredStartMapIndex then
+			self._startRedirectDone = true
+			return
+		end
+		local hasUser = false
+		for _, userEntity in pairs(_UserService.UserEntities) do
+			hasUser = true
+			break
+		end
+		if not hasUser then return end
+		self._startRedirectDone = true
+		self:SilentMoveToMap(self.CurrentMapIndex, self.DesiredStartMapIndex)
+	end
 
-		local mapName = "map0" .. targetIndex
+	-- 게임 시작 리다이렉트 전용: 와이프 커버/리빌 연출 없이 즉시 텔레포트한다. 일반 좌우 이동(MoveToMap)과
+	-- 달리 "맵을 이동했다"는 느낌을 주면 안 되고, 그냥 처음부터 DesiredStartMapIndex에서 시작한 것처럼 보여야 한다.
+	@ExecSpace("ServerOnly")
+	method void SilentMoveToMap(integer fromIndex, integer targetIndex)
+		if targetIndex < self.MinMapIndex or targetIndex > self.MaxMapIndex then return end
+		if targetIndex == fromIndex then return end
+
+		local mapName = self:GetMapName(targetIndex)
 		local mapEntity = _EntityService:GetEntityByPath("/maps/" .. mapName)
 		if mapEntity == nil then
 			log_error("MapManager: " .. mapName .. " not found")
@@ -50,21 +69,144 @@ script MapManager extends Logic
 			_TeleportService:TeleportToMapPosition(userEntity, self.SpawnPosition, mapName)
 		end
 
-		self.CurrentMapIndex = targetIndex
-		if targetIndex > self._frontierMapIndex then
-			self._frontierMapIndex = targetIndex
+		local oldMapName = self:GetMapName(fromIndex)
+		local oldMapEntity = _EntityService:GetEntityByPath("/maps/" .. oldMapName)
+		self:SetMonstersPaused(oldMapEntity, true)
+		self:SetMonstersPaused(mapEntity, false)
+
+		-- 처음 가보는 맵이면 여기서 스폰이 시작된다. 맵10(보너스 스테이지)은 일반 웨이브 스폰 대신
+		-- 매번 입장할 때마다 보너스 보스 등장 여부를 판정하는 별도 진입점을 탄다.
+		if targetIndex == 10 then
+			_MonsterSpawner:TryStartBonusStage()
+		else
+			_MonsterSpawner:ActivateMap(targetIndex)
 		end
 
-		if targetIndex == self._frontierMapIndex then
-			-- 프론티어(가장 앞선 진행 지점)에 도착 → 이 맵에서 스폰 재개
-			_MonsterSpawner:SetMap(mapEntity)
-			_MonsterSpawner:ResumeSpawning()
-			log("MapManager: moved to " .. mapName .. " (frontier, spawning resumed)")
-		else
-			-- 이미 지나온 맵으로 후퇴 → 스폰 중단 (기존 몬스터는 그대로 방치)
-			_MonsterSpawner:StopSpawning()
-			log("MapManager: moved to " .. mapName .. " (cleared map, spawning stopped)")
+		self.CurrentMapIndex = targetIndex
+		log("MapManager: silent-started at " .. mapName)
+		_MapMoveUI:NotifyMapChanged(targetIndex)
+	end
+
+	-- 실제로 플레이어가 있는 맵 번호를 엔티티 기준으로 다시 계산한다. Maker Play Test는 world 시작 시점의
+	-- 유저 연결 타이밍에 따라 항상 map01에서 시작한다고 보장할 수 없어서(예: 마지막으로 있던 맵에서 재개),
+	-- CurrentMapIndex를 무조건 1로 고정하면 실제 위치와 어긋나 보스 스폰/일시정지 대상이 틀어진다.
+	@ExecSpace("ServerOnly")
+	method integer ResolveCurrentMapIndex()
+		for _, userEntity in pairs(_UserService.UserEntities) do
+			local mapName = userEntity.CurrentMapName
+			if mapName ~= nil then
+				local numStr = string.match(mapName, "(%d+)$")
+				local idx = numStr and tonumber(numStr) or nil
+				if idx ~= nil and idx >= self.MinMapIndex and idx <= self.MaxMapIndex then
+					return idx
+				end
+			end
 		end
+		return self.MinMapIndex
+	end
+
+	-- 클라이언트의 좌측 이동 버튼 요청
+	@ExecSpace("Server")
+	method void RequestMoveLeft()
+		self:MoveByDelta(-1)
+	end
+
+	-- 클라이언트의 우측 이동 버튼 요청
+	@ExecSpace("Server")
+	method void RequestMoveRight()
+		self:MoveByDelta(1)
+	end
+
+	-- 버튼 클릭 시점에 실제 위치를 다시 확인한 뒤 이동 — CurrentMapIndex 캐시가 실제 위치와
+	-- 어긋나 있어도(위 ResolveCurrentMapIndex 주석 참고) 항상 올바른 방향으로 이동한다
+	@ExecSpace("ServerOnly")
+	method void MoveByDelta(integer delta)
+		local actualIndex = self:ResolveCurrentMapIndex()
+		self:MoveToMap(actualIndex, actualIndex + delta)
+	end
+
+	-- map 위의 모든 몬스터를 일괄 일시정지/재개
+	@ExecSpace("ServerOnly")
+	method void SetMonstersPaused(Entity map, boolean paused)
+		if map == nil then return end
+		local monsters = map:GetChildComponentsByTypeName("script.MonsterAI", false)
+		for i = 1, #monsters do
+			---@type MonsterAI
+			local ai = monsters[i]
+			if paused then ai:Pause() else ai:Resume() end
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void MoveToMap(integer fromIndex, integer targetIndex)
+		-- 범위를 벗어나면 무시 (map1에서 좌 / 마지막 맵에서 우 — 아무 반응 없음)
+		if targetIndex < self.MinMapIndex or targetIndex > self.MaxMapIndex then return end
+		if targetIndex == fromIndex then return end
+
+		-- 맵4 이상은 웨이브10 보스(리본돼지)를 잡기 전까지 잠겨있다
+		if targetIndex >= 4 and not _GameManager.BossDefeated then
+			log("MapManager: map" .. targetIndex .. " locked until boss is defeated")
+			return
+		end
+
+		-- 화면을 먼저 이동 방향으로 덮은 뒤(와이프 커버), 다 덮인 시점에 실제 텔레포트를 실행한다 —
+		-- 순간이동 컷을 가려서 부드럽게 넘어가는 것처럼 보이게 한다
+		local direction = "right"
+		if targetIndex < fromIndex then direction = "left" end
+		_MapTransitionLogic:PlayCover(direction)
+
+		_TimerService:SetTimerOnce(function()
+			self:DoMapChange(fromIndex, targetIndex, direction)
+		end, _MapTransitionLogic.CoverDuration)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void DoMapChange(integer fromIndex, integer targetIndex, string direction)
+		-- 와이프가 화면을 다 덮은 뒤 실행되는 실제 텔레포트 + 몬스터 일시정지/재개 처리
+		local mapName = self:GetMapName(targetIndex)
+		local mapEntity = _EntityService:GetEntityByPath("/maps/" .. mapName)
+		if mapEntity == nil then
+			log_error("MapManager: " .. mapName .. " not found")
+			_MapTransitionLogic:PlayReveal(direction)
+			return
+		end
+
+		-- 텔레포트를 먼저 실행해야 한다 — ActivateMap()이 내부에서 "지금 내가 있는 맵"을 실제 엔티티
+		-- 위치로 판정하는데(MonsterSpawner.GetCurrentMap), 텔레포트보다 먼저 스폰하면 아직 예전 맵에
+		-- 있는 것으로 판정되어 방금 도착한 맵의 새 몬스터가 거꾸로 일시정지된 채로 태어난다.
+		for _, userEntity in pairs(_UserService.UserEntities) do
+			_TeleportService:TeleportToMapPosition(userEntity, self.SpawnPosition, mapName)
+		end
+
+		-- 떠나는 맵의 몬스터는 일시정지(공격/접근 중단) — 안 그러면 화면 밖에서 계속 타이머가 돌아
+		-- 플레이어가 안 보고 있어도 GameManager에 피해를 입힌다. 도착한 맵의 몬스터는 재개.
+		local oldMapName = self:GetMapName(fromIndex)
+		local oldMapEntity = _EntityService:GetEntityByPath("/maps/" .. oldMapName)
+		self:SetMonstersPaused(oldMapEntity, true)
+		self:SetMonstersPaused(mapEntity, false)
+
+		-- 처음 가보는 맵이면 여기서 스폰이 시작된다 (이미 활성화된 맵이면 아무 일도 안 함). 맵10(보너스
+		-- 스테이지)은 일반 웨이브 스폰 대신 매번 입장할 때마다 보너스 보스 등장 여부를 판정하는 별도
+		-- 진입점을 탄다.
+		if targetIndex == 10 then
+			_MonsterSpawner:TryStartBonusStage()
+		else
+			_MonsterSpawner:ActivateMap(targetIndex)
+		end
+
+		self.CurrentMapIndex = targetIndex
+		log("MapManager: moved to " .. mapName)
+		-- targetIndex를 파라미터로 직접 넘긴다 — CurrentMapIndex의 @Sync 전파와 이 Multicast 호출은
+		-- 서로 다른 채널이라 순서 보장이 없어서, 클라이언트가 NotifyMapChanged 시점에 CurrentMapIndex를
+		-- 다시 읽으면 아직 갱신 전(이전 값)을 볼 수 있다 — 값 자체를 인자로 넘겨야 확실하다
+		_MapMoveUI:NotifyMapChanged(targetIndex)
+
+		-- 텔레포트 직후 카메라가 새 맵 발판 범위에 맞춰 자리 잡는 데 실측 0.5~0.8초 정도 걸린다
+		-- (Damping을 낮춰도 confine 영역 자체가 바뀌는 건 즉시 스냅되지 않음) — 그 시간만큼 화면을
+		-- 가린 채로 더 기다렸다가 걷어내야 리빌 도중/직후에 카메라가 움직이는 게 보이지 않는다
+		_TimerService:SetTimerOnce(function()
+			_MapTransitionLogic:PlayReveal(direction)
+		end, _MapTransitionLogic.CameraSettleDelay)
 	end
 
 end

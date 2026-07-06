@@ -40,14 +40,35 @@ script MonsterAI extends Component
 	-- 엘리트 상태 (5웨이브마다 스폰 그룹 중 1마리)
 	property boolean _isElite = false
 	property number _scaleMultiplier = 1.0
+	property string EliteOutlineMaterialId = "1a012835-dab3-4dcd-821b-9bc826ce696f"  -- RootDesk/MyDesk/Materials/EliteOutline.material
 
-	-- 스폰 시점 웨이브의 die1 / hit1 애니메이션 RUID 및 재생 시간
+	-- 웨이브10 리본돼지 보스인지 여부 — Die()에서 GameManager에 보스 처치를 알리는 데 사용
+	property boolean _isBoss = false
+
+	-- 맵10 보너스 스테이지 전용 보스 여부 — true면 접근/공격 대신 배회하고, 사실상 무적이며
+	-- 맞을 때마다(죽지 않고) 골드/포션/스킬을 지급한다. MonsterSpawner.InitializeBonusBoss()가 설정한다.
+	property boolean _isBonusBoss = false
+	property number _wanderMinX = -5
+	property number _wanderMaxX = 5
+	property number _wanderY = -1.18
+	property number _wanderTargetX = 0
+	property number _wanderSpeed = 1.6
+	property number _wanderRetargetTimer = 0
+	property integer BonusGoldPerHit = 8
+	property number BonusPotionChance = 0.10
+	property number BonusSkillChance = 0.01
+
+	-- 스폰 시점 웨이브의 die1 / hit1 / attack1 애니메이션 RUID 및 재생 시간
 	property string _dieRUID = ""
 	property number _dieDuration = 0.5
 	property string _hitRUID = ""
+	property string _attackRUID = ""  -- 없는 웨이브(3/5/6/8/9/10)는 빈 문자열 → 들이받기 연출로 대체
 
 	-- 이어하기 밀려나는 중 OnUpdate 스킵 플래그
 	property boolean _isPushingBack = false
+
+	-- 플레이어가 이 몬스터가 있는 맵을 떠났을 때 true — 접근/공격 로직을 멈춘다 (MapManager가 제어)
+	property boolean _paused = false
 
 	-- 빙결 스택 (프리징 이펙트 패시브)
 	@Sync property integer FreezeStack = 0
@@ -56,40 +77,102 @@ script MonsterAI extends Component
 
 	method void OnBeginPlay()
 		if self:IsServer() then
-			-- 현재 웨이브에 맞는 체력과 접근 속도로 초기화
-			local wave = _GameManager.Wave
-			local hp = _GameManager:GetWaveHp(wave)
-			self.MaxHp = hp
-			self.CurrentHp = hp
-			self.ApproachSpeed = _GameManager:GetWaveApproachSpeed(wave)
-
-			-- 보스(Wave 10+)는 속도 분산 없이 일정하게 접근, 일반 몬스터는 도착 타이밍 분산
-			if wave < 10 then
-				local variance = (_UtilLogic:RandomDouble() * 2 - 1) * self.ApproachSpeedVariance
-				self.ApproachSpeed = self.ApproachSpeed + variance
-			else
-				-- 보스는 임팩트를 위해 비주얼 스케일을 5배 키운다 (엘리트와 곱연산으로 같이 적용됨)
-				self._scaleMultiplier = self._scaleMultiplier * 5
-			end
-
-			-- 웨이브에 맞는 스프라이트 RUID 동기화 (OnSyncProperty → 클라이언트 렌더러 교체)
-			self.MonsterSprite = _GameManager:GetWaveStandRUID(wave)
-			self._dieRUID = _GameManager:GetWaveDieRUID(wave)
-			self._dieDuration = _GameManager:GetWaveDieDuration(wave)
-			self._hitRUID = _GameManager:GetWaveHitRUID(wave)
-
+			-- 스탯/외형 초기화는 MonsterSpawner가 스폰 직후 InitializeStats()를 명시적으로 호출해서 처리한다 —
+			-- 존(zone)별 몬스터 풀을 고르려면 "이 몬스터가 어느 맵에서 스폰됐는지"가 필요한데
+			-- OnBeginPlay는 그 정보를 모른다(스폰 파라미터로 전달받지 않는 한 알 수 없음).
 			self._currentScale = 0.85
 			self.Entity.TransformComponent.Scale = Vector3(0.85 * self._scaleMultiplier, 0.85 * self._scaleMultiplier, 1.0)
 			self:UpdateDepth()
-			log("MonsterAI: Wave=" .. wave .. " HP=" .. self.CurrentHp .. " Speed=" .. self.ApproachSpeed)
 		else
-			-- 클라이언트: @Sync MonsterSprite가 도착하기 전에 Monster.model 기본 SpriteRUID가
-			-- 잠깐 보이는 현상(스프라이트 깜빡임) 방지 — OnSyncProperty에서 올바른 RUID로 교체됨
+			-- 클라이언트: MonsterSprite가 이미 초기 동기화되어 도착해 있을 수 있으므로(스폰 직후 등)
+			-- OnSyncProperty의 "값 변경" 이벤트만 기다리지 않고 여기서 바로 적용한다.
+			-- 맵 이동 직후처럼 동기화 타이밍이 애매한 경우, OnSyncProperty가 안 불려도
+			-- 몬스터가 기본 플레이스홀더 스프라이트로 멈춰있지 않도록 하기 위함.
 			local renderer = self.Entity.SpriteRendererComponent
 			if renderer ~= nil then
-				renderer.SpriteRUID = ""
+				renderer.SpriteRUID = self.MonsterSprite
 			end
 		end
+	end
+
+	-- MonsterSpawner가 스폰 직후 호출: zoneIndex(1~3=기존 웨이브 풀, 4~6=신규 몬스터 풀)에 맞춰
+	-- 스탯(HP/접근속도)과 외형(스프라이트 RUID)을 초기화한다. HP/접근속도는 존과 무관하게 항상
+	-- 웨이브 공식을 따르고, 외형만 존별 규칙으로 고른다.
+	@ExecSpace("ServerOnly")
+	method void InitializeStats(integer zoneIndex, integer wave, boolean isBoss)
+		self._isBoss = isBoss
+		local hp = _GameManager:GetWaveHp(wave)
+		self.MaxHp = hp
+		self.CurrentHp = hp
+		self.ApproachSpeed = _GameManager:GetWaveApproachSpeed(wave)
+
+		-- 보스는 속도 분산 없이 일정하게 접근 + 임팩트를 위해 비주얼 스케일 5배 (엘리트와 곱연산으로 같이 적용됨)
+		if not isBoss then
+			local variance = (_UtilLogic:RandomDouble() * 2 - 1) * self.ApproachSpeedVariance
+			self.ApproachSpeed = self.ApproachSpeed + variance
+			-- 웨이브10 보스 이후(무한 웨이브)는 체력처럼 크기도 완만하게 계속 커지게 한다(보스급 5배까지는 안 가고
+			-- 최대 1.6배로 캡) — 그냥 초반과 똑같은 크기인데 체력만 계속 느는 건 시각적으로 어색해서
+			if wave > 10 then
+				local growth = 1.0 + math.min(0.6, 0.03 * (wave - 10))
+				self._scaleMultiplier = self._scaleMultiplier * growth
+			end
+		else
+			self._scaleMultiplier = self._scaleMultiplier * 5
+		end
+
+		if zoneIndex >= 7 then
+			-- 맵7~9 전용 몬스터 풀: 맵마다 별도 구성(고스텀프/보어류 등)에서 무작위로 외형을 고른다.
+			-- 맵10(보너스 스테이지)은 별도 풀이 없고 맵9 몬스터 풀을 그대로 재사용한다(평소 웨이브 폴백 시).
+			local appearanceZone = zoneIndex
+			if appearanceZone == 10 then appearanceZone = 9 end
+			local speciesIdx = _UtilLogic:RandomIntegerRange(1, _GameManager:GetMapMonsterCount(appearanceZone))
+			self.MonsterSprite = _GameManager:GetMapStandRUID(appearanceZone, speciesIdx)
+			self._dieRUID = _GameManager:GetMapDieRUID(appearanceZone, speciesIdx)
+			self._dieDuration = _GameManager:GetMapDieDuration(appearanceZone, speciesIdx)
+			self._hitRUID = _GameManager:GetMapHitRUID(appearanceZone, speciesIdx)
+			self._attackRUID = ""
+		elseif zoneIndex >= 4 then
+			-- 맵4~6 전용 몬스터 풀: 스폰마다 1~4 중 무작위로 외형을 고른다 (보스도 이 풀에서 고름 — 별도 존 보스는 없음)
+			local speciesIdx = _UtilLogic:RandomIntegerRange(1, _GameManager:GetZoneMonsterCount())
+			self.MonsterSprite = _GameManager:GetZoneStandRUID(speciesIdx)
+			self._dieRUID = _GameManager:GetZoneDieRUID(speciesIdx)
+			self._dieDuration = _GameManager:GetZoneDieDuration(speciesIdx)
+			self._hitRUID = _GameManager:GetZoneHitRUID(speciesIdx)
+			self._attackRUID = ""
+		else
+			-- 맵1~3: 웨이브1~9는 웨이브 번호 = 종 인덱스(기존과 동일), 웨이브10은 보스(리본돼지) 고정,
+			-- 11부터는 지금까지 나온 1~9 종 중 무작위로 섞어서 계속 등장시킨다
+			local speciesIdx = wave
+			if wave > 10 then
+				speciesIdx = _UtilLogic:RandomIntegerRange(1, 9)
+			end
+			self.MonsterSprite = _GameManager:GetWaveStandRUID(speciesIdx)
+			self._dieRUID = _GameManager:GetWaveDieRUID(speciesIdx)
+			self._dieDuration = _GameManager:GetWaveDieDuration(speciesIdx)
+			self._hitRUID = _GameManager:GetWaveHitRUID(speciesIdx)
+			self._attackRUID = _GameManager:GetWaveAttackRUID(speciesIdx)
+		end
+
+		self.Entity.TransformComponent.Scale = Vector3(self._currentScale * self._scaleMultiplier, self._currentScale * self._scaleMultiplier, 1.0)
+		self:UpdateDepth()
+		log("MonsterAI: Zone=" .. zoneIndex .. " Wave=" .. wave .. " HP=" .. self.CurrentHp .. " Speed=" .. self.ApproachSpeed)
+	end
+
+	-- MonsterSpawner.SpawnBonusBoss()가 스폰 직후 호출: 배회 범위/스프라이트를 설정하고 무적·보상형 보스로 전환한다.
+	-- MonsterSprite를 명시적으로 세팅해야 한다 — 안 그러면 OnBeginPlay의 클라이언트 분기가 빈 문자열을
+	-- SpriteRUID에 덮어써서(기본값 "") 모델에 박아둔 스프라이트가 순간적으로 사라져 보일 수 있다.
+	@ExecSpace("ServerOnly")
+	method void InitializeBonusBoss(number minX, number maxX, number groundY, string spriteRUID)
+		self._isBonusBoss = true
+		self._wanderMinX = minX
+		self._wanderMaxX = maxX
+		self._wanderY = groundY
+		self.MonsterSprite = spriteRUID
+		self._currentScale = 1.3
+		self.Entity.TransformComponent.Position = Vector3(0, groundY, 0)
+		self.Entity.TransformComponent.Scale = Vector3(1.3, 1.3, 1.0)
+		self:PickNewWanderTarget()
+		log("MonsterAI: bonus boss initialized")
 	end
 
 	@ExecSpace("ServerOnly")
@@ -102,6 +185,8 @@ script MonsterAI extends Component
 		self.MaxHp = self.MaxHp * 1.15
 		self.CurrentHp = self.MaxHp
 		self.Entity.TransformComponent.Scale = Vector3(self._currentScale * self._scaleMultiplier, self._currentScale * self._scaleMultiplier, 1.0)
+		-- 골드 아웃라인 머티리얼 적용 (MaterialId는 @Sync라 서버에서 바꾸면 클라이언트에 자동 반영)
+		self.Entity.SpriteRendererComponent:ChangeMaterial(self.EliteOutlineMaterialId)
 		log("MonsterAI: promoted to ELITE (HP=" .. math.floor(self.MaxHp) .. ")")
 	end
 
@@ -123,6 +208,12 @@ script MonsterAI extends Component
 		if self._dead then return end
 		if _GameManager.GameOver then return end
 		if self._isPushingBack then return end
+		if self._paused then return end
+
+		if self._isBonusBoss then
+			self:UpdateWander(delta)
+			return
+		end
 
 		-- 빙결 스택 UI 지표 위치 추적
 		if isvalid(self._freezeIndicator) then
@@ -157,6 +248,34 @@ script MonsterAI extends Component
 		end
 	end
 
+	-- 보너스 보스 전용: 짧은 간격으로 새 목표 X를 뽑아 그쪽으로 이동해 "정신없이 돌아다니는" 느낌을 준다
+	@ExecSpace("ServerOnly")
+	method void UpdateWander(number delta)
+		self._wanderRetargetTimer = self._wanderRetargetTimer - delta
+		if self._wanderRetargetTimer <= 0 then
+			self:PickNewWanderTarget()
+		end
+
+		local pos = self.Entity.TransformComponent.Position
+		local dx = self._wanderTargetX - pos.x
+		local step = self._wanderSpeed * delta
+		local moveX = pos.x
+		if math.abs(dx) <= step then
+			moveX = self._wanderTargetX
+		elseif dx > 0 then
+			moveX = pos.x + step
+		else
+			moveX = pos.x - step
+		end
+		self.Entity.TransformComponent.Position = Vector3(moveX, self._wanderY, pos.z)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void PickNewWanderTarget()
+		self._wanderTargetX = self._wanderMinX + _UtilLogic:RandomDouble() * (self._wanderMaxX - self._wanderMinX)
+		self._wanderRetargetTimer = 0.4 + _UtilLogic:RandomDouble() * 0.6
+	end
+
 	@ExecSpace("ServerOnly")
 	method void UpdateDepth()
 		-- 스케일이 작을수록(멀리 있을수록) Z를 크게 해서 뒤로 깔리고,
@@ -170,6 +289,11 @@ script MonsterAI extends Component
 	method void TakeDamage(number damage)
 		-- 카드 공격 시 호출
 		if self._dead then return end
+		if self._isBonusBoss then
+			self:SpawnDamageNumber(damage)
+			self:OnBonusBossHit()
+			return
+		end
 		self.CurrentHp = self.CurrentHp - damage
 		log("Monster HP: " .. self.CurrentHp .. "/" .. self.MaxHp)
 		self:SpawnDamageNumber(damage)
@@ -226,6 +350,11 @@ script MonsterAI extends Component
 	@ExecSpace("ServerOnly")
 	method void TakeDamageCrit(number damage)
 		if self._dead then return end
+		if self._isBonusBoss then
+			self:SpawnDamageNumberCrit(damage)
+			self:OnBonusBossHit()
+			return
+		end
 		self.CurrentHp = self.CurrentHp - damage
 		log("Monster HP (CRIT): " .. self.CurrentHp .. "/" .. self.MaxHp)
 		self:SpawnDamageNumberCrit(damage)
@@ -250,6 +379,18 @@ script MonsterAI extends Component
 		if renderer ~= nil then
 			renderer.Text = tostring(math.floor(damage))
 			renderer.FontColor = Color(1.0, 0.05, 0.05, 1.0)  -- 크리티컬 강렬한 빨강
+		end
+	end
+
+	-- 보너스 보스는 사실상 무적 — 맞을 때마다(죽음 없이) 골드는 무조건, 포션/스킬은 각각 확률적으로 지급한다
+	@ExecSpace("ServerOnly")
+	method void OnBonusBossHit()
+		_GameManager:AddGold(self.BonusGoldPerHit)
+		if _UtilLogic:RandomDouble() < self.BonusPotionChance then
+			_GameManager:ForceDropPotion(self.Entity.TransformComponent.Position)
+		end
+		if _UtilLogic:RandomDouble() < self.BonusSkillChance then
+			_CardManager:OnEliteKilled(self.Entity.TransformComponent.Position)
 		end
 	end
 
@@ -452,8 +593,12 @@ script MonsterAI extends Component
 		end
 		log("Monster died")
 		_GameManager:OnMonsterKilled()
+		if self._isBoss then
+			_GameManager:OnBossDefeated()
+		end
 		if self._isElite then
 			_CardManager:OnEliteKilled(self.Entity.TransformComponent.Position)
+			_MonsterSpawner:OnEliteKilled()
 		else
 			_GameManager:TryDropHealPotion(self.Entity.TransformComponent.Position)
 		end
@@ -477,12 +622,63 @@ script MonsterAI extends Component
 		end, dieDuration)
 	end
 
+	-- MapManager가 호출: 플레이어가 이 맵을 떠나면 접근/공격을 멈춘다 (화면 밖에서 몰래 때리는 것 방지)
+	@ExecSpace("ServerOnly")
+	method void Pause()
+		self._paused = true
+	end
+
+	-- MapManager가 호출: 플레이어가 이 맵으로 돌아오면 다시 활동 재개
+	@ExecSpace("ServerOnly")
+	method void Resume()
+		self._paused = false
+	end
+
 	@ExecSpace("ServerOnly")
 	method void OnReachPlayer()
 		-- 플레이어 HP 감소 (엘리트는 공격력 15% 추가)
 		log("Monster reached player!")
 		local dmgMultiplier = self._isElite and 1.15 or 1.0
 		_GameManager:OnMonsterReached(dmgMultiplier)
+
+		-- attack1 리소스가 있는 웨이브는 스프라이트 교체, 없는 웨이브는 스케일 들이받기로 대체
+		if self._attackRUID ~= "" then
+			self:PlayAttackAnimation(self._attackRUID, self.MonsterSprite)
+		else
+			self:PlayLungeAnimation()
+		end
+	end
+
+	@ExecSpace("Multicast")
+	method void PlayAttackAnimation(string attackRUID, string standRUID)
+		if self:IsServer() then return end
+		if self._dead then return end
+		local renderer = self.Entity.SpriteRendererComponent
+		if renderer == nil or attackRUID == "" then return end
+		renderer.SpriteRUID = attackRUID
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) then return end
+			-- attack1 상태일 때만 stand로 복원 — hit1/die1로 이미 전환된 뒤라면 그대로 둔다
+			if renderer.SpriteRUID == attackRUID then
+				renderer.SpriteRUID = standRUID
+			end
+		end, 0.25)
+	end
+
+	-- attack1 애니메이션 리소스가 없는 몬스터용 대체 연출. 이 게임은 몬스터 스케일 자체가
+	-- "카메라와의 거리"를 표현하므로(접근할수록 커짐), 같은 방식으로 순간적으로 더 커졌다가
+	-- 되돌아오게 해서 위치를 옮기지 않고도 "들이받는" 느낌을 준다
+	@ExecSpace("ServerOnly")
+	method void PlayLungeAnimation()
+		if self._dead then return end
+		local mult = self._scaleMultiplier
+		local baseScale = self._currentScale
+		local lungeBoost = 0.25
+		_TweenLogic:PlayTween(0.0, 1.0, 0.18, EaseType.QuadEaseOut, function(t)
+			if not isvalid(self) or not isvalid(self.Entity) then return end
+			local s = baseScale + lungeBoost * math.sin(t * math.pi)
+			self.Entity.TransformComponent.Scale = Vector3(s * mult, s * mult, 1.0)
+		end)
 	end
 
 	@ExecSpace("ServerOnly")

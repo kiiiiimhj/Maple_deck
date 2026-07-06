@@ -4,15 +4,74 @@ script MapMoveUI extends Logic
 	-- UI 바인딩 (클라이언트 전용)
 	property ButtonComponent btnMapLeft = "0e741f46-3a04-4117-be4d-54aa6898a335"
 	property ButtonComponent btnMapRight = "4489416c-b03d-4478-bc37-514ac3a40990"
+	property ButtonComponent btnMapUp = "2c899ef8-3dfd-49aa-ad4d-0ad3fa2e0d46"
+	property ButtonComponent btnMapDown = "ebf77f70-837b-4ae3-a13d-5bb9f8d84b51"
+
+	-- 맵4 이상 잠금 표시용 자물쇠 아이콘 / ">" 텍스트 (BtnMapRight의 자식/자기자신 컴포넌트)
+	property SpriteGUIRendererComponent lockIcon = "cbd1ed65-3756-41a9-8e89-4bec9ecc3778"
+	property TextComponent rightArrowText = "4489416c-b03d-4478-bc37-514ac3a40990"
 
 	property any _leftHandler = nil
 	property any _rightHandler = nil
+	property any _upHandler = nil
+	property any _downHandler = nil
 
 	@ExecSpace("ClientOnly")
 	method void OnBeginPlay()
 		self._leftHandler = self.btnMapLeft.Entity:ConnectEvent(ButtonClickEvent, self.OnLeftClicked)
 		self._rightHandler = self.btnMapRight.Entity:ConnectEvent(ButtonClickEvent, self.OnRightClicked)
+		self._upHandler = self.btnMapUp.Entity:ConnectEvent(ButtonClickEvent, self.OnUpClicked)
+		self._downHandler = self.btnMapDown.Entity:ConnectEvent(ButtonClickEvent, self.OnDownClicked)
+		self:UpdateLockVisual()
+		self:UpdateButtonVisibility(_MapManager.CurrentMapIndex)
 		log("MapMoveUI started")
+	end
+
+	-- GameManager.OnBossDefeated() / MapManager.DoMapChange()가 각각 호출 — OnSyncProperty는 자기 자신의
+	-- @Sync 프로퍼티 변경에만 반응하고 다른 스크립트(GameManager/MapManager)의 동기화는 감지하지 못해서
+	-- 명시적으로 알려줘야 한다
+	-- bossDefeated를 파라미터로 직접 받는다 — GameManager.BossDefeated의 @Sync 전파와 이 Multicast 호출은
+	-- 서로 다른 채널이라 순서 보장이 없어서, 여기서 다시 _GameManager.BossDefeated를 읽으면 아직 갱신 전
+	-- (false) 값을 볼 수 있어 자물쇠가 즉시 갱신되지 않는다
+	@ExecSpace("Multicast")
+	method void NotifyBossDefeated(boolean bossDefeated)
+		if not self:IsClient() then return end
+		local showLock = (_MapManager.CurrentMapIndex == 3) and (not bossDefeated)
+		self:ApplyLockState(showLock)
+		log("MapMoveUI: NotifyBossDefeated bossDefeated=" .. tostring(bossDefeated) .. " showLock=" .. tostring(showLock))
+	end
+
+	-- mapIndex를 파라미터로 직접 받는다 — CurrentMapIndex의 @Sync 전파와 이 Multicast 호출은 서로 다른
+	-- 채널이라 순서 보장이 없어서, 여기서 다시 _MapManager.CurrentMapIndex를 읽으면 아직 갱신 전(이전
+	-- 값)을 볼 수 있다
+	@ExecSpace("Multicast")
+	method void NotifyMapChanged(integer mapIndex)
+		if not self:IsClient() then return end
+		local showLock = (mapIndex == 3) and (not _GameManager.BossDefeated)
+		self:ApplyLockState(showLock)
+		self:UpdateButtonVisibility(mapIndex)
+	end
+
+	-- 맵6에만 "위로" 버튼(맵7 진입), 맵7에만 "아래로" 버튼(맵6 복귀) — 맵7의 왼쪽 버튼은 계속 숨김
+	@ExecSpace("ClientOnly")
+	method void UpdateButtonVisibility(integer mapIndex)
+		if isvalid(self.btnMapUp) then self.btnMapUp.Entity.Enable = (mapIndex == 6) end
+		if isvalid(self.btnMapDown) then self.btnMapDown.Entity.Enable = (mapIndex == 7) end
+		if isvalid(self.btnMapLeft) then self.btnMapLeft.Entity.Enable = (mapIndex ~= 7) end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void UpdateLockVisual()
+		-- 자물쇠는 "지금 맵3에 있고 아직 보스를 못 잡았을 때"만 보여준다 — 맵1~2는 어차피 잠긴 경계가
+		-- 아니라서 항상 ">"가 맞고, 맵4 이상은 이미 보스를 잡았어야만 올 수 있으니 항상 ">"가 맞다
+		local showLock = (_MapManager.CurrentMapIndex == 3) and (not _GameManager.BossDefeated)
+		self:ApplyLockState(showLock)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ApplyLockState(boolean showLock)
+		if isvalid(self.lockIcon) then self.lockIcon.Enable = showLock end
+		if isvalid(self.rightArrowText) then self.rightArrowText.Enable = not showLock end
 	end
 
 	@ExecSpace("ClientOnly")
@@ -25,10 +84,24 @@ script MapMoveUI extends Logic
 		_MapManager:RequestMoveRight()
 	end
 
+	-- 맵6→7은 인덱스상 +1이라 RequestMoveRight와 동일한 이동이지만, "위로"라는 별도 버튼으로 노출한다
+	@ExecSpace("ClientOnly")
+	method void OnUpClicked()
+		_MapManager:RequestMoveRight()
+	end
+
+	-- 맵7→6은 인덱스상 -1이라 RequestMoveLeft와 동일한 이동이지만, "아래로"라는 별도 버튼으로 노출한다
+	@ExecSpace("ClientOnly")
+	method void OnDownClicked()
+		_MapManager:RequestMoveLeft()
+	end
+
 	@ExecSpace("ClientOnly")
 	method void OnEndPlay()
 		if self._leftHandler then self.btnMapLeft.Entity:DisconnectEvent(ButtonClickEvent, self._leftHandler) end
 		if self._rightHandler then self.btnMapRight.Entity:DisconnectEvent(ButtonClickEvent, self._rightHandler) end
+		if self._upHandler then self.btnMapUp.Entity:DisconnectEvent(ButtonClickEvent, self._upHandler) end
+		if self._downHandler then self.btnMapDown.Entity:DisconnectEvent(ButtonClickEvent, self._downHandler) end
 	end
 
 end

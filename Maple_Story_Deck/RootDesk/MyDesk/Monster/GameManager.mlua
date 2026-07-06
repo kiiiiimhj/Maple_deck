@@ -16,6 +16,9 @@ script GameManager extends Logic
 	-- 웨이브
 	@Sync property integer Wave = 1
 
+	-- 웨이브10 리본돼지 보스를 잡았는지 여부 — 맵4 이상 이동 가능 여부를 여기로 판정한다
+	@Sync property boolean BossDefeated = false
+
 	-- 게임 상태
 	@Sync property boolean GameOver = false
 
@@ -36,6 +39,9 @@ script GameManager extends Logic
 	property TextComponent expLevelText = "7e10b488-7eb5-44c2-98b0-87c80f1f38ec"
 	property TextComponent expText = "998eb743-a64b-4cf3-af6c-f9dc870c315c"
 	property TextComponent goldText = "96a9909e-7c1c-43e4-928f-1e97f0dcc8a3"
+
+	-- 경험치 바가 순간이동하듯 뚝뚝 끊기지 않고 부드럽게 차오르는 데 걸리는 시간
+	property number ExpBarFillDuration = 0.4
 
 	-- 일반 몬스터 처치 시 회복 포션 드롭 연출용 아이콘 (월드 사망 위치 → HP바로 포물선 비행)
 	property SpriteGUIRendererComponent potionFlyIcon = "831d845f-6b01-459e-9724-3c7e26bf1af0"
@@ -79,6 +85,7 @@ script GameManager extends Logic
 		self.Level = 1
 		self.Wave = 1
 		self.GameOver = false
+		self:NotifyExpChanged(self.Exp, self.ExpNeeded, self.Level, false)
 		log("GameManager started")
 	end
 
@@ -92,15 +99,26 @@ script GameManager extends Logic
 				self:ShakeCameraOnHit()
 			end
 			self._prevPlayerHp = self.PlayerHp
-		elseif name == "Level" or name == "Exp" or name == "ExpNeeded" then
-			local ratio = self.Exp / self.ExpNeeded
-			ratio = math.max(0, math.min(1, ratio))
-			self.expBarFill.FillAmount = ratio
-			self.expLevelText.Text = "Lv." .. self.Level
-			self.expText.Text = math.floor(self.Exp) .. " / " .. math.floor(self.ExpNeeded)
 		elseif name == "Gold" then
 			self.goldText.Text = ": " .. self.Gold
 		end
+	end
+
+	-- 경험치 바 갱신 연출. @Sync 프로퍼티 갱신과 이 Multicast 호출은 서로 다른 채널이라 순서 보장이
+	-- 없어서(다른 곳에서 이미 한번 겪은 문제), self.Exp/ExpNeeded/Level을 클라이언트에서 다시 읽지 않고
+	-- 서버가 확정한 값을 파라미터로 직접 넘긴다 — 레벨업 순간엔 Exp가 훅 줄어드는데, 그걸 동기화 타이밍에
+	-- 의존해서 감지하려다 보니 "차있던 데서 줄어드는 것처럼" 보이는 버그가 났었다.
+	@ExecSpace("Multicast")
+	method void NotifyExpChanged(number newExp, number newExpNeeded, integer newLevel, boolean didLevelUp)
+		if not self:IsClient() then return end
+		local ratio = math.max(0, math.min(1, newExp / newExpNeeded))
+		local startRatio = self.expBarFill.FillAmount
+		if didLevelUp then startRatio = 0 end
+		_TweenLogic:PlayTween(startRatio, ratio, self.ExpBarFillDuration, EaseType.QuadEaseOut, function(value)
+			if isvalid(self.expBarFill) then self.expBarFill.FillAmount = value end
+		end)
+		self.expLevelText.Text = "Lv." .. newLevel
+		self.expText.Text = math.floor(newExp) .. " / " .. math.floor(newExpNeeded)
 	end
 
 	-- 플레이어 피격 시 화면을 살짝 흔든다
@@ -123,33 +141,56 @@ script GameManager extends Logic
 
 		if self.Exp >= self.ExpNeeded then
 			self:LevelUp()
+		else
+			self:NotifyExpChanged(self.Exp, self.ExpNeeded, self.Level, false)
 		end
 	end
 
-	-- 웨이브별 몬스터 공격력 반환 (Wave 10 보스, 10 이후 고정)
+	-- 웨이브10 리본돼지 보스가 죽을 때 MonsterAI가 호출 — 맵4 이상 이동 잠금 해제
+	@ExecSpace("ServerOnly")
+	method void OnBossDefeated()
+		if self.BossDefeated then return end
+		self.BossDefeated = true
+		_MapMoveUI:NotifyBossDefeated(true)
+		_MonsterSpawner:ClearCurrentBoss()
+		-- 보스 킬 한 번으로 반드시 웨이브를 넘겨야 한다 — 안 그러면 보스를 수십 번 반복해서 잡아야
+		-- 웨이브가 넘어가고, 그동안 맵을 옮겨 다니면 "분명히 잡았는데 다른 맵에서 또 나온다"처럼 보인다.
+		-- 예전엔 이 시점 Exp와 무관하게 그냥 LevelUp()을 강제 호출했는데, LevelUp()의 뺄셈은 "Exp가 이미
+		-- ExpNeeded 이상일 때만 호출된다"는 일반 처치 경로만 가정하고 있어서, Exp가 얼마 안 쌓인 채로
+		-- (예: 20%) 강제 호출되면 경험치 바가 갑자기 훅 줄어드는(0%로 리셋되는) 것처럼 보이는 문제가 있었다.
+		-- 지금은 그냥 현재 필요경험치만큼을 그대로 더해서(기존에 쌓아둔 Exp는 보존한 채) 문턱을 확실히
+		-- 넘기고, 그 뒤로는 일반 레벨업과 동일한 연출(0%부터 다시 차오름)로 자연스럽게 이어지게 한다.
+		self.Exp = self.Exp + self.ExpNeeded
+		self:LevelUp()
+		log("GameManager: Boss defeated, map4+ unlocked")
+	end
+
+	-- 웨이브별 몬스터 공격력 반환 (Wave 10 보스, 11부터는 9번째 값 기준으로 계속 성장 — 무한 웨이브)
 	@ExecSpace("ServerOnly")
 	method integer GetWaveAttack(integer wave)
 		-- 달팽이→파란달팽이→스포아→빨간달팽이→슬라임→돼지→주니어부기→스텀프→옥토퍼스→리본돼지(보스)
 		-- Card1 쿨타임 0.8s 기준 1회 공격당 대미지 (플레이어 HP=100)
 		local attacks = {3, 5, 8, 11, 14, 17, 20, 23, 27, 35}
-		local idx = math.min(wave, #attacks)
-		return attacks[idx]
+		if wave <= 10 then return attacks[wave] end
+		return math.floor(attacks[9] + 4 * (wave - 9))
 	end
 
-	-- 웨이브별 몬스터 체력 반환 (Card1 데미지=100 기준 설계, Wave 10 보스, 이후 고정)
+	-- 웨이브별 몬스터 체력 반환 (Card1 데미지=100 기준 설계, Wave 10 보스, 11부터는 9번째 값 기준으로 계속 성장)
 	@ExecSpace("ServerOnly")
 	method integer GetWaveHp(integer wave)
 		-- Wave 4(520)부터 도달 시작, Wave 10 보스는 접근 속도가 느려 15초 교전 창 확보
 		local hps = {60, 80, 100, 150, 230, 340, 500, 720, 1000, 1800}
-		local idx = math.min(wave, #hps)
-		return hps[idx]
+		if wave <= 10 then return hps[wave] end
+		-- 기존 테이블의 평균 성장률(약 ×1.4)로 계속 확장 — 웨이브10 보스 수치(1800)에서 바로 이어받지 않고
+		-- 9번째(1000) 기준으로 이어가야 11부터의 "일반 몬스터"가 보스급 체력으로 갑자기 뛰지 않는다
+		return math.floor(hps[9] * (1.4 ^ (wave - 9)))
 	end
 
-	-- 웨이브별 몬스터 접근 속도 반환 (Wave 10 보스는 느리게 접근)
+	-- 웨이브별 몬스터 접근 속도 반환 (Wave 10 보스만 느리게 접근, 11부터는 평시 속도로 복귀)
 	@ExecSpace("ServerOnly")
 	method number GetWaveApproachSpeed(integer wave)
 		-- Wave 10 보스: (1.5-0.3)/0.08 = 15초 교전 창 → 카드 풀업그레이드 시 도달 전 처치 가능
-		if wave >= 10 then return 0.08 end
+		if wave == 10 then return 0.08 end
 		return 0.3
 	end
 
@@ -229,6 +270,147 @@ script GameManager extends Logic
 		return ruids[idx]
 	end
 
+	-- 웨이브별 몬스터 attack1 애니메이션 RUID. 원본 리소스에 attack1이 없는 몬스터(3/5/6/8/9/10웨이브)는
+	-- 빈 문자열 — MonsterAI가 빈 값이면 스프라이트 교체 대신 스케일 들이받기 연출로 대체한다
+	@ExecSpace("ServerOnly")
+	method string GetWaveAttackRUID(integer wave)
+		local ruids = {
+			"a8a1c54cb27f489da57db7cc7ba5db04",  -- Wave  1: 달팽이
+			"781d08d159de4a4fb4d4d4435d2af300",  -- Wave  2: 파란 달팽이
+			"",                                    -- Wave  3: 스포아 (없음)
+			"6b6bac121ef1497f985ddf339fc6ed7d",  -- Wave  4: 빨간 달팽이
+			"",                                    -- Wave  5: 슬라임 (없음)
+			"",                                    -- Wave  6: 돼지 (없음)
+			"bcc04483577743d9993960f38dfa04d3",  -- Wave  7: 주니어 부기
+			"",                                    -- Wave  8: 스텀프 (없음)
+			"",                                    -- Wave  9: 옥토퍼스 (없음)
+			"",                                    -- Wave 10: 리본 돼지 (없음)
+		}
+		local idx = math.max(1, math.min(wave, #ruids))
+		return ruids[idx]
+	end
+
+	-- 맵4~6 전용 몬스터 풀 (idx 1~4) stand 애니메이션 RUID. HP/공격력은 GetWaveHp/GetWaveAttack을
+	-- 그대로 재사용한다(웨이브가 맵과 무관한 전역 값이라 별도 스탯 테이블이 필요 없다) — 외형만 이 4종에서 무작위로 고른다
+	@ExecSpace("ServerOnly")
+	method string GetZoneStandRUID(integer idx)
+		local ruids = {
+			"d6bf82f05b5441dcbcb77171b5b8f7b5",  -- 1: 음흉한 여우
+			"53f5e84a36444f6a92ae64881ddfa44c",  -- 2: 이상한 돼지
+			"a95cfed2c8fe4d2cb64cbb62db051f92",  -- 3: 주황버섯
+			"a4e381810620417694ee0f0abe7acb40",  -- 4: 시니컬한 주황버섯
+		}
+		local i = math.max(1, math.min(idx, #ruids))
+		return ruids[i]
+	end
+
+	-- 맵4~6 전용 몬스터 풀 hit1 애니메이션 RUID
+	@ExecSpace("ServerOnly")
+	method string GetZoneHitRUID(integer idx)
+		local ruids = {
+			"de656d6c313345e19f5c1e9dc66d3f70",  -- 1: 음흉한 여우
+			"dc7e4c433fe542e892fe8300c06ff367",  -- 2: 이상한 돼지
+			"5ebbdaf503964f3e87de155d16650805",  -- 3: 주황버섯
+			"74ed05756d0d48ee912e0576769e1ad0",  -- 4: 시니컬한 주황버섯
+		}
+		local i = math.max(1, math.min(idx, #ruids))
+		return ruids[i]
+	end
+
+	-- 맵4~6 전용 몬스터 풀 die1 애니메이션 RUID
+	@ExecSpace("ServerOnly")
+	method string GetZoneDieRUID(integer idx)
+		local ruids = {
+			"ced6d10a4ef143a09025adf87bad4190",  -- 1: 음흉한 여우
+			"066a864720d0499ea1ba4012b19094cc",  -- 2: 이상한 돼지
+			"dddbe2f162184ec89add7440da56eb75",  -- 3: 주황버섯
+			"b12039766d7c4f31be1be3b8459d65ae",  -- 4: 시니컬한 주황버섯
+		}
+		local i = math.max(1, math.min(idx, #ruids))
+		return ruids[i]
+	end
+
+	-- 맵4~6 전용 몬스터 풀 die1 1회 재생 시간 (프레임 수 × ~100ms + 여유, 기존 웨이브 테이블과 동일한 공식)
+	@ExecSpace("ServerOnly")
+	method number GetZoneDieDuration(integer idx)
+		local durations = {
+			0.95,  -- 1: 음흉한 여우      9프레임
+			1.05,  -- 2: 이상한 돼지     10프레임
+			0.35,  -- 3: 주황버섯         3프레임
+			0.45,  -- 4: 시니컬한 주황버섯 4프레임
+		}
+		local i = math.max(1, math.min(idx, #durations))
+		return durations[i]
+	end
+
+	-- 맵4~6 몬스터 풀 종 개수 (MonsterAI가 무작위 인덱스를 뽑을 때 사용)
+	@ExecSpace("ServerOnly")
+	method integer GetZoneMonsterCount()
+		return 4
+	end
+
+	-- 맵7~9 전용 몬스터 풀 (맵마다 별도 구성) — 7:고스텀프/엑스텀프, 8:와일드보어/아이언호그, 9:히죽대는 고스텀프/아이언보어/파이어보어
+	@ExecSpace("ServerOnly")
+	method integer GetMapMonsterCount(integer mapIndex)
+		if mapIndex == 7 then return 2
+		elseif mapIndex == 8 then return 2
+		elseif mapIndex == 9 then return 3
+		end
+		return 1
+	end
+
+	@ExecSpace("ServerOnly")
+	method string GetMapStandRUID(integer mapIndex, integer idx)
+		local pools = {
+			[7] = {"52fc9a75b6174bfa96af66c49dbb3369", "9d4f9e8f572548f692438ffa817eb52d"},
+			[8] = {"af64c62c1dcf427998c3c52f0a060fec", "eadfe08070d343a9afafe0fd6290f1c6"},
+			[9] = {"4286356e1f6a4c03a6ef125123a49bbe", "e6c2fd7213d44cd3a5dd5eed2e8fb1ce", "67523b05f66f470cb86b2c6cc46af861"},
+		}
+		local pool = pools[mapIndex]
+		if pool == nil then return "" end
+		local i = math.max(1, math.min(idx, #pool))
+		return pool[i]
+	end
+
+	@ExecSpace("ServerOnly")
+	method string GetMapHitRUID(integer mapIndex, integer idx)
+		local pools = {
+			[7] = {"4b48cdc7601e4786bf415a0162f4ebbb", "dc128e1b65f64548841940cadd8e258d"},
+			[8] = {"76b4c7a5c6ec4a4eb3b08e23872f16a5", "24d7017733b04d1c9de247fe5bd77bfd"},
+			[9] = {"6a7cbad766b54e8c904d4c3738d4b151", "340205d6b9e44fa393a21afe3a7ecd37", "aa0b899e8dc84bfe859001bd9238c3ed"},
+		}
+		local pool = pools[mapIndex]
+		if pool == nil then return "" end
+		local i = math.max(1, math.min(idx, #pool))
+		return pool[i]
+	end
+
+	@ExecSpace("ServerOnly")
+	method string GetMapDieRUID(integer mapIndex, integer idx)
+		local pools = {
+			[7] = {"9cad6e1fa5b04a078d2876e3a0481b40", "8177fddafdcb4bee958ab1aee7a714cc"},
+			[8] = {"0211fb67c56b4a738b2de3810a7e4509", "af01ec8b8d19418e87158d5d596edbeb"},
+			[9] = {"6efc89e6e0cd4d4abcbfa35b8e6ee51a", "5885fa79e25e4cb8880991f15ee57572", "f71e007e35634cd5b05f6c51e24d8154"},
+		}
+		local pool = pools[mapIndex]
+		if pool == nil then return "" end
+		local i = math.max(1, math.min(idx, #pool))
+		return pool[i]
+	end
+
+	@ExecSpace("ServerOnly")
+	method number GetMapDieDuration(integer mapIndex, integer idx)
+		local pools = {
+			[7] = {0.55, 0.45},
+			[8] = {0.25, 0.25},
+			[9] = {0.55, 0.45, 0.25},
+		}
+		local pool = pools[mapIndex]
+		if pool == nil then return 0.5 end
+		local i = math.max(1, math.min(idx, #pool))
+		return pool[i]
+	end
+
 	-- 몬스터가 플레이어에게 도달했을 때 MonsterAI가 호출 (엘리트는 dmgMultiplier로 공격력 가산)
 	@ExecSpace("ServerOnly")
 	method void OnMonsterReached(number dmgMultiplier)
@@ -253,13 +435,18 @@ script GameManager extends Logic
 	@ExecSpace("ServerOnly")
 	method void LevelUp()
 		self.Level = self.Level + 1
-		self.Exp = self.Exp - self.ExpNeeded
+		-- OnBossDefeated()는 그 시점의 누적 경험치가 ExpNeeded 미만이어도 강제로 LevelUp()을 호출한다.
+		-- 그냥 빼기만 하면 음수 Exp가 남는데, 경험치 바 갱신(NotifyExpChanged)의 ratio 계산이
+		-- math.max(0, ...)로 음수를 0에 고정시켜서, 그 뒤로 몬스터를 잡아 조금씩 채워도 다시 0을
+		-- 넘기 전까지는 바가 안 움직이는 것처럼 보이는 버그가 있었다 — 0 밑으로 내려가지 않게 고정한다.
+		self.Exp = math.max(0, self.Exp - self.ExpNeeded)
 		self.ExpNeeded = math.floor(self.ExpNeeded * self.ExpGrowthRate)
 		self.Wave = self.Wave + 1
 		self.PlayerMaxHp = self.PlayerMaxHp + 15
 		self.PlayerHp = math.min(self.PlayerHp + 15, self.PlayerMaxHp)
 		log("Level Up! Lv." .. self.Level .. " | Wave:" .. self.Wave .. " | MaxHP:" .. self.PlayerMaxHp)
 		_CardManager:GenerateLevelUpChoices()
+		self:NotifyExpChanged(self.Exp, self.ExpNeeded, self.Level, true)
 	end
 
 	@ExecSpace("ServerOnly")
@@ -297,6 +484,7 @@ script GameManager extends Logic
 		_MonsterSpawner:ClearAllMonsters()
 		_MonsterSpawner:ResetEliteTracking()
 		_MonsterSpawner:RestartSpawning()
+		self:NotifyExpChanged(self.Exp, self.ExpNeeded, self.Level, true)
 		log("Game restarted (full reset)")
 	end
 
@@ -336,6 +524,21 @@ script GameManager extends Logic
 		end
 		if potionType == 0 then return end
 
+		self:ApplyPotionDrop(potionType, worldPos)
+	end
+
+	-- 맵10 보너스 보스 전용: 드롭 여부 확률은 호출측(MonsterAI.OnBonusBossHit)이 이미 굴렸으므로
+	-- 여기서는 무조건 드롭한다 (빨강/흰색만 배타적으로 선택)
+	@ExecSpace("ServerOnly")
+	method void ForceDropPotion(Vector3 worldPos)
+		if self.GameOver then return end
+		local potionType = (_UtilLogic:RandomDouble() < 0.7) and 1 or 2
+		self:ApplyPotionDrop(potionType, worldPos)
+	end
+
+	-- TryDropHealPotion / ForceDropPotion 공용 — 회복량 계산 + 드롭 연출/타이밍 적용
+	@ExecSpace("ServerOnly")
+	method void ApplyPotionDrop(integer potionType, Vector3 worldPos)
 		local healPercent = (potionType == 1) and self.RedPotionHealPercent or self.WhitePotionHealPercent
 		local healAmount = math.floor(self.PlayerMaxHp * healPercent)
 		log("HealPotion dropped: type=" .. potionType .. " heal=" .. healAmount)

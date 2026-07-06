@@ -1,0 +1,72 @@
+@Logic
+script MapTransitionLogic extends Logic
+
+	-- 화면 전환용 와이프 패널 UI 엔티티 (ui/TransitionGroup.ui의 WipePanel, 클라이언트 전용)
+	property Entity wipePanel = "3c112439-fb80-41db-8f84-53bb12e532b0"
+
+	property number CoverDuration = 0.25
+	property number RevealDuration = 0.25
+	property number ScreenWidth = 1920
+
+	-- 텔레포트 후 실제로 화면을 가린 채 더 대기하는 시간 — MapManager가 텔레포트 직후부터 이 시간만큼
+	-- 기다렸다가 PlayReveal을 호출한다. 실측 결과 카메라가 새 발판 범위에 맞춰 자리 잡는 데 0.5~0.8초
+	-- 걸려서(Damping을 낮춰도 즉시 스냅되지 않음), 이보다 짧으면 리빌 도중/직후에 카메라가 움직이는 게 보인다
+	property number CameraSettleDelay = 0.7
+
+	-- 텔레포트 직후 카메라가 새 위치로 천천히 따라붙는(Damping) 것 때문에 화면이 가려진 뒤에도
+	-- 살짝 움직이는 것처럼 보이는 걸 막기 위한 임시 저장값
+	property Vector2 _savedCameraDamping = Vector2(2.5, 5.0)
+	property boolean _dampingSaved = false
+
+	@ExecSpace("Multicast")
+	method void PlayCover(string direction)
+		-- 서버에서도 호출되므로 실제 연출은 클라이언트에서만 재생한다
+		if not self:IsClient() then return end
+		if not isvalid(self.wipePanel) then return end
+		log("MapTransitionLogic: PlayCover " .. direction)
+
+		-- 화면이 가려져 있는 동안만 카메라 Damping을 거의 0으로 낮춰서, 텔레포트로 카메라 위치가
+		-- 바뀌어도 부드럽게 따라오는 대신 즉시 스냅되게 한다 — 리빌이 끝나면 원래 값으로 되돌린다
+		local cam = _CameraService:GetCurrentCameraComponent()
+		if cam ~= nil and not self._dampingSaved then
+			self._savedCameraDamping = cam.Damping
+			self._dampingSaved = true
+			cam.Damping = Vector2(0.001, 0.001)
+		end
+
+		local startX = self.ScreenWidth
+		if direction == "left" then startX = -self.ScreenWidth end
+		self.wipePanel.UITransformComponent.anchoredPosition = Vector2(startX, 0)
+		_TweenLogic:PlayTween(Vector2(startX, 0), Vector2(0, 0), self.CoverDuration, EaseType.QuadEaseIn, function(value)
+			if isvalid(self.wipePanel) then
+				self.wipePanel.UITransformComponent.anchoredPosition = value
+			end
+		end)
+	end
+
+	@ExecSpace("Multicast")
+	method void PlayReveal(string direction)
+		-- 서버에서도 호출되므로 실제 연출은 클라이언트에서만 재생한다
+		if not self:IsClient() then return end
+		if not isvalid(self.wipePanel) then return end
+		log("MapTransitionLogic: PlayReveal " .. direction)
+		local endX = -self.ScreenWidth
+		if direction == "left" then endX = self.ScreenWidth end
+		_TweenLogic:PlayTween(Vector2(0, 0), Vector2(endX, 0), self.RevealDuration, EaseType.QuadEaseOut, function(value)
+			if isvalid(self.wipePanel) then
+				self.wipePanel.UITransformComponent.anchoredPosition = value
+			end
+		end)
+
+		-- 화면이 다 드러난 뒤 카메라 Damping을 원래 값으로 복구한다
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) then return end
+			local cam = _CameraService:GetCurrentCameraComponent()
+			if cam ~= nil and self._dampingSaved then
+				cam.Damping = self._savedCameraDamping
+				self._dampingSaved = false
+			end
+		end, self.RevealDuration)
+	end
+
+end

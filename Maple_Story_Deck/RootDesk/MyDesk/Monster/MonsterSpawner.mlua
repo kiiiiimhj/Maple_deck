@@ -7,92 +7,212 @@ script MonsterSpawner extends Logic
 	property number MinInterval = 0.6         -- 최소 간격
 	property number IntervalDecay = 0.1       -- 웨이브마다 빨라지는 양
 
-	-- 무리 스폰 설정 (한 번에 여러 마리)
+	-- 무리 스폰 설정 (한 번에 여러 마리, 맵 하나당)
 	property integer BaseSpawnCount = 2       -- 기본 최소 스폰 수 (Wave 1부터)
 	property integer SpawnCountVariance = 2   -- 추가 랜덤 범위 (0~variance)
 	property integer SpawnCountPerWaves = 2   -- 이 웨이브마다 스폰 수 +1
 	property integer MaxSpawnCount = 6        -- 한 번에 최대 스폰 수
 
+	-- 맵 하나에 동시에 존재할 수 있는 일반 몬스터 총 개수 상한. 오랫동안 안 가본 맵은 계속 스폰만
+	-- 되고 아무도 안 죽여서 무한정 쌓일 수 있는데, 그러다 나중에 방문해서 한꺼번에 재개(Resume)되면
+	-- 과도한 엔티티 수로 성능 문제/불안정을 유발할 수 있어 상한을 둔다 (보스는 대상 아님 — 항상 1마리뿐)
+	property integer MaxMonstersPerMap = 20
+
 	-- 내부
 	property number _timer = 0
 	property boolean _running = false
-	property Entity _map = nil
 	property integer _lastEliteWave = 0  -- 이 웨이브엔 이미 엘리트를 냈다 (같은 웨이브에서 중복 스폰 방지)
+
+	-- 엘리트 재등장 주기 (웨이브5 고정 등장 이후, 잡을 때마다 다음 엘리트까지 랜덤 대기)
+	property number MinEliteRespawnDelay = 180.0  -- 3분
+	property number MaxEliteRespawnDelay = 300.0  -- 5분
+	property number _nextEliteTimer = -1  -- -1이면 대기 중 아님
+	property any _activeMaps = nil  -- {[mapIndex] = true, ...} — 한 번이라도 방문해서 스폰이 시작된 맵만 기록
+	-- 웨이브10 보스는 전역에 동시에 1마리만 존재해야 한다. 이게 없으면 플레이어가 보스를 못 잡고
+	-- 여러 맵을 옮겨 다니는 동안(SpawnWave 20초 주기 + ActivateMap의 최초 진입 스폰이 각각 트리거되어)
+	-- 맵마다 보스가 하나씩 쌓여서, 나중에 그 맵들을 다시 방문하면 "죽인 보스가 다른 맵에서 또 나오는"
+	-- 것처럼 보이는 버그가 생긴다.
+	property Entity _currentBoss = nil
+
+	-- 맵10 보너스 스테이지 설정 — 등장하면 정신없이 돌아다니며 무적으로 히트당 보상만 지급하는 보스.
+	-- 첫 방문은 100% 등장, 이후 재방문마다 BonusBossChance 확률로 재판정. 실패하면(또는 지속시간이
+	-- 끝나면) 맵9와 같은 몬스터 풀을 그대로 재사용하는 평소 웨이브 스폰으로 대체된다.
+	property string BonusBossModelId = "bonusboss"       -- BonusBoss.model EntryKey
+	property string BonusBossSpriteRUID = "0d577f299dbd49c996f2dac8aee99a23"
+	property number BonusBossChance = 0.30
+	property number BonusBossDuration = 30.0
+	property boolean _map10Visited = false
+	property Entity _bonusBoss = nil
+	property boolean _bonusBossActive = false
 
 	@ExecSpace("ServerOnly")
 	method void OnBeginPlay()
 		self._timer = self.SpawnInterval
 		self._running = true
-		self:ResolveMap()
-	end
-
-	-- 하드코딩된 "/maps/map01" 대신, 실제로 플레이어가 있는 맵을 찾아서 스폰 대상으로 삼는다
-	-- (map02/03/04 등 다른 맵에서 플레이해도 그 맵에 스폰되도록)
-	@ExecSpace("ServerOnly")
-	method void ResolveMap()
-		for _, userEntity in pairs(_UserService.UserEntities) do
-			if userEntity.CurrentMap ~= nil then
-				self._map = userEntity.CurrentMap
-				return
-			end
-		end
+		-- MapManager의 OnBeginPlay가 이것보다 먼저 실행돼 ActivateMap()으로 이미 _activeMaps를
+		-- 채워놨을 수 있으므로, nil일 때만 초기화한다 (무조건 덮어쓰면 그 활성화가 날아간다)
+		if self._activeMaps == nil then self._activeMaps = {} end
 	end
 
 	@ExecSpace("ServerOnly")
 	method void OnUpdate(number delta)
 		if not self._running then return end
-		if self._map == nil then
-			self:ResolveMap()
-			if self._map == nil then return end
-		end
 		if self.MonsterModelId == "" then return end
 
 		self._timer = self._timer - delta
 		if self._timer <= 0 then
-			self:SpawnMonster()
-			-- Wave 10 보스는 20초 간격(15초 접근 + 여유), 일반은 점점 빨라짐
-			if _GameManager.Wave >= 10 then
+			self:SpawnWave()
+			-- Wave 10 보스만 20초 간격(15초 접근 + 여유), 11부터는 다시 일반 웨이브처럼 점점 빨라짐
+			if _GameManager.Wave == 10 then
 				self._timer = 20.0
 			else
 				self._timer = math.max(self.MinInterval, self.SpawnInterval - self.IntervalDecay * _GameManager.Wave)
 			end
 		end
+
+		if self._nextEliteTimer > 0 then
+			self._nextEliteTimer = self._nextEliteTimer - delta
+			if self._nextEliteTimer <= 0 then
+				self._nextEliteTimer = -1
+				self:SpawnRandomElite()
+			end
+		end
 	end
 
+	-- 현재 웨이브에 맞는 몬스터를 스폰한다. 일반 몬스터는 "이미 한 번 방문해서 활성화된" 맵에만 동시에
+	-- 등장하고(안 가본 맵은 스폰 안 됨), 보스/엘리트는 플레이어가 실제로 있는 맵에서만 1번 등장한다
 	@ExecSpace("ServerOnly")
-	method void SpawnMonster()
-		-- Wave 10은 보스 1마리만, 일반 웨이브는 점점 더 많이 몰려나옴
+	method void SpawnWave()
 		local wave = _GameManager.Wave
+		local currentMap = self:GetCurrentMap()
+
+		if wave == 10 then
+			-- 보스: 정확히 웨이브10에서만, 플레이어가 있는 맵에 1마리. 11부터는 else 분기로 이어져
+			-- 지금까지 나온 몬스터들이 섞인 일반 웨이브가 계속된다 (무한 웨이브)
+			-- 이미 어딘가에 살아있는 보스가 있으면 새로 스폰하지 않는다 (전역 1마리 제한)
+			if isvalid(self._currentBoss) then return end
+			if currentMap == nil then return end
+			local mapIndex = self:GetMapIndexByEntity(currentMap)
+			local spawned = self:SpawnBatchOnMap(currentMap, wave, true, false, mapIndex)
+			if #spawned > 0 then self._currentBoss = spawned[1] end
+		else
+			-- 일반 웨이브: 활성화된(=한 번 이상 방문한) 맵에만 동시 스폰. 엘리트는 플레이어가 있는 맵의 무리에서만 뽑는다
+			if self._activeMaps == nil then return end
+			for idx = _MapManager.MinMapIndex, _MapManager.MaxMapIndex do
+				-- 맵10에 보너스 보스가 떠 있는 동안은 평소 웨이브 몬스터를 같이 스폰하지 않는다
+				if idx == 10 and self._bonusBossActive then continue end
+				if self._activeMaps[idx] then
+					local map = _EntityService:GetEntityByPath("/maps/" .. _MapManager:GetMapName(idx))
+					if map ~= nil then
+						self:SpawnBatchOnMap(map, wave, false, map == currentMap, idx)
+					end
+				end
+			end
+		end
+	end
+
+	-- 맵 엔티티로부터 그 맵의 인덱스(1~6)를 역으로 찾는다 (GetCurrentMap()은 Entity만 반환하므로 필요)
+	@ExecSpace("ServerOnly")
+	method integer GetMapIndexByEntity(Entity map)
+		if map == nil then return _MapManager.MinMapIndex end
+		local numStr = string.match(map.Name, "(%d+)$")
+		local idx = numStr and tonumber(numStr) or nil
+		if idx ~= nil and idx >= _MapManager.MinMapIndex and idx <= _MapManager.MaxMapIndex then
+			return idx
+		end
+		return _MapManager.MinMapIndex
+	end
+
+	-- GameManager.OnBossDefeated()가 보스 처치 시점에 호출 — 다음 SpawnWave/ActivateMap 틱부터
+	-- 다시 보스를 스폰할 수 있게 참조를 비운다 (사실상 Wave가 곧 11로 넘어가 다시 안 쓰이지만,
+	-- 넘어가기 직전의 짧은 틈에도 중복 스폰을 막기 위해 명시적으로 정리한다)
+	@ExecSpace("ServerOnly")
+	method void ClearCurrentBoss()
+		self._currentBoss = nil
+	end
+
+	-- MapManager가 호출: 플레이어가 이 맵에 처음 도착했을 때 스폰을 활성화하고, 그 자리에서 바로 한 무리를
+	-- 즉시 스폰한다(이동하기 전까지 진행된 현재 웨이브 기준). 이미 활성화된 맵이면 아무 것도 하지 않는다.
+	@ExecSpace("ServerOnly")
+	method void ActivateMap(integer mapIndex)
+		-- 다른 Logic의 OnBeginPlay가 이것보다 먼저 실행돼 _activeMaps가 아직 nil일 수 있으므로 지연 초기화
+		if self._activeMaps == nil then self._activeMaps = {} end
+		if self._activeMaps[mapIndex] then return end
+		self._activeMaps[mapIndex] = true
+
+		local map = _EntityService:GetEntityByPath("/maps/" .. _MapManager:GetMapName(mapIndex))
+		if map == nil then return end
+
+		local wave = _GameManager.Wave
+		if wave == 10 then
+			-- 처음 도착한 맵이라도 이미 다른 맵에 보스가 살아있으면 여기서 또 스폰하지 않는다
+			if isvalid(self._currentBoss) then return end
+			local spawned = self:SpawnBatchOnMap(map, wave, true, false, mapIndex)
+			if #spawned > 0 then self._currentBoss = spawned[1] end
+		else
+			-- 지금 도착한 맵이 곧 "플레이어가 있는 맵"이므로 엘리트 후보 자격도 준다
+			self:SpawnBatchOnMap(map, wave, false, true, mapIndex)
+		end
+	end
+
+	-- 지정한 맵 하나에 몬스터 무리를 스폰. allowElite=true인 호출에서만 엘리트 승급 후보가 된다.
+	-- 스폰되는 맵이 플레이어의 현재 맵이 아니라고 "확실히" 판단될 때만 새로 태어난 몬스터를 일시정지시킨다 —
+	-- 안 그러면 화면 밖 맵에서 계속 새로 스폰되는 애들이 기본값(안 멈춤)으로 태어나서 몰래 공격한다.
+	-- 반대로 GetCurrentMap()이 nil(아직 어느 맵인지 모름 — 월드 시작 직후 _UserService.UserEntities가
+	-- 비어있는 순간과 겹칠 수 있음)이면 "다른 맵"으로 단정하지 않고 활성 상태로 스폰한다 — 그렇지 않으면
+	-- 게임 시작하자마자 첫 맵의 몬스터가 통째로 멈춰있는 채로 태어나는 버그가 생긴다.
+	@ExecSpace("ServerOnly")
+	method table SpawnBatchOnMap(Entity map, integer wave, boolean isBoss, boolean allowElite, integer mapIndex)
+		local currentMap = self:GetCurrentMap()
+		local isCurrentMap = (currentMap == nil) or (map == currentMap)
+
 		local count = 1
-		if wave < 10 then
+		if not isBoss then
 			local variance = math.floor(_UtilLogic:RandomDouble() * (self.SpawnCountVariance + 1))
-			count = self.BaseSpawnCount + variance + math.floor((wave - 1) / self.SpawnCountPerWaves)
+			if wave <= 10 then
+				count = self.BaseSpawnCount + variance + math.floor((wave - 1) / self.SpawnCountPerWaves)
+			else
+				-- 웨이브10 보스 이후(무한 웨이브)는 체력/공격력이 계속 커지는 쪽으로 난이도를 올리므로
+				-- 마리 수는 다시 초반 수준으로 되돌린다 — 안 그러면 "이미 최대치(6마리)인데 한 마리당
+				-- 체력도 계속 늘어나는" 이중 스케일링으로 순식간에 감당 불가능해진다
+				count = self.BaseSpawnCount + variance
+			end
 			count = math.min(count, self.MaxSpawnCount)
+
+			-- 이미 이 맵에 몬스터가 상한만큼 쌓여있으면 이번 스폰은 건너뛴다 (오래 방치된 맵 몬스터 무한 누적 방지)
+			local existingCount = #map:GetChildComponentsByTypeName("script.MonsterAI", false)
+			if existingCount >= self.MaxMonstersPerMap then return {} end
+			count = math.min(count, self.MaxMonstersPerMap - existingCount)
+			if count <= 0 then return {} end
 		end
 
 		local spawned = {}
 		for i = 1, count do
-			-- 화면 X 범위: ±5 월드유닛 (카메라 12.8 너비 기준). 보스(Wave 10+)는 임팩트를 위해 항상 가운데(0)에 스폰
-			local rx = (_UtilLogic:RandomDouble() * 10) - 5
-			if wave >= 10 then rx = 0 end
-			local pos = Vector3(rx, 0, 0)
+			local pos = self:GetSpawnPosition(mapIndex, map, isBoss)
 
 			local entity = _SpawnService:SpawnByModelId(
 				self.MonsterModelId,
 				"Monster",
 				pos,
-				self._map
+				map
 			)
 			if entity == nil then
 				log_error("MonsterSpawner: SpawnByModelId failed")
 			else
+				---@type MonsterAI
+				local ai = entity:GetComponent("script.MonsterAI")
+				if ai ~= nil then
+					ai:InitializeStats(mapIndex, wave, isBoss)
+					if not isCurrentMap then ai:Pause() end
+				end
 				table.insert(spawned, entity)
 			end
 		end
 
-		-- 웨이브 5, 15, 25... (10마다 한 번, 보스 웨이브 10/20/30...은 제외) 마다 딱 한 번만,
-		-- 그 웨이브의 첫 스폰 그룹 중 1마리를 엘리트로 승급한다 (같은 웨이브에 머무는 동안 반복 스폰 방지)
-		if wave % 10 == 5 and wave ~= self._lastEliteWave and #spawned > 0 then
+		-- 웨이브 5(딱 한 번)에만 플레이어가 있는 맵의 스폰 그룹 중 1마리를 엘리트로 승급한다.
+		-- 웨이브10 보스 이후(11부터의 무한 웨이브)는 지금까지 나온 몬스터가 섞여서 나오되 보스/엘리트는
+		-- 제외한 "일반 몬스터"만 나와야 하므로 wave<=10으로 명시적으로 막는다.
+		if allowElite and wave <= 10 and wave % 10 == 5 and wave ~= self._lastEliteWave and #spawned > 0 then
 			self._lastEliteWave = wave
 			local eliteIdx = _UtilLogic:RandomIntegerRange(1, #spawned)
 			---@type MonsterAI
@@ -100,20 +220,238 @@ script MonsterSpawner extends Logic
 			if ai ~= nil then ai:MarkElite() end
 		end
 
-		local label = (wave >= 10) and "BOSS" or "monster(s)"
-		log("MonsterSpawner: spawned " .. count .. " " .. label .. " (Wave " .. wave .. ")")
+		local label = isBoss and "BOSS" or "monster(s)"
+		log("MonsterSpawner: spawned " .. count .. " " .. label .. " on " .. map.Name .. " (Wave " .. wave .. ")")
+		return spawned
+	end
+
+	-- MonsterAI.Die()가 엘리트 처치 시점에 호출 — 다음 엘리트 등장까지 3~5분 랜덤 대기를 시작한다
+	@ExecSpace("ServerOnly")
+	method void OnEliteKilled()
+		self._nextEliteTimer = self.MinEliteRespawnDelay + _UtilLogic:RandomDouble() * (self.MaxEliteRespawnDelay - self.MinEliteRespawnDelay)
+		log("MonsterSpawner: next elite in " .. math.floor(self._nextEliteTimer) .. "s")
+	end
+
+	-- _nextEliteTimer 만료 시 호출 — 플레이어가 있는 맵에 엘리트 몬스터 1마리를 즉시 스폰한다
+	@ExecSpace("ServerOnly")
+	method void SpawnRandomElite()
+		local map = self:GetCurrentMap()
+		if map == nil then
+			-- 플레이어 위치를 아직 모르면 잠시 후 재시도
+			self._nextEliteTimer = 5.0
+			return
+		end
+
+		local mapIndex = self:GetMapIndexByEntity(map)
+		local wave = _GameManager.Wave
+		local pos = self:GetSpawnPosition(mapIndex, map, false)
+		local entity = _SpawnService:SpawnByModelId(self.MonsterModelId, "Monster", pos, map)
+		if entity == nil then
+			log_error("MonsterSpawner: SpawnRandomElite failed")
+			return
+		end
+
+		---@type MonsterAI
+		local ai = entity:GetComponent("script.MonsterAI")
+		if ai ~= nil then
+			ai:InitializeStats(mapIndex, wave, false)
+			ai:MarkElite()
+		end
+		log("MonsterSpawner: random elite spawned on " .. map.Name)
+	end
+
+	-- 실제로 플레이어가 있는 맵을 찾는다 (보스/엘리트 스폰 위치 판정용, 스폰 시 일시정지 여부 판정용).
+	-- userEntity.CurrentMap(엔티티 참조)은 월드 시작 직후 아직 nil일 수 있어(MapManager.OnBeginPlay가
+	-- 첫 ActivateMap을 호출하는 시점과 겹침) 그때 스폰되는 몬스터가 전부 "현재 맵 아님"으로 오판되어
+	-- 일시정지 상태로 태어나는 버그가 있었다. CurrentMapName(문자열)은 이 시점에도 항상 신뢰 가능
+	-- (MapManager.ResolveCurrentMapIndex가 이미 같은 필드로 검증됨)하므로 경로 조회로 통일한다.
+	@ExecSpace("ServerOnly")
+	method Entity GetCurrentMap()
+		for _, userEntity in pairs(_UserService.UserEntities) do
+			local mapName = userEntity.CurrentMapName
+			if mapName ~= nil and mapName ~= "" then
+				return _EntityService:GetEntityByPath("/maps/" .. mapName)
+			end
+		end
+		return nil
+	end
+
+	-- x좌표 위치의 발판 Y값을 찾아서 반환한다 (발판이 없으면 0에 스폰 — 맵마다 발판 높이가 달라도 항상 바닥 위에 스폰되도록)
+	@ExecSpace("ServerOnly")
+	method number GetGroundY(Entity map, number x)
+		if map == nil then return 0 end
+		---@type FootholdComponent
+		local foothold = map:GetComponent("FootholdComponent")
+		if foothold == nil then return 0 end
+
+		local hit = foothold:Raycast(Vector2(x, 100), Vector2(0, -1), 200)
+		if hit == nil then return 0 end
+		return hit:GetYByX(x)
+	end
+
+	-- 맵4~6은 바닥 발판 + 공중 발판이 따로 있어서(getFootholds()로 확인한 좌표를 그대로 하드코딩),
+	-- 아래로 레이캐스트하는 GetGroundY 방식으로는 맨 위 발판만 걸려 공중 발판에 스폰이 안 된다.
+	-- 발판 폭에 비례한 확률로 밴드를 하나 고르고 그 안에서 X를 뽑아 "타일이 있는 곳은 다 등장 가능"하게 한다.
+	@ExecSpace("ServerOnly")
+	method table GetZonePlatformBands(integer mapIndex)
+		if mapIndex == 4 then
+			return {
+				{ y = -1.22, xMin = -7.15, xMax = 7.15 },   -- 바닥
+				{ y = 1.18, xMin = -7.15, xMax = -0.95 },   -- 좌측 공중 발판
+			}
+		elseif mapIndex == 5 then
+			return {
+				{ y = -1.22, xMin = -7.15, xMax = 7.15 },   -- 바닥
+				{ y = 1.18, xMin = 0.05, xMax = 7.15 },     -- 우측 공중 발판
+			}
+		elseif mapIndex == 6 then
+			return {
+				{ y = -1.22, xMin = -7.15, xMax = 7.15 },   -- 바닥
+				{ y = 1.78, xMin = -1.75, xMax = 1.75 },    -- 중앙 공중 발판
+			}
+		elseif mapIndex == 9 then
+			-- 맵9는 우측에 장식용 절벽 발판(계단식, y≈2.6~4.6)이 따로 있는데 이건 배경 연출 전용이라
+			-- 밴드를 바닥 하나로만 명시해서 몬스터가 그 위로는 절대 스폰되지 않게 한다
+			return {
+				{ y = -1.18, xMin = -7.15, xMax = 7.15 },   -- 바닥만
+			}
+		elseif mapIndex == 10 then
+			-- 맵10(보너스 스테이지)은 보너스 보스가 없을 때 맵9와 같은 몬스터 풀로 폴백 스폰될 때 쓰인다
+			return {
+				{ y = -1.18, xMin = -7.07, xMax = 7.07 },   -- 바닥만
+			}
+		end
+		return nil
+	end
+
+	-- ── 맵10 보너스 스테이지 ──────────────────────────────────────
+
+	-- MapManager가 맵10 입장마다 호출. 첫 방문은 100%, 이후엔 BonusBossChance 확률로 보너스 보스를
+	-- 등장시킨다. 실패하거나 이미 보스가 떠 있으면 평소 웨이브 스폰(맵9 몬스터 풀 재사용)으로 대체한다.
+	@ExecSpace("ServerOnly")
+	method void TryStartBonusStage()
+		if isvalid(self._bonusBoss) then return end
+
+		local chance = self._map10Visited and self.BonusBossChance or 1.0
+		self._map10Visited = true
+
+		if _UtilLogic:RandomDouble() >= chance then
+			self:ActivateMap(10)
+			return
+		end
+
+		self:SpawnBonusBoss()
+	end
+
+	-- 맵10에 보너스 보스 1마리를 즉시 스폰한다. 평소 웨이브 몬스터와 섞이지 않도록 기존 몬스터를 먼저 정리한다.
+	@ExecSpace("ServerOnly")
+	method void SpawnBonusBoss()
+		local map = _EntityService:GetEntityByPath("/maps/map10")
+		if map == nil then return end
+
+		local existing = map:GetChildComponentsByTypeName("script.MonsterAI", false)
+		for i = 1, #existing do
+			---@type MonsterAI
+			local mob = existing[i]
+			mob.Entity:Destroy()
+		end
+
+		local bands = self:GetZonePlatformBands(10)
+		local groundY = bands[1].y
+		local pos = Vector3(0, groundY, 0)
+		local entity = _SpawnService:SpawnByModelId(self.BonusBossModelId, "BonusBoss", pos, map)
+		if entity == nil then
+			log_error("MonsterSpawner: SpawnBonusBoss failed")
+			return
+		end
+
+		---@type MonsterAI
+		local ai = entity:GetComponent("script.MonsterAI")
+		if ai ~= nil then
+			ai:InitializeBonusBoss(bands[1].xMin + 0.4, bands[1].xMax - 0.4, groundY, self.BonusBossSpriteRUID)
+		end
+
+		self._bonusBoss = entity
+		self._bonusBossActive = true
+		-- 보스 지속시간이 끝난 뒤 평소 웨이브가 곧바로 이어지도록 활성 맵으로 표시해둔다
+		if self._activeMaps == nil then self._activeMaps = {} end
+		self._activeMaps[10] = true
+		log("MonsterSpawner: bonus boss spawned on map10")
+
+		_TimerService:SetTimerOnce(function()
+			if isvalid(self) then self:EndBonusStage() end
+		end, self.BonusBossDuration)
+	end
+
+	-- 지속시간 만료 시 호출 — 보너스 보스를 제거한다. 이후 평소 SpawnWave 틱이 맵9 몬스터 풀로 재개한다.
+	@ExecSpace("ServerOnly")
+	method void EndBonusStage()
+		if isvalid(self._bonusBoss) then self._bonusBoss:Destroy() end
+		self._bonusBoss = nil
+		self._bonusBossActive = false
+		log("MonsterSpawner: bonus stage ended on map10")
+	end
+
+	-- 스폰 위치를 정한다. 맵4~6은 발판 밴드 테이블에서 폭에 비례한 확률로 하나 골라 그 위에 스폰하고,
+	-- 맵1~3은 기존처럼 화면 근처(±5) 범위에서 골라 아래로 레이캐스트한다(회귀 방지를 위해 그대로 둠).
+	@ExecSpace("ServerOnly")
+	method Vector3 GetSpawnPosition(integer mapIndex, Entity map, boolean isBoss)
+		local bands = self:GetZonePlatformBands(mapIndex)
+		if bands == nil then
+			-- 맵1~3: 기존 로직 그대로
+			local rx = (_UtilLogic:RandomDouble() * 10) - 5
+			if isBoss then rx = 0 end
+			return Vector3(rx, self:GetGroundY(map, rx), 0)
+		end
+
+		if isBoss then
+			-- 보스는 임팩트를 위해 바닥 밴드 중앙에 고정
+			local ground = bands[1]
+			return Vector3(0, ground.y, 0)
+		end
+
+		-- 발판 폭 그대로 쓰면 화면 가장자리(카메라 가시범위 밖, 대략 ±6.4)에서 스폰돼 몬스터가
+		-- 양옆으로 잘려 보인다 — 맵1~3과 동일하게 화면에 안전하게 들어오는 ±5 범위로 각 밴드를 잘라서 쓴다.
+		-- 그리고 발판 자체의 가장자리에도 몬스터 스프라이트 폭만큼(edgeMargin) 여유를 둬야 공중 발판
+		-- 끝에 반쯤 걸쳐서 스폰되는 걸 막을 수 있다.
+		local edgeMargin = 0.4
+		local safeMin = -5
+		local safeMax = 5
+		local clamped = {}
+		for i = 1, #bands do
+			local xMin = math.max(bands[i].xMin + edgeMargin, safeMin)
+			local xMax = math.min(bands[i].xMax - edgeMargin, safeMax)
+			if xMax > xMin then
+				table.insert(clamped, { y = bands[i].y, xMin = xMin, xMax = xMax })
+			end
+		end
+		if #clamped == 0 then
+			return Vector3(0, bands[1].y, 0)
+		end
+
+		local totalWidth = 0
+		for i = 1, #clamped do
+			totalWidth = totalWidth + (clamped[i].xMax - clamped[i].xMin)
+		end
+		local roll = _UtilLogic:RandomDouble() * totalWidth
+		local chosen = clamped[1]
+		local acc = 0
+		for i = 1, #clamped do
+			acc = acc + (clamped[i].xMax - clamped[i].xMin)
+			if roll <= acc then
+				chosen = clamped[i]
+				break
+			end
+		end
+
+		local x = chosen.xMin + _UtilLogic:RandomDouble() * (chosen.xMax - chosen.xMin)
+		return Vector3(x, chosen.y, 0)
 	end
 
 	-- GameManager가 호출: 스폰 멈추기 (게임 종료 시)
 	@ExecSpace("ServerOnly")
 	method void StopSpawning()
 		self._running = false
-	end
-
-	-- MapManager가 호출: 맵 이동 시 스폰 대상 맵을 직접 지정 (프론티어 맵으로 복귀/진입할 때)
-	@ExecSpace("ServerOnly")
-	method void SetMap(Entity map)
-		self._map = map
 	end
 
 	-- GameManager가 호출: 다시하기/이어하기 시 스폰 재개
@@ -135,30 +473,43 @@ script MonsterSpawner extends Logic
 	@ExecSpace("ServerOnly")
 	method void ResetEliteTracking()
 		self._lastEliteWave = 0
+		self._nextEliteTimer = -1
 	end
 
-	-- GameManager가 호출: 다시하기/이어하기 시 남아있는 몬스터 전부 제거
+	-- GameManager가 호출: 다시하기/이어하기 시 남아있는 몬스터 전부 제거 (map1~3 전부)
 	@ExecSpace("ServerOnly")
 	method void ClearAllMonsters()
-		if self._map == nil then return end
-		local monsters = self._map:GetChildComponentsByTypeName("script.MonsterAI", false)
-		for i = 1, #monsters do
-			monsters[i].Entity:Destroy()
+		local total = 0
+		for idx = _MapManager.MinMapIndex, _MapManager.MaxMapIndex do
+			local map = _EntityService:GetEntityByPath("/maps/" .. _MapManager:GetMapName(idx))
+			if map ~= nil then
+				local monsters = map:GetChildComponentsByTypeName("script.MonsterAI", false)
+				for i = 1, #monsters do
+					monsters[i].Entity:Destroy()
+				end
+				total = total + #monsters
+			end
 		end
-		log("MonsterSpawner: cleared " .. #monsters .. " monster(s)")
+		log("MonsterSpawner: cleared " .. total .. " monster(s)")
 	end
 
-	-- 이어하기 전용: 몬스터를 제거하지 않고 스폰 위치로 밀어냄
+	-- 이어하기 전용: 몬스터를 제거하지 않고 스폰 위치로 밀어냄 (map1~3 전부)
 	@ExecSpace("ServerOnly")
 	method void PushAllMonstersBack()
-		if self._map == nil then return end
-		local monsters = self._map:GetChildComponentsByTypeName("script.MonsterAI", false)
-		for i = 1, #monsters do
-			---@type MonsterAI
-			local ai = monsters[i].Entity:GetComponent("script.MonsterAI")
-			if ai ~= nil then ai:PushBack() end
+		local total = 0
+		for idx = _MapManager.MinMapIndex, _MapManager.MaxMapIndex do
+			local map = _EntityService:GetEntityByPath("/maps/" .. _MapManager:GetMapName(idx))
+			if map ~= nil then
+				local monsters = map:GetChildComponentsByTypeName("script.MonsterAI", false)
+				for i = 1, #monsters do
+					---@type MonsterAI
+					local ai = monsters[i].Entity:GetComponent("script.MonsterAI")
+					if ai ~= nil then ai:PushBack() end
+				end
+				total = total + #monsters
+			end
 		end
-		log("MonsterSpawner: pushed back " .. #monsters .. " monster(s)")
+		log("MonsterSpawner: pushed back " .. total .. " monster(s)")
 	end
 
 	@ExecSpace("ServerOnly")
