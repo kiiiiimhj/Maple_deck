@@ -1,0 +1,139 @@
+@Logic
+script TitleUI extends Logic
+
+	-- 루트 그룹 자체 — "게임 시작" 클릭 시 이 전체(하단 탭바 포함)를 한 번에 끈다. 이 스크립트는
+	-- @Logic이라 UI 엔티티 트리 밖에서 독립 실행되므로, 루트를 꺼도 스크립트 생명주기엔 영향 없다.
+	property Entity titleGroup = "4109795c-8f3d-41f1-9403-fefcec8fbb3e"
+	property ButtonComponent btnStart = "7324df2c-c085-43e9-9b23-93c36b4e7121"
+
+	-- 하단 탭 5개(상점/스킬/전투/유물/랭킹) — 클릭 시 해당 패널만 보이고 나머지는 숨는다
+	property ButtonComponent btnShop = "f6e66e4a-08d4-48cc-a0a6-25305634678e"
+	property ButtonComponent btnSkill = "3d0c5a53-a76d-4349-bc82-d27bf7af450b"
+	property ButtonComponent btnBattle = "578ab65e-c34b-4341-83e4-9d59b323d1fc"
+	property ButtonComponent btnRelic = "cebc9839-c154-4b66-9e1e-ed6c5225de19"
+	property ButtonComponent btnRank = "23708561-776c-4235-b4a0-34df325b210a"
+
+	property Entity battlePanel = "f75fae1e-c8fb-4554-9017-79134b71633c"
+	property Entity shopPanel = "d67d85f8-44fe-41bb-912e-18387d1029fc"
+	property Entity skillPanel = "d6c39a06-7db3-42e2-8d21-635fc028b775"
+	property Entity relicPanel = "eba587f7-623c-4c03-ac11-af666a917cbf"
+	property Entity rankPanel = "06fe7223-8b8e-403a-a901-295fcdda2a77"
+
+	-- 상점 탭 아이콘 — 평소엔 라이딩 가게 NPC의 stand 클립으로 가만히 서 있다가, 탭 클릭 시 say 클립으로 짧게 인사하는 연출을 재생한다
+	property SpriteGUIRendererComponent shopIcon = "cdcc6063-2fd8-45c5-81b9-851158d06ce8"
+
+	-- 탭 아이콘 5개의 UITransform — 선택된 탭의 아이콘만 위로 올라오고 커지는 연출, 나머지는 평소 크기/위치로 되돌린다
+	property UITransformComponent battleIconTransform = "05e4d9f8-ea68-4dad-80b1-60fd5aea1dbf"
+	property UITransformComponent shopIconTransform = "cdcc6063-2fd8-45c5-81b9-851158d06ce8"
+	property UITransformComponent skillIconTransform = "846f8a92-91da-481c-b5ee-6f333a0e6241"
+	property UITransformComponent relicIconTransform = "bc8c5931-252c-4178-a10f-4478f6f91281"
+	property UITransformComponent rankIconTransform = "a5885431-8221-4fa0-a0c1-1994fe28cfeb"
+
+	-- 탭 아이콘 5개의 SpriteGUIRenderer — 선택되지 않은 동안은 PlayRate=0으로 멈춰있고, 선택된 탭만 애니메이션이 재생된다
+	property SpriteGUIRendererComponent battleIcon = "05e4d9f8-ea68-4dad-80b1-60fd5aea1dbf"
+	property SpriteGUIRendererComponent skillIcon = "846f8a92-91da-481c-b5ee-6f333a0e6241"
+	property SpriteGUIRendererComponent relicIcon = "bc8c5931-252c-4178-a10f-4478f6f91281"
+	property SpriteGUIRendererComponent rankIcon = "a5885431-8221-4fa0-a0c1-1994fe28cfeb"
+
+	-- 5개 탭 아이콘이 공통으로 사용하는 평소 y 좌표 (탭바 기준)
+	property number tabIconBaseY = 28
+
+	property any _startHandler = nil
+	property any _shopHandler = nil
+	property any _skillHandler = nil
+	property any _battleHandler = nil
+	property any _relicHandler = nil
+	property any _rankHandler = nil
+	property any _shopIconAnimEndHandler = nil
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		-- 메인 화면 버튼들을 연결한다. 기본 탭은 전투(게임 시작 화면)
+		self._startHandler = self.btnStart.Entity:ConnectEvent(ButtonClickEvent, self.OnStartClicked)
+		self._shopHandler = self.btnShop.Entity:ConnectEvent(ButtonClickEvent, self.OnShopClicked)
+		self._skillHandler = self.btnSkill.Entity:ConnectEvent(ButtonClickEvent, function() self:ShowTab("skill") end)
+		self._battleHandler = self.btnBattle.Entity:ConnectEvent(ButtonClickEvent, function() self:ShowTab("battle") end)
+		self._relicHandler = self.btnRelic.Entity:ConnectEvent(ButtonClickEvent, function() self:ShowTab("relic") end)
+		self._rankHandler = self.btnRank.Entity:ConnectEvent(ButtonClickEvent, function() self:ShowTab("rank") end)
+		self._shopIconAnimEndHandler = self.shopIcon.Entity:ConnectEvent(SpriteGUIAnimPlayerEndEvent, self.OnShopIconAnimEnd)
+		-- 시작 시 기본 탭인 전투가 눌린 상태로 보이도록 연출까지 함께 적용한다
+		self:ShowTab("battle")
+		log("TitleUI started")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ShowPanelOnly(string tabName)
+		-- 5개 패널 중 선택된 탭 하나만 보여주고 나머지는 숨긴다 (아이콘 연출은 건드리지 않는다)
+		self.battlePanel.Enable = (tabName == "battle")
+		self.shopPanel.Enable = (tabName == "shop")
+		self.skillPanel.Enable = (tabName == "skill")
+		self.relicPanel.Enable = (tabName == "relic")
+		self.rankPanel.Enable = (tabName == "rank")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ShowTab(string tabName)
+		-- 탭 버튼을 실제로 눌렀을 때만 호출 — 패널 전환과 함께 선택된 탭 아이콘이 위로 뜨는 연출을 재생한다
+		self:ShowPanelOnly(tabName)
+
+		-- 선택된 탭의 아이콘만 위로 올라오고 커진 상태로 애니메이션이 재생되고, 나머지는 평소 상태(정지)로 되돌린다
+		self:SetTabIconSelected(self.battleIconTransform, self.battleIcon, tabName == "battle")
+		self:SetTabIconSelected(self.shopIconTransform, self.shopIcon, tabName == "shop")
+		self:SetTabIconSelected(self.skillIconTransform, self.skillIcon, tabName == "skill")
+		self:SetTabIconSelected(self.relicIconTransform, self.relicIcon, tabName == "relic")
+		self:SetTabIconSelected(self.rankIconTransform, self.rankIcon, tabName == "rank")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetTabIconSelected(UITransformComponent iconTransform, SpriteGUIRendererComponent iconSprite, boolean selected)
+		-- selected면 아이콘 높이의 절반만큼 위로 띄우고 1.5배로 키우고 애니메이션을 재생하며, 아니면 평소 위치/크기로 되돌리고 애니메이션을 멈춘다
+		local x = iconTransform.anchoredPosition.x
+		if selected then
+			local halfHeight = iconTransform.RectSize.y * 0.5
+			iconTransform.anchoredPosition = Vector2(x, self.tabIconBaseY + halfHeight)
+			iconTransform.Scale = Vector3(1.5, 1.5, 1.5)
+			iconSprite.PlayRate = 1
+		else
+			iconTransform.anchoredPosition = Vector2(x, self.tabIconBaseY)
+			iconTransform.Scale = Vector3(1, 1, 1)
+			iconSprite.PlayRate = 0
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnShopClicked()
+		-- 상점 탭 진입 연출 — 아이콘이 say 클립을 한 번 재생해 인사하고, 끝나면 OnShopIconAnimEnd에서 stand로 복귀한다
+		self.shopIcon.AnimClipPlayType = SpriteAnimClipPlayType.Onetime
+		self.shopIcon.ImageRUID = DataRef("9a8dd4b49d2d4e2b9941c4cd46a17423")
+		self:ShowTab("shop")
+		log("TitleUI: Shop clicked, playing greet animation")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnShopIconAnimEnd(SpriteGUIAnimPlayerEndEvent event)
+		-- say 연출이 끝나면 평소 상태(stand 루프)로 되돌린다
+		self.shopIcon.AnimClipPlayType = SpriteAnimClipPlayType.Loop
+		self.shopIcon.ImageRUID = DataRef("e4c8f831403d4c09bb4464a20dc72f98")
+		log("TitleUI: Shop icon back to stand")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnStartClicked()
+		-- 같은 클라이언트가 방금 누른 버튼이므로 서버 응답(동기화)을 기다리지 않고 바로 메인 화면을 닫는다
+		log("TitleUI: Start clicked")
+		self.titleGroup.Enable = false
+		_GameManager:RequestStartGame()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		if self._startHandler then self.btnStart.Entity:DisconnectEvent(ButtonClickEvent, self._startHandler) end
+		if self._shopHandler then self.btnShop.Entity:DisconnectEvent(ButtonClickEvent, self._shopHandler) end
+		if self._skillHandler then self.btnSkill.Entity:DisconnectEvent(ButtonClickEvent, self._skillHandler) end
+		if self._battleHandler then self.btnBattle.Entity:DisconnectEvent(ButtonClickEvent, self._battleHandler) end
+		if self._relicHandler then self.btnRelic.Entity:DisconnectEvent(ButtonClickEvent, self._relicHandler) end
+		if self._rankHandler then self.btnRank.Entity:DisconnectEvent(ButtonClickEvent, self._rankHandler) end
+		if self._shopIconAnimEndHandler then self.shopIcon.Entity:DisconnectEvent(SpriteGUIAnimPlayerEndEvent, self._shopIconAnimEndHandler) end
+	end
+
+end

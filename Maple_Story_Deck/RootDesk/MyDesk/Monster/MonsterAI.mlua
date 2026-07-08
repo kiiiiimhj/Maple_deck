@@ -276,6 +276,35 @@ script MonsterAI extends Component
 		self._wanderRetargetTimer = 0.4 + _UtilLogic:RandomDouble() * 0.6
 	end
 
+	-- MonsterSpawner.EndBonusStage()가 보너스 보스 지속시간 종료 시 호출 — 즉시 사라지는 대신
+	-- 바닥에 먼지를 일으키고 위로 붕 뜨며 점점 투명해지다가 사라지는 연출 후 파괴한다
+	@ExecSpace("ServerOnly")
+	method void PlayDespawnJump()
+		local map = self.Entity.CurrentMap
+		local startPos = self.Entity.TransformComponent.Position
+		if map ~= nil then
+			local dustPos = Vector3(startPos.x, startPos.y - 0.35, startPos.z + 0.1)
+			local dust = _SpawnService:SpawnByModelId("skilleffect", "Dust", dustPos, map)
+			if dust ~= nil then
+				local r = dust.SpriteRendererComponent
+				if r ~= nil then r.SpriteRUID = "98262e9a441d41abb19a6d519f74aec7" end
+				dust:Destroy(0.5)
+			end
+		end
+
+		local duration = 0.6
+		local jumpHeight = 3.0
+		_TweenLogic:PlayTween(0.0, 1.0, duration, EaseType.QuadEaseIn, function(t)
+			if not isvalid(self) or not isvalid(self.Entity) then return end
+			local y = startPos.y + jumpHeight * t
+			self.Entity.TransformComponent.Position = Vector3(startPos.x, y, startPos.z)
+			local renderer = self.Entity.SpriteRendererComponent
+			if renderer ~= nil then renderer.Color = Color(1, 1, 1, 1.0 - t) end
+		end)
+
+		self.Entity:Destroy(duration + 0.05)
+	end
+
 	@ExecSpace("ServerOnly")
 	method void UpdateDepth()
 		-- 스케일이 작을수록(멀리 있을수록) Z를 크게 해서 뒤로 깔리고,
@@ -592,9 +621,14 @@ script MonsterAI extends Component
 			self._freezeIndicator = nil
 		end
 		log("Monster died")
-		_GameManager:OnMonsterKilled()
 		if self._isBoss then
+			-- 보스는 OnBossDefeated()가 처치 보상(Exp/Gold)까지 전부 처리한다. OnMonsterKilled()도
+			-- 같이 부르면 NotifyExpChanged가 한 프레임 안에 두 번 겹쳐 호출되어, 레벨업 트윈이 강제로
+			-- 0%부터 시작하기 직전에 다른 값으로 이미 차오르고 있던 바가 순간적으로 줄어드는 것처럼
+			-- 보이는 버그가 있었다.
 			_GameManager:OnBossDefeated()
+		else
+			_GameManager:OnMonsterKilled()
 		end
 		if self._isElite then
 			_CardManager:OnEliteKilled(self.Entity.TransformComponent.Position)

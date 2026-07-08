@@ -1,0 +1,113 @@
+@Logic
+script ShopUI extends Logic
+
+	property ScrollLayoutGroupComponent productScroll = "3506edd8-d843-4f21-85a4-5a06d260f219"
+	property ButtonComponent btnPrev = "3dce8aa6-c9ae-4310-90f8-520a395d6d6a"
+	property ButtonComponent btnNext = "6c718151-44eb-4282-9eed-092630bfeaef"
+	property Entity scrollTouchArea = "6e336451-5d36-4e79-bd42-d2bd4f9ddc83"
+	property SliderComponent scrollBar = "26212c1d-5b7a-41d6-baa0-c4e400b23841"
+	property integer itemCount = 6
+	property integer currentIndex = 0
+	property number scrollTweenDuration = 0.28
+	-- 카드 340 + 간격 24 * 5장 + 좌우 패딩 40 - 뷰포트 1300 = 실제로 드래그 가능한 스크롤 폭(px)
+	property number scrollableRangePx = 900
+
+	property any _prevHandler = nil
+	property any _nextHandler = nil
+	property any _scrollTween = nil
+	property any _dragHandler = nil
+	property any _scrollBarHandler = nil
+	-- 스크립트가 scrollBar.Value를 코드로 갱신할 때(카드 쪽에서 온 변화를 핸들에 반영) true로 세워서,
+	-- 그 갱신이 다시 SliderValueChangedEvent로 되돌아와 카드를 또 움직이는 무한 루프를 막는다
+	property boolean _syncingScrollBar = false
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		-- 상점 상품 목록의 이전/다음 화살표 버튼을 스크롤 위치 이동에 연결한다
+		self._prevHandler = self.btnPrev.Entity:ConnectEvent(ButtonClickEvent, self.OnPrevClicked)
+		self._nextHandler = self.btnNext.Entity:ConnectEvent(ButtonClickEvent, self.OnNextClicked)
+		-- 마우스/터치로 좌우로 끌면 상품 목록이 그만큼 스크롤되도록 연결한다
+		self._dragHandler = self.scrollTouchArea:ConnectEvent(UITouchDragEvent, self.OnScrollDrag)
+		-- 하단 스크롤바 핸들을 직접 끌면 카드 목록도 같이 움직이도록 연결한다
+		self._scrollBarHandler = self.scrollBar.Entity:ConnectEvent(SliderValueChangedEvent, self.OnScrollBarChanged)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SyncScrollBar(number normalizedValue)
+		-- 카드 쪽 스크롤(드래그/화살표 트윈)이 바뀔 때 핸들 위치를 따라오게 한다.
+		-- 이 대입 자체가 SliderValueChangedEvent를 다시 쏘므로, 그 되돌아온 이벤트를 OnScrollBarChanged가
+		-- 무시하도록 플래그를 세워둔다.
+		self._syncingScrollBar = true
+		self.scrollBar.Value = normalizedValue
+		self._syncingScrollBar = false
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnScrollBarChanged(SliderValueChangedEvent event)
+		-- 방금 SyncScrollBar()가 코드로 쓴 값이 되돌아온 것이면 무시 — 사용자가 직접 핸들을 끈 경우만 처리
+		if self._syncingScrollBar then return end
+		if self._scrollTween then
+			self._scrollTween:Stop()
+			self._scrollTween = nil
+		end
+		self.productScroll:SetScrollNormalizedPosition(UITransformAxis.Horizontal, event.Value)
+		self.currentIndex = math.floor(event.Value * (self.itemCount - 1) + 0.5)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnScrollDrag(UITouchDragEvent event)
+		-- 좌로 끌면(TouchDelta.x < 0) 다음 상품 쪽(정규화 값 증가)으로, 우로 끌면 반대로 스크롤한다
+		if self._scrollTween then
+			self._scrollTween:Stop()
+			self._scrollTween = nil
+		end
+		local current = self.productScroll:GetScrollNormalizedPosition(UITransformAxis.Horizontal)
+		local delta = -event.TouchDelta.x / self.scrollableRangePx
+		local newValue = math.max(0, math.min(1, current + delta))
+		self.productScroll:SetScrollNormalizedPosition(UITransformAxis.Horizontal, newValue)
+		self.currentIndex = math.floor(newValue * (self.itemCount - 1) + 0.5)
+		self:SyncScrollBar(newValue)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnPrevClicked()
+		-- 왼쪽 화살표 — 이전 상품으로 부드럽게 스크롤
+		self:ScrollToIndexSmooth(math.max(0, self.currentIndex - 1))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnNextClicked()
+		-- 오른쪽 화살표 — 다음 상품으로 부드럽게 스크롤
+		self:ScrollToIndexSmooth(math.min(self.itemCount - 1, self.currentIndex + 1))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ScrollToIndexSmooth(integer newIndex)
+		-- 즉시 점프하던 SetScrollPositionByItemIndex를 스와이프처럼 부드럽게 이어지도록 트윈으로 감싼다.
+		-- 목표 정규화 위치를 알아낼 API가 없어서, 한 번 순간이동시켜 도착 위치를 측정한 뒤
+		-- 원래 위치로 되돌리고 그 구간을 트윈으로 재생하는 방식을 쓴다.
+		if newIndex == self.currentIndex then return end
+		local fromValue = self.productScroll:GetScrollNormalizedPosition(UITransformAxis.Horizontal)
+		self.currentIndex = newIndex
+		self.productScroll:SetScrollPositionByItemIndex(self.currentIndex)
+		wait(1/60) -- 레이아웃이 한 프레임 뒤에 갱신되므로, 도착 위치를 읽기 전에 한 프레임 대기한다
+		local toValue = self.productScroll:GetScrollNormalizedPosition(UITransformAxis.Horizontal)
+		self.productScroll:SetScrollNormalizedPosition(UITransformAxis.Horizontal, fromValue)
+
+		if self._scrollTween then self._scrollTween:Stop() end
+		self._scrollTween = _TweenLogic:PlayTween(fromValue, toValue, self.scrollTweenDuration, EaseType.QuartEaseOut, function(value)
+			self.productScroll:SetScrollNormalizedPosition(UITransformAxis.Horizontal, value)
+			self:SyncScrollBar(value)
+		end)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		if self._prevHandler then self.btnPrev.Entity:DisconnectEvent(ButtonClickEvent, self._prevHandler) end
+		if self._nextHandler then self.btnNext.Entity:DisconnectEvent(ButtonClickEvent, self._nextHandler) end
+		if self._dragHandler then self.scrollTouchArea:DisconnectEvent(UITouchDragEvent, self._dragHandler) end
+		if self._scrollBarHandler then self.scrollBar.Entity:DisconnectEvent(SliderValueChangedEvent, self._scrollBarHandler) end
+		if self._scrollTween then self._scrollTween:Stop() end
+	end
+
+end

@@ -1,0 +1,55 @@
+@Logic
+script RelicUI extends Logic
+
+	property ScrollLayoutGroupComponent relicScroll = "e7c58f67-b7f5-461b-89fb-3f7e16dd64bc"
+	property Entity scrollTouchArea = "9481ea28-3f0f-4b9c-9d7c-73ae0f3b267e"
+	property SliderComponent scrollBar = "238ef981-ac51-4d81-a81e-3546a41ea4b9"
+	-- 그리드 총 폭(2342) - 뷰포트 폭(1300) = 실제로 드래그 가능한 스크롤 폭(px)
+	property number scrollableRangePx = 1042
+
+	property any _dragHandler = nil
+	property any _scrollBarHandler = nil
+	-- 카드 쪽 스크롤(드래그)이 스크롤바 핸들 위치를 코드로 갱신할 때 true로 세워서,
+	-- 그 갱신이 다시 SliderValueChangedEvent로 되돌아와 카드를 또 움직이는 무한 루프를 막는다
+	property boolean _syncingScrollBar = false
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		-- 유물 그리드를 좌우로 끌면 스크롤되고, 하단 스크롤바를 직접 끌어도 그리드가 같이 움직이도록 연결한다
+		self._dragHandler = self.scrollTouchArea:ConnectEvent(UITouchDragEvent, self.OnScrollDrag)
+		self._scrollBarHandler = self.scrollBar.Entity:ConnectEvent(SliderValueChangedEvent, self.OnScrollBarChanged)
+		log("RelicUI started")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnScrollDrag(UITouchDragEvent event)
+		-- 좌로 끌면(TouchDelta.x < 0) 오른쪽 열 쪽(정규화 값 증가)으로, 우로 끌면 반대로 스크롤한다
+		local current = self.relicScroll:GetScrollNormalizedPosition(UITransformAxis.Horizontal)
+		local delta = -event.TouchDelta.x / self.scrollableRangePx
+		local newValue = math.max(0, math.min(1, current + delta))
+		self.relicScroll:SetScrollNormalizedPosition(UITransformAxis.Horizontal, newValue)
+		self:SyncScrollBar(newValue)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SyncScrollBar(number normalizedValue)
+		-- 드래그로 바뀐 스크롤 위치를 하단 슬라이더 핸들에 반영한다
+		self._syncingScrollBar = true
+		self.scrollBar.Value = normalizedValue
+		self._syncingScrollBar = false
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnScrollBarChanged(SliderValueChangedEvent event)
+		-- 방금 SyncScrollBar()가 코드로 쓴 값이 되돌아온 것이면 무시 — 사용자가 직접 핸들을 끈 경우만 처리
+		if self._syncingScrollBar then return end
+		self.relicScroll:SetScrollNormalizedPosition(UITransformAxis.Horizontal, event.Value)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		if self._dragHandler then self.scrollTouchArea:DisconnectEvent(UITouchDragEvent, self._dragHandler) end
+		if self._scrollBarHandler then self.scrollBar.Entity:DisconnectEvent(SliderValueChangedEvent, self._scrollBarHandler) end
+	end
+
+end
