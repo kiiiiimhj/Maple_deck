@@ -19,6 +19,9 @@ script TitleUI extends Logic
 	property Entity relicPanel = "eba587f7-623c-4c03-ac11-af666a917cbf"
 	property Entity rankPanel = "06fe7223-8b8e-403a-a901-295fcdda2a77"
 
+	-- 우측 상단 상시 코인 배지 — 어떤 탭을 보고 있어도 항상 표시된다 (GameManager.TotalCoins, 런과 무관하게 누적)
+	property TextComponent coinText = "7953a102-4e89-451e-907d-ad8215d50f79"
+
 	-- 상점 탭 아이콘 — 평소엔 라이딩 가게 NPC의 stand 클립으로 가만히 서 있다가, 탭 클릭 시 say 클립으로 짧게 인사하는 연출을 재생한다
 	property SpriteGUIRendererComponent shopIcon = "cdcc6063-2fd8-45c5-81b9-851158d06ce8"
 
@@ -39,6 +42,7 @@ script TitleUI extends Logic
 	property number tabIconBaseY = 28
 
 	property any _startHandler = nil
+	property any _startStateHandler = nil
 	property any _shopHandler = nil
 	property any _skillHandler = nil
 	property any _battleHandler = nil
@@ -50,6 +54,8 @@ script TitleUI extends Logic
 	method void OnBeginPlay()
 		-- 메인 화면 버튼들을 연결한다. 기본 탭은 전투(게임 시작 화면)
 		self._startHandler = self.btnStart.Entity:ConnectEvent(ButtonClickEvent, self.OnStartClicked)
+		-- 패딩(눌림) 연출 — 누르는 순간 작아지고 떼는 순간 원래 크기로 돌아온다
+		self._startStateHandler = self.btnStart.Entity:ConnectEvent(ButtonStateChangeEvent, function(event) self:OnButtonStateChanged(event, self.btnStart.Entity) end)
 		self._shopHandler = self.btnShop.Entity:ConnectEvent(ButtonClickEvent, self.OnShopClicked)
 		self._skillHandler = self.btnSkill.Entity:ConnectEvent(ButtonClickEvent, function() self:ShowTab("skill") end)
 		self._battleHandler = self.btnBattle.Entity:ConnectEvent(ButtonClickEvent, function() self:ShowTab("battle") end)
@@ -58,7 +64,20 @@ script TitleUI extends Logic
 		self._shopIconAnimEndHandler = self.shopIcon.Entity:ConnectEvent(SpriteGUIAnimPlayerEndEvent, self.OnShopIconAnimEnd)
 		-- 시작 시 기본 탭인 전투가 눌린 상태로 보이도록 연출까지 함께 적용한다
 		self:ShowTab("battle")
+		-- 코인 배지 초기값 — TotalCoins의 @Sync 전파 타이밍을 신뢰하지 않고, 서버에 현재 값을 직접
+		-- 요청한다(RequestCoinSync → NotifyCoinsChanged 응답). 이 시점의 로컬 캐시 값은 서버가 스토리지
+		-- 로드를 끝내기 전의 기본값(0)일 수 있어서 그냥 읽으면 "코인이 초기화된 것처럼" 보일 수 있다
+		self.coinText.Text = tostring(_GameManager.TotalCoins)
+		_GameManager:RequestCoinSync()
 		log("TitleUI started")
+	end
+
+	@ExecSpace("Multicast")
+	method void NotifyCoinsChanged(integer newTotal)
+		-- GameManager.AddGold()가 호출 — TotalCoins의 @Sync 전파와 이 Multicast 호출은 서로 다른 채널이라
+		-- 순서 보장이 없어서, 여기서 다시 _GameManager.TotalCoins를 읽지 않고 파라미터로 직접 받는다
+		if not self:IsClient() then return end
+		self.coinText.Text = tostring(newTotal)
 	end
 
 	@ExecSpace("ClientOnly")
@@ -122,12 +141,38 @@ script TitleUI extends Logic
 		-- 같은 클라이언트가 방금 누른 버튼이므로 서버 응답(동기화)을 기다리지 않고 바로 메인 화면을 닫는다
 		log("TitleUI: Start clicked")
 		self.titleGroup.Enable = false
-		_GameManager:RequestStartGame()
+		-- 게임오버 팝업의 X(로비로 가기)를 거쳐 돌아온 경우, 런이 GameOver=true 상태로 멈춰있을 수 있다.
+		-- GameStarted는 최초 1회만 켜지는 플래그라 RequestStartGame()만으로는 죽은 런이 재개되지 않으므로,
+		-- 이 경우엔 다시하기와 동일하게 새 런으로 초기화한다
+		if _GameManager.GameOver then
+			_GameManager:RequestRestart()
+		else
+			_GameManager:RequestStartGame()
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnButtonStateChanged(ButtonStateChangeEvent event, Entity buttonEntity)
+		-- Pressed 상태가 되는 순간 작아지고, 그 외(뗐을 때 등) 상태로 돌아오면 원래 크기로 복귀한다
+		if not isvalid(buttonEntity) then return end
+		if event.state == ButtonState.Pressed then
+			_TweenLogic:ScaleTo(buttonEntity, Vector2(0.9, 0.9), 0.06, EaseType.QuadEaseOut)
+		else
+			_TweenLogic:ScaleTo(buttonEntity, Vector2(1, 1), 0.12, EaseType.QuadEaseOut)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ShowLobby()
+		-- 게임오버 팝업의 X(로비로 가기)가 호출 — 런 상태는 건드리지 않고 타이틀 화면만 다시 보여준다
+		self.titleGroup.Enable = true
+		log("TitleUI: ShowLobby")
 	end
 
 	@ExecSpace("ClientOnly")
 	method void OnEndPlay()
 		if self._startHandler then self.btnStart.Entity:DisconnectEvent(ButtonClickEvent, self._startHandler) end
+		if self._startStateHandler then self.btnStart.Entity:DisconnectEvent(ButtonStateChangeEvent, self._startStateHandler) end
 		if self._shopHandler then self.btnShop.Entity:DisconnectEvent(ButtonClickEvent, self._shopHandler) end
 		if self._skillHandler then self.btnSkill.Entity:DisconnectEvent(ButtonClickEvent, self._skillHandler) end
 		if self._battleHandler then self.btnBattle.Entity:DisconnectEvent(ButtonClickEvent, self._battleHandler) end

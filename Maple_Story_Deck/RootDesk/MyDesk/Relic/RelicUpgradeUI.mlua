@@ -1,0 +1,137 @@
+@Logic
+script RelicUpgradeUI extends Logic
+
+	property Entity popupGroup = "a04efdfb-176b-4515-b656-76e9c37c195d"
+	property ButtonComponent btnClose = "f40ad922-4fa4-4d1f-9837-7f312e24e20c"
+	property ButtonComponent btnUpgrade = "c3f520cc-b529-4bf5-b91b-159a8789aedc"
+	property TextComponent levelText = "13c84be0-0170-45f2-b940-0ab9b07d20d9"
+	property SpriteGUIRendererComponent iconSprite = "e0a7eef4-a364-49a4-8c63-507d1cc7fcd7"
+	property TextComponent nameText = "dafd698b-6dc4-4dfa-96fc-b2a893c07b12"
+	property TextComponent optionText = "0f7b01bf-01ce-4532-b5e6-5782e785aaab"
+	property TextComponent costText = "0e60ade8-ea21-4153-9c49-4aa6e81bfce1"
+	property TextComponent upgradeTitleText = "b3e970ef-68a6-4a5b-bf68-8ee388144750"
+	-- 유물명 아래 조각 진행바 — 버튼의 코인 비용과 분리해서 여기서 "N/다음레벨요구치"를 보여준다
+	property SpriteGUIRendererComponent fragmentBarFill = "e40c4cd0-1e56-4752-a83d-2ae5e25bb77f"
+	property TextComponent fragmentBarText = "526e26a5-3dde-4633-afbf-8fd346b6d3ad"
+
+	property integer _currentRelicIndex = -1
+	property any _closeHandler = nil
+	property any _upgradeHandler = nil
+	property any _closeStateHandler = nil
+	property any _upgradeStateHandler = nil
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		self._closeHandler = self.btnClose.Entity:ConnectEvent(ButtonClickEvent, self.Close)
+		self._upgradeHandler = self.btnUpgrade.Entity:ConnectEvent(ButtonClickEvent, self.OnUpgradeClicked)
+		-- 패딩(눌림) 연출 — 누르는 순간 작아지고 떼는 순간 원래 크기로 돌아온다 (클릭 시점이 아니라 프레스/릴리즈 상태 자체에 붙인다)
+		self._closeStateHandler = self.btnClose.Entity:ConnectEvent(ButtonStateChangeEvent, function(event) self:OnButtonStateChanged(event, self.btnClose.Entity) end)
+		self._upgradeStateHandler = self.btnUpgrade.Entity:ConnectEvent(ButtonStateChangeEvent, function(event) self:OnButtonStateChanged(event, self.btnUpgrade.Entity) end)
+		log("RelicUpgradeUI started")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OpenForRelic(integer relicIndex)
+		-- 유물 탭에서 아이콘을 눌렀을 때 RelicUI가 호출 — 상세/업그레이드 팝업을 연다
+		self._currentRelicIndex = relicIndex
+		self.popupGroup.Enable = true
+		self:RefreshPanel()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Close()
+		self._currentRelicIndex = -1
+		self.popupGroup.Enable = false
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnButtonStateChanged(ButtonStateChangeEvent event, Entity buttonEntity)
+		-- Pressed 상태가 되는 순간 작아지고, 그 외(뗐을 때 등) 상태로 돌아오면 원래 크기로 복귀한다
+		if not isvalid(buttonEntity) then return end
+		if event.state == ButtonState.Pressed then
+			_TweenLogic:ScaleTo(buttonEntity, Vector2(0.9, 0.9), 0.06, EaseType.QuadEaseOut)
+		else
+			_TweenLogic:ScaleTo(buttonEntity, Vector2(1, 1), 0.12, EaseType.QuadEaseOut)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshPanel()
+		-- 현재 선택된 유물의 레벨/조각/골드 상태를 다시 그린다. 업그레이드 성공 후에도 이 메서드로 갱신한다
+		if self._currentRelicIndex < 0 then return end
+		local key = tostring(self._currentRelicIndex)
+
+		local level = 0
+		if _RelicInventory.Levels[key] ~= nil then level = _RelicInventory.Levels[key] end
+		local fragments = 0
+		if _RelicInventory.Counts[key] ~= nil then fragments = _RelicInventory.Counts[key] end
+
+		self.levelText.Text = "Lv." .. tostring(level)
+		self.nameText.Text = _RelicUI:GetRelicBaseName(self._currentRelicIndex)
+		self.iconSprite.ImageRUID = DataRef(_RelicUI:GetRelicIconRuid(self._currentRelicIndex))
+
+		local effectType = _RelicInventory:GetRelicEffectType(self._currentRelicIndex)
+		local effectLabel = _RelicInventory:GetEffectLabel(effectType)
+		local magnitudePerLevel = _RelicInventory:GetEffectMagnitudePerLevel(effectType)
+		local totalTypeLevels = _RelicInventory:GetTotalLevelsForType(effectType)
+		local currentBonus = totalTypeLevels * magnitudePerLevel
+
+		local maxLevel = _RelicInventory.maxLevel
+		if level >= maxLevel then
+			self.optionText.Text = effectLabel .. " +" .. tostring(currentBonus) .. "% (같은 효과 유물 합산)\n최대 레벨입니다"
+			self.costText.Text = "MAX"
+			self.fragmentBarText.Text = "MAX"
+			self.fragmentBarFill.FillAmount = 1
+			self:SetUpgradeEnabled(false)
+			return
+		end
+
+		local nextLevel = level + 1
+		local fragmentCost = _RelicInventory:GetFragmentCostForLevel(nextLevel)
+		local coinCost = _RelicInventory:GetGoldCostForLevel(nextLevel)
+		local nextBonus = currentBonus + magnitudePerLevel
+		self.optionText.Text = effectLabel .. " +" .. tostring(currentBonus) .. "% (같은 효과 유물 합산)\n다음 레벨: +" .. tostring(nextBonus) .. "%"
+		self.costText.Text = tostring(coinCost) .. "코인"
+
+		-- 유물명 아래 조각 진행바 — 그리드 슬롯과 동일하게 "다음 레벨 요구치"를 분모로 쓴다
+		self.fragmentBarText.Text = tostring(fragments) .. "/" .. tostring(fragmentCost)
+		local fragmentRatio = fragments / fragmentCost
+		if fragmentRatio > 1 then fragmentRatio = 1 end
+		self.fragmentBarFill.FillAmount = fragmentRatio
+
+		-- 유물 강화는 런 골드가 아니라 메인화면 누적 코인(TotalCoins)으로 결제한다
+		local canAfford = fragments >= fragmentCost and _GameManager.TotalCoins >= coinCost
+		self:SetUpgradeEnabled(canAfford)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetUpgradeEnabled(boolean enabled)
+		self.btnUpgrade.Enable = enabled
+		local sprite = self.btnUpgrade.Entity.SpriteGUIRendererComponent
+		-- 버튼 원래 톤(골드) 기준으로 매번 다시 계산한다 — sprite.Color를 그대로 읽어서 재사용하면
+		-- 비활성→활성을 반복할 때 어두워진 색이 누적되어 점점 더 어두워지는 버그가 생긴다
+		if enabled then
+			sprite.Color = Color(0.94, 0.78, 0.32, 1.0)
+			self.upgradeTitleText.FontColor = Color(0.169, 0.141, 0.071, 1.0)
+			self.costText.FontColor = Color(0.169, 0.141, 0.071, 1.0)
+		else
+			sprite.Color = Color(0.94 * 0.4, 0.78 * 0.4, 0.32 * 0.4, 1.0)
+			self.upgradeTitleText.FontColor = Color(1.0, 1.0, 1.0, 1.0)
+			self.costText.FontColor = Color(1.0, 1.0, 1.0, 1.0)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUpgradeClicked()
+		_RelicInventory:RequestLevelUpRelic(self._currentRelicIndex)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		if self._closeHandler then self.btnClose.Entity:DisconnectEvent(ButtonClickEvent, self._closeHandler) end
+		if self._upgradeHandler then self.btnUpgrade.Entity:DisconnectEvent(ButtonClickEvent, self._upgradeHandler) end
+		if self._closeStateHandler then self.btnClose.Entity:DisconnectEvent(ButtonStateChangeEvent, self._closeStateHandler) end
+		if self._upgradeStateHandler then self.btnUpgrade.Entity:DisconnectEvent(ButtonStateChangeEvent, self._upgradeStateHandler) end
+	end
+
+end

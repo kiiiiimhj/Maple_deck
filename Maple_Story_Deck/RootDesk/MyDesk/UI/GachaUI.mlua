@@ -1,0 +1,560 @@
+@Logic
+script GachaUI extends Logic
+
+	property Entity gachaGroup = "52f1ba6e-e680-446b-80cd-16a417d3b766"
+	property ButtonComponent btnOpen = "5e347139-8e1c-4aa2-8cad-b71126d93f1c"
+	property ButtonComponent btnClose = "63097ce5-4b6e-47ba-a0c9-ef9f4cd4a602"
+	property ButtonComponent btnPull1 = "a0d524d7-1c98-45fc-aeda-262624d9bf47"
+	property ButtonComponent btnPull10 = "9200c775-1054-4b14-ae05-a9c3c9a70535"
+	property Entity monsterTemplate = "02e50ccf-8670-40d3-9289-d314de3c9e99"
+	property Entity magicEffectTemplate = "6152b0ff-3767-4bb3-8cbb-508a879cb7bb"
+	property Entity magicImpactTemplate = "5335103c-6880-41cc-bed6-4f77e97f2af5"
+	property Entity relicDropTemplate = "e79b0aae-286d-472b-9cc5-2827b34250cc"
+	property Entity characterIcon = "4f95f489-53d3-4b53-9c80-d118abd5b2a0"
+
+	property any _openHandler = nil
+	property any _closeHandler = nil
+	property any _pull1Handler = nil
+	property any _pull10Handler = nil
+	property any _openStateHandler = nil
+	property any _closeStateHandler = nil
+	property any _pull1StateHandler = nil
+	property any _pull10StateHandler = nil
+
+	-- 필드 안에서 몬스터가 돌아다닐 수 있는 범위 (Panel/Field 900x540 기준, 가장자리 여백 제외)
+	property number _fieldHalfWidth = 380
+	property number _fieldHalfHeight = 220
+
+	-- 아바타가 서있는 위치 (CharacterIcon의 anchoredPosition과 일치시켜야 마법이 정확히 거기서 시작한다)
+	property Vector2 _avatarPosition = Vector2(0, -20)
+	-- 몬스터가 이 반경 안으로는 들어오지 못하게 밀어내서 아바타를 그냥 관통하지 않게 한다
+	property number _avatarAvoidRadius = 95
+	-- 한 번에 이동하는 거리를 필드 전체가 아니라 이 정도로 짧게 제한해서 자연스럽게 배회하도록 한다
+	property number _wanderStepRadius = 140
+
+	property any _monsters = nil -- { {entity=Entity, hp=integer, stateTimerId=any, clips=table}, ... }
+	property any _attackTimerId = nil
+	property boolean _fieldActive = false
+
+	-- 몬스터 종족 후보군 — 스폰마다 이 중 하나를 무작위로 골라 stand/move/hit/die 세트를 통째로 적용한다.
+	-- 전부 몬스터 템플릿(70x70, 머쉬맘 크기)에 그대로 clone되므로 크기는 항상 머쉬맘 크기를 넘지 않는다.
+	property any _monsterSpecies = {
+		{
+			stand = "a95cfed2c8fe4d2cb64cbb62db051f92",
+			move = "8257566e41aa4234929e81c6c2dab2e4",
+			hit = "5ebbdaf503964f3e87de155d16650805",
+			die = "dddbe2f162184ec89add7440da56eb75",
+		}, -- 주황버섯
+		{
+			stand = "d6bf82f05b5441dcbcb77171b5b8f7b5",
+			move = "cd06f855649a4c79b8e99f1bdba2c700",
+			hit = "de656d6c313345e19f5c1e9dc66d3f70",
+			die = "ced6d10a4ef143a09025adf87bad4190",
+		}, -- 음흉한 여우
+		{
+			stand = "53f5e84a36444f6a92ae64881ddfa44c",
+			move = "9c617f7125d64ad2ae3ca01f69ffe88f",
+			hit = "dc7e4c433fe542e892fe8300c06ff367",
+			die = "066a864720d0499ea1ba4012b19094cc",
+		}, -- 이상한 돼지
+	}
+
+	-- 일반 공격 임팩트 이펙트 후보군 — 매번 이 중 하나를 무작위로 골라 재생한다
+	-- (skill/5101014 에너지 폭풍 / 파이어 오라 / 와일드 발칸 Type-P 강화)
+	property any _skillImpactRuids = {
+		"2912d09170704723a3d5e6141ccc95db",
+		"2b3c964c0372411f9d6dd70dfee42935",
+		"0c986efd8d634349a78ab00aba409ecd",
+	}
+
+	-- 유물 드롭 아이콘 후보군 — 유물 탭(RelicPanel)의 18개 유물 아이콘을 전부 그대로 재사용한다
+	property any _relicIconRuids = {
+		"thumbnail://211528c140544b359a6858379515c3e1",
+		"thumbnail://ba12da26b63f4430b57fdf02b465ccf8",
+		"thumbnail://0467733bb01e421abde16635d87ba9b6",
+		"thumbnail://bad248cbff164266bb948f9285b7054d",
+		"thumbnail://9ed9739181914bd09389f2c49bd295be",
+		"thumbnail://119e09005e154f39bcfb273cebfae4f0",
+		"21856f85066e4f90892f5ed7b5bcd309",
+		"thumbnail://967d64c4b59841c19827018362c5a63c",
+		"thumbnail://18d3d37f6e2c42f4bd839b5cce5e843e",
+		"a6b0760a513642108effbd2c153d6dfd",
+		"thumbnail://bbe5c62d1b6f4923aae7a8504f17b805",
+		"thumbnail://4deeb124b07340ddb22328bd069c4e4e",
+		"thumbnail://d9cdbdd33ca44dc993d1acfda1372075",
+		"thumbnail://fcca3fc04ad94d468a99ca1386d9cb29",
+		"thumbnail://91ecb7dad2074866afb54d256a702ac5",
+		"thumbnail://36eff685af71414bab39916c7583d071",
+		"thumbnail://0d63fa19da21442cb87497c3db5cb73d",
+		"thumbnail://18b442993e34429ba13a1594636dda27",
+	}
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		-- 팝업은 기본적으로 닫힌 상태로 시작한다
+		self.gachaGroup.Enable = false
+		self._monsters = {}
+		self._openHandler = self.btnOpen.Entity:ConnectEvent(ButtonClickEvent, self.Open)
+		self._closeHandler = self.btnClose.Entity:ConnectEvent(ButtonClickEvent, self.Close)
+		self._pull1Handler = self.btnPull1.Entity:ConnectEvent(ButtonClickEvent, self.OnPull1Clicked)
+		self._pull10Handler = self.btnPull10.Entity:ConnectEvent(ButtonClickEvent, self.OnPull10Clicked)
+		-- 패딩(눌림) 연출 — 누르는 순간 작아지고 떼는 순간 원래 크기로 돌아온다 (클릭 시점이 아니라 프레스/릴리즈 상태 자체에 붙인다)
+		self._openStateHandler = self.btnOpen.Entity:ConnectEvent(ButtonStateChangeEvent, function(event) self:OnButtonStateChanged(event, self.btnOpen.Entity) end)
+		self._closeStateHandler = self.btnClose.Entity:ConnectEvent(ButtonStateChangeEvent, function(event) self:OnButtonStateChanged(event, self.btnClose.Entity) end)
+		self._pull1StateHandler = self.btnPull1.Entity:ConnectEvent(ButtonStateChangeEvent, function(event) self:OnButtonStateChanged(event, self.btnPull1.Entity) end)
+		self._pull10StateHandler = self.btnPull10.Entity:ConnectEvent(ButtonStateChangeEvent, function(event) self:OnButtonStateChanged(event, self.btnPull10.Entity) end)
+		log("GachaUI started")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Open()
+		self.gachaGroup.Enable = true
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Close()
+		self.gachaGroup.Enable = false
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnPull1Clicked()
+		-- 이미 진행 중인 뽑기가 있으면 무시 — 버튼이 비활성화되어 있어도 이중 안전장치로 한 번 더 막는다
+		if self._fieldActive then return end
+		-- TODO: 재화(다이아) 차감은 재화 시스템 붙을 때 추가
+		self:StartField(1, 1.0)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnPull10Clicked()
+		if self._fieldActive then return end
+		-- TODO: 재화(다이아) 차감은 재화 시스템 붙을 때 추가
+		self:StartField(10, 0.35)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnButtonStateChanged(ButtonStateChangeEvent event, Entity buttonEntity)
+		-- Pressed 상태가 되는 순간 작아지고, 그 외(뗐을 때 등) 상태로 돌아오면 원래 크기로 복귀한다
+		if not isvalid(buttonEntity) then return end
+		if event.state == ButtonState.Pressed then
+			_TweenLogic:ScaleTo(buttonEntity, Vector2(0.9, 0.9), 0.06, EaseType.QuadEaseOut)
+		else
+			_TweenLogic:ScaleTo(buttonEntity, Vector2(1, 1), 0.12, EaseType.QuadEaseOut)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetPullButtonsEnabled(boolean enabled)
+		-- 뽑기 진행 중에는 두 버튼을 눌러도 반응하지 않도록 막고, 흐릿하게 비활성 상태를 보여준다
+		self.btnPull1.Enable = enabled
+		self.btnPull10.Enable = enabled
+		local alpha = 1.0
+		if not enabled then alpha = 0.5 end
+		local sprite1 = self.btnPull1.Entity.SpriteGUIRendererComponent
+		if isvalid(sprite1) then sprite1.Color = Color(sprite1.Color.r, sprite1.Color.g, sprite1.Color.b, alpha) end
+		local sprite10 = self.btnPull10.Entity.SpriteGUIRendererComponent
+		if isvalid(sprite10) then sprite10.Color = Color(sprite10.Color.r, sprite10.Color.g, sprite10.Color.b, alpha) end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void StartField(integer monsterCount, number attackInterval)
+		-- 팝업(Panel/Field) 초록 영역 안에서만 몬스터가 등장/배회/전투/드롭까지 전부 일어난다 (맵 이동 없음)
+		self:ClearMonsters()
+		self._fieldActive = true
+		self:SetPullButtonsEnabled(false)
+
+		for i = 1, monsterCount do
+			local clone = self.monsterTemplate:Clone("GachaMonster_" .. tostring(i) .. "_" .. tostring(_UtilLogic.ElapsedSeconds))
+			clone.Enable = true
+			clone.UITransformComponent.anchoredPosition = self:SpawnPosition(i, monsterCount)
+			local species = self._monsterSpecies[_UtilLogic:RandomIntegerRange(1, #self._monsterSpecies)]
+			-- 템플릿의 기본 스프라이트(주황버섯)가 잠깐 보였다가 바뀌는 걸 막기 위해, 배회 타이머를 기다리지 않고
+			-- 클론 직후 바로 해당 종족의 stand 클립으로 덮어씌운다
+			local cloneSprite = clone.SpriteGUIRendererComponent
+			cloneSprite.ImageRUID = DataRef(species.stand)
+			cloneSprite.AnimClipPlayType = SpriteAnimClipPlayType.Loop
+			local monsterData = { entity = clone, hp = 2, stateTimerId = nil, clips = species, dead = false }
+			table.insert(self._monsters, monsterData)
+			-- 몬스터마다 살짝 다른 타이밍에 배회를 시작하도록 약간의 지연을 준다
+			local capturedData = monsterData
+			_TimerService:SetTimerOnce(function() self:SetMonsterIdle(capturedData) end, _UtilLogic:RandomDouble() * 0.5)
+		end
+
+		self._attackTimerId = _TimerService:SetTimerRepeat(self.TickAttack, attackInterval)
+		log("GachaUI: field started, monsterCount=" .. tostring(monsterCount))
+	end
+
+	@ExecSpace("ClientOnly")
+	method Vector2 RandomFieldPosition()
+		-- 필드 범위 안 무작위 좌표 (0,0)
+		local x = (_UtilLogic:RandomDouble() * 2 - 1) * self._fieldHalfWidth
+		local y = (_UtilLogic:RandomDouble() * 2 - 1) * self._fieldHalfHeight
+		return Vector2(x, y)
+	end
+
+	@ExecSpace("ClientOnly")
+	method Vector2 AvoidAvatarPosition(Vector2 pos)
+		-- pos가 아바타 회피 반경 안에 있으면 그 방향 그대로 반경 밖으로 밀어낸다
+		local dx = pos.x - self._avatarPosition.x
+		local dy = pos.y - self._avatarPosition.y
+		local dist = math.sqrt(dx * dx + dy * dy)
+		if dist >= self._avatarAvoidRadius then
+			return pos
+		end
+		if dist < 0.001 then
+			dx = 1
+			dy = 0
+			dist = 1
+		end
+		local scale = self._avatarAvoidRadius / dist
+		return Vector2(self._avatarPosition.x + dx * scale, self._avatarPosition.y + dy * scale)
+	end
+
+	@ExecSpace("ClientOnly")
+	method number DistancePointToSegment(Vector2 point, Vector2 segA, Vector2 segB)
+		-- point에서 segA-segB 선분까지의 최단 거리 (지나가는 경로가 아바타를 스치는지 확인하는 데 쓰인다)
+		local abx = segB.x - segA.x
+		local aby = segB.y - segA.y
+		local lenSq = abx * abx + aby * aby
+		local t = 0
+		if lenSq > 0.0001 then
+			t = ((point.x - segA.x) * abx + (point.y - segA.y) * aby) / lenSq
+			t = math.max(0, math.min(1, t))
+		end
+		local closestX = segA.x + abx * t
+		local closestY = segA.y + aby * t
+		local dx = point.x - closestX
+		local dy = point.y - closestY
+		return math.sqrt(dx * dx + dy * dy)
+	end
+
+	@ExecSpace("ClientOnly")
+	method Vector2 NextWanderPosition(Vector2 fromPos)
+		-- 필드 전체를 크게 가로지르지 않고, 현재 위치에서 가까운 곳으로 짧게 이동해 자연스럽게 배회한다.
+		-- 도착 지점뿐 아니라 이동 "경로"가 아바타를 스치지 않는 후보가 나올 때까지 다시 뽑는다
+		-- (도착 지점만 밀어내면 지나가는 길에는 여전히 아바타를 관통할 수 있었음)
+		local candidate = nil
+		for attempt = 1, 8 do
+			local dx = (_UtilLogic:RandomDouble() * 2 - 1) * self._wanderStepRadius
+			local dy = (_UtilLogic:RandomDouble() * 2 - 1) * self._wanderStepRadius
+			local x = math.max(-self._fieldHalfWidth, math.min(self._fieldHalfWidth, fromPos.x + dx))
+			local y = math.max(-self._fieldHalfHeight, math.min(self._fieldHalfHeight, fromPos.y + dy))
+			local test = Vector2(x, y)
+			if self:DistancePointToSegment(self._avatarPosition, fromPos, test) >= self._avatarAvoidRadius then
+				candidate = test
+				break
+			end
+		end
+		if candidate == nil then
+			-- 여러 번 시도해도 실패하면 아바타 반대 방향으로 강제 이동시킨다
+			local dx = fromPos.x - self._avatarPosition.x
+			local dy = fromPos.y - self._avatarPosition.y
+			local dist = math.sqrt(dx * dx + dy * dy)
+			if dist < 0.001 then
+				dx = 1
+				dy = 0
+				dist = 1
+			end
+			local x = math.max(-self._fieldHalfWidth, math.min(self._fieldHalfWidth, fromPos.x + dx / dist * self._wanderStepRadius))
+			local y = math.max(-self._fieldHalfHeight, math.min(self._fieldHalfHeight, fromPos.y + dy / dist * self._wanderStepRadius))
+			candidate = Vector2(x, y)
+		end
+		return self:AvoidAvatarPosition(candidate)
+	end
+
+	@ExecSpace("ClientOnly")
+	method Vector2 SpawnPosition(integer index, integer totalCount)
+		-- 여러 마리가 한 번에 나올 때는(10뽑) 아바타를 삥 둘러싼 원형으로 등장시키고, 1마리면 무작위 위치로 등장한다
+		if totalCount <= 1 then
+			return self:AvoidAvatarPosition(self:RandomFieldPosition())
+		end
+		local angle = (index - 1) / totalCount * 2 * math.pi
+		local radiusX = 300
+		local radiusY = 170
+		return Vector2(self._avatarPosition.x + math.cos(angle) * radiusX, self._avatarPosition.y + math.sin(angle) * radiusY)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetMonsterIdle(table monsterData)
+		-- 가만히 서있는 상태(IDLE) -> 잠시 후 다시 걷기 시작
+		if not isvalid(monsterData.entity) then return end
+		local sprite = monsterData.entity.SpriteGUIRendererComponent
+		sprite.ImageRUID = DataRef(monsterData.clips.stand)
+		sprite.AnimClipPlayType = SpriteAnimClipPlayType.Loop
+		monsterData.stateTimerId = _TimerService:SetTimerOnce(function()
+			self:StartMonsterMove(monsterData)
+		end, 0.7 + _UtilLogic:RandomDouble() * 0.6)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void StartMonsterMove(table monsterData)
+		-- 새 목표 지점으로 걷는 애니메이션을 재생하며 이동, 도착하면 다시 IDLE로
+		-- (TweenLogic:MoveTo는 UI anchoredPosition을 제대로 못 다뤄서 화면 밖으로 튀는 문제가 있었음 -> anchoredPosition을 직접 갱신하는 PlayTween으로 대체)
+		if not isvalid(monsterData.entity) then return end
+		local ut = monsterData.entity.UITransformComponent
+		local fromPos = ut.anchoredPosition
+		local toPos = self:NextWanderPosition(fromPos)
+		local sprite = monsterData.entity.SpriteGUIRendererComponent
+		-- 스프라이트는 기본적으로 왼쪽을 보고 있으므로 오른쪽으로 갈 때만 뒤집는다
+		if toPos.x - fromPos.x > 0 then
+			sprite.FlipX = true
+		elseif toPos.x - fromPos.x < 0 then
+			sprite.FlipX = false
+		end
+		sprite.ImageRUID = DataRef(monsterData.clips.move)
+		sprite.AnimClipPlayType = SpriteAnimClipPlayType.Loop
+
+		-- 짧은 거리를 천천히 걷도록(필드 안에서처럼 자연스럽게) 이동 거리에 비례해 소요 시간을 정한다
+		local dx = toPos.x - fromPos.x
+		local dy = toPos.y - fromPos.y
+		local distance = math.sqrt(dx * dx + dy * dy)
+		local duration = math.max(0.8, distance / 60)
+		local capturedEntity = monsterData.entity
+		_TweenLogic:PlayTween(fromPos, toPos, duration, EaseType.Linear, function(value)
+			if isvalid(capturedEntity) then
+				capturedEntity.UITransformComponent.anchoredPosition = value
+			end
+		end)
+
+		monsterData.stateTimerId = _TimerService:SetTimerOnce(function()
+			self:SetMonsterIdle(monsterData)
+		end, duration)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void TickAttack()
+		-- 살아있는 몬스터 중 하나를 무작위로 골라, 아바타가 마법을 쏴서 공격한다
+		-- (죽어서 Destroy 대기 중인 몬스터는 entity가 아직 valid해도 dead 플래그로 걸러서 중복 처치/중복 드롭을 막는다)
+		local alive = {}
+		for _, m in ipairs(self._monsters) do
+			if isvalid(m.entity) and not m.dead then table.insert(alive, m) end
+		end
+		if #alive == 0 then
+			self:StopField()
+			return
+		end
+
+		local target = alive[_UtilLogic:RandomIntegerRange(1, #alive)]
+		target.hp = target.hp - 1
+		self:PlayMagicEffect(target)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayAvatarAttack(Vector2 targetPos)
+		-- 아바타가 적 쪽으로 살짝 다가섰다가 되돌아오면서 무기 휘두르기 모션(swingO1)을 재생한다
+		if not isvalid(self.characterIcon) then return end
+		local ut = self.characterIcon.UITransformComponent
+		local avatarRenderer = self.characterIcon.AvatarGUIRendererComponent
+
+		local dx = targetPos.x - self._avatarPosition.x
+		local dy = targetPos.y - self._avatarPosition.y
+		local dist = math.sqrt(dx * dx + dy * dy)
+		if isvalid(avatarRenderer) then
+			if dx > 0 then avatarRenderer.FlipX = true
+			elseif dx < 0 then avatarRenderer.FlipX = false end
+		end
+
+		local lungePos = self._avatarPosition
+		if dist > 0.001 then
+			local stepDist = math.min(45, dist * 0.3)
+			lungePos = Vector2(self._avatarPosition.x + dx / dist * stepDist, self._avatarPosition.y + dy / dist * stepDist)
+		end
+
+		local capturedIcon = self.characterIcon
+		_TweenLogic:PlayTween(self._avatarPosition, lungePos, 0.12, EaseType.QuadEaseOut, function(value)
+			if isvalid(capturedIcon) then capturedIcon.UITransformComponent.anchoredPosition = value end
+		end)
+		_TimerService:SetTimerOnce(function()
+			if isvalid(capturedIcon) then
+				_TweenLogic:PlayTween(lungePos, self._avatarPosition, 0.2, EaseType.QuadEaseIn, function(value)
+					if isvalid(capturedIcon) then capturedIcon.UITransformComponent.anchoredPosition = value end
+				end)
+			end
+		end, 0.12)
+
+		if isvalid(avatarRenderer) then
+			local body = avatarRenderer:GetBodyEntity()
+			if isvalid(body) then
+				local swingEvent = ActionStateChangedEvent()
+				swingEvent.CoreActionName = "swingO1"
+				swingEvent.PartsActionName = "swingO1"
+				swingEvent.PlayRate = 1.4
+				swingEvent.PlayType = SpriteAnimClipPlayType.Onetime
+				body:SendEvent(swingEvent)
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayMagicEffect(table monsterData)
+		-- 아바타가 적 쪽으로 다가서며 무기를 휘두르고, 마법 구슬이 대상까지 날아간 뒤 명중 처리를 실행한다
+		if not isvalid(monsterData.entity) then return end
+		local targetPos = monsterData.entity.UITransformComponent.anchoredPosition
+		self:PlayAvatarAttack(targetPos)
+
+		local bolt = self.magicEffectTemplate:Clone("MagicBolt_" .. tostring(_UtilLogic.ElapsedSeconds))
+		bolt.Enable = true
+		bolt.UITransformComponent.anchoredPosition = self._avatarPosition
+
+		local duration = 0.2
+		local capturedBolt = bolt
+		_TweenLogic:PlayTween(self._avatarPosition, targetPos, duration, EaseType.QuadEaseIn, function(value)
+			if isvalid(capturedBolt) then
+				capturedBolt.UITransformComponent.anchoredPosition = value
+			end
+		end)
+
+		_TimerService:SetTimerOnce(function()
+			if isvalid(capturedBolt) then capturedBolt:Destroy() end
+			-- 이 화살이 날아가는 동안 다른 공격이 먼저 같은 몬스터를 처치했을 수 있으니 dead도 다시 확인한다
+			if isvalid(monsterData.entity) and not monsterData.dead then
+				self:PlayMagicImpact(monsterData.entity.UITransformComponent.anchoredPosition)
+				if monsterData.hp <= 0 then
+					self:KillMonster(monsterData)
+				else
+					self:FlashMonster(monsterData)
+				end
+			end
+		end, duration)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayMagicImpact(Vector2 position)
+		-- 매번 스킬 후보군(에너지 폭풍/파이어 오라/와일드 발칸) 중 하나를 무작위로 골라 재생한다
+		local impact = self.magicImpactTemplate:Clone("MagicImpact_" .. tostring(_UtilLogic.ElapsedSeconds))
+		impact.Enable = true
+		impact.UITransformComponent.anchoredPosition = position
+		local sprite = impact.SpriteGUIRendererComponent
+		local pickedRuid = self._skillImpactRuids[_UtilLogic:RandomIntegerRange(1, #self._skillImpactRuids)]
+		sprite.ImageRUID = DataRef(pickedRuid)
+		sprite.AnimClipPlayType = SpriteAnimClipPlayType.Onetime
+		impact:Destroy(0.5)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void FlashMonster(table monsterData)
+		-- 피격 애니메이션을 한 번 재생한 뒤 IDLE로 되돌아가고, 거기서 다시 배회 사이클이 이어진다
+		if monsterData.stateTimerId then _TimerService:ClearTimer(monsterData.stateTimerId) end
+		local sprite = monsterData.entity.SpriteGUIRendererComponent
+		sprite.ImageRUID = DataRef(monsterData.clips.hit)
+		sprite.AnimClipPlayType = SpriteAnimClipPlayType.Onetime
+		monsterData.stateTimerId = _TimerService:SetTimerOnce(function()
+			self:SetMonsterIdle(monsterData)
+		end, 0.3)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void KillMonster(table monsterData)
+		-- TODO: 유물 등급/레벨업 시스템은 나중에 붙인다 (지금은 종류당 1개 획득 카운트만 RelicInventory에 기록)
+		-- dead를 가장 먼저 세워서, 아직 날아오고 있는 다른 공격이 이 몬스터를 또 처치 처리하지 못하게 막는다
+		if monsterData.dead then return end
+		monsterData.dead = true
+		if monsterData.stateTimerId then _TimerService:ClearTimer(monsterData.stateTimerId) end
+		local sprite = monsterData.entity.SpriteGUIRendererComponent
+		sprite.ImageRUID = DataRef(monsterData.clips.die)
+		sprite.AnimClipPlayType = SpriteAnimClipPlayType.Onetime
+		self:PlayRelicDrop(monsterData.entity.UITransformComponent.anchoredPosition)
+		_TweenLogic:ScaleTo(monsterData.entity, Vector2(0, 0), 0.45, EaseType.QuadEaseIn)
+		monsterData.entity:Destroy(0.45)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayRelicDrop(Vector2 position)
+		-- 메이플스토리 실제 아이템 드롭처럼 회전 없이 위로 톡 튀어올랐다가 포물선으로 떨어져 착지한다.
+		-- 착지 후 1초 동안 가만히 있다가 아바타 쪽으로 빨려들어가며 사라진다(그 도착 시점에 획득 연출이 재생된다)
+		local popPos = Vector2(position.x, position.y + 35)
+		local popDuration = 0.15
+		local fallDuration = 0.25
+
+		local relic = self.relicDropTemplate:Clone("RelicDrop_" .. tostring(_UtilLogic.ElapsedSeconds))
+		relic.Enable = true
+		relic.UITransformComponent.anchoredPosition = position
+		local sprite = relic.SpriteGUIRendererComponent
+		-- pickedSlot은 1-based Lua 인덱스, RelicPanel의 RelicSlot_0.."17"과 맞추려면 유물탭 갱신 시 -1 해서 넘긴다
+		local pickedSlot = _UtilLogic:RandomIntegerRange(1, #self._relicIconRuids)
+		sprite.ImageRUID = DataRef(self._relicIconRuids[pickedSlot])
+
+		local capturedRelic = relic
+		-- 톡 튀어오름
+		_TweenLogic:PlayTween(position, popPos, popDuration, EaseType.QuadEaseOut, function(value)
+			if isvalid(capturedRelic) then
+				capturedRelic.UITransformComponent.anchoredPosition = value
+			end
+		end)
+		-- 중력에 끌리듯 떨어져 착지
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(capturedRelic) then return end
+			_TweenLogic:PlayTween(popPos, position, fallDuration, EaseType.QuadEaseIn, function(value)
+				if isvalid(capturedRelic) then
+					capturedRelic.UITransformComponent.anchoredPosition = value
+				end
+			end)
+		end, popDuration)
+
+		local landDuration = popDuration + fallDuration
+		-- 착지 후 1초간 그대로 머물렀다가 획득 단계로 넘어간다
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(capturedRelic) then return end
+			local flyDuration = 0.35
+			_TweenLogic:ScaleTo(capturedRelic, Vector2(0.5, 0.5), flyDuration, EaseType.QuadEaseIn)
+			_TweenLogic:PlayTween(position, self._avatarPosition, flyDuration, EaseType.QuadEaseIn, function(value)
+				if isvalid(capturedRelic) then
+					capturedRelic.UITransformComponent.anchoredPosition = value
+				end
+			end)
+			capturedRelic:Destroy(flyDuration)
+			-- 유물이 아바타에게 도착하는 시점에 맞춰 획득 연출을 재생하고, 서버에 실제 획득을 기록해 유물 탭에 반영한다
+			_TimerService:SetTimerOnce(function()
+				self:PlayAcquireEffect()
+				_RelicInventory:RequestAddRelic(pickedSlot - 1)
+			end, flyDuration)
+		end, landDuration + 1.0)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayAcquireEffect()
+		-- 유물이 아바타에게 도착할 때마다 재생되는 획득 연출. 공격 마법 구슬과 같은 이펙트를 쓰면
+		-- 마치 유물이 하나 더 나온 것처럼 헷갈려서, 별도 이펙트 없이 아바타 스케일 펀치만 재생한다
+		if not isvalid(self.characterIcon) then return end
+		local capturedIcon = self.characterIcon
+		_TweenLogic:ScaleTo(capturedIcon, Vector2(1.25, 1.25), 0.15, EaseType.QuadEaseOut)
+		_TimerService:SetTimerOnce(function()
+			if isvalid(capturedIcon) then
+				_TweenLogic:ScaleTo(capturedIcon, Vector2(1, 1), 0.25, EaseType.QuadEaseIn)
+			end
+		end, 0.15)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void StopField()
+		-- 획득 연출은 이제 유물 하나하나가 아바타에게 도착할 때(PlayRelicDrop) 재생되므로 여기서는 정리만 한다
+		if self._attackTimerId then _TimerService:ClearTimer(self._attackTimerId) end
+		self._attackTimerId = nil
+		self._fieldActive = false
+		self:SetPullButtonsEnabled(true)
+		log("GachaUI: field cleared, all monsters defeated")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ClearMonsters()
+		self:StopField()
+		for _, m in ipairs(self._monsters) do
+			if m.stateTimerId then _TimerService:ClearTimer(m.stateTimerId) end
+			if isvalid(m.entity) then m.entity:Destroy() end
+		end
+		self._monsters = {}
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		self:ClearMonsters()
+		if self._openHandler then self.btnOpen.Entity:DisconnectEvent(ButtonClickEvent, self._openHandler) end
+		if self._closeHandler then self.btnClose.Entity:DisconnectEvent(ButtonClickEvent, self._closeHandler) end
+		if self._pull1Handler then self.btnPull1.Entity:DisconnectEvent(ButtonClickEvent, self._pull1Handler) end
+		if self._pull10Handler then self.btnPull10.Entity:DisconnectEvent(ButtonClickEvent, self._pull10Handler) end
+		if self._openStateHandler then self.btnOpen.Entity:DisconnectEvent(ButtonStateChangeEvent, self._openStateHandler) end
+		if self._closeStateHandler then self.btnClose.Entity:DisconnectEvent(ButtonStateChangeEvent, self._closeStateHandler) end
+		if self._pull1StateHandler then self.btnPull1.Entity:DisconnectEvent(ButtonStateChangeEvent, self._pull1StateHandler) end
+		if self._pull10StateHandler then self.btnPull10.Entity:DisconnectEvent(ButtonStateChangeEvent, self._pull10StateHandler) end
+	end
+
+end

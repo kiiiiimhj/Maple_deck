@@ -10,8 +10,18 @@ script GameManager extends Logic
 	@Sync property number Exp = 0
 	@Sync property number ExpNeeded = 100
 
-	-- 골드
+	-- 골드 (런 전용 — "다시하기" 누르면 0으로 리셋됨)
 	@Sync property integer Gold = 0
+	-- 골드 유물 보너스를 마지막으로 정산한 시점의 Gold 값 — TriggerGameOver()가 이 값 이후로
+	-- "새로 번" 골드에만 보너스를 곱한다 (이어하기로 여러 번 게임오버가 나도 이미 보너스 받은
+	-- 골드를 또 보너스 대상에 포함시키는 중복 적용을 막는다)
+	property integer _goldBonusCheckpoint = 0
+
+	-- 메인화면 우측 상단에 표시되는 누적 코인 — 런이 끝나도 리셋되지 않고 전역 저장소에 영구 저장됨
+	@Sync property integer TotalCoins = 0
+	property any _coinStorage = nil
+	property boolean _coinDirty = false
+	property any _coinFlushTimerId = nil
 
 	-- 웨이브
 	@Sync property integer Wave = 1
@@ -91,7 +101,37 @@ script GameManager extends Logic
 		self.Wave = 1
 		self.GameOver = false
 		self:NotifyExpChanged(self.Exp, self.ExpNeeded, self.Level, false)
+
+		-- 누적 코인은 런과 무관하게 전역 저장소에서 불러온다 (RelicInventory와 동일한 dirty-flag 패턴)
+		self._coinStorage = _DataStorageService:GetGlobalDataStorage("PlayerCoins")
+		local errorCode, raw = self._coinStorage:GetAndWait("TotalCoins")
+		if errorCode == 0 and raw ~= nil and raw ~= "" then
+			local loaded = tonumber(raw)
+			if loaded ~= nil then self.TotalCoins = loaded end
+		end
+		self._coinFlushTimerId = _TimerService:SetTimerRepeat(function() self:FlushCoinsIfDirty() end, 3.0)
+
 		log("GameManager started")
+	end
+
+	@ExecSpace("Server")
+	method void RequestCoinSync()
+		-- TitleUI.OnBeginPlay가 호출한다. TotalCoins는 @Sync라 자동 전파되지만, 서버가 스토리지에서
+		-- 불러오는(OnBeginPlay, GetAndWait) 시점과 클라이언트가 자기 UI를 초기화하는 시점 사이에는
+		-- 순서 보장이 없다 — 클라이언트가 먼저 뜨면 아직 로드 전인 기본값(0)을 그대로 표시해버려서
+		-- "코인이 초기화된 것처럼 보이는" 버그가 된다. 클라이언트가 준비된 시점에 직접 요청(pull)하면
+		-- 그 시점 서버는 이미 OnBeginPlay를 끝낸 뒤이므로(월드 시작이 클라이언트 접속보다 항상 먼저다)
+		-- 항상 정확한 값을 받을 수 있다
+		_TitleUI:NotifyCoinsChanged(self.TotalCoins)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void FlushCoinsIfDirty()
+		-- SetAndWait를 쓴다 — Async 콜백을 기다리지 않고 OnEndPlay가 먼저 끝나버리면(에디터/월드 종료 시)
+		-- 저장이 씹힐 수 있어서, 드물게 호출되는 이 경로는 블로킹 저장으로 확실히 반영되게 한다
+		if not self._coinDirty then return end
+		self._coinDirty = false
+		self._coinStorage:SetAndWait("TotalCoins", tostring(self.TotalCoins))
 	end
 
 	-- HP/EXP 동기화 → UI 갱신
@@ -148,8 +188,8 @@ script GameManager extends Logic
 	method void OnMonsterKilled()
 		if self.GameOver then return end
 
-		self.Gold = self.Gold + self.GoldPerKill
-		self.Exp = self.Exp + self.ExpPerKill
+		self:AddGold(self:GetGoldPerKill())
+		self.Exp = self.Exp + self:GetExpPerKill()
 		log("Kill! EXP:" .. self.Exp .. "/" .. self.ExpNeeded .. " Gold:" .. self.Gold)
 
 		if self.Exp >= self.ExpNeeded then
@@ -178,10 +218,25 @@ script GameManager extends Logic
 		-- OnBossDefeated의 강제 0% 리셋이 거의 같은 프레임에 덮어써 "차오르다가 갑자기 줄어드는"
 		-- 연출로 보이는 버그가 있었다. 지금은 Die()가 보스일 때 OnMonsterKilled()를 호출하지 않고
 		-- OnBossDefeated() 한 번만 처치 보상까지 전부 처리한다.
-		self.Gold = self.Gold + self.GoldPerKill
-		self.Exp = self.Exp + self.ExpPerKill + self.ExpNeeded
+		self:AddGold(self:GetGoldPerKill())
+		self.Exp = self.Exp + self:GetExpPerKill() + self.ExpNeeded
 		self:LevelUp()
 		log("GameManager: Boss defeated, map4+ unlocked")
+	end
+
+	-- 몬스터 처치 시 실제로 지급할 골드 (기본값 그대로) — 유물 골드 보너스는 킬마다 곱하지 않는다.
+	-- GoldPerKill이 작아서(기본 5) 킬마다 곱하면 math.floor에 보너스가 통째로 묻혀 버렸다.
+	-- 대신 TriggerGameOver()에서 이번 런에 모은 골드 총액에 한 번에 곱해서 지급한다.
+	@ExecSpace("ServerOnly")
+	method integer GetGoldPerKill()
+		return self.GoldPerKill
+	end
+
+	-- 몬스터 처치 시 실제로 지급할 경험치 — 유물 레벨업 보너스(레벨 합계 1당 +1%)를 반영한다
+	@ExecSpace("ServerOnly")
+	method number GetExpPerKill()
+		local bonusPercent = _RelicInventory:GetExpBonusPercent()
+		return self.ExpPerKill * (1 + bonusPercent / 100)
 	end
 
 	-- 웨이브별 몬스터 공격력 반환 (Wave 10 보스, 11부터는 9번째 값 기준으로 계속 성장 — 무한 웨이브)
@@ -472,6 +527,18 @@ script GameManager extends Logic
 	method void TriggerGameOver()
 		self.GameOver = true
 		_MonsterSpawner:StopSpawning()
+		-- 유물 골드 보너스는 킬마다 곱하지 않고, 게임오버 시점에 이번 구간(직전 정산 이후) 동안
+		-- 모은 골드 총액에 한 번에 곱해서 지급한다 — 정수 내림 오차가 킬 단위보다 훨씬 작아진다
+		local bonusPercent = _RelicInventory:GetGoldBonusPercent()
+		local earnedSinceBonus = self.Gold - self._goldBonusCheckpoint
+		if bonusPercent > 0 and earnedSinceBonus > 0 then
+			local bonusGold = math.floor(earnedSinceBonus * bonusPercent / 100)
+			if bonusGold > 0 then
+				self:AddGold(bonusGold)
+				log("Gold relic bonus applied: +" .. bonusGold .. " (" .. bonusPercent .. "% of " .. earnedSinceBonus .. ")")
+			end
+		end
+		self._goldBonusCheckpoint = self.Gold
 		log("Game Over!")
 	end
 
@@ -512,9 +579,17 @@ script GameManager extends Logic
 		self.Exp = 0
 		self.ExpNeeded = 100
 		self.Gold = 0
+		self._goldBonusCheckpoint = 0
 		self.Wave = 1
 		self.GameOver = false
 		self._hitImmune = false
+		-- 보스를 잡아서 열렸던 맵4+ 잠금도 "처음부터"에 포함된다 — 새 런에서는 다시 잠근다
+		if self.BossDefeated then
+			self.BossDefeated = false
+			_MapMoveUI:NotifyBossDefeated(false)
+		end
+		-- 이전 런에서 맵4+까지 진행했더라도 시작 맵(map02)으로 되돌린다. 이미 시작 맵이면 내부에서 no-op
+		_MapManager:SilentMoveToMap(_MapManager.CurrentMapIndex, _MapManager.DesiredStartMapIndex)
 		_CardManager:ResetAllCards()
 		_MonsterSpawner:ClearAllMonsters()
 		_MonsterSpawner:ResetEliteTracking()
@@ -550,11 +625,16 @@ script GameManager extends Logic
 		-- 일반 몬스터 처치 시 가끔 회복 포션을 드롭한다 (빨강/흰색은 배타적 — 합쳐서 15% 확률)
 		if self.GameOver then return end
 
+		-- 유물 레벨업 보너스(레벨 합계 1당 +0.5%p)를 두 확률에 동일하게 얹는다
+		local bonusChance = _RelicInventory:GetPotionChanceBonusPercent() / 100
+		local redChance = self.RedPotionDropChance + bonusChance
+		local whiteChance = self.WhitePotionDropChance + bonusChance
+
 		local r = _UtilLogic:RandomDouble()
 		local potionType = 0
-		if r < self.RedPotionDropChance then
+		if r < redChance then
 			potionType = 1
-		elseif r < self.RedPotionDropChance + self.WhitePotionDropChance then
+		elseif r < redChance + whiteChance then
 			potionType = 2
 		end
 		if potionType == 0 then return end
@@ -574,7 +654,9 @@ script GameManager extends Logic
 	-- TryDropHealPotion / ForceDropPotion 공용 — 회복량 계산 + 드롭 연출/타이밍 적용
 	@ExecSpace("ServerOnly")
 	method void ApplyPotionDrop(integer potionType, Vector3 worldPos)
-		local healPercent = (potionType == 1) and self.RedPotionHealPercent or self.WhitePotionHealPercent
+		local basePercent = (potionType == 1) and self.RedPotionHealPercent or self.WhitePotionHealPercent
+		-- 유물 레벨업 보너스(레벨 합계 1당 +1%p)를 회복 비율에 더한다
+		local healPercent = basePercent + (_RelicInventory:GetPotionHealBonusPercent() / 100)
 		local healAmount = math.floor(self.PlayerMaxHp * healPercent)
 		log("HealPotion dropped: type=" .. potionType .. " heal=" .. healAmount)
 
@@ -702,13 +784,32 @@ script GameManager extends Logic
 
 	@ExecSpace("ServerOnly")
 	method void AddGold(integer amount)
-		-- 엘리트 몬스터 드롭 등 카드 강화와 무관한 보상에 사용
+		-- 엘리트 몬스터 드롭 등 카드 강화와 무관한 보상에 사용. 런 내 골드(리셋됨)와 메인화면
+		-- 우측 상단 누적 코인(영구 저장, TotalCoins)을 항상 같이 늘린다 — 골드를 지급하는 모든
+		-- 지점은 이 메서드를 거쳐야 두 값이 어긋나지 않는다
 		self.Gold = self.Gold + amount
-		log("Gold +" .. amount .. " -> " .. self.Gold)
+		self.TotalCoins = self.TotalCoins + amount
+		self._coinDirty = true
+		_TitleUI:NotifyCoinsChanged(self.TotalCoins)
+		log("Gold +" .. amount .. " -> " .. self.Gold .. " (TotalCoins:" .. self.TotalCoins .. ")")
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean SpendCoins(integer amount)
+		-- 메인화면 누적 코인(TotalCoins)에서 소비한다 — 유물 강화 등 런과 무관한 영구 진행 요소가 사용.
+		-- 코인이 부족하면 false만 반환하고 아무것도 바꾸지 않는다
+		if self.TotalCoins < amount then return false end
+		self.TotalCoins = self.TotalCoins - amount
+		self._coinDirty = true
+		_TitleUI:NotifyCoinsChanged(self.TotalCoins)
+		log("Coins -" .. amount .. " -> " .. self.TotalCoins)
+		return true
 	end
 
 	@ExecSpace("ServerOnly")
 	method void OnEndPlay()
+		if self._coinFlushTimerId then _TimerService:ClearTimer(self._coinFlushTimerId) end
+		self:FlushCoinsIfDirty()
 	end
 
 end

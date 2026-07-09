@@ -1,0 +1,219 @@
+@Logic
+script RelicInventory extends Logic
+
+	-- 유물별 획득 개수(조각) — key = 유물 인덱스 "0".."17" 문자열, value = 개수.
+	-- 유물별 현재 레벨 — key는 동일, value = 0(레벨업 전)~maxLevel.
+	-- SyncTable은 next/pairs를 못 쓰므로 항상 0~relicCount-1 범위를 직접 순회한다
+	@Sync property SyncTable<string, integer> Counts
+	@Sync property SyncTable<string, integer> Levels
+
+	property integer relicCount = 18
+	property integer maxPerRelic = 2
+	property integer maxLevel = 5
+
+	-- 레벨업에 필요한 조각/코인 (인덱스 1=Lv1, ..., 5=Lv5). 사용자가 제공한 실제 표
+	property any _levelFragmentCost = { 2, 4, 10, 20, 30 }
+	property any _levelGoldCost = { 2000, 4000, 10000, 20000, 30000 }
+
+	-- 유물마다 하나씩 배정된 효과 종류 — 인덱스 0~17 순서대로(1-based Lua 테이블이라 i+1로 조회).
+	-- gold=골드 획득%, exp=경험치 획득%, potionChance=포션 드롭 확률%p, potionHeal=포션 회복량%p
+	-- 4종류를 균등 분배(각 4~5개)해서 "유물마다 다른 효과"가 되도록 함
+	property any _relicEffectTypes = {
+		"gold", "exp", "potionChance", "potionHeal", "gold",
+		"exp", "potionChance", "potionHeal", "gold", "exp",
+		"potionChance", "potionHeal", "gold", "exp", "potionChance",
+		"potionHeal", "gold", "exp"
+	}
+
+	-- 효과 종류별 레벨당 증가량(%) — 전부 "레벨 합계 × 이 값"으로 계산
+	property number goldBonusPerLevel = 1.0
+	property number expBonusPerLevel = 1.0
+	property number potionChanceBonusPerLevel = 0.5
+	property number potionHealBonusPerLevel = 1.0
+
+	property any _storage = nil
+	property boolean _dirty = false
+	property any _flushTimerId = nil
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		-- 월드 시작 시 저장된 유물 획득 개수/레벨을 전역 저장소에서 불러온다
+		self._storage = _DataStorageService:GetGlobalDataStorage("RelicInventory")
+		local errorCode, raw = self._storage:GetAndWait("Counts")
+		if errorCode == 0 and raw ~= nil and raw ~= "" then
+			local loaded = _UtilLogic:StringToTable(raw)
+			if loaded ~= nil then
+				for i = 0, self.relicCount - 1 do
+					local key = tostring(i)
+					if loaded[key] ~= nil then
+						self.Counts[key] = loaded[key]
+					end
+				end
+			end
+		end
+		local levelErrorCode, levelRaw = self._storage:GetAndWait("Levels")
+		if levelErrorCode == 0 and levelRaw ~= nil and levelRaw ~= "" then
+			local loadedLevels = _UtilLogic:StringToTable(levelRaw)
+			if loadedLevels ~= nil then
+				for i = 0, self.relicCount - 1 do
+					local key = tostring(i)
+					if loadedLevels[key] ~= nil then
+						self.Levels[key] = loadedLevels[key]
+					end
+				end
+			end
+		end
+		-- 5초마다 변경이 있을 때만 저장한다 (매번 저장하면 크레딧을 낭비한다)
+		self._flushTimerId = _TimerService:SetTimerRepeat(function() self:FlushIfDirty() end, 3.0)
+		log("RelicInventory started")
+	end
+
+	@ExecSpace("Server")
+	method void RequestAddRelic(integer relicIndex)
+		-- 유물을 획득했을 때 클라이언트(GachaUI)가 호출한다. 서버에서 개수를 올리고 저장 대상으로 표시한다
+		if relicIndex < 0 or relicIndex >= self.relicCount then return end
+		local key = tostring(relicIndex)
+		local current = 0
+		if self.Counts[key] ~= nil then current = self.Counts[key] end
+		self.Counts[key] = current + 1
+		self._dirty = true
+	end
+
+	@ExecSpace("Server")
+	method void RequestLevelUpRelic(integer relicIndex)
+		-- 유물 탭에서 유물 아이콘을 눌렀을 때 클라이언트가 호출한다. 조각/골드가 충분하면 레벨을 올린다
+		if relicIndex < 0 or relicIndex >= self.relicCount then return end
+		local key = tostring(relicIndex)
+		local currentLevel = 0
+		if self.Levels[key] ~= nil then currentLevel = self.Levels[key] end
+		if currentLevel >= self.maxLevel then
+			log("RelicInventory: relic " .. key .. " already at max level")
+			return
+		end
+
+		local nextLevel = currentLevel + 1
+		local fragmentCost = self._levelFragmentCost[nextLevel]
+		local goldCost = self._levelGoldCost[nextLevel]
+
+		local haveFragments = 0
+		if self.Counts[key] ~= nil then haveFragments = self.Counts[key] end
+		if haveFragments < fragmentCost then
+			log("RelicInventory: not enough fragments for relic " .. key)
+			return
+		end
+		-- 유물 강화는 런과 무관하게 영구히 쌓이는 메인화면 코인(TotalCoins)으로 결제한다 — 런 골드(Gold)는
+		-- "다시하기"마다 리셋되므로 영구 진행 요소인 유물 강화 비용으로는 맞지 않는다
+		if not _GameManager:SpendCoins(goldCost) then
+			log("RelicInventory: not enough coins for relic " .. key)
+			return
+		end
+
+		self.Counts[key] = haveFragments - fragmentCost
+		self.Levels[key] = nextLevel
+		self._dirty = true
+		log("RelicInventory: relic " .. key .. " leveled up to " .. tostring(nextLevel))
+	end
+
+	method integer GetFragmentCostForLevel(integer level)
+		-- 업그레이드 팝업(RelicUpgradeUI)이 표시용으로 조회한다. 정적 표라 서버/클라 어느 쪽에서 불러도 동일하다
+		return self._levelFragmentCost[level]
+	end
+
+	method integer GetGoldCostForLevel(integer level)
+		-- 업그레이드 팝업(RelicUpgradeUI)이 표시용으로 조회한다. 정적 표라 서버/클라 어느 쪽에서 불러도 동일하다
+		return self._levelGoldCost[level]
+	end
+
+	method string GetRelicEffectType(integer relicIndex)
+		-- 이 유물이 어떤 효과를 담당하는지 반환한다 ("gold"/"exp"/"potionChance"/"potionHeal")
+		return self._relicEffectTypes[relicIndex + 1]
+	end
+
+	method number GetEffectMagnitudePerLevel(string effectType)
+		-- 업그레이드 팝업이 옵션 설명 텍스트를 만들 때 쓰는, 효과 종류별 레벨당 증가량(%)
+		if effectType == "gold" then return self.goldBonusPerLevel
+		elseif effectType == "exp" then return self.expBonusPerLevel
+		elseif effectType == "potionChance" then return self.potionChanceBonusPerLevel
+		elseif effectType == "potionHeal" then return self.potionHealBonusPerLevel
+		else return 0 end
+	end
+
+	method string GetEffectLabel(string effectType)
+		-- 업그레이드 팝업의 옵션 설명에 쓰는 한글 라벨
+		if effectType == "gold" then return "골드 획득"
+		elseif effectType == "exp" then return "경험치 획득"
+		elseif effectType == "potionChance" then return "포션 드롭 확률"
+		elseif effectType == "potionHeal" then return "포션 회복량"
+		else return "알 수 없는 효과" end
+	end
+
+	method integer GetTotalLevelsForType(string effectType)
+		-- 지정한 효과 종류를 가진 유물들의 레벨 합계 — Levels는 @Sync라 서버/클라 어느 쪽에서 불러도 값이 같다
+		local total = 0
+		for i = 0, self.relicCount - 1 do
+			if self._relicEffectTypes[i + 1] == effectType then
+				local key = tostring(i)
+				if self.Levels[key] ~= nil then total = total + self.Levels[key] end
+			end
+		end
+		return total
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer GetGoldBonusPercent()
+		-- "gold" 유물들의 레벨 합계 × 레벨당 보너스(%) — GameManager.GetGoldPerKill()이 사용한다
+		return math.floor(self:GetTotalLevelsForType("gold") * self.goldBonusPerLevel)
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer GetExpBonusPercent()
+		-- "exp" 유물들의 레벨 합계 × 레벨당 보너스(%) — GameManager.GetExpPerKill()이 사용한다
+		return math.floor(self:GetTotalLevelsForType("exp") * self.expBonusPerLevel)
+	end
+
+	@ExecSpace("ServerOnly")
+	method number GetPotionChanceBonusPercent()
+		-- "potionChance" 유물들의 레벨 합계 × 레벨당 보너스(%p) — GameManager.TryDropHealPotion()이 사용한다
+		return self:GetTotalLevelsForType("potionChance") * self.potionChanceBonusPerLevel
+	end
+
+	@ExecSpace("ServerOnly")
+	method number GetPotionHealBonusPercent()
+		-- "potionHeal" 유물들의 레벨 합계 × 레벨당 보너스(%p) — GameManager.ApplyPotionDrop()이 사용한다
+		return self:GetTotalLevelsForType("potionHeal") * self.potionHealBonusPerLevel
+	end
+
+	@ExecSpace("ServerOnly")
+	method void FlushIfDirty()
+		-- 변경이 있을 때만 실제 저장소에 기록한다. SetAndWait를 쓴다 — Async 콜백을 기다리지 않고
+		-- OnEndPlay가 먼저 끝나버리면(에디터/월드 종료 시) 저장이 씹힐 수 있어서, 드물게 호출되는
+		-- 이 경로는 블로킹 저장으로 확실히 반영되게 한다
+		if not self._dirty then return end
+		self._dirty = false
+		local plainCounts = {}
+		local plainLevels = {}
+		for i = 0, self.relicCount - 1 do
+			local key = tostring(i)
+			if self.Counts[key] ~= nil then plainCounts[key] = self.Counts[key] end
+			if self.Levels[key] ~= nil then plainLevels[key] = self.Levels[key] end
+		end
+		self._storage:SetAndWait("Counts", _UtilLogic:TableToString(plainCounts))
+		self._storage:SetAndWait("Levels", _UtilLogic:TableToString(plainLevels))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnSyncProperty(string name, any value)
+		-- 획득 개수나 레벨이 갱신될 때마다 유물 탭 UI를 새로고침한다
+		if name == "Counts" or name == "Levels" then
+			_RelicUI:RefreshAllRelicSlots()
+			_RelicUpgradeUI:RefreshPanel()
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnEndPlay()
+		if self._flushTimerId then _TimerService:ClearTimer(self._flushTimerId) end
+		self:FlushIfDirty()
+	end
+
+end

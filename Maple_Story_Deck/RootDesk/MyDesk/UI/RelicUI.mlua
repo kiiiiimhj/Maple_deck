@@ -13,12 +13,150 @@ script RelicUI extends Logic
 	-- 그 갱신이 다시 SliderValueChangedEvent로 되돌아와 카드를 또 움직이는 무한 루프를 막는다
 	property boolean _syncingScrollBar = false
 
+	-- 유물 원래 이름 캐시 — Name 텍스트에 "Lv.N"을 매번 새로 붙이기 때문에, 이미 붙은 텍스트에서
+	-- 또 붙이면 계속 누적되는 것을 막기 위해 최초 1회만 읽어서 저장해둔다
+	property any _relicBaseNames = nil
+
+	-- 드래그(스크롤)와 탭(클릭)을 구분하는 최대 이동 거리(px) — 이보다 적게 움직였으면 탭으로 간주
+	property number _tapMoveThreshold = 12
+	-- 슬롯별 Down/Up/Drag 핸들러 목록 — OnEndPlay에서 전부 해제한다
+	property any _slotHandlers = nil
+	-- 슬롯별 터치 시작 좌표 (한 번에 하나의 터치만 가정)
+	property any _slotTouchDownPoints = nil
+
 	@ExecSpace("ClientOnly")
 	method void OnBeginPlay()
 		-- 유물 그리드를 좌우로 끌면 스크롤되고, 하단 스크롤바를 직접 끌어도 그리드가 같이 움직이도록 연결한다
 		self._dragHandler = self.scrollTouchArea:ConnectEvent(UITouchDragEvent, self.OnScrollDrag)
 		self._scrollBarHandler = self.scrollBar.Entity:ConnectEvent(SliderValueChangedEvent, self.OnScrollBarChanged)
+		self._relicBaseNames = {}
+		self._slotHandlers = {}
+		self._slotTouchDownPoints = {}
+		self:CacheRelicBaseNamesAndConnectSlots()
+		self:RefreshAllRelicSlots()
 		log("RelicUI started")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void CacheRelicBaseNamesAndConnectSlots()
+		-- RelicSlot_N에는 ButtonComponent 대신 UITouchReceiveComponent가 붙어있다 — Down/Up/Drag를
+		-- 슬롯 자신에게서 직접 받으므로(스크롤이 얼마나 됐든 event.Entity=그 슬롯 자체), 화면 좌표를
+		-- 역산해서 어느 슬롯인지 추측할 필요가 없다. Drag는 그대로 부모 스크롤 핸들러로 전달해
+		-- 카드 위에서 시작된 스와이프도 정상적으로 스크롤되게 한다.
+		local list = self.relicScroll.Entity
+		if not isvalid(list) then return end
+		for i = 0, _RelicInventory.relicCount - 1 do
+			local slot = list:GetChildByName("RelicSlot_" .. tostring(i))
+			if isvalid(slot) then
+				local nameEntity = slot:GetChildByName("Name")
+				if isvalid(nameEntity) then
+					self._relicBaseNames[tostring(i)] = nameEntity.TextComponent.Text
+				end
+				local capturedIndex = i
+				local downH = slot:ConnectEvent(UITouchDownEvent, function(event) self:OnSlotTouchDown(event, capturedIndex) end)
+				local upH = slot:ConnectEvent(UITouchUpEvent, function(event) self:OnSlotTouchUp(event, capturedIndex) end)
+				local dragH = slot:ConnectEvent(UITouchDragEvent, self.OnScrollDrag)
+				table.insert(self._slotHandlers, { entity = slot, downHandler = downH, upHandler = upH, dragHandler = dragH })
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnSlotTouchDown(UITouchDownEvent event, integer relicIndex)
+		self._slotTouchDownPoints[tostring(relicIndex)] = event.TouchPoint
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnSlotTouchUp(UITouchUpEvent event, integer relicIndex)
+		-- 누른 지점과 뗀 지점이 거의 같으면(드래그가 아니면) 탭으로 판정한다
+		local downPoint = self._slotTouchDownPoints[tostring(relicIndex)]
+		if downPoint == nil then return end
+		local dx = event.TouchPoint.x - downPoint.x
+		local dy = event.TouchPoint.y - downPoint.y
+		local distance = math.sqrt(dx * dx + dy * dy)
+		if distance > self._tapMoveThreshold then return end
+		self:OnRelicSlotClicked(relicIndex)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnRelicSlotClicked(integer relicIndex)
+		-- 유물을 누르면 바로 레벨업하지 않고, 상세/업그레이드 팝업을 띄운다
+		_RelicUpgradeUI:OpenForRelic(relicIndex)
+	end
+
+	@ExecSpace("ClientOnly")
+	method string GetRelicBaseName(integer relicIndex)
+		-- 레벨 표기가 안 붙은 원래 유물명을 돌려준다 (업그레이드 팝업에서 재사용)
+		local baseName = self._relicBaseNames[tostring(relicIndex)]
+		if baseName ~= nil then return baseName end
+		return "유물"
+	end
+
+	@ExecSpace("ClientOnly")
+	method string GetRelicIconRuid(integer relicIndex)
+		-- RelicSlot_N/Icon에서 실제 사용 중인 아이콘 RUID를 그대로 읽어온다 (업그레이드 팝업에서 재사용)
+		local list = self.relicScroll.Entity
+		if not isvalid(list) then return "" end
+		local slot = list:GetChildByName("RelicSlot_" .. tostring(relicIndex))
+		if not isvalid(slot) then return "" end
+		local icon = slot:GetChildByName("Icon")
+		if not isvalid(icon) then return "" end
+		return icon.SpriteGUIRendererComponent.ImageRUID.DataId
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshAllRelicSlots()
+		-- 유물 획득 개수/레벨(RelicInventory.Counts/Levels)이 바뀔 때마다 18개 슬롯을 전부 다시 그린다
+		local list = self.relicScroll.Entity
+		if not isvalid(list) then return end
+		for i = 0, _RelicInventory.relicCount - 1 do
+			local slot = list:GetChildByName("RelicSlot_" .. tostring(i))
+			if isvalid(slot) then
+				local key = tostring(i)
+				local count = 0
+				if _RelicInventory.Counts[key] ~= nil then count = _RelicInventory.Counts[key] end
+				local level = 0
+				if _RelicInventory.Levels[key] ~= nil then level = _RelicInventory.Levels[key] end
+				local maxLevel = _RelicInventory.maxLevel
+
+				-- 진행바는 "다음 레벨에 필요한 조각 수"를 분모로 삼는다 — 레벨마다 요구치가 다르므로
+				-- (Lv1=2, Lv2=4, Lv3=10...) 레벨업할 때마다 분모 자체가 커지면서 자연스럽게 다시 채워나가는
+				-- 모습으로 보인다(강화 직후 조각을 소비하면 분자도 줄어서 실제로 "초기화"된 것처럼 보임)
+				local progressText = slot:GetChildByName("ProgressText")
+				local progressFill = slot:GetChildByName("ProgressFill")
+				if level >= maxLevel then
+					if isvalid(progressText) then progressText.TextComponent.Text = "MAX" end
+					if isvalid(progressFill) then progressFill.SpriteGUIRendererComponent.FillAmount = 1 end
+				else
+					local nextFragmentCost = _RelicInventory:GetFragmentCostForLevel(level + 1)
+					if isvalid(progressText) then
+						progressText.TextComponent.Text = tostring(count) .. "/" .. tostring(nextFragmentCost)
+					end
+					if isvalid(progressFill) then
+						local amount = count / nextFragmentCost
+						if amount > 1 then amount = 1 end
+						progressFill.SpriteGUIRendererComponent.FillAmount = amount
+					end
+				end
+
+				local nameEntity = slot:GetChildByName("Name")
+				if isvalid(nameEntity) then
+					local baseName = self._relicBaseNames[key]
+					if baseName == nil then baseName = nameEntity.TextComponent.Text end
+					if level > 0 then
+						nameEntity.TextComponent.Text = baseName .. " Lv." .. tostring(level)
+					else
+						nameEntity.TextComponent.Text = baseName
+					end
+				end
+
+				-- 아이콘 프레임 위에 별도로 얹힌 레벨 표시 — Name 텍스트의 "Lv.N"과 중복 표기(의도됨)
+				local levelEntity = slot:GetChildByName("Level")
+				if isvalid(levelEntity) then
+					levelEntity.TextComponent.Text = "Lv." .. tostring(level)
+				end
+			end
+		end
 	end
 
 	@ExecSpace("ClientOnly")
@@ -50,6 +188,15 @@ script RelicUI extends Logic
 	method void OnEndPlay()
 		if self._dragHandler then self.scrollTouchArea:DisconnectEvent(UITouchDragEvent, self._dragHandler) end
 		if self._scrollBarHandler then self.scrollBar.Entity:DisconnectEvent(SliderValueChangedEvent, self._scrollBarHandler) end
+		if self._slotHandlers then
+			for _, rec in ipairs(self._slotHandlers) do
+				if isvalid(rec.entity) then
+					rec.entity:DisconnectEvent(UITouchDownEvent, rec.downHandler)
+					rec.entity:DisconnectEvent(UITouchUpEvent, rec.upHandler)
+					rec.entity:DisconnectEvent(UITouchDragEvent, rec.dragHandler)
+				end
+			end
+		end
 	end
 
 end
