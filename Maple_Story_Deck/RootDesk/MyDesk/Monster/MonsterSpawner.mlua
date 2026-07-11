@@ -18,12 +18,6 @@ script MonsterSpawner extends Logic
 	-- 과도한 엔티티 수로 성능 문제/불안정을 유발할 수 있어 상한을 둔다 (보스는 대상 아님 — 항상 1마리뿐)
 	property integer MaxMonstersPerMap = 20
 
-	-- 맵12 전용: 유저가 화면 중앙부(Y축 기준)에 직접 깔아둔 타일 섬 위에서만 원거리 종이 스폰되도록
-	-- X/Y를 그 타일 범위에 고정한다. 다른 맵(7/8/9/11)에는 원거리 종이 없어서 이 값은 영향을 주지 않는다.
-	property number RangedTileMinX = -1
-	property number RangedTileMaxX = 5
-	property number RangedTileY = 2
-
 	-- 내부
 	property number _timer = 0
 	property boolean _running = false
@@ -39,6 +33,14 @@ script MonsterSpawner extends Logic
 	-- 맵마다 보스가 하나씩 쌓여서, 나중에 그 맵들을 다시 방문하면 "죽인 보스가 다른 맵에서 또 나오는"
 	-- 것처럼 보이는 버그가 생긴다.
 	property Entity _currentBoss = nil
+
+	-- 존12 원거리(먹물) 종 전용 고정 스폰 구역 — 유저가 Maker에서 직접 깔아둔 "타일 섬" 발판(FootholdComponent
+	-- 레이어 "2", 실측: 월드 X 9.06~15.24, Y 0.9~1.75, 경사/계단 있음). 발판은 항상 맵 루트(월드) 기준이라
+	-- Zone12 컨테이너 오프셋과 무관하게 이미 월드 좌표다 — 하드코딩된 Y 대신 GetGroundY로 실제 발판 표면에
+	-- 레이캐스트해서 스폰한다(이전엔 Y를 고정값으로 하드코딩해서, 유저가 발판 모양을 바꿀 때마다 실제
+	-- 발판 위치와 계속 어긋나 허공에 뜨는 버그가 반복됐다).
+	property number RangedTileMinX = 9.5
+	property number RangedTileMaxX = 14.8
 
 	-- 맵10 보너스 스테이지 설정 — 등장하면 정신없이 돌아다니며 무적으로 히트당 보상만 지급하는 보스.
 	-- 첫 방문은 100% 등장, 이후 재방문마다 BonusBossChance 확률로 재판정. 실패하면(또는 지속시간이
@@ -100,7 +102,7 @@ script MonsterSpawner extends Logic
 			-- 이미 어딘가에 살아있는 보스가 있으면 새로 스폰하지 않는다 (전역 1마리 제한)
 			if isvalid(self._currentBoss) then return end
 			if currentMap == nil then return end
-			local mapIndex = self:GetMapIndexByEntity(currentMap)
+			local mapIndex = _MapManager.CurrentMapIndex
 			local spawned = self:SpawnBatchOnMap(currentMap, wave, true, false, mapIndex)
 			if #spawned > 0 then self._currentBoss = spawned[1] end
 		else
@@ -110,7 +112,7 @@ script MonsterSpawner extends Logic
 				-- 맵10에 보너스 보스가 떠 있는 동안은 평소 웨이브 몬스터를 같이 스폰하지 않는다
 				if idx == 10 and self._bonusBossActive then continue end
 				if self._activeMaps[idx] then
-					local map = _EntityService:GetEntityByPath("/maps/" .. _MapManager:GetMapName(idx))
+					local map = self:GetZoneEntity(idx)
 					if map ~= nil then
 						self:SpawnBatchOnMap(map, wave, false, map == currentMap, idx)
 					end
@@ -119,16 +121,28 @@ script MonsterSpawner extends Logic
 		end
 	end
 
-	-- 맵 엔티티로부터 그 맵의 인덱스(1~6)를 역으로 찾는다 (GetCurrentMap()은 Entity만 반환하므로 필요)
+	-- 그룹D 병합(맵11+12를 map11.map 하나로 합침) 전용: 맵12 구역은 유저가 맵11 발판을 x=9.92~33.92까지
+	-- 직접 이어붙인 구간이다. 이 값은 아래 GetSpawnPosition의 기존 "±5 범위" 로컬 스폰 로직의 중심으로
+	-- 쓰인다. 원래 그 구간의 정중앙(21.92)로 잡았었는데, 하필 Zone12/TreasureChest의 실제 월드좌표(23.2)와
+	-- 거의 겹쳐서 몬스터가 상자 바로 옆에서만 계속 스폰되는 것처럼 보였다 — 상자와 충분히 떨어진 15로 이동
+	-- (MapManager.GetSpawnPositionForIndex의 플레이어 스폰 좌표도 같이 맞춰뒀다).
 	@ExecSpace("ServerOnly")
-	method integer GetMapIndexByEntity(Entity map)
-		if map == nil then return _MapManager.MinMapIndex end
-		local numStr = string.match(map.Name, "(%d+)$")
-		local idx = numStr and tonumber(numStr) or nil
-		if idx ~= nil and idx >= _MapManager.MinMapIndex and idx <= _MapManager.MaxMapIndex then
-			return idx
+	method number GetZoneOffsetX(integer mapIndex)
+		if mapIndex == 12 then return 15 end
+		return 0
+	end
+
+	-- mapIndex가 가리키는 "존"의 실제 엔티티(스폰 부모/일시정지 스코프용)를 반환한다. 병합되지 않은
+	-- 맵은 지금까지처럼 맵 루트 엔티티 그대로, 맵12는 map11.map 루트 밑의 "Zone12" 자식 컨테이너를 반환한다
+	-- (맵11 자신은 재배치 없이 루트에 그대로 남아있어 별도 컨테이너가 필요 없다).
+	@ExecSpace("ServerOnly")
+	method Entity GetZoneEntity(integer mapIndex)
+		local rootMap = _EntityService:GetEntityByPath("/maps/" .. _MapManager:GetMapName(mapIndex))
+		if rootMap == nil then return nil end
+		if mapIndex == 12 then
+			return rootMap:GetChildByName("Zone12", false)
 		end
-		return _MapManager.MinMapIndex
+		return rootMap
 	end
 
 	-- GameManager.OnBossDefeated()가 보스 처치 시점에 호출 — 다음 SpawnWave/ActivateMap 틱부터
@@ -148,7 +162,7 @@ script MonsterSpawner extends Logic
 		if self._activeMaps[mapIndex] then return end
 		self._activeMaps[mapIndex] = true
 
-		local map = _EntityService:GetEntityByPath("/maps/" .. _MapManager:GetMapName(mapIndex))
+		local map = self:GetZoneEntity(mapIndex)
 		if map == nil then return end
 
 		local wave = _GameManager.Wave
@@ -199,12 +213,12 @@ script MonsterSpawner extends Logic
 			-- 맵 전용 풀(zoneIndex>=7)은 종을 먼저 뽑아서 스폰 위치 결정에도 같이 써야 한다 —
 			-- 원거리 종은 중앙 구역에만, 근접 종은 중앙을 피해서 스폰시키려면 위치보다 종 선택이 먼저 필요하다
 			local speciesIdx = self:RollSpeciesForMap(mapIndex)
-			local pos = self:GetSpawnPosition(mapIndex, map, isBoss, speciesIdx)
+			local pos = self:GetSpawnPosition(mapIndex, isBoss, speciesIdx)
 
 			local entity = _SpawnService:SpawnByModelId(
 				self.MonsterModelId,
 				"Monster",
-				pos,
+				self:ToLocalSpawnPos(map, pos),
 				map
 			)
 			if entity == nil then
@@ -253,11 +267,11 @@ script MonsterSpawner extends Logic
 			return
 		end
 
-		local mapIndex = self:GetMapIndexByEntity(map)
+		local mapIndex = _MapManager.CurrentMapIndex
 		local wave = _GameManager.Wave
 		local speciesIdx = self:RollSpeciesForMap(mapIndex)
-		local pos = self:GetSpawnPosition(mapIndex, map, false, speciesIdx)
-		local entity = _SpawnService:SpawnByModelId(self.MonsterModelId, "Monster", pos, map)
+		local pos = self:GetSpawnPosition(mapIndex, false, speciesIdx)
+		local entity = _SpawnService:SpawnByModelId(self.MonsterModelId, "Monster", self:ToLocalSpawnPos(map, pos), map)
 		if entity == nil then
 			log_error("MonsterSpawner: SpawnRandomElite failed")
 			return
@@ -316,19 +330,28 @@ script MonsterSpawner extends Logic
 	end
 
 	-- 실제로 플레이어가 있는 맵을 찾는다 (보스/엘리트 스폰 위치 판정용, 스폰 시 일시정지 여부 판정용).
-	-- userEntity.CurrentMap(엔티티 참조)은 월드 시작 직후 아직 nil일 수 있어(MapManager.OnBeginPlay가
-	-- 첫 ActivateMap을 호출하는 시점과 겹침) 그때 스폰되는 몬스터가 전부 "현재 맵 아님"으로 오판되어
-	-- 일시정지 상태로 태어나는 버그가 있었다. CurrentMapName(문자열)은 이 시점에도 항상 신뢰 가능
-	-- (MapManager.ResolveCurrentMapIndex가 이미 같은 필드로 검증됨)하므로 경로 조회로 통일한다.
+	-- 그룹D 병합(맵11+12가 같은 map11.map 파일)으로 CurrentMapName만으로는 11/12를 구분할 수 없게
+	-- 됐다 — 대신 MapManager.CurrentMapIndex(버튼 이동 때마다 확정적으로 갱신됨)를 신뢰하고,
+	-- GetZoneEntity로 맵 루트 또는 Zone12 자식 컨테이너를 구분해서 반환한다.
 	@ExecSpace("ServerOnly")
 	method Entity GetCurrentMap()
-		for _, userEntity in pairs(_UserService.UserEntities) do
-			local mapName = userEntity.CurrentMapName
-			if mapName ~= nil and mapName ~= "" then
-				return _EntityService:GetEntityByPath("/maps/" .. mapName)
-			end
-		end
-		return nil
+		return self:GetZoneEntity(_MapManager.CurrentMapIndex)
+	end
+
+	-- SpawnByModelId의 spawnPosition은 parent 기준 로컬 좌표다. GetSpawnPosition은 발판 레이캐스트를
+	-- 위해 항상 월드 좌표를 계산해 반환하므로(Zone12처럼 parent 자체가 오프셋을 가진 컨테이너일 수 있음),
+	-- 실제 스폰 직전에 parent의 WorldPosition을 빼서 로컬로 변환해야 한다. 이걸 빼먹으면 Zone12(오프셋 +25)
+	-- 컨테이너 밑에서 오프셋이 두 번 겹쳐 적용돼(발판 계산의 +15 오프셋 + 부모의 +25 오프셋) 몬스터가
+	-- 발판 오른쪽 끝(33.92)을 한참 벗어난 곳(35~45)에서 스폰되는 버그가 있었다(parent가 원점인 다른 맵은
+	-- WorldPosition이 (0,0,0)이라 이 변환이 항등이므로 기존 동작에 영향 없음).
+	-- 맵 루트 엔티티(map01 등)는 애초에 TransformComponent 자체가 없다(실측 확인 — [LEA-2007] AttemptToIndex)
+	-- 이 경우 오프셋 없이 worldPos를 그대로 쓰면 된다(루트는 항상 원점이므로 로컬==월드).
+	@ExecSpace("ServerOnly")
+	method Vector3 ToLocalSpawnPos(Entity parent, Vector3 worldPos)
+		local transform = parent.TransformComponent
+		if transform == nil then return worldPos end
+		local parentWorld = transform.WorldPosition
+		return Vector3(worldPos.x - parentWorld.x, worldPos.y - parentWorld.y, worldPos.z - parentWorld.z)
 	end
 
 	-- x좌표 위치의 발판 Y값을 찾아서 반환한다 (발판이 없으면 0에 스폰 — 맵마다 발판 높이가 달라도 항상 바닥 위에 스폰되도록)
@@ -454,27 +477,37 @@ script MonsterSpawner extends Logic
 	-- 스폰 위치를 정한다. 맵4~6은 발판 밴드 테이블에서 폭에 비례한 확률로 하나 골라 그 위에 스폰하고,
 	-- 맵1~3/맵 전용 풀은 기존처럼 화면 근처(±5) 범위에서 골라 아래로 레이캐스트한다(회귀 방지를 위해 그대로 둠).
 	-- speciesIdx: 맵 전용 풀(zoneIndex>=7)에서 RollSpeciesForMap이 미리 뽑아준 값(0=해당 없음). 원거리 종이면
-	-- 발판 레이캐스트를 쓰지 않고 유저가 화면 중앙부에 직접 깔아둔 타일 섬 위(RangedTileMinX~MaxX, RangedTileY)에 고정 스폰한다.
-	-- 맵12는 근접 종도 그 타일 섬 발판(레이캐스트가 먼저 걸림) 위에 착지해버릴 수 있어서, 맵12에 한해서만
-	-- 근접 종은 타일 섬 X구간을 피해 좌우 바깥쪽에서만 스폰되도록 명시적으로 막는다(다른 맵은 영향 없음).
+	-- 일반 바닥 대신 유저가 Maker에서 직접 깔아둔 타일 섬 발판(RangedTileMinX~MaxX, 이미 월드 좌표 —
+	-- 발판은 항상 맵 루트 기준이라 Zone12 오프셋과 무관) X구간에서 뽑되, Y는 하드코딩하지 않고 GetGroundY로
+	-- 그 발판 표면에 직접 레이캐스트한다(경사/계단이 있어도 항상 정확히 표면에 선다 — 이전엔 Y를 고정값으로
+	-- 하드코딩해서 유저가 발판 모양을 바꿀 때마다 허공에 뜨는 버그가 반복됐다). 근접 종은 그 X구간을 피해
+	-- 좌우 바깥쪽에서만 스폰한다(레이캐스트가 타일 섬 위에 먼저 걸려 근접 종도 섬 위에 착지해버릴 수 있어서).
+	-- map 파라미터를 받지 않는다 — 그룹D 병합 이후 맵12는 물리적으로 map11.map 안의 Zone12 자식이라
+	-- 발판(FootholdComponent)은 항상 맵 루트(map11)에 있으므로, 레이캐스트 대상은 mapIndex로부터
+	-- 직접 다시 조회한다(호출측이 넘기는 "존 엔티티"와 발판 소유 루트가 다를 수 있어서).
 	@ExecSpace("ServerOnly")
-	method Vector3 GetSpawnPosition(integer mapIndex, Entity map, boolean isBoss, integer speciesIdx)
+	method Vector3 GetSpawnPosition(integer mapIndex, boolean isBoss, integer speciesIdx)
 		local bands = self:GetZonePlatformBands(mapIndex)
 		if bands == nil then
+			local rootMap = _EntityService:GetEntityByPath("/maps/" .. _MapManager:GetMapName(mapIndex))
+			local offsetX = self:GetZoneOffsetX(mapIndex)
+
 			if not isBoss and mapIndex >= 7 and speciesIdx > 0 and self:GetMapIsRangedSpecies(mapIndex, speciesIdx) then
 				local rrx = self.RangedTileMinX + _UtilLogic:RandomDouble() * (self.RangedTileMaxX - self.RangedTileMinX)
-				return Vector3(rrx, self.RangedTileY, 0)
+				return Vector3(rrx, self:GetGroundY(rootMap, rrx), 0)
 			end
 
 			if not isBoss and mapIndex == 12 then
-				local rx = self:RollXAvoidingRange(-5, 5, self.RangedTileMinX, self.RangedTileMaxX)
-				return Vector3(rx, self:GetGroundY(map, rx), 0)
+				local rx = self:RollXAvoidingRange(offsetX - 5, offsetX + 5, self.RangedTileMinX, self.RangedTileMaxX)
+				return Vector3(rx, self:GetGroundY(rootMap, rx), 0)
 			end
 
-			-- 기존 로직 그대로 (맵1~3, 보스, 또는 원거리 종이 없는 맵 전용 풀)
+			-- 기존 로직 그대로 (맵1~3, 보스, 또는 원거리 종이 없는 맵 전용 풀) — offsetX는 병합 안 된
+			-- 맵에서는 항상 0이라 아래 결과에 영향 없음
 			local rx = (_UtilLogic:RandomDouble() * 10) - 5
 			if isBoss then rx = 0 end
-			return Vector3(rx, self:GetGroundY(map, rx), 0)
+			local worldX = rx + offsetX
+			return Vector3(worldX, self:GetGroundY(rootMap, worldX), 0)
 		end
 
 		if isBoss then
@@ -561,7 +594,7 @@ script MonsterSpawner extends Logic
 	method void ClearAllMonsters()
 		local total = 0
 		for idx = _MapManager.MinMapIndex, _MapManager.MaxMapIndex do
-			local map = _EntityService:GetEntityByPath("/maps/" .. _MapManager:GetMapName(idx))
+			local map = self:GetZoneEntity(idx)
 			if map ~= nil then
 				local monsters = map:GetChildComponentsByTypeName("script.MonsterAI", false)
 				for i = 1, #monsters do
@@ -578,7 +611,7 @@ script MonsterSpawner extends Logic
 	method void PushAllMonstersBack()
 		local total = 0
 		for idx = _MapManager.MinMapIndex, _MapManager.MaxMapIndex do
-			local map = _EntityService:GetEntityByPath("/maps/" .. _MapManager:GetMapName(idx))
+			local map = self:GetZoneEntity(idx)
 			if map ~= nil then
 				local monsters = map:GetChildComponentsByTypeName("script.MonsterAI", false)
 				for i = 1, #monsters do
