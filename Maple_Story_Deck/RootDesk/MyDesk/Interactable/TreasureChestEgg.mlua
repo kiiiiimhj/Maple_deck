@@ -1,0 +1,55 @@
+@Component
+script TreasureChestEgg extends Component
+
+	property string StandRUID = "9cff692190eb472fba4f6d0e68f213a7"
+	property string DieRUID = "7a09c81fa4534f898a41595750d7411d"
+	property number DieDuration = 0.5
+
+	-- 상자 옆에 같이 놓인 장식(map12의 object-1036 등) — 상자가 열릴 때 같이 사라져야 하는 딸린 엔티티.
+	-- 안 쓰는 맵의 상자는 빈 값이면 그냥 무시된다
+	property Entity extraEntity = ""
+
+	property boolean _opened = false
+	property any _touchHandler = nil
+
+	method void OnBeginPlay()
+		if self:IsClient() then
+			local renderer = self.Entity.SpriteRendererComponent
+			if renderer ~= nil then renderer.SpriteRUID = self.StandRUID end
+			self._touchHandler = self.Entity:ConnectEvent(TouchEvent, self.OnTouched)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnTouched(TouchEvent event)
+		-- 터치 시 서버에 개봉을 요청한다
+		self:RequestOpen()
+	end
+
+	@ExecSpace("Server")
+	method void RequestOpen()
+		-- 이미 열렸으면 중복 요청 무시 (여러 번 터치해도 카드가 한 번만 드롭되도록)
+		if self._opened then return end
+		self._opened = true
+		self:PlayOpen()
+		_CardManager:OnEliteKilled(self.Entity.TransformComponent.Position)
+		self.Entity:Destroy(self.DieDuration + 0.3)
+		if isvalid(self.extraEntity) then
+			self.extraEntity:Destroy(self.DieDuration + 0.3)
+		end
+	end
+
+	@ExecSpace("Multicast")
+	method void PlayOpen()
+		if self:IsServer() then return end
+		local renderer = self.Entity.SpriteRendererComponent
+		if renderer ~= nil then renderer.SpriteRUID = self.DieRUID end
+	end
+
+	method void OnEndPlay()
+		if self:IsClient() and self._touchHandler ~= nil then
+			self.Entity:DisconnectEvent(TouchEvent, self._touchHandler)
+		end
+	end
+
+end

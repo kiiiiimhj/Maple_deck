@@ -18,6 +18,12 @@ script MonsterSpawner extends Logic
 	-- 과도한 엔티티 수로 성능 문제/불안정을 유발할 수 있어 상한을 둔다 (보스는 대상 아님 — 항상 1마리뿐)
 	property integer MaxMonstersPerMap = 20
 
+	-- 맵12 전용: 유저가 화면 중앙부(Y축 기준)에 직접 깔아둔 타일 섬 위에서만 원거리 종이 스폰되도록
+	-- X/Y를 그 타일 범위에 고정한다. 다른 맵(7/8/9/11)에는 원거리 종이 없어서 이 값은 영향을 주지 않는다.
+	property number RangedTileMinX = -1
+	property number RangedTileMaxX = 5
+	property number RangedTileY = 2
+
 	-- 내부
 	property number _timer = 0
 	property boolean _running = false
@@ -190,7 +196,10 @@ script MonsterSpawner extends Logic
 
 		local spawned = {}
 		for i = 1, count do
-			local pos = self:GetSpawnPosition(mapIndex, map, isBoss)
+			-- 맵 전용 풀(zoneIndex>=7)은 종을 먼저 뽑아서 스폰 위치 결정에도 같이 써야 한다 —
+			-- 원거리 종은 중앙 구역에만, 근접 종은 중앙을 피해서 스폰시키려면 위치보다 종 선택이 먼저 필요하다
+			local speciesIdx = self:RollSpeciesForMap(mapIndex)
+			local pos = self:GetSpawnPosition(mapIndex, map, isBoss, speciesIdx)
 
 			local entity = _SpawnService:SpawnByModelId(
 				self.MonsterModelId,
@@ -204,7 +213,7 @@ script MonsterSpawner extends Logic
 				---@type MonsterAI
 				local ai = entity:GetComponent("script.MonsterAI")
 				if ai ~= nil then
-					ai:InitializeStats(mapIndex, wave, isBoss)
+					ai:InitializeStats(mapIndex, wave, isBoss, speciesIdx)
 					if not isCurrentMap then ai:Pause() end
 				end
 				table.insert(spawned, entity)
@@ -246,7 +255,8 @@ script MonsterSpawner extends Logic
 
 		local mapIndex = self:GetMapIndexByEntity(map)
 		local wave = _GameManager.Wave
-		local pos = self:GetSpawnPosition(mapIndex, map, false)
+		local speciesIdx = self:RollSpeciesForMap(mapIndex)
+		local pos = self:GetSpawnPosition(mapIndex, map, false, speciesIdx)
 		local entity = _SpawnService:SpawnByModelId(self.MonsterModelId, "Monster", pos, map)
 		if entity == nil then
 			log_error("MonsterSpawner: SpawnRandomElite failed")
@@ -256,10 +266,53 @@ script MonsterSpawner extends Logic
 		---@type MonsterAI
 		local ai = entity:GetComponent("script.MonsterAI")
 		if ai ~= nil then
-			ai:InitializeStats(mapIndex, wave, false)
+			ai:InitializeStats(mapIndex, wave, false, speciesIdx)
 			ai:MarkElite()
 		end
 		log("MonsterSpawner: random elite spawned on " .. map.Name)
+	end
+
+	-- 맵 전용 몬스터 풀(zoneIndex>=7)에서 쓸 종 인덱스를 미리 뽑는다. 스폰 위치 결정(GetSpawnPosition)과
+	-- 외형 초기화(MonsterAI.InitializeStats)가 같은 종을 참조해야 해서 두 호출보다 먼저 실행한다.
+	-- 맵1~6은 풀 개념이 없으므로 0(= "위치 로직에서 무시") 반환.
+	@ExecSpace("ServerOnly")
+	method integer RollSpeciesForMap(integer mapIndex)
+		if mapIndex < 7 then return 0 end
+		local appearanceZone = self:ResolveAppearanceZone(mapIndex)
+		return _UtilLogic:RandomIntegerRange(1, _GameManager:GetMapMonsterCount(appearanceZone))
+	end
+
+	-- 맵10(보너스 스테이지)은 별도 풀이 없고 맵9 풀을 그대로 재사용한다 — MonsterAI.InitializeStats와
+	-- 동일한 규칙을 스폰 위치 결정 쪽에서도 써야 해서 별도 헬퍼로 뽑아둔다
+	@ExecSpace("ServerOnly")
+	method integer ResolveAppearanceZone(integer mapIndex)
+		if mapIndex == 10 then return 9 end
+		return mapIndex
+	end
+
+	-- speciesIdx가 가리키는 종이 이 맵(zoneIndex>=7) 풀에서 원거리(먹물) 종인지 여부
+	@ExecSpace("ServerOnly")
+	method boolean GetMapIsRangedSpecies(integer mapIndex, integer speciesIdx)
+		return _GameManager:GetMapIsRanged(self:ResolveAppearanceZone(mapIndex), speciesIdx)
+	end
+
+	-- safeMin~safeMax 범위에서 avoidMin~avoidMax 구간을 제외하고 X를 뽑는다. 좌/우 남은 폭에 비례해서
+	-- 어느 쪽에서 뽑을지 정하므로, 한쪽 폭이 0이어도(구간이 끝에 붙어있어도) 자연스럽게 반대쪽만 나온다.
+	@ExecSpace("ServerOnly")
+	method number RollXAvoidingRange(number safeMin, number safeMax, number avoidMin, number avoidMax)
+		local leftWidth = math.max(0, avoidMin - safeMin)
+		local rightWidth = math.max(0, safeMax - avoidMax)
+		local totalWidth = leftWidth + rightWidth
+		if totalWidth <= 0 then
+			-- 피할 구간이 안전범위 전체를 덮으면(설정 실수 등) 그냥 안전범위 전체에서 뽑는다
+			return safeMin + _UtilLogic:RandomDouble() * (safeMax - safeMin)
+		end
+		local roll = _UtilLogic:RandomDouble() * totalWidth
+		if roll < leftWidth then
+			return safeMin + roll
+		else
+			return avoidMax + (roll - leftWidth)
+		end
 	end
 
 	-- 실제로 플레이어가 있는 맵을 찾는다 (보스/엘리트 스폰 위치 판정용, 스폰 시 일시정지 여부 판정용).
@@ -399,12 +452,26 @@ script MonsterSpawner extends Logic
 	end
 
 	-- 스폰 위치를 정한다. 맵4~6은 발판 밴드 테이블에서 폭에 비례한 확률로 하나 골라 그 위에 스폰하고,
-	-- 맵1~3은 기존처럼 화면 근처(±5) 범위에서 골라 아래로 레이캐스트한다(회귀 방지를 위해 그대로 둠).
+	-- 맵1~3/맵 전용 풀은 기존처럼 화면 근처(±5) 범위에서 골라 아래로 레이캐스트한다(회귀 방지를 위해 그대로 둠).
+	-- speciesIdx: 맵 전용 풀(zoneIndex>=7)에서 RollSpeciesForMap이 미리 뽑아준 값(0=해당 없음). 원거리 종이면
+	-- 발판 레이캐스트를 쓰지 않고 유저가 화면 중앙부에 직접 깔아둔 타일 섬 위(RangedTileMinX~MaxX, RangedTileY)에 고정 스폰한다.
+	-- 맵12는 근접 종도 그 타일 섬 발판(레이캐스트가 먼저 걸림) 위에 착지해버릴 수 있어서, 맵12에 한해서만
+	-- 근접 종은 타일 섬 X구간을 피해 좌우 바깥쪽에서만 스폰되도록 명시적으로 막는다(다른 맵은 영향 없음).
 	@ExecSpace("ServerOnly")
-	method Vector3 GetSpawnPosition(integer mapIndex, Entity map, boolean isBoss)
+	method Vector3 GetSpawnPosition(integer mapIndex, Entity map, boolean isBoss, integer speciesIdx)
 		local bands = self:GetZonePlatformBands(mapIndex)
 		if bands == nil then
-			-- 맵1~3: 기존 로직 그대로
+			if not isBoss and mapIndex >= 7 and speciesIdx > 0 and self:GetMapIsRangedSpecies(mapIndex, speciesIdx) then
+				local rrx = self.RangedTileMinX + _UtilLogic:RandomDouble() * (self.RangedTileMaxX - self.RangedTileMinX)
+				return Vector3(rrx, self.RangedTileY, 0)
+			end
+
+			if not isBoss and mapIndex == 12 then
+				local rx = self:RollXAvoidingRange(-5, 5, self.RangedTileMinX, self.RangedTileMaxX)
+				return Vector3(rx, self:GetGroundY(map, rx), 0)
+			end
+
+			-- 기존 로직 그대로 (맵1~3, 보스, 또는 원거리 종이 없는 맵 전용 풀)
 			local rx = (_UtilLogic:RandomDouble() * 10) - 5
 			if isBoss then rx = 0 end
 			return Vector3(rx, self:GetGroundY(map, rx), 0)

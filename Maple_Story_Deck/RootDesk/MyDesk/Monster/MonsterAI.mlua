@@ -17,6 +17,9 @@ script MonsterAI extends Component
 	-- 정면 도착 후 공격 간격 (초)
 	property number AttackInterval = 1.0
 
+	-- 엔진 기본 데미지 스킨 RUID (DamageSkinSettingComponent 기본값과 동일 — 실제 메이플스토리 데미지 숫자 그래픽)
+	property string _damageSkinId = "6ba67548f43f48f29eb23dafd0766383"
+
 	-- 내부 상태
 	property boolean _dead = false
 	property number _currentScale = 0.3
@@ -63,6 +66,12 @@ script MonsterAI extends Component
 	property number _dieDuration = 0.5
 	property string _hitRUID = ""
 	property string _attackRUID = ""  -- 없는 웨이브(3/5/6/8/9/10)는 빈 문자열 → 들이받기 연출로 대체
+	-- 맵 전용 몬스터 풀 중 원거리(먹물) 공격 종인지 여부 — true면 도달 시 들이받기 대신 화면 잉크 스플랫 연출
+	property boolean _isRangedInk = false
+	-- 원거리 종이 근접 종보다 "조금 멀리서" 공격하도록, 도달 판정(_reachedPlayer) 스케일 임계값을 낮춰준다.
+	-- 근접은 기존과 동일하게 1.5(최대 크기)까지 다가와야 도달 판정, 원거리는 이보다 작은 값에서 멈춘다
+	property number _reachedScaleThreshold = 1.5
+	property number RangedReachedScale = 1.15
 
 	-- 이어하기 밀려나는 중 OnUpdate 스킵 플래그
 	property boolean _isPushingBack = false
@@ -74,6 +83,9 @@ script MonsterAI extends Component
 	@Sync property integer FreezeStack = 0
 	property Entity _freezeIndicator = nil
 	property boolean _freezeSlowed = false
+
+	-- 스턴(감전) 중 머리 위에 뺑글뻉글 도는 별 이펙트
+	property Entity _stunStarsIndicator = nil
 
 	method void OnBeginPlay()
 		if self:IsServer() then
@@ -98,9 +110,12 @@ script MonsterAI extends Component
 	-- MonsterSpawner가 스폰 직후 호출: zoneIndex(1~3=기존 웨이브 풀, 4~6=신규 몬스터 풀)에 맞춰
 	-- 스탯(HP/접근속도)과 외형(스프라이트 RUID)을 초기화한다. HP/접근속도는 존과 무관하게 항상
 	-- 웨이브 공식을 따르고, 외형만 존별 규칙으로 고른다.
+	-- forcedSpeciesIdx: 맵 전용 풀(zoneIndex>=7)에서 스폰 위치 결정과 같은 종을 쓰기 위해
+	-- MonsterSpawner가 미리 뽑아서 넘겨주는 값. 0 이하면 기존처럼 여기서 무작위로 고른다.
 	@ExecSpace("ServerOnly")
-	method void InitializeStats(integer zoneIndex, integer wave, boolean isBoss)
+	method void InitializeStats(integer zoneIndex, integer wave, boolean isBoss, integer forcedSpeciesIdx)
 		self._isBoss = isBoss
+		self._reachedScaleThreshold = 1.5
 		local hp = _GameManager:GetWaveHp(wave)
 		self.MaxHp = hp
 		self.CurrentHp = hp
@@ -125,12 +140,19 @@ script MonsterAI extends Component
 			-- 맵10(보너스 스테이지)은 별도 풀이 없고 맵9 몬스터 풀을 그대로 재사용한다(평소 웨이브 폴백 시).
 			local appearanceZone = zoneIndex
 			if appearanceZone == 10 then appearanceZone = 9 end
-			local speciesIdx = _UtilLogic:RandomIntegerRange(1, _GameManager:GetMapMonsterCount(appearanceZone))
+			local speciesIdx = forcedSpeciesIdx
+			if speciesIdx <= 0 then
+				speciesIdx = _UtilLogic:RandomIntegerRange(1, _GameManager:GetMapMonsterCount(appearanceZone))
+			end
 			self.MonsterSprite = _GameManager:GetMapStandRUID(appearanceZone, speciesIdx)
 			self._dieRUID = _GameManager:GetMapDieRUID(appearanceZone, speciesIdx)
 			self._dieDuration = _GameManager:GetMapDieDuration(appearanceZone, speciesIdx)
 			self._hitRUID = _GameManager:GetMapHitRUID(appearanceZone, speciesIdx)
 			self._attackRUID = ""
+			self._isRangedInk = _GameManager:GetMapIsRanged(appearanceZone, speciesIdx)
+			if self._isRangedInk then
+				self._reachedScaleThreshold = self.RangedReachedScale
+			end
 		elseif zoneIndex >= 4 then
 			-- 맵4~6 전용 몬스터 풀: 스폰마다 1~4 중 무작위로 외형을 고른다 (보스도 이 풀에서 고름 — 별도 존 보스는 없음)
 			local speciesIdx = _UtilLogic:RandomIntegerRange(1, _GameManager:GetZoneMonsterCount())
@@ -221,6 +243,12 @@ script MonsterAI extends Component
 			self._freezeIndicator.TransformComponent.Position = Vector3(fpos.x + 0.45, fpos.y - 0.40, fpos.z - 0.05)
 		end
 
+		-- 스턴 별 이펙트 위치 추적 (머리 위)
+		if isvalid(self._stunStarsIndicator) then
+			local spos = self.Entity.TransformComponent.Position
+			self._stunStarsIndicator.TransformComponent.Position = Vector3(spos.x, spos.y + 0.9, spos.z - 0.1)
+		end
+
 		if self._reachedPlayer then
 			-- 정면에 멈춰서 일정 간격으로 계속 공격
 			self._attackTimer = self._attackTimer - delta
@@ -234,10 +262,10 @@ script MonsterAI extends Component
 		-- 스케일 증가 (카메라 접근 연출)
 		self._currentScale = self._currentScale + self.ApproachSpeed * delta
 
-		if self._currentScale >= 1.5 then
-			-- 플레이어 정면에 도착 → 소멸하지 않고 자리에서 계속 공격 시작
-			self._currentScale = 1.5
-			self.Entity.TransformComponent.Scale = Vector3(1.5 * self._scaleMultiplier, 1.5 * self._scaleMultiplier, 1.0)
+		if self._currentScale >= self._reachedScaleThreshold then
+			-- 도달 임계값(근접 1.5 / 원거리는 더 낮음)에 도달 → 소멸하지 않고 그 자리에서 계속 공격 시작
+			self._currentScale = self._reachedScaleThreshold
+			self.Entity.TransformComponent.Scale = Vector3(self._reachedScaleThreshold * self._scaleMultiplier, self._reachedScaleThreshold * self._scaleMultiplier, 1.0)
 			self:UpdateDepth()
 			self._reachedPlayer = true
 			self._attackTimer = self.AttackInterval
@@ -319,13 +347,13 @@ script MonsterAI extends Component
 		-- 카드 공격 시 호출
 		if self._dead then return end
 		if self._isBonusBoss then
-			self:SpawnDamageNumber(damage)
+			self:PlayDamageSkin(damage, false)
 			self:OnBonusBossHit()
 			return
 		end
 		self.CurrentHp = self.CurrentHp - damage
 		log("Monster HP: " .. self.CurrentHp .. "/" .. self.MaxHp)
-		self:SpawnDamageNumber(damage)
+		self:PlayDamageSkin(damage, false)
 		self:PlayHitAnimation(self._hitRUID, self.MonsterSprite)
 		if self.CurrentHp <= 0 then
 			self:Die()
@@ -349,65 +377,28 @@ script MonsterAI extends Component
 	end
 
 
-	@ExecSpace("ServerOnly")
-	method void SpawnDamageNumber(number damage)
-		-- 데미지 숫자 엔티티를 몬스터 위에 스폰 (X를 랜덤 분산해 겹침 방지)
-		local map = self.Entity.CurrentMap
-		if map == nil then return end
-		local pos = self.Entity.TransformComponent.Position
-		local rx = (_UtilLogic:RandomDouble() - 0.5) * 1.2  -- ±0.6 월드유닛 분산
-		local spawnPos = Vector3(pos.x + rx, pos.y + 1.2, pos.z - 0.1)
-		local e = _SpawnService:SpawnByModelId("damagenumber", "DmgNum", spawnPos, map)
-		if e == nil then
-			log_warning("MonsterAI: SpawnDamageNumber failed")
-			return
-		end
-		local renderer = e.TextRendererComponent
-		if renderer ~= nil then
-			renderer.Text = tostring(math.floor(damage))
-			-- 메이플 스타일 색상: 노랑(기본) → 주황(중) → 핫핑크/빨강(고)
-			if damage >= 400 then
-				renderer.FontColor = Color(1.0, 0.15, 0.15, 1.0)  -- 빨강 (고데미지)
-			elseif damage >= 150 then
-				renderer.FontColor = Color(1.0, 0.55, 0.0, 1.0)   -- 주황 (중데미지)
-			else
-				renderer.FontColor = Color(1.0, 1.0, 0.0, 1.0)    -- 순노랑 (기본)
-			end
-		end
+	-- 엔진 기본 내장 데미지 스킨(실제 메이플스토리와 동일한 숫자 그래픽/트윈)을 재생한다.
+	-- TakeDamage/TakeDamageCrit는 ServerOnly라 시각 연출은 별도 Multicast로 클라이언트에서만 재생한다.
+	@ExecSpace("Multicast")
+	method void PlayDamageSkin(number damage, boolean isCritical)
+		if self:IsServer() then return end
+		_DamageSkinService:Play(self.Entity, self._damageSkinId, 0.05, { math.floor(damage) }, DamageSkinTweenType.Default, isCritical)
 	end
 
 	@ExecSpace("ServerOnly")
 	method void TakeDamageCrit(number damage)
 		if self._dead then return end
 		if self._isBonusBoss then
-			self:SpawnDamageNumberCrit(damage)
+			self:PlayDamageSkin(damage, true)
 			self:OnBonusBossHit()
 			return
 		end
 		self.CurrentHp = self.CurrentHp - damage
 		log("Monster HP (CRIT): " .. self.CurrentHp .. "/" .. self.MaxHp)
-		self:SpawnDamageNumberCrit(damage)
+		self:PlayDamageSkin(damage, true)
 		self:PlayHitAnimation(self._hitRUID, self.MonsterSprite)
 		if self.CurrentHp <= 0 then
 			self:Die()
-		end
-	end
-
-	@ExecSpace("ServerOnly")
-	method void SpawnDamageNumberCrit(number damage)
-		local map = self.Entity.CurrentMap
-		if map == nil then return end
-		local pos = self.Entity.TransformComponent.Position
-		local rx = (_UtilLogic:RandomDouble() - 0.5) * 1.2
-		local spawnPos = Vector3(pos.x + rx, pos.y + 1.5, pos.z - 0.1)
-		local e = _SpawnService:SpawnByModelId("damagenumber", "DmgNum", spawnPos, map)
-		if e == nil then return end
-		local tc = e.TransformComponent
-		if tc ~= nil then tc.Scale = Vector3(1.5, 1.5, 1.0) end
-		local renderer = e.TextRendererComponent
-		if renderer ~= nil then
-			renderer.Text = tostring(math.floor(damage))
-			renderer.FontColor = Color(1.0, 0.05, 0.05, 1.0)  -- 크리티컬 강렬한 빨강
 		end
 	end
 
@@ -455,8 +446,7 @@ script MonsterAI extends Component
 			self._stunSavedSpeed = self.ApproachSpeed
 			self.ApproachSpeed = 0
 			self._isStunned = true
-			local renderer = self.Entity.SpriteRendererComponent
-			if renderer ~= nil then renderer.Color = Color(1.0, 1.0, 0.3, 0.85) end
+			self:SpawnStunStars()
 		end
 		if self._stunTimerId ~= 0 then
 			_TimerService:ClearTimer(self._stunTimerId)
@@ -466,10 +456,28 @@ script MonsterAI extends Component
 				self.ApproachSpeed = self._stunSavedSpeed
 				self._isStunned = false
 				self._stunTimerId = 0
-				local renderer = self.Entity.SpriteRendererComponent
-				if renderer ~= nil then renderer.Color = Color(1, 1, 1, 1) end
+				self:DestroyStunStars()
 			end
 		end, duration)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SpawnStunStars()
+		-- 머리 위에 뺑글뻉글 도는 별 이펙트를 스폰한다 (색상 틴트 대신 사용)
+		if isvalid(self._stunStarsIndicator) then return end
+		local map = self.Entity.CurrentMap
+		if map == nil then return end
+		local pos = self.Entity.TransformComponent.Position
+		local starPos = Vector3(pos.x, pos.y + 0.9, pos.z - 0.1)
+		self._stunStarsIndicator = _SpawnService:SpawnByModelId("stunstars", "StunStars", starPos, map)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void DestroyStunStars()
+		if isvalid(self._stunStarsIndicator) then
+			self._stunStarsIndicator:Destroy()
+			self._stunStarsIndicator = nil
+		end
 	end
 
 	@ExecSpace("ServerOnly")
@@ -572,6 +580,8 @@ script MonsterAI extends Component
 		if self._slowTimerId ~= 0 then _TimerService:ClearTimer(self._slowTimerId) ; self._slowTimerId = 0 end
 		if self._stunTimerId ~= 0 then _TimerService:ClearTimer(self._stunTimerId) ; self._stunTimerId = 0 end
 		if self._dotTimerId ~= 0 then _TimerService:ClearTimer(self._dotTimerId) ; self._dotTimerId = 0 end
+		self._isStunned = false
+		self:DestroyStunStars()
 		self._reachedPlayer = false
 		self._isPushingBack = true
 		-- 먼지 이펙트 스폰 — 몬스터 바닥(y 최하단)에 붙도록 y 오프셋 적용
@@ -616,6 +626,8 @@ script MonsterAI extends Component
 		if self._dotTimerId ~= 0 then _TimerService:ClearTimer(self._dotTimerId) ; self._dotTimerId = 0 end
 		self.FreezeStack = 0
 		self._freezeSlowed = false
+		self._isStunned = false
+		self:DestroyStunStars()
 		if isvalid(self._freezeIndicator) then
 			self._freezeIndicator:Destroy()
 			self._freezeIndicator = nil
@@ -675,12 +687,23 @@ script MonsterAI extends Component
 		local dmgMultiplier = self._isElite and 1.15 or 1.0
 		_GameManager:OnMonsterReached(dmgMultiplier)
 
-		-- attack1 리소스가 있는 웨이브는 스프라이트 교체, 없는 웨이브는 스케일 들이받기로 대체
+		-- attack1 리소스가 있는 웨이브는 스프라이트 교체, 원거리(먹물) 종은 화면 잉크 스플랫,
+		-- 그 외(없는 웨이브)는 스케일 들이받기로 대체
 		if self._attackRUID ~= "" then
 			self:PlayAttackAnimation(self._attackRUID, self.MonsterSprite)
+		elseif self._isRangedInk then
+			self:PlayInkAttack()
 		else
 			self:PlayLungeAnimation()
 		end
+	end
+
+	-- 원거리(먹물) 공격 연출: 몬스터 자체는 그대로 접근/정지만 하고, 실제 "먹물이 화면에 튄" 연출은
+	-- GameManager의 UI 스플랫 아이콘이 담당한다(월드 좌표를 화면 좌표로 환산해서 그 근처에 팝시킴)
+	@ExecSpace("ServerOnly")
+	method void PlayInkAttack()
+		local pos = self.Entity.TransformComponent.Position
+		_GameManager:PlayInkSplat(Vector2(pos.x, pos.y))
 	end
 
 	@ExecSpace("Multicast")
@@ -734,6 +757,7 @@ script MonsterAI extends Component
 			self._freezeIndicator:Destroy()
 			self._freezeIndicator = nil
 		end
+		self:DestroyStunStars()
 	end
 
 end

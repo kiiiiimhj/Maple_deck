@@ -5,7 +5,12 @@ script MapManager extends Logic
 	@Sync property integer CurrentMapIndex = 1
 
 	property integer MinMapIndex = 1
-	property integer MaxMapIndex = 10
+	-- 맵11(해변 존)이 맵6의 우측 분기로 추가되면서, 그리고 맵12가 맵11의 순차적 연장으로 추가되면서
+	-- 스폰/정리 루프(SpawnWave, ClearAllMonsters 등)가 도는 범위에 11~12도 포함되도록 12로 올린다.
+	-- 맵10→11 방향의 일반 순차 이동은 MoveByDelta에서 별도로 막아, "10 다음이 11"이 아니라
+	-- "6의 분기가 11"이라는 의도를 유지한다. 반면 11→12는 진짜 순차 연장이라 별도 분기 없이
+	-- 일반 델타(+1/-1) 이동으로 자연스럽게 처리된다.
+	property integer MaxMapIndex = 12
 
 	-- 맵 이동 시 플레이어를 위치시킬 좌표. Y는 DefaultUserEnterLeaveLogic이 원래 스폰시키는 높이(0.2)와
 	-- 반드시 맞춰야 한다 — 다르면 카메라가 그 차이만큼 밀려서 몬스터가 화면 아래(UI 위)로 잘못 표시된다
@@ -126,12 +131,35 @@ script MapManager extends Logic
 		self:MoveByDelta(1)
 	end
 
+	-- 클라이언트의 "위로" 버튼 요청 (맵6 → 맵7 전용 경로). 우측 이동 버튼은 맵6에서 이제 맵11로
+	-- 분기하므로, 맵7 진입은 더 이상 RequestMoveRight와 공유하지 않고 이 전용 메서드로 분리한다
+	@ExecSpace("Server")
+	method void RequestMoveToMap7()
+		local actualIndex = self:ResolveCurrentMapIndex()
+		if actualIndex ~= 6 then return end
+		self:MoveToMap(actualIndex, 7)
+	end
+
 	-- 버튼 클릭 시점에 실제 위치를 다시 확인한 뒤 이동 — CurrentMapIndex 캐시가 실제 위치와
 	-- 어긋나 있어도(위 ResolveCurrentMapIndex 주석 참고) 항상 올바른 방향으로 이동한다
 	@ExecSpace("ServerOnly")
 	method void MoveByDelta(integer delta)
 		local actualIndex = self:ResolveCurrentMapIndex()
-		self:MoveToMap(actualIndex, actualIndex + delta)
+		local targetIndex = actualIndex + delta
+
+		-- 맵6↔11 특수 분기: 맵6의 오른쪽은 7이 아니라 11(신규 해변 존)로 이어지고, 맵11의 왼쪽은
+		-- 6으로 되돌아간다. 맵7 진입은 RequestMoveToMap7("위로" 버튼) 전용 경로로 분리되어 있다.
+		if actualIndex == 6 and delta == 1 then
+			targetIndex = 11
+		elseif actualIndex == 11 and delta == -1 then
+			targetIndex = 6
+		elseif actualIndex == 10 and delta == 1 then
+			-- MaxMapIndex를 11로 올린 부작용 방지: 맵10 오른쪽은 여전히 막다른 길이어야 한다
+			-- (11은 맵6 전용 분기이지 맵10의 다음 단계가 아님)
+			return
+		end
+
+		self:MoveToMap(actualIndex, targetIndex)
 	end
 
 	-- map 위의 모든 몬스터를 일괄 일시정지/재개

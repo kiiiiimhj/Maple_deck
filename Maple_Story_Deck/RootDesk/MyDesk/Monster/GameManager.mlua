@@ -60,6 +60,9 @@ script GameManager extends Logic
 
 	-- 일반 몬스터 처치 시 회복 포션 드롭 연출용 아이콘 (월드 사망 위치 → HP바로 포물선 비행)
 	property SpriteGUIRendererComponent potionFlyIcon = "831d845f-6b01-459e-9724-3c7e26bf1af0"
+	-- 원거리(먹물) 공격 몬스터가 도달했을 때 재생하는 화면 잉크 스플랫 아이콘 (ui/DefaultGroup.ui InkSplat)
+	property SpriteGUIRendererComponent inkSplatIcon = "a2391bcc-9ccb-48f4-8aea-a358b123557e"
+	property boolean _inkSplatActive = false
 
 	-- 회복 포션 드롭 확률 (배타적 — 빨강 5%, 흰색 2%, 나머지 93%는 드롭 없음)
 	property number RedPotionDropChance = 0.05
@@ -181,6 +184,44 @@ script GameManager extends Logic
 		if cam == nil then return end
 		cam:ShakeCamera(0.2, 0.15)
 		log("ShakeCameraOnHit triggered")
+	end
+
+	-- 원거리(먹물) 공격 몬스터가 플레이어에게 도달했을 때 MonsterAI가 호출 — 몬스터 위치 근처 화면 좌표에
+	-- 먹물 스플랫 아이콘을 툭 튀어나오듯 팝시킨 뒤, 잠깐 붙어있다가 알파를 서서히 빼며 사라지게 한다
+	@ExecSpace("Multicast")
+	method void PlayInkSplat(Vector2 worldPos)
+		if self:IsServer() then return end
+		if self._inkSplatActive then return end
+		self._inkSplatActive = true
+
+		local rawUI = _UILogic:ScreenToUIPosition(_UILogic:WorldToScreenPosition(worldPos))
+		local offsetX = (_UtilLogic:RandomDouble() * 2 - 1) * 220
+		local offsetY = (_UtilLogic:RandomDouble() * 2 - 1) * 140
+		local splatUI = Vector2(rawUI.x + offsetX, rawUI.y + offsetY)
+
+		local icon = self.inkSplatIcon
+		icon.Color = Color(1, 1, 1, 1)
+		icon.Entity:SetEnable(true)
+		local tc = icon.Entity.UITransformComponent
+		tc.anchoredPosition = splatUI
+		tc.Scale = Vector3(0.3, 0.3, 1)
+
+		-- 팝: 작은 크기에서 순간적으로 튀어나오듯 확대되며 화면에 붙는다
+		_TweenLogic:PlayTween(0.3, 1.0, 0.12, EaseType.QuadEaseOut, function(scale)
+			if isvalid(icon) then icon.Entity.UITransformComponent.Scale = Vector3(scale, scale, 1) end
+		end)
+
+		-- 잠깐 붙어있다가 알파를 서서히 빼며 사라짐
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) then return end
+			_TweenLogic:PlayTween(1.0, 0.0, 0.8, EaseType.QuadEaseIn, function(alpha)
+				if isvalid(icon) then icon.Color = Color(1, 1, 1, alpha) end
+			end)
+			_TimerService:SetTimerOnce(function()
+				if isvalid(icon) then icon.Entity:SetEnable(false) end
+				self._inkSplatActive = false
+			end, 0.8)
+		end, 0.5)
 	end
 
 	-- 몬스터 처치 시 MonsterAI가 호출
@@ -423,12 +464,15 @@ script GameManager extends Logic
 		return 4
 	end
 
-	-- 맵7~9 전용 몬스터 풀 (맵마다 별도 구성) — 7:고스텀프/엑스텀프, 8:와일드보어/아이언호그, 9:히죽대는 고스텀프/아이언보어/파이어보어
+	-- 맵7~9 전용 몬스터 풀 (맵마다 별도 구성) — 7:고스텀프/엑스텀프, 8:와일드보어/아이언호그, 9:히죽대는 고스텀프/아이언보어/파이어보어,
+	-- 11(맵6 우측 분기, 해변 존):로랑/엄티/클랑, 12:날치 슬라임/보라조개 슬라임/불가사리 문어 슬라임
 	@ExecSpace("ServerOnly")
 	method integer GetMapMonsterCount(integer mapIndex)
 		if mapIndex == 7 then return 2
 		elseif mapIndex == 8 then return 2
 		elseif mapIndex == 9 then return 3
+		elseif mapIndex == 11 then return 3
+		elseif mapIndex == 12 then return 3
 		end
 		return 1
 	end
@@ -439,6 +483,8 @@ script GameManager extends Logic
 			[7] = {"52fc9a75b6174bfa96af66c49dbb3369", "9d4f9e8f572548f692438ffa817eb52d"},
 			[8] = {"af64c62c1dcf427998c3c52f0a060fec", "eadfe08070d343a9afafe0fd6290f1c6"},
 			[9] = {"4286356e1f6a4c03a6ef125123a49bbe", "e6c2fd7213d44cd3a5dd5eed2e8fb1ce", "67523b05f66f470cb86b2c6cc46af861"},
+			[11] = {"4c306c0ee5ba4ae4ae196578aba3c079", "7ddae18f519d4c80973744fd43f3e763", "377c34e44a3e430ca02c71daeeb96b4b"},  -- 로랑/엄티/클랑
+			[12] = {"8037209a35ea435c99de75071eef88fb", "51884d41c7964a0dbec042d7e8718d64", "b84366b1179b42b98e7a096ce8536470"},  -- 날치/보라조개/불가사리문어 슬라임
 		}
 		local pool = pools[mapIndex]
 		if pool == nil then return "" end
@@ -452,6 +498,8 @@ script GameManager extends Logic
 			[7] = {"4b48cdc7601e4786bf415a0162f4ebbb", "dc128e1b65f64548841940cadd8e258d"},
 			[8] = {"76b4c7a5c6ec4a4eb3b08e23872f16a5", "24d7017733b04d1c9de247fe5bd77bfd"},
 			[9] = {"6a7cbad766b54e8c904d4c3738d4b151", "340205d6b9e44fa393a21afe3a7ecd37", "aa0b899e8dc84bfe859001bd9238c3ed"},
+			[11] = {"b093cc7dfe0445c2b0a229e0ac624021", "389cd513903b4a13a2120d7eec297c6a", "454f9337c1d543ba80d2d615c6ea3f4a"},  -- 로랑/엄티/클랑
+			[12] = {"982aec9f77294c58b7c56338dba3d776", "2e36af63570a4787b28c05fd9380d546", "a2b32d65313b44aeb100b3785317442e"},  -- 날치/보라조개/불가사리문어 슬라임
 		}
 		local pool = pools[mapIndex]
 		if pool == nil then return "" end
@@ -465,6 +513,8 @@ script GameManager extends Logic
 			[7] = {"9cad6e1fa5b04a078d2876e3a0481b40", "8177fddafdcb4bee958ab1aee7a714cc"},
 			[8] = {"0211fb67c56b4a738b2de3810a7e4509", "af01ec8b8d19418e87158d5d596edbeb"},
 			[9] = {"6efc89e6e0cd4d4abcbfa35b8e6ee51a", "5885fa79e25e4cb8880991f15ee57572", "f71e007e35634cd5b05f6c51e24d8154"},
+			[11] = {"396aeccf33ff4450b7565e86a8c5a679", "ce7b546f17c34cdd873c158fa9de8e49", "20206700fd1b47d592bfe12e6ad6148f"},  -- 로랑/엄티/클랑
+			[12] = {"2d7c20c8e93a4ae595e8f1adc19ecc59", "3e0bf51c15524c7ab695dc0c258dd2b2", "541ebe896a904e8f8e626b28e050004e"},  -- 날치/보라조개/불가사리문어 슬라임
 		}
 		local pool = pools[mapIndex]
 		if pool == nil then return "" end
@@ -478,11 +528,19 @@ script GameManager extends Logic
 			[7] = {0.55, 0.45},
 			[8] = {0.25, 0.25},
 			[9] = {0.55, 0.45, 0.25},
+			[11] = {0.45, 0.35, 0.25},  -- 로랑(4프레임)/엄티(3프레임)/클랑(2프레임)
+			[12] = {0.95, 0.85, 1.15},  -- 날치(9프레임)/보라조개(8프레임)/불가사리문어(11프레임)
 		}
 		local pool = pools[mapIndex]
 		if pool == nil then return 0.5 end
 		local i = math.max(1, math.min(idx, #pool))
 		return pool[i]
+	end
+
+	-- 맵 전용 몬스터 풀 중 원거리(먹물) 공격 종인지 여부 — 지금은 맵12의 3번째 종(불가사리 문어 슬라임)만 해당
+	@ExecSpace("ServerOnly")
+	method boolean GetMapIsRanged(integer mapIndex, integer idx)
+		return mapIndex == 12 and idx == 3
 	end
 
 	-- 몬스터가 플레이어에게 도달했을 때 MonsterAI가 호출 (엘리트는 dmgMultiplier로 공격력 가산)
