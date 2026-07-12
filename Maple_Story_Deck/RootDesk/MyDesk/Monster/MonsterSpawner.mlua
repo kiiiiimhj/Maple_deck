@@ -41,6 +41,8 @@ script MonsterSpawner extends Logic
 	-- 발판 위치와 계속 어긋나 허공에 뜨는 버그가 반복됐다).
 	property number RangedTileMinX = 9.5
 	property number RangedTileMaxX = 14.8
+	-- 이 메커니즘은 존12 전용(맵7~10에는 추가하지 않기로 확정 — 범위 축소)이라 mapIndex 하드코딩을
+	-- 유지한다. 아래 GetMapIsRangedSpecies가 이 조건을 감싼다.
 
 	-- 맵10 보너스 스테이지 설정 — 등장하면 정신없이 돌아다니며 무적으로 히트당 보상만 지급하는 보스.
 	-- 첫 방문은 100% 등장, 이후 재방문마다 BonusBossChance 확률로 재판정. 실패하면(또는 지속시간이
@@ -121,26 +123,24 @@ script MonsterSpawner extends Logic
 		end
 	end
 
-	-- 그룹D 병합(맵11+12를 map11.map 하나로 합침) 전용: 맵12 구역은 유저가 맵11 발판을 x=9.92~33.92까지
-	-- 직접 이어붙인 구간이다. 이 값은 아래 GetSpawnPosition의 기존 "±5 범위" 로컬 스폰 로직의 중심으로
-	-- 쓰인다. 원래 그 구간의 정중앙(21.92)로 잡았었는데, 하필 Zone12/TreasureChest의 실제 월드좌표(23.2)와
-	-- 거의 겹쳐서 몬스터가 상자 바로 옆에서만 계속 스폰되는 것처럼 보였다 — 상자와 충분히 떨어진 15로 이동
-	-- (MapManager.GetSpawnPositionForIndex의 플레이어 스폰 좌표도 같이 맞춰뒀다).
+	-- 존별 스폰 X 오프셋 — MapManager.ZoneInfo가 단일 진실 소스다(그룹A/B/C로 존이 늘어나도 여기 손댈
+	-- 필요 없음). 이 값은 아래 GetSpawnPosition의 "±5 범위" 로컬 스폰 로직의 중심으로 쓰인다.
 	@ExecSpace("ServerOnly")
 	method number GetZoneOffsetX(integer mapIndex)
-		if mapIndex == 12 then return 15 end
-		return 0
+		local info = _MapManager:GetZoneInfo(mapIndex)
+		return (info ~= nil) and info.spawnX or 0
 	end
 
-	-- mapIndex가 가리키는 "존"의 실제 엔티티(스폰 부모/일시정지 스코프용)를 반환한다. 병합되지 않은
-	-- 맵은 지금까지처럼 맵 루트 엔티티 그대로, 맵12는 map11.map 루트 밑의 "Zone12" 자식 컨테이너를 반환한다
-	-- (맵11 자신은 재배치 없이 루트에 그대로 남아있어 별도 컨테이너가 필요 없다).
+	-- mapIndex가 가리키는 "존"의 실제 엔티티(스폰 부모/일시정지 스코프용)를 반환한다. MapManager.ZoneInfo에서
+	-- 물리 파일/자식 컨테이너 이름을 조회 — container가 nil이면 맵 루트 자신, 아니면 그 자식 컨테이너.
 	@ExecSpace("ServerOnly")
 	method Entity GetZoneEntity(integer mapIndex)
-		local rootMap = _EntityService:GetEntityByPath("/maps/" .. _MapManager:GetMapName(mapIndex))
+		local info = _MapManager:GetZoneInfo(mapIndex)
+		local fileName = (info ~= nil) and info.file or string.format("map%02d", mapIndex)
+		local rootMap = _EntityService:GetEntityByPath("/maps/" .. fileName)
 		if rootMap == nil then return nil end
-		if mapIndex == 12 then
-			return rootMap:GetChildByName("Zone12", false)
+		if info ~= nil and info.container ~= nil then
+			return rootMap:GetChildByName(info.container, false)
 		end
 		return rootMap
 	end
@@ -387,6 +387,17 @@ script MonsterSpawner extends Logic
 				{ y = -1.22, xMin = -7.15, xMax = 7.15 },   -- 바닥
 				{ y = 1.78, xMin = -1.75, xMax = 1.75 },    -- 중앙 공중 발판
 			}
+		elseif mapIndex == 8 then
+			-- 맵8 중앙은 낮은 언덕 구조다 — 바닥(y=-1.18)에서 완만한 경사(슬로프)로 올라가 중앙에
+			-- 평평한 정상부(y=2.42)가 있고, 반대쪽 경사로 다시 내려온다. 이전에 그룹C 병합 데이터가
+			-- 일부 유실돼 "석조 아치"로 잘못 파악했던 적이 있는데(발판 173개 전량 재검증 후 재병합으로
+			-- 수정 완료), 실제 발판 데이터 기준으로 다시 확인한 정확한 형태다. 경사면 자체는 밴드가
+			-- 표현할 수 없는 구간이라 스폰 대상에서 자연히 빠지고(밴드는 고정 Y만 쓰므로), 바닥과
+			-- 언덕 정상 평지 두 곳만 명시한다.
+			return {
+				{ y = -1.18, xMin = -7.07, xMax = 7.07 },   -- 바닥
+				{ y = 2.42, xMin = -3.15, xMax = 1.35 },    -- 언덕 정상 평지
+			}
 		elseif mapIndex == 9 then
 			-- 맵9는 우측에 장식용 절벽 발판(계단식, y≈2.6~4.6)이 따로 있는데 이건 배경 연출 전용이라
 			-- 밴드를 바닥 하나로만 명시해서 몬스터가 그 위로는 절대 스폰되지 않게 한다
@@ -424,7 +435,9 @@ script MonsterSpawner extends Logic
 	-- 맵10에 보너스 보스 1마리를 즉시 스폰한다. 평소 웨이브 몬스터와 섞이지 않도록 기존 몬스터를 먼저 정리한다.
 	@ExecSpace("ServerOnly")
 	method void SpawnBonusBoss()
-		local map = _EntityService:GetEntityByPath("/maps/map10")
+		-- 그룹C 병합 이후 맵10은 물리적으로 map07.map 안의 Zone10 자식 컨테이너다 — 하드코딩된
+		-- "/maps/map10" 경로 대신 ZoneInfo 기반 GetZoneEntity로 조회해야 한다.
+		local map = self:GetZoneEntity(10)
 		if map == nil then return end
 
 		local existing = map:GetChildComponentsByTypeName("script.MonsterAI", false)
@@ -434,6 +447,11 @@ script MonsterSpawner extends Logic
 			mob.Entity:Destroy()
 		end
 
+		-- map(GetZoneEntity(10))은 이미 Zone10 자식 컨테이너 자신이 월드 오프셋(spawnX=46.5)을 갖고
+		-- 있으므로, 그 밑에 스폰되는 엔티티의 Position/wander 이동량은 전부 "그 컨테이너 기준 로컬"이다.
+		-- 여기에 GetZoneOffsetX를 또 더하면 오프셋이 두 번 적용돼(46.5+46.5) 보스가 존 밖 저 멀리
+		-- 스폰/배회하다가 카메라 밖으로 사라진다(실측 확인 — "보스가 존 밖으로 나가 화면에서 안 보임").
+		-- bands 테이블 자체는 이미 로컬(병합 전 맵10 기준) 좌표이므로 그대로 쓴다.
 		local bands = self:GetZonePlatformBands(10)
 		local groundY = bands[1].y
 		local pos = Vector3(0, groundY, 0)
@@ -510,10 +528,15 @@ script MonsterSpawner extends Logic
 			return Vector3(worldX, self:GetGroundY(rootMap, worldX), 0)
 		end
 
+		-- bands 테이블은 원본(병합 전) 맵의 로컬 좌표라, 그룹B/C처럼 존이 오프셋을 가지면 여기도
+		-- GetZoneOffsetX를 더해야 한다 — 그룹D는 밴드가 있는 존(11/12)이 없어서 이 버그가 지금까지
+		-- 한 번도 실전 테스트를 안 받았다(신규 코드 취급, 그룹B에서 처음 검증).
+		local offsetX = self:GetZoneOffsetX(mapIndex)
+
 		if isBoss then
 			-- 보스는 임팩트를 위해 바닥 밴드 중앙에 고정
 			local ground = bands[1]
-			return Vector3(0, ground.y, 0)
+			return Vector3(offsetX, ground.y, 0)
 		end
 
 		-- 발판 폭 그대로 쓰면 화면 가장자리(카메라 가시범위 밖, 대략 ±6.4)에서 스폰돼 몬스터가
@@ -521,18 +544,18 @@ script MonsterSpawner extends Logic
 		-- 그리고 발판 자체의 가장자리에도 몬스터 스프라이트 폭만큼(edgeMargin) 여유를 둬야 공중 발판
 		-- 끝에 반쯤 걸쳐서 스폰되는 걸 막을 수 있다.
 		local edgeMargin = 0.4
-		local safeMin = -5
-		local safeMax = 5
+		local safeMin = offsetX - 5
+		local safeMax = offsetX + 5
 		local clamped = {}
 		for i = 1, #bands do
-			local xMin = math.max(bands[i].xMin + edgeMargin, safeMin)
-			local xMax = math.min(bands[i].xMax - edgeMargin, safeMax)
+			local xMin = math.max(bands[i].xMin + offsetX + edgeMargin, safeMin)
+			local xMax = math.min(bands[i].xMax + offsetX - edgeMargin, safeMax)
 			if xMax > xMin then
 				table.insert(clamped, { y = bands[i].y, xMin = xMin, xMax = xMax })
 			end
 		end
 		if #clamped == 0 then
-			return Vector3(0, bands[1].y, 0)
+			return Vector3(offsetX, bands[1].y, 0)
 		end
 
 		local totalWidth = 0

@@ -715,14 +715,34 @@ script MonsterAI extends Component
 		end
 	end
 
-	-- 원거리(먹물) 공격 연출: 몬스터 자체는 그대로 접근/정지만 하고, 실제 "먹물이 화면에 튄" 연출은
-	-- GameManager의 UI 스플랫 아이콘이 담당한다(월드 좌표를 화면 좌표로 환산해서 그 근처에 팝시킴)
+	-- 원거리(먹물) 공격 연출: 화면 잉크 스플랫(GameManager 담당)에 더해, 몬스터 본인도 "찍 내뿜는"
+	-- 스쿼시 연출을 재생한다 — 리소스 팩(mob/3401009.img)에 attack1 클립이 아예 없어서(die1/hit1/
+	-- move/stand만 존재, msw-search로 확인) 근접종의 PlayLungeAnimation과 같은 절차적 방식을 쓰되,
+	-- 원거리종은 앞으로 들이받으면 안 되므로 전진 없이 제자리에서 가로로 짜부라졌다 돌아오는 모션으로 대체한다.
 	@ExecSpace("ServerOnly")
 	method void PlayInkAttack()
 		-- PlayInkSplat은 파라미터 이름부터 worldPos — WorldToScreenPosition으로 화면 좌표 환산에 쓰인다.
 		-- 로컬 Position을 넘기면 Zone12에서는 존 오프셋만큼 어긋난 화면 밖 위치로 환산돼 연출이 안 보인다.
 		local pos = self.Entity.TransformComponent.WorldPosition
 		_GameManager:PlayInkSplat(Vector2(pos.x, pos.y))
+		self:PlaySquirtAnimation()
+	end
+
+	-- 먹물을 내뿜는 순간의 스쿼시(가로로 넓어지고 세로로 눌렸다 원래대로) 연출 — 근접종의 들이받기
+	-- (PlayLungeAnimation)와 달리 위치/전체 스케일은 그대로 두고 XY 비율만 짧게 일그러뜨린다.
+	@ExecSpace("ServerOnly")
+	method void PlaySquirtAnimation()
+		if self._dead then return end
+		local mult = self._scaleMultiplier
+		local baseScale = self._currentScale
+		local squashAmount = 0.35
+		_TweenLogic:PlayTween(0.0, 1.0, 0.2, EaseType.QuadEaseOut, function(t)
+			if not isvalid(self) or not isvalid(self.Entity) then return end
+			local squash = math.sin(t * math.pi) * squashAmount
+			local sx = (baseScale + squash) * mult
+			local sy = (baseScale - squash * 0.6) * mult
+			self.Entity.TransformComponent.Scale = Vector3(sx, sy, 1.0)
+		end)
 	end
 
 	@ExecSpace("Multicast")
