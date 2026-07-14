@@ -77,7 +77,7 @@ script ShadowShopUI extends Logic
 	method void RollSkillSlots()
 		-- 현재 보유 중인 스킬(패시브 포함) 중 최대 3개를 무작위로 뽑아 3~5번 슬롯에 채운다.
 		-- 보유 스킬이 3개 미만이면 남는 슬롯은 비활성화한다
-		local candidates = { 2, 3, 4, 5, 7, 8, 9, 10 }
+		local candidates = { 2, 3, 4, 5, 7, 8, 9, 10, 11, 12 }
 		local pool = {}
 		for _, cardIdx in ipairs(candidates) do
 			if _CardManager:IsCardUnlocked(cardIdx) then table.insert(pool, cardIdx) end
@@ -134,6 +134,8 @@ script ShadowShopUI extends Logic
 		elseif cardIdx == 8 then return _CardManager.Card8IconRUID
 		elseif cardIdx == 9 then return _CardManager.Card9IconRUID
 		elseif cardIdx == 10 then return _CardManager.Card10IconRUID
+		elseif cardIdx == 11 then return _CardManager.Card11IconRUID
+		elseif cardIdx == 12 then return _CardManager.Card12IconRUID
 		end
 		return ""
 	end
@@ -141,14 +143,14 @@ script ShadowShopUI extends Logic
 	@ExecSpace("ClientOnly")
 	method void OnBuyPotion()
 		if _GameManager.ShadowVoucher < self.PotionPrice then return end
-		self:QueueReward(self.PotionIconRUID, _GameManager.HpBarFlyTargetUI, "potion")
+		self:QueueReward(self.PotionIconRUID, _GameManager.HpBarFlyTargetUI, "potion", 0)
 		self:RequestBuyPotion()
 	end
 
 	@ExecSpace("ClientOnly")
 	method void OnBuyTicket()
 		if _GameManager.ShadowVoucher < self.TicketPrice then return end
-		self:QueueReward(self.TicketIconRUID, _GameManager.LootFlyTargetUI, "ticket")
+		self:QueueReward(self.TicketIconRUID, _GameManager.LootFlyTargetUI, "ticket", 0)
 		self:RequestBuyTicket()
 	end
 
@@ -171,7 +173,7 @@ script ShadowShopUI extends Logic
 	method void OnBuySkillSlot(integer cardIdx)
 		if cardIdx == 0 then return end
 		if _GameManager.ShadowVoucher < self.SkillPrice then return end
-		self:QueueReward(self:GetCardIconRUID(cardIdx), self:GetSkillFlyTargetUI(cardIdx), "skill")
+		self:QueueReward(self:GetCardIconRUID(cardIdx), self:GetSkillFlyTargetUI(cardIdx), "skill", cardIdx)
 		self:RequestBuySkill(cardIdx)
 	end
 
@@ -188,9 +190,9 @@ script ShadowShopUI extends Logic
 	end
 
 	@ExecSpace("ClientOnly")
-	method void QueueReward(string iconRuid, Vector2 targetUI, string kind)
+	method void QueueReward(string iconRuid, Vector2 targetUI, string kind, integer cardIdx)
 		if self._pendingRewards == nil then self._pendingRewards = {} end
-		table.insert(self._pendingRewards, { icon = iconRuid, target = targetUI, kind = kind })
+		table.insert(self._pendingRewards, { icon = iconRuid, target = targetUI, kind = kind, cardIdx = cardIdx })
 	end
 
 	@ExecSpace("ClientOnly")
@@ -235,12 +237,12 @@ script ShadowShopUI extends Logic
 		end)
 		_TimerService:SetTimerOnce(function()
 			if isvalid(icon) then icon.Entity.UITransformComponent.Scale = Vector3(1, 1, 1) end
-			self:FlyRewardToTarget(icon, spawnUI, reward.target, reward.kind)
+			self:FlyRewardToTarget(icon, spawnUI, reward.target, reward.kind, reward.cardIdx)
 		end, 0.35)
 	end
 
 	@ExecSpace("ClientOnly")
-	method void FlyRewardToTarget(SpriteGUIRendererComponent icon, Vector2 startUI, Vector2 endUI, string kind)
+	method void FlyRewardToTarget(SpriteGUIRendererComponent icon, Vector2 startUI, Vector2 endUI, string kind, integer cardIdx)
 		if not isvalid(icon) then return end
 		local duration = 0.5
 		local arcHeight = 150
@@ -255,11 +257,17 @@ script ShadowShopUI extends Logic
 		end)
 		_TimerService:SetTimerOnce(function()
 			if isvalid(icon) then icon.Entity:SetEnable(false) end
-			-- 드롭으로 얻을 때와 동일한 도착 연출: 포션은 HP바, 티켓은 가방 아이콘을 살짝 펀치
+			-- 드롭으로 얻을 때와 동일한 도착 연출: 포션은 HP바, 티켓은 가방 아이콘을 살짝 펀치.
+			-- 스킬(카드 슬롯 2/3/4/5/9)은 CardManager가 몬스터 드롭 강화 때 쓰는 것과 동일한
+			-- 슬롯 확대-축소+반짝이 연출(PunchSlotScale)을 그대로 재사용한다 — 패시브(7/8/10)는
+			-- 슬롯이 없어 대응되는 펀치 연출이 없으므로 대상에서 제외한다.
 			if kind == "potion" then
 				_GameManager:PunchHpBar()
 			elseif kind == "ticket" then
 				_GameManager:PunchBagIcon()
+			elseif kind == "skill" then
+				local slotIdx = _CardManager:GetSlotForCard(cardIdx)
+				if slotIdx > 0 then _CardManager:PunchSlotScale(slotIdx) end
 			end
 		end, duration)
 	end
@@ -296,6 +304,8 @@ script ShadowShopUI extends Logic
 		elseif cardIdx == 8 then upgradeType = "critical_up"
 		elseif cardIdx == 9 then upgradeType = "energybolt_up"
 		elseif cardIdx == 10 then upgradeType = "freeze_up"
+		elseif cardIdx == 11 then upgradeType = "icecutter_up"
+		elseif cardIdx == 12 then upgradeType = "kingpepe_up"
 		end
 		self:QueueGrant({ kind = "skill", cardIdx = cardIdx, upgradeType = upgradeType })
 	end
