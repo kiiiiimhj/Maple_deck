@@ -44,6 +44,34 @@ script MonsterSpawner extends Logic
 	-- 이 메커니즘은 존12 전용(맵7~10에는 추가하지 않기로 확정 — 범위 축소)이라 mapIndex 하드코딩을
 	-- 유지한다. 아래 GetMapIsRangedSpecies가 이 조건을 감싼다.
 
+	-- 비행형 종(맵15 박쥐) 전용 스폰 높이 범위 — 발판 레이캐스트로 바닥에 고정되지 않고 이 Y 범위
+	-- 안에서 공중에 무작위로 스폰된다(이 게임은 몬스터가 실제로 날아다니지 않고 스케일만 커지며
+	-- "접근"을 표현하므로, 비행형의 차이는 스폰 높이가 바닥이 아니라 공중이라는 것뿐이다).
+	property number FlyingMinY = -0.3
+	property number FlyingMaxY = 2.0
+
+	-- 존13~15 전용 스폰 방식: GetZonePlatformBands처럼 발판 좌표를 코드에 하드코딩하는 대신, 매 스폰마다
+	-- FootholdComponent를 직접 레이캐스트해서 실제 발판 위에 스폰한다 — 유저가 Maker에서 발판을 옮기거나
+	-- 지워도 코드를 다시 맞출 필요가 없다(하드코딩 밴드가 발판 편집 때마다 어긋나던 근본 문제 해결).
+	-- 그룹A~C(맵1~10)는 이번엔 손대지 않고 그대로 두고, 이 방식이 안정적으로 검증되면 나중에 전체로 넓힌다.
+	property number MinFlatRunWidth = 0.5   -- 이보다 좁게 이어진 발판 구간은 스폰 후보에서 제외
+	property number EdgeMarginGround = 0.4  -- 바닥 발판 양끝 제외 여유
+	property number EdgeMarginAerial = 0.15 -- 공중 발판 양끝 제외 여유 (좁은 발판이라 넓게 깎으면 폭 비례
+	-- 확률 선택에서 거의 안 뽑히는 이중 페널티가 생겨 작게 잡음 — 존13 중앙 발판 폭 0.9 기준 실사용폭
+	-- 0.36→0.6로 완화)
+	property number AerialHeightThreshold = 0.3  -- 이 맵의 최저 발판 Y보다 이만큼 높으면 "공중 발판"으로 간주
+	property number FlatSlopeTolerance = 0.05  -- 발판 시작/끝 Y차가 이 이하면 "수평"으로 간주(엔진 IsHorizontal()이
+	-- 사람이 손으로 그린 발판의 미세한 오차까지 엄격히 걸러내면, 눈에는 평평한 기둥 꼭대기 같은 발판이
+	-- 계속 걸러져서 후보에서 빠지는 문제가 있어 자체 허용오차로 판정한다)
+	property any _baselineGroundYCache = nil  -- {[mapIndex] = y, ...} — 맵마다 한 번만 전체 발판을 훑어 계산
+
+	-- 유저가 존15 중앙 기둥을 지우고 대신 CustomFootholdComponent 오브젝트("foothold-848_1~3", 실측
+	-- OwnerId 3개)로 교체함 — 이 3개 발판 위에는 몬스터가 스폰되지 않게 OwnerId로 제외한다. 좌표(X범위)가
+	-- 아니라 소유 엔티티 ID로 판정해서, 유저가 Maker에서 이 오브젝트를 옮기거나 크기를 바꿔도 계속 걸러진다.
+	property string Zone15ExcludedFootholdOwnerId1 = "9e591620-aa5a-49c1-b23b-d9907ec6f3ba"
+	property string Zone15ExcludedFootholdOwnerId2 = "35bc9d79-4793-4039-8357-b37c2cda364a"
+	property string Zone15ExcludedFootholdOwnerId3 = "7b48d3a1-c42a-4f2c-8a13-efefddea1917"
+
 	-- 맵10 보너스 스테이지 설정 — 등장하면 정신없이 돌아다니며 무적으로 히트당 보상만 지급하는 보스.
 	-- 첫 방문은 100% 등장, 이후 재방문마다 BonusBossChance 확률로 재판정. 실패하면(또는 지속시간이
 	-- 끝나면) 맵9와 같은 몬스터 풀을 그대로 재사용하는 평소 웨이브 스폰으로 대체된다.
@@ -105,6 +133,7 @@ script MonsterSpawner extends Logic
 			if isvalid(self._currentBoss) then return end
 			if currentMap == nil then return end
 			local mapIndex = _MapManager.CurrentMapIndex
+			if self:IsNoMonsterZone(mapIndex) then return end
 			local spawned = self:SpawnBatchOnMap(currentMap, wave, true, false, mapIndex)
 			if #spawned > 0 then self._currentBoss = spawned[1] end
 		else
@@ -113,6 +142,8 @@ script MonsterSpawner extends Logic
 			for idx = _MapManager.MinMapIndex, _MapManager.MaxMapIndex do
 				-- 맵10에 보너스 보스가 떠 있는 동안은 평소 웨이브 몬스터를 같이 스폰하지 않는다
 				if idx == 10 and self._bonusBossActive then continue end
+				-- 존18(그림자 존 안전지대)은 몬스터가 아예 없어야 한다
+				if self:IsNoMonsterZone(idx) then continue end
 				if self._activeMaps[idx] then
 					local map = self:GetZoneEntity(idx)
 					if map ~= nil then
@@ -121,6 +152,12 @@ script MonsterSpawner extends Logic
 				end
 			end
 		end
+	end
+
+	-- 몬스터가 절대 스폰되지 않아야 하는 맵/존 — 지금은 존18(그림자 존 안전지대)만 해당.
+	@ExecSpace("ServerOnly")
+	method boolean IsNoMonsterZone(integer mapIndex)
+		return mapIndex == 18
 	end
 
 	-- 존별 스폰 X 오프셋 — MapManager.ZoneInfo가 단일 진실 소스다(그룹A/B/C로 존이 늘어나도 여기 손댈
@@ -161,6 +198,7 @@ script MonsterSpawner extends Logic
 		if self._activeMaps == nil then self._activeMaps = {} end
 		if self._activeMaps[mapIndex] then return end
 		self._activeMaps[mapIndex] = true
+		if self:IsNoMonsterZone(mapIndex) then return end
 
 		local map = self:GetZoneEntity(mapIndex)
 		if map == nil then return end
@@ -213,7 +251,7 @@ script MonsterSpawner extends Logic
 			-- 맵 전용 풀(zoneIndex>=7)은 종을 먼저 뽑아서 스폰 위치 결정에도 같이 써야 한다 —
 			-- 원거리 종은 중앙 구역에만, 근접 종은 중앙을 피해서 스폰시키려면 위치보다 종 선택이 먼저 필요하다
 			local speciesIdx = self:RollSpeciesForMap(mapIndex)
-			local pos = self:GetSpawnPosition(mapIndex, isBoss, speciesIdx)
+			local pos = self:GetSpawnPosition(mapIndex, isBoss, speciesIdx, map)
 
 			local entity = _SpawnService:SpawnByModelId(
 				self.MonsterModelId,
@@ -266,11 +304,16 @@ script MonsterSpawner extends Logic
 			self._nextEliteTimer = 5.0
 			return
 		end
+		if self:IsNoMonsterZone(_MapManager.CurrentMapIndex) then
+			-- 존18(안전지대)에 있는 동안은 엘리트도 스폰하지 않는다 — 다음 타이머에 다시 시도
+			self._nextEliteTimer = 5.0
+			return
+		end
 
 		local mapIndex = _MapManager.CurrentMapIndex
 		local wave = _GameManager.Wave
 		local speciesIdx = self:RollSpeciesForMap(mapIndex)
-		local pos = self:GetSpawnPosition(mapIndex, false, speciesIdx)
+		local pos = self:GetSpawnPosition(mapIndex, false, speciesIdx, map)
 		local entity = _SpawnService:SpawnByModelId(self.MonsterModelId, "Monster", self:ToLocalSpawnPos(map, pos), map)
 		if entity == nil then
 			log_error("MonsterSpawner: SpawnRandomElite failed")
@@ -308,6 +351,12 @@ script MonsterSpawner extends Logic
 	@ExecSpace("ServerOnly")
 	method boolean GetMapIsRangedSpecies(integer mapIndex, integer speciesIdx)
 		return _GameManager:GetMapIsRanged(self:ResolveAppearanceZone(mapIndex), speciesIdx)
+	end
+
+	-- speciesIdx가 가리키는 종이 이 맵(zoneIndex>=7) 풀에서 비행형 종인지 여부 (지금은 맵15의 박쥐만 해당)
+	@ExecSpace("ServerOnly")
+	method boolean GetMapIsFlyingSpecies(integer mapIndex, integer speciesIdx)
+		return _GameManager:GetMapIsFlying(self:ResolveAppearanceZone(mapIndex), speciesIdx)
 	end
 
 	-- safeMin~safeMax 범위에서 avoidMin~avoidMax 구간을 제외하고 X를 뽑는다. 좌/우 남은 폭에 비례해서
@@ -410,7 +459,222 @@ script MonsterSpawner extends Logic
 				{ y = -1.18, xMin = -7.07, xMax = 7.07 },   -- 바닥만
 			}
 		end
+		-- 존13~15는 더 이상 하드코딩 밴드를 쓰지 않는다 — GetSpawnPositionFromFootholds가 FootholdComponent를
+		-- 직접 레이캐스트해서 실제 발판을 찾는다(위 주석 "존13~15 전용 스폰 방식" 참고).
 		return nil
+	end
+
+	-- 존13~15 전용: 랜덤 X를 쏴서 "맞으면 쓰고 아니면 다시 쏘는" 방식 대신, FootholdComponent가 이미
+	-- 알고 있는 발판 전체(GetFootholdAll)를 한 번에 훑어서 밟을 수 있는 평평한 구간을 직접 뽑고, 그중
+	-- 하나를 폭 비례 확률로 고른다 — "밟을 수 있는지" 판단은 이미 GetFlatRuns가 코드로 갖고 있으니
+	-- 그 결과에만 스폰하면 된다.
+	@ExecSpace("ServerOnly")
+	method Vector3 GetSpawnPositionFromFootholds(integer mapIndex, boolean isBoss, Entity map)
+		local mapName = _MapManager:GetMapName(mapIndex)
+		local rootMap = _EntityService:GetEntityByPath("/maps/" .. mapName)
+		local offsetX = self:GetZoneOffsetX(mapIndex)
+		if rootMap == nil then return Vector3(offsetX, 0, 0) end
+
+		---@type FootholdComponent
+		local footholdComp = rootMap:GetComponent("FootholdComponent")
+		if footholdComp == nil then return Vector3(offsetX, 0, 0) end
+
+		local runs = self:GetFlatRuns(footholdComp)
+		local baselineY = self:GetBaselineGroundY(mapIndex, footholdComp)
+
+		if isBoss then
+			-- 보스는 임팩트를 위해 존 중앙을 포함하는 바닥(baselineY) 구간에 고정 스폰
+			for i = 1, #runs do
+				if math.abs(runs[i].y - baselineY) <= self.FlatSlopeTolerance and offsetX >= runs[i].xMin and offsetX <= runs[i].xMax then
+					return Vector3(offsetX, runs[i].y, 0)
+				end
+			end
+			return Vector3(offsetX, baselineY, 0)
+		end
+
+		local safeMin = offsetX - 5
+		local safeMax = offsetX + 5
+
+		-- 폭 비례 확률만 쓰면 공중 발판처럼 좁은 구간은 계속 안 뽑힐 수 있다 — 그래서 폭 비례로 고르기
+		-- 전에, 비어있는(몬스터가 하나도 없는) 공중 발판이 있으면 이번 스폰은 그쪽에 무조건 먼저 배정한다.
+		-- 이미 몬스터가 있으면 더 채우지 않고 아래 폭 비례 선택(주로 바닥)으로 넘어간다.
+		if map ~= nil then
+			for i = 1, #runs do
+				local run = runs[i]
+				local runWidth = run.xMax - run.xMin
+				local isAerial = run.y > baselineY + self.AerialHeightThreshold
+				local isExcluded = mapIndex == 15 and self:IsExcludedZone15Foothold(run.ownerId)
+				if isAerial and runWidth >= self.MinFlatRunWidth and not isExcluded and not self:IsRunOccupied(map, run) then
+					local margin = math.min(self.EdgeMarginAerial, runWidth * 0.3)
+					local xMin = math.max(run.xMin + margin, safeMin)
+					local xMax = math.min(run.xMax - margin, safeMax)
+					if xMax > xMin then
+						local x = xMin + _UtilLogic:RandomDouble() * (xMax - xMin)
+						return Vector3(x, run.y, 0)
+					end
+				end
+			end
+		end
+
+		-- 화면 안전 범위(±5)로 클램프하고, 폭/양끝 여유 조건을 만족하는 구간만 후보로 남긴다
+		local candidates = {}
+		local totalWidth = 0
+		for i = 1, #runs do
+			local run = runs[i]
+			local runWidth = run.xMax - run.xMin
+			local isExcluded = mapIndex == 15 and self:IsExcludedZone15Foothold(run.ownerId)
+			if runWidth >= self.MinFlatRunWidth and not isExcluded then
+				local isAerial = run.y > baselineY + self.AerialHeightThreshold
+				local margin = math.min(isAerial and self.EdgeMarginAerial or self.EdgeMarginGround, runWidth * 0.3)
+				local xMin = math.max(run.xMin + margin, safeMin)
+				local xMax = math.min(run.xMax - margin, safeMax)
+				if xMax > xMin then
+					local width = xMax - xMin
+					table.insert(candidates, { y = run.y, xMin = xMin, xMax = xMax, width = width })
+					totalWidth = totalWidth + width
+				end
+			end
+		end
+
+		if #candidates == 0 then
+			-- 화면 범위 안에 유효한 구간이 없으면(예: 핏폴 구멍 위) 존 중앙 바닥으로 안전 폴백
+			return Vector3(offsetX, baselineY, 0)
+		end
+
+		local roll = _UtilLogic:RandomDouble() * totalWidth
+		local chosen = candidates[1]
+		local acc = 0
+		for i = 1, #candidates do
+			acc = acc + candidates[i].width
+			if roll <= acc then
+				chosen = candidates[i]
+				break
+			end
+		end
+
+		local x = chosen.xMin + _UtilLogic:RandomDouble() * (chosen.xMax - chosen.xMin)
+		return Vector3(x, chosen.y, 0)
+	end
+
+	-- run(발판 구간) 범위 안에 이미 살아있는 몬스터가 있는지 확인한다. "비어있는 특수 발판을 우선
+	-- 채운다" 로직의 존재 여부 판정에 쓰인다.
+	@ExecSpace("ServerOnly")
+	---@param run any
+	method boolean IsRunOccupied(Entity map, any run)
+		local monsters = map:GetChildComponentsByTypeName("script.MonsterAI", false)
+		for i = 1, #monsters do
+			local pos = monsters[i].Entity.TransformComponent.WorldPosition
+			if pos.x >= run.xMin - 0.2 and pos.x <= run.xMax + 0.2 and math.abs(pos.y - run.y) <= 0.5 then
+				return true
+			end
+		end
+		return false
+	end
+
+	-- run의 소유 엔티티(ownerId)가 존15 foothold-848 오브젝트 3개 중 하나인지 확인한다.
+	@ExecSpace("ServerOnly")
+	method boolean IsExcludedZone15Foothold(string ownerId)
+		return ownerId == self.Zone15ExcludedFootholdOwnerId1
+			or ownerId == self.Zone15ExcludedFootholdOwnerId2
+			or ownerId == self.Zone15ExcludedFootholdOwnerId3
+	end
+
+	-- FootholdComponent가 가진 발판 전체를 한 번 훑어서, 이어진 평평한 구간(run)별로 { y, xMin, xMax }를
+	-- 만든다. 개별 발판 조각(예: 길이 0.9) 하나만 보면 바닥도 "좁다"고 오판하기 쉬워서, 실제로 연결된
+	-- 전체 폭을 기준으로 판단해야 한다.
+	@ExecSpace("ServerOnly")
+	method table GetFlatRuns(FootholdComponent footholdComp)
+		local all = footholdComp:GetFootholdAll()
+		local visited = {}
+		local runs = {}
+		for i = 1, #all do
+			local seg = all[i]
+			if not visited[seg.Id] and self:IsFlatSegment(seg) then
+				local bounds = self:GetFlatRunBounds(footholdComp, seg)
+				local xMin, xMax = bounds.xMin, bounds.xMax
+				visited[seg.Id] = true
+
+				local prevId = seg.PreviousFootholdId
+				while prevId ~= 0 do
+					local prev = footholdComp:GetFoothold(prevId)
+					if prev == nil or not self:IsFlatSegment(prev) or math.abs(prev.StartPoint.y - seg.StartPoint.y) > self.FlatSlopeTolerance then break end
+					visited[prev.Id] = true
+					prevId = prev.PreviousFootholdId
+				end
+
+				local nextId = seg.NextFootholdId
+				while nextId ~= 0 do
+					local nxt = footholdComp:GetFoothold(nextId)
+					if nxt == nil or not self:IsFlatSegment(nxt) or math.abs(nxt.StartPoint.y - seg.StartPoint.y) > self.FlatSlopeTolerance then break end
+					visited[nxt.Id] = true
+					nextId = nxt.NextFootholdId
+				end
+
+				table.insert(runs, { y = seg.StartPoint.y, xMin = xMin, xMax = xMax, ownerId = seg.OwnerId })
+			end
+		end
+		return runs
+	end
+
+	-- hit이 속한 발판이 앞뒤로 같은 높이(수평)인 이웃과 계속 이어지는 만큼을 따라가서, 실제로 연결된
+	-- 평평한 구간 전체의 xMin/xMax를 구한다. 개별 발판 조각(예: 길이 0.9) 하나만으로는 "좁다"고 오판하기
+	-- 쉬워서(바닥도 여러 조각이 이어붙어 만들어짐), 이어진 전체 폭을 기준으로 좁은지 판단해야 한다.
+	-- 반환타입을 "number, number"(다중 반환)로 선언하면 Maker 컴파일러가 [LEA-3015] CannotLoad
+	-- ("Sequence contains no elements")를 내며 이 파일 전체 로드에 실패한다(실측 확인 — 파라미터가
+	-- 없는 다중 반환 선언(예: 엔진 네이티브 GetBound())은 문제없지만, 파라미터가 있는 사용자 정의
+	-- 다중 반환 메서드에서 재현됨). 그래서 xMin/xMax를 테이블 하나에 담아 단일 반환값으로 우회한다.
+	@ExecSpace("ServerOnly")
+	---@param hit Foothold
+	method table GetFlatRunBounds(FootholdComponent footholdComp, any hit)
+		local y = hit.StartPoint.y
+		local xMin = hit.StartPoint.x
+		local xMax = hit.EndPoint.x
+
+		local prevId = hit.PreviousFootholdId
+		while prevId ~= 0 do
+			local prev = footholdComp:GetFoothold(prevId)
+			if prev == nil or not self:IsFlatSegment(prev) or math.abs(prev.StartPoint.y - y) > self.FlatSlopeTolerance then break end
+			xMin = prev.StartPoint.x
+			prevId = prev.PreviousFootholdId
+		end
+
+		local nextId = hit.NextFootholdId
+		while nextId ~= 0 do
+			local nxt = footholdComp:GetFoothold(nextId)
+			if nxt == nil or not self:IsFlatSegment(nxt) or math.abs(nxt.StartPoint.y - y) > self.FlatSlopeTolerance then break end
+			xMax = nxt.EndPoint.x
+			nextId = nxt.NextFootholdId
+		end
+
+		return { xMin = xMin, xMax = xMax }
+	end
+
+	-- 발판이 "수평"인지 판정. 엔진 네이티브 Foothold:IsHorizontal()은 오차 없이 엄격하게 판정하는 것으로
+	-- 보이는데, 유저가 Maker에서 손으로 그린 발판은 눈에 평평해 보여도 StartPoint/EndPoint의 Y가 아주
+	-- 살짝 다를 수 있다 — 그러면 IsHorizontal()이 계속 false를 반환해 그 발판이 스폰 후보에서 통째로
+	-- 빠지고(예: 기둥 꼭대기 발판), 결국 아래 바닥에만 스폰되는 것처럼 보인다. FlatSlopeTolerance 이내의
+	-- 기울기는 수평으로 간주해 이 문제를 피한다.
+	@ExecSpace("ServerOnly")
+	---@param seg Foothold
+	method boolean IsFlatSegment(any seg)
+		return math.abs(seg.EndPoint.y - seg.StartPoint.y) <= self.FlatSlopeTolerance
+	end
+
+	-- 이 맵(mapIndex)에 있는 모든 발판을 한 번 훑어서 최저 Y(=바닥 기준선)를 구하고 캐시한다. 이 값보다
+	-- AerialHeightThreshold 이상 높은 발판을 "공중 발판"으로 취급해 edgeMargin을 더 크게 적용한다.
+	@ExecSpace("ServerOnly")
+	method number GetBaselineGroundY(integer mapIndex, FootholdComponent footholdComp)
+		if self._baselineGroundYCache == nil then self._baselineGroundYCache = {} end
+		if self._baselineGroundYCache[mapIndex] ~= nil then return self._baselineGroundYCache[mapIndex] end
+
+		local all = footholdComp:GetFootholdAll()
+		local minY = 0
+		for i = 1, #all do
+			if all[i].StartPoint.y < minY then minY = all[i].StartPoint.y end
+			if all[i].EndPoint.y < minY then minY = all[i].EndPoint.y end
+		end
+		self._baselineGroundYCache[mapIndex] = minY
+		return minY
 	end
 
 	-- ── 맵10 보너스 스테이지 ──────────────────────────────────────
@@ -504,7 +768,24 @@ script MonsterSpawner extends Logic
 	-- 발판(FootholdComponent)은 항상 맵 루트(map11)에 있으므로, 레이캐스트 대상은 mapIndex로부터
 	-- 직접 다시 조회한다(호출측이 넘기는 "존 엔티티"와 발판 소유 루트가 다를 수 있어서).
 	@ExecSpace("ServerOnly")
-	method Vector3 GetSpawnPosition(integer mapIndex, boolean isBoss, integer speciesIdx)
+	method Vector3 GetSpawnPosition(integer mapIndex, boolean isBoss, integer speciesIdx, Entity map)
+		-- 비행형 종(맵15 박쥐)은 밴드/레이캐스트 어느 쪽과도 무관하게 항상 화면 안전 범위(±5) X +
+		-- FlyingMinY~FlyingMaxY 사이 임의 높이에 스폰한다 — 발판 유무와 상관없이 가장 먼저 처리해야
+		-- 한다(맵15는 아래 바닥/공중 발판 밴드도 갖고 있어서, 이 체크가 bands==nil 분기 안에 있으면
+		-- 밴드가 있는 맵에서는 아예 실행되지 않아 비행형이 무력화된다).
+		if not isBoss and mapIndex >= 7 and speciesIdx > 0 and self:GetMapIsFlyingSpecies(mapIndex, speciesIdx) then
+			local flyOffsetX = self:GetZoneOffsetX(mapIndex)
+			local fx = (_UtilLogic:RandomDouble() * 10) - 5 + flyOffsetX
+			local fy = self.FlyingMinY + _UtilLogic:RandomDouble() * (self.FlyingMaxY - self.FlyingMinY)
+			return Vector3(fx, fy, 0)
+		end
+
+		-- 존13~15는 하드코딩 밴드 대신 실제 FootholdComponent를 레이캐스트하는 방식을 쓴다(§"존13~15 전용
+		-- 스폰 방식" 참고) — 발판을 Maker에서 편집해도 코드가 어긋나지 않는다.
+		if mapIndex >= 13 and mapIndex <= 15 then
+			return self:GetSpawnPositionFromFootholds(mapIndex, isBoss, map)
+		end
+
 		local bands = self:GetZonePlatformBands(mapIndex)
 		if bands == nil then
 			local rootMap = _EntityService:GetEntityByPath("/maps/" .. _MapManager:GetMapName(mapIndex))
@@ -542,12 +823,15 @@ script MonsterSpawner extends Logic
 		-- 발판 폭 그대로 쓰면 화면 가장자리(카메라 가시범위 밖, 대략 ±6.4)에서 스폰돼 몬스터가
 		-- 양옆으로 잘려 보인다 — 맵1~3과 동일하게 화면에 안전하게 들어오는 ±5 범위로 각 밴드를 잘라서 쓴다.
 		-- 그리고 발판 자체의 가장자리에도 몬스터 스프라이트 폭만큼(edgeMargin) 여유를 둬야 공중 발판
-		-- 끝에 반쯤 걸쳐서 스폰되는 걸 막을 수 있다.
-		local edgeMargin = 0.4
+		-- 끝에 반쯤 걸쳐서 스폰되는 걸 막을 수 있다. 고정값 0.4를 그대로 양쪽에서 빼면 존13/15의 좁은
+		-- 발판(폭 0.9 이하)은 실사용 폭이 0에 가깝게 눌려서 사실상 안 뽑히는 것과 마찬가지가 된다
+		-- (실측 확인 — 300번 중 3번). 밴드 폭의 15%로 상한을 둬서 좁은 발판도 최소한의 스폰 확률을 유지한다.
 		local safeMin = offsetX - 5
 		local safeMax = offsetX + 5
 		local clamped = {}
 		for i = 1, #bands do
+			local width = bands[i].xMax - bands[i].xMin
+			local edgeMargin = math.min(0.4, width * 0.15)
 			local xMin = math.max(bands[i].xMin + offsetX + edgeMargin, safeMin)
 			local xMax = math.min(bands[i].xMax + offsetX - edgeMargin, safeMax)
 			if xMax > xMin then

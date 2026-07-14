@@ -1,0 +1,355 @@
+@Logic
+script ShadowShopUI extends Logic
+
+	-- UI 바인딩 (클라이언트 전용)
+	property Entity shopGroup = "ef5d731e-f12a-4016-8611-340f354753ac"
+	property ButtonComponent btnClose = "0648b8e6-ec4b-4be0-ad94-10595c7ad586"
+	property TextComponent currencyCountText = "1ff93e83-a105-49bb-9e00-142436698cb2"
+
+	-- 상품1: 엘릭서 포션(고정), 상품2: 알 수 없는 티켓(고정), 상품3~5: 보유 스킬 중 랜덤(최대 3개)
+	property ButtonComponent item1Btn = "60b8d93c-b00f-4763-afb5-bc8758908684"
+	property ButtonComponent item2Btn = "79b2f0b0-ae31-451c-ab7d-9556ff68aabf"
+	property ButtonComponent item3Btn = "1e01070f-d70f-47f8-b127-ece25f11ae0b"
+	property ButtonComponent item4Btn = "62ee2827-c0af-44fe-98ce-ac4887a22d1f"
+	property ButtonComponent item5Btn = "300837d6-66dd-40ad-922e-26cf3f27d60f"
+	property SpriteGUIRendererComponent item3Icon = "bb2b6a39-8db4-4be9-b432-50bc597ffda1"
+	property SpriteGUIRendererComponent item4Icon = "b30e582c-08ba-4474-b576-92dececef3e7"
+	property SpriteGUIRendererComponent item5Icon = "32cbacd0-87c6-49fb-8a46-c55e2c58b932"
+	property TextComponent item3Name = "e9d62e51-fa83-459d-a084-04c882224582"
+	property TextComponent item4Name = "a8f7088d-6220-4bc0-9bc1-0d529794451e"
+	property TextComponent item5Name = "d63862b8-c56c-42ad-9516-f040caff25da"
+
+	property integer PotionPrice = 2
+	property integer TicketPrice = 3
+	property integer SkillPrice = 2
+
+	property string PotionIconRUID = "234aca1a4ce946119b68e3717991e775"
+	property string TicketIconRUID = "5d9d14a961464c0da4c2dae7ed99b8a0"
+	-- 팝업이 닫힌 뒤 화면 중앙 부근에 등장해 실제 위치로 날아가는 구매 보상 연출 전용 아이콘 풀(최대 5개 동시 재생)
+	property SpriteGUIRendererComponent shopRewardIcon1 = "b9b95851-a175-4d94-beed-960c69399e72"
+	property SpriteGUIRendererComponent shopRewardIcon2 = "e4a5dec1-9cbf-497d-a776-cf1442f07ad0"
+	property SpriteGUIRendererComponent shopRewardIcon3 = "76af1dd6-dfcb-4a62-930c-c79aa6d16ba4"
+	property SpriteGUIRendererComponent shopRewardIcon4 = "980bec9b-b7ab-43d5-aeb8-28a4447c5a12"
+	property SpriteGUIRendererComponent shopRewardIcon5 = "81e33600-e330-40f9-af8d-fbcf7490a543"
+	-- 팝업이 열려있는 동안 클릭한 구매 건들을 쌓아뒀다가, 팝업이 닫힌 뒤 한꺼번에 연출한다
+	property any _pendingRewards = nil
+	-- 여러 개를 연달아 살 때 "파파파팍" 하고 순서대로 등장하도록 각 건 사이에 두는 간격(초)
+	property number RewardPopStagger = 0.12
+
+	property any _closeHandler = nil
+	property any _item1Handler = nil
+	property any _item2Handler = nil
+	property any _item3Handler = nil
+	property any _item4Handler = nil
+	property any _item5Handler = nil
+	-- 이번 상점 오픈 동안 3/4/5번 슬롯에 배정된 cardIdx (없으면 0)
+	property integer _slot3Card = 0
+	property integer _slot4Card = 0
+	property integer _slot5Card = 0
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		self.shopGroup.Enable = false
+		self._closeHandler = self.btnClose.Entity:ConnectEvent(ButtonClickEvent, self.OnCloseClicked)
+		self._item1Handler = self.item1Btn.Entity:ConnectEvent(ButtonClickEvent, self.OnBuyPotion)
+		self._item2Handler = self.item2Btn.Entity:ConnectEvent(ButtonClickEvent, self.OnBuyTicket)
+		self._item3Handler = self.item3Btn.Entity:ConnectEvent(ButtonClickEvent, self.OnBuySlot3)
+		self._item4Handler = self.item4Btn.Entity:ConnectEvent(ButtonClickEvent, self.OnBuySlot4)
+		self._item5Handler = self.item5Btn.Entity:ConnectEvent(ButtonClickEvent, self.OnBuySlot5)
+		-- CloseBtnBacking(닫기 버튼 뒤에 까는 흰 스프라이트)이 형제 엔티티라 배치 순서에 따라
+		-- 버튼 위로 그려질 수 있어, 닫기 버튼을 항상 맨 앞으로 확정적으로 올려둔다
+		_UILogic:SetSiblingIndex(self.btnClose.Entity.UITransformComponent, 1000000)
+		-- GroupOrder만으로는 다른 UIGroup(DefaultGroup 등)보다 항상 앞에 그려진다는 보장이 없어서,
+		-- 실제 렌더 순서를 결정하는 형제 인덱스를 확정적으로 맨 뒤(=맨 앞)로 올려둔다
+		_UILogic:SetSiblingIndex(self.shopGroup.UITransformComponent, 1000000)
+	end
+
+	-- 상점을 여는 것 자체는 서버 상태를 바꾸지 않는 순수 UI 동작이라 서버 RPC 없이 존18 NPC의
+	-- 월드 터치 스크립트(ClientOnly)가 클라이언트에서 바로 호출한다
+	@ExecSpace("ClientOnly")
+	method void Open()
+		self.currencyCountText.Text = tostring(_GameManager.ShadowVoucher)
+		self:RollSkillSlots()
+		self.shopGroup.Enable = true
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RollSkillSlots()
+		-- 현재 보유 중인 스킬(패시브 포함) 중 최대 3개를 무작위로 뽑아 3~5번 슬롯에 채운다.
+		-- 보유 스킬이 3개 미만이면 남는 슬롯은 비활성화한다
+		local candidates = { 2, 3, 4, 5, 7, 8, 9, 10 }
+		local pool = {}
+		for _, cardIdx in ipairs(candidates) do
+			if _CardManager:IsCardUnlocked(cardIdx) then table.insert(pool, cardIdx) end
+		end
+		for i = #pool, 2, -1 do
+			local j = math.floor(_UtilLogic:RandomDouble() * i) + 1
+			local tmp = pool[i] ; pool[i] = pool[j] ; pool[j] = tmp
+		end
+
+		self._slot3Card = 0
+		self._slot4Card = 0
+		self._slot5Card = 0
+		if #pool >= 1 then self._slot3Card = pool[1] end
+		if #pool >= 2 then self._slot4Card = pool[2] end
+		if #pool >= 3 then self._slot5Card = pool[3] end
+
+		self:ApplySlotDisplay(self._slot3Card, self.item3Btn, self.item3Icon, self.item3Name)
+		self:ApplySlotDisplay(self._slot4Card, self.item4Btn, self.item4Icon, self.item4Name)
+		self:ApplySlotDisplay(self._slot5Card, self.item5Btn, self.item5Icon, self.item5Name)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ApplySlotDisplay(integer cardIdx, ButtonComponent btn, SpriteGUIRendererComponent icon, TextComponent nameText)
+		if cardIdx == 0 then
+			btn.Entity:SetEnable(false)
+			return
+		end
+		btn.Entity:SetEnable(true)
+		icon.ImageRUID = self:GetCardIconRUID(cardIdx)
+		nameText.Text = self:GetCardName(cardIdx) .. " 강화"
+	end
+
+	@ExecSpace("ClientOnly")
+	method string GetCardName(integer cardIdx)
+		if cardIdx == 2 then return _CardManager.Card2Name
+		elseif cardIdx == 3 then return _CardManager.Card3Name
+		elseif cardIdx == 4 then return _CardManager.Card4Name
+		elseif cardIdx == 5 then return _CardManager.Card5Name
+		elseif cardIdx == 7 then return _CardManager.Card7Name
+		elseif cardIdx == 8 then return _CardManager.Card8Name
+		elseif cardIdx == 9 then return _CardManager.Card9Name
+		elseif cardIdx == 10 then return _CardManager.Card10Name
+		end
+		return "???"
+	end
+
+	@ExecSpace("ClientOnly")
+	method string GetCardIconRUID(integer cardIdx)
+		if cardIdx == 2 then return _CardManager.Card2IconRUID
+		elseif cardIdx == 3 then return _CardManager.Card3IconRUID
+		elseif cardIdx == 4 then return _CardManager.Card4IconRUID
+		elseif cardIdx == 5 then return _CardManager.Card5IconRUID
+		elseif cardIdx == 7 then return _CardManager.Card7IconRUID
+		elseif cardIdx == 8 then return _CardManager.Card8IconRUID
+		elseif cardIdx == 9 then return _CardManager.Card9IconRUID
+		elseif cardIdx == 10 then return _CardManager.Card10IconRUID
+		end
+		return ""
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnBuyPotion()
+		if _GameManager.ShadowVoucher < self.PotionPrice then return end
+		self:QueueReward(self.PotionIconRUID, _GameManager.HpBarFlyTargetUI, "potion")
+		self:RequestBuyPotion()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnBuyTicket()
+		if _GameManager.ShadowVoucher < self.TicketPrice then return end
+		self:QueueReward(self.TicketIconRUID, _GameManager.LootFlyTargetUI, "ticket")
+		self:RequestBuyTicket()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnBuySlot3()
+		self:OnBuySkillSlot(self._slot3Card)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnBuySlot4()
+		self:OnBuySkillSlot(self._slot4Card)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnBuySlot5()
+		self:OnBuySkillSlot(self._slot5Card)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnBuySkillSlot(integer cardIdx)
+		if cardIdx == 0 then return end
+		if _GameManager.ShadowVoucher < self.SkillPrice then return end
+		self:QueueReward(self:GetCardIconRUID(cardIdx), self:GetSkillFlyTargetUI(cardIdx), "skill")
+		self:RequestBuySkill(cardIdx)
+	end
+
+	@ExecSpace("ClientOnly")
+	method Vector2 GetSkillFlyTargetUI(integer cardIdx)
+		-- 2~5, 9는 카드 슬롯(1~5번)에 배치되므로 그 위치로, 패시브(7/8/10)는 슬롯이 없어
+		-- 화면 좌하단의 버프 아이콘(ui/DefaultGroup.ui BoosterBuff/CritBuff/FreezeBuff) 위치로 보낸다
+		if cardIdx == 7 then return Vector2(-915, -320)
+		elseif cardIdx == 8 then return Vector2(-861, -320)
+		elseif cardIdx == 10 then return Vector2(-915, -320)
+		end
+		local slotIdx = _CardManager:GetSlotForCard(cardIdx)
+		return _CardManager:GetSlotUIPosition(slotIdx)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void QueueReward(string iconRuid, Vector2 targetUI, string kind)
+		if self._pendingRewards == nil then self._pendingRewards = {} end
+		table.insert(self._pendingRewards, { icon = iconRuid, target = targetUI, kind = kind })
+	end
+
+	@ExecSpace("ClientOnly")
+	method SpriteGUIRendererComponent GetRewardIcon(integer poolIndex)
+		if poolIndex == 2 then return self.shopRewardIcon2
+		elseif poolIndex == 3 then return self.shopRewardIcon3
+		elseif poolIndex == 4 then return self.shopRewardIcon4
+		elseif poolIndex == 5 then return self.shopRewardIcon5
+		end
+		return self.shopRewardIcon1
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayAllRewardFlourishes()
+		-- 팝업이 닫힌 뒤: 산 개수만큼 "파파파팍" 순서대로 화면 중앙 부근에 등장하고, 각자 자기 목적지로 동시에 날아간다.
+		-- 아이템마다 서로 다른 아이콘 슬롯 + 좌표를 써서 겹치지 않게 하고, 등장 순서가 곧 지급 순서(RequestCloseShop)와 같다
+		if self._pendingRewards == nil then return end
+		local count = #self._pendingRewards
+		for i, reward in ipairs(self._pendingRewards) do
+			local icon = self:GetRewardIcon(((i - 1) % 5) + 1)
+			local spawnX = (i - (count + 1) / 2.0) * 90
+			local spawnUI = Vector2(spawnX, 0)
+			local popDelay = (i - 1) * self.RewardPopStagger
+			_TimerService:SetTimerOnce(function()
+				self:PopRewardIcon(icon, reward, spawnUI)
+			end, popDelay)
+		end
+		self._pendingRewards = {}
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PopRewardIcon(SpriteGUIRendererComponent icon, any reward, Vector2 spawnUI)
+		icon.ImageRUID = reward.icon
+		icon.Color = Color(1, 1, 1, 1)
+		icon.Entity:SetEnable(true)
+		local tc = icon.Entity.UITransformComponent
+		tc.anchoredPosition = spawnUI
+		tc.Scale = Vector3(0.3, 0.3, 1)
+		-- 등장 순간 자기 중심에서 살짝 통통 튀듯 팝(작게 시작 → 확 커졌다가 → 원래 크기로)
+		_TweenLogic:PlayTween(0.3, 1.2, 0.12, EaseType.BackEaseOut, function(scale)
+			if isvalid(icon) then icon.Entity.UITransformComponent.Scale = Vector3(scale, scale, 1) end
+		end)
+		_TimerService:SetTimerOnce(function()
+			if isvalid(icon) then icon.Entity.UITransformComponent.Scale = Vector3(1, 1, 1) end
+			self:FlyRewardToTarget(icon, spawnUI, reward.target, reward.kind)
+		end, 0.35)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void FlyRewardToTarget(SpriteGUIRendererComponent icon, Vector2 startUI, Vector2 endUI, string kind)
+		if not isvalid(icon) then return end
+		local duration = 0.5
+		local arcHeight = 150
+		_TweenLogic:PlayTween(0.0, 1.0, duration, EaseType.QuadEaseOut, function(t)
+			if not isvalid(icon) then return end
+			local x = startUI.x + (endUI.x - startUI.x) * t
+			local y = startUI.y + (endUI.y - startUI.y) * t + math.sin(t * math.pi) * arcHeight
+			icon.Entity.UITransformComponent.anchoredPosition = Vector2(x, y)
+			local scale = 1.0 - 0.5 * t
+			icon.Entity.UITransformComponent.Scale = Vector3(scale, scale, 1)
+			icon.Color = Color(1, 1, 1, 1.0 - 0.6 * t)
+		end)
+		_TimerService:SetTimerOnce(function()
+			if isvalid(icon) then icon.Entity:SetEnable(false) end
+			-- 드롭으로 얻을 때와 동일한 도착 연출: 포션은 HP바, 티켓은 가방 아이콘을 살짝 펀치
+			if kind == "potion" then
+				_GameManager:PunchHpBar()
+			elseif kind == "ticket" then
+				_GameManager:PunchBagIcon()
+			end
+		end, duration)
+	end
+
+	-- 팝업이 열려있는 동안 결제(화폐 차감)만 즉시 처리하고, 실제 지급(체력회복/가방/스킬강화)은
+	-- 여기에 쌓아뒀다가 팝업이 닫힌 뒤(RequestCloseShop) 클라이언트 연출 도착 시점에 맞춰 적용한다
+	property any _pendingGrants = nil
+
+	@ExecSpace("ServerOnly")
+	method void QueueGrant(any grant)
+		if self._pendingGrants == nil then self._pendingGrants = {} end
+		table.insert(self._pendingGrants, grant)
+	end
+
+	@ExecSpace("Server")
+	method void RequestBuyPotion()
+		if not _GameManager:SpendShadowVoucher(self.PotionPrice) then return end
+		self:QueueGrant({ kind = "potion" })
+	end
+
+	@ExecSpace("Server")
+	method void RequestBuyTicket()
+		if not _GameManager:SpendShadowVoucher(self.TicketPrice) then return end
+		self:QueueGrant({ kind = "ticket" })
+	end
+
+	@ExecSpace("Server")
+	method void RequestBuySkill(integer cardIdx)
+		-- 클라이언트가 무작위로 배정한 슬롯을 그대로 신뢰하지 않고, 서버에서도 실제 보유 여부를 다시 확인한다
+		if not _CardManager:IsCardUnlocked(cardIdx) then return end
+		if not _GameManager:SpendShadowVoucher(self.SkillPrice) then return end
+		local upgradeType = "dmg"
+		if cardIdx == 7 then upgradeType = "booster_up"
+		elseif cardIdx == 8 then upgradeType = "critical_up"
+		elseif cardIdx == 9 then upgradeType = "energybolt_up"
+		elseif cardIdx == 10 then upgradeType = "freeze_up"
+		end
+		self:QueueGrant({ kind = "skill", cardIdx = cardIdx, upgradeType = upgradeType })
+	end
+
+	-- 팝업을 닫을 때 클라이언트가 호출 — 쌓아둔 구매 건을 클라이언트 연출(등장 간격 RewardPopStagger초 +
+	-- 등장 후 0.35초 대기 + 비행 0.5초)이 실제로 도착하는 시점에 맞춰 각각 지급한다
+	@ExecSpace("Server")
+	method void RequestCloseShop()
+		if self._pendingGrants == nil then return end
+		for i, grant in ipairs(self._pendingGrants) do
+			local delay = (i - 1) * self.RewardPopStagger + 0.85
+			_TimerService:SetTimerOnce(function()
+				if isvalid(self) then self:ApplyGrant(grant) end
+			end, delay)
+		end
+		self._pendingGrants = {}
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ApplyGrant(any grant)
+		if grant.kind == "potion" then
+			-- 엘릭서 포션: 스킬이 아니라 체력을 가득 채우는 소모품
+			_GameManager:HealPlayer(_GameManager.PlayerMaxHp)
+		elseif grant.kind == "ticket" then
+			_PlayerInventory:AddItem("unknown_ticket", 1)
+		elseif grant.kind == "skill" then
+			_CardManager:ApplyCardUpgrade(grant.cardIdx, grant.upgradeType)
+		end
+	end
+
+	@ExecSpace("Multicast")
+	method void NotifyVoucherChanged(integer newTotal)
+		-- GameManager.AddShadowVoucher/SpendShadowVoucher가 호출 — ShadowVoucher의 @Sync 전파와
+		-- 이 Multicast 호출은 서로 다른 채널이라 순서 보장이 없어서, 파라미터로 직접 받은 값을 쓴다
+		if not self:IsClient() then return end
+		self.currencyCountText.Text = tostring(newTotal)
+		_InventoryUI:NotifyInventoryChanged()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnCloseClicked()
+		self.shopGroup.Enable = false
+		self:RequestCloseShop()
+		self:PlayAllRewardFlourishes()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		if self._closeHandler then self.btnClose.Entity:DisconnectEvent(ButtonClickEvent, self._closeHandler) end
+		if self._item1Handler then self.item1Btn.Entity:DisconnectEvent(ButtonClickEvent, self._item1Handler) end
+		if self._item2Handler then self.item2Btn.Entity:DisconnectEvent(ButtonClickEvent, self._item2Handler) end
+		if self._item3Handler then self.item3Btn.Entity:DisconnectEvent(ButtonClickEvent, self._item3Handler) end
+		if self._item4Handler then self.item4Btn.Entity:DisconnectEvent(ButtonClickEvent, self._item4Handler) end
+		if self._item5Handler then self.item5Btn.Entity:DisconnectEvent(ButtonClickEvent, self._item5Handler) end
+	end
+
+end

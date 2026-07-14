@@ -23,6 +23,14 @@ script GameManager extends Logic
 	property boolean _coinDirty = false
 	property any _coinFlushTimerId = nil
 
+	-- 그림자 숲 샵(존18 NPC) 전용 재화 — 야누스의 검 교환권. TotalCoins와 동일한 패턴(전역 저장소,
+	-- dirty-flag 지연 flush)으로 런이 끝나도 리셋되지 않고 영구 보존된다. 존16~17 몬스터 처치 시
+	-- 5% 확률로 드롭(MonsterAI.Die 참고).
+	@Sync property integer ShadowVoucher = 0
+	property number ShadowVoucherDropChance = 0.05
+	property any _voucherStorage = nil
+	property boolean _voucherDirty = false
+
 	-- 웨이브
 	@Sync property integer Wave = 1
 
@@ -71,6 +79,23 @@ script GameManager extends Logic
 	-- 회복 포션 드롭 확률 (배타적 — 빨강 5%, 흰색 2%, 나머지 93%는 드롭 없음)
 	property number RedPotionDropChance = 0.05
 	property number WhitePotionDropChance = 0.02
+
+	-- 일반 잡템(가방행) 드롭 확률 — 존16~17(그림자 존)은 야누스의 검 교환권 전용이라 제외한다
+	property number LootItemDropChance = 0.35
+
+	-- 잡템 드롭 연출용 아이콘 (포션과 동일한 방식 — 월드 사망 위치 → 가방 아이콘으로 포물선 비행).
+	-- 짧은 시간에 여러 마리가 죽어도 겹치지 않도록 4개를 돌려쓴다(2개였을 때 몰려 죽으면 슬롯이
+	-- 부족해 드롭이 밀리는 문제가 실측됨)
+	property SpriteGUIRendererComponent lootFlyIcon1 = "54e5fc11-ff74-4d52-9b94-562e62bbe4c0"
+	property SpriteGUIRendererComponent lootFlyIcon2 = "a1209f8e-2506-4f2b-8d19-45b1e8285b09"
+	property SpriteGUIRendererComponent lootFlyIcon3 = "b71cf15a-16d4-4a2d-8643-2473071ac27c"
+	property SpriteGUIRendererComponent lootFlyIcon4 = "365a8647-5b4d-4d7b-943c-86d6412215d7"
+	-- 클라이언트 전용 슬롯 상태(런타임에 지연 생성) — 각 원소: { icon, busy, landed, landUI, collectRequested, flown, token }
+	property any _lootSlots = nil
+	-- 가방 아이콘(ui/DefaultGroup.ui BtnInventory, top-right anchor -34,-180 + size 88,88)의 중심을
+	-- 화면 중앙 기준 좌표(DropFlyIcon과 동일한 좌표계)로 환산한 값
+	property Vector2 LootFlyTargetUI = Vector2(882, 316)
+	property ButtonComponent btnInventory = "22519eca-9947-4040-bbd4-45afb7d9f95a"
 
 	-- 아이템 드롭 등장 Y 좌표 보정 (죽은 위치를 화면 좌표로 환산한 값에 더해 살짝 위로 띄운다)
 	property number DropYOffset = 60
@@ -127,7 +152,18 @@ script GameManager extends Logic
 			local loaded = tonumber(raw)
 			if loaded ~= nil then self.TotalCoins = loaded end
 		end
-		self._coinFlushTimerId = _TimerService:SetTimerRepeat(function() self:FlushCoinsIfDirty() end, 3.0)
+		self._coinFlushTimerId = _TimerService:SetTimerRepeat(function()
+			self:FlushCoinsIfDirty()
+			self:FlushVoucherIfDirty()
+		end, 3.0)
+
+		-- 야누스의 검 교환권도 TotalCoins와 동일하게 전역 저장소에서 불러온다
+		self._voucherStorage = _DataStorageService:GetGlobalDataStorage("PlayerCoins")
+		local voucherErrorCode, voucherRaw = self._voucherStorage:GetAndWait("ShadowVoucher")
+		if voucherErrorCode == 0 and voucherRaw ~= nil and voucherRaw ~= "" then
+			local loadedVoucher = tonumber(voucherRaw)
+			if loadedVoucher ~= nil then self.ShadowVoucher = loadedVoucher end
+		end
 
 		log("GameManager started")
 	end
@@ -150,6 +186,44 @@ script GameManager extends Logic
 		if not self._coinDirty then return end
 		self._coinDirty = false
 		self._coinStorage:SetAndWait("TotalCoins", tostring(self.TotalCoins))
+	end
+
+	@ExecSpace("ServerOnly")
+	method void FlushVoucherIfDirty()
+		if not self._voucherDirty then return end
+		self._voucherDirty = false
+		self._voucherStorage:SetAndWait("ShadowVoucher", tostring(self.ShadowVoucher))
+	end
+
+	property string ShadowVoucherIconRUID = "b4ef5ecaa6584954831a86bd844e287e"
+
+	-- 존16~17 몬스터 처치 시 MonsterAI.Die()가 호출 — 확률 판정 후 성공하면 1개 지급.
+	-- 일반 잡템과 동일하게 사망 위치에서 바닥에 떨어졌다가 가방으로 날아가는 연출을 보여준 뒤 지급한다
+	@ExecSpace("ServerOnly")
+	method void TryDropShadowVoucher(Vector3 worldPos, number fallHeight)
+		if self.GameOver then return end
+		if _UtilLogic:RandomDouble() >= self.ShadowVoucherDropChance then return end
+		self:ScheduleLootDrop(worldPos, self.ShadowVoucherIconRUID, fallHeight, function()
+			self:AddShadowVoucher(1)
+		end)
+		log("ShadowVoucher dropped!")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void AddShadowVoucher(integer amount)
+		self.ShadowVoucher = self.ShadowVoucher + amount
+		self._voucherDirty = true
+		_ShadowShopUI:NotifyVoucherChanged(self.ShadowVoucher)
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean SpendShadowVoucher(integer amount)
+		-- 그림자 숲 샵 구매 결제. 부족하면 false만 반환하고 아무것도 바꾸지 않는다
+		if self.ShadowVoucher < amount then return false end
+		self.ShadowVoucher = self.ShadowVoucher - amount
+		self._voucherDirty = true
+		_ShadowShopUI:NotifyVoucherChanged(self.ShadowVoucher)
+		return true
 	end
 
 	-- HP/EXP 동기화 → UI 갱신
@@ -481,7 +555,10 @@ script GameManager extends Logic
 	end
 
 	-- 맵7~9 전용 몬스터 풀 (맵마다 별도 구성) — 7:고스텀프/엑스텀프, 8:와일드보어/아이언호그, 9:히죽대는 고스텀프/아이언보어/파이어보어,
-	-- 11(맵6 우측 분기, 해변 존):로랑/엄티/클랑, 12:날치 슬라임/보라조개 슬라임/불가사리 문어 슬라임
+	-- 11(맵6 우측 분기, 해변 존):로랑/엄티/클랑, 12:날치 슬라임/보라조개 슬라임/불가사리 문어 슬라임,
+	-- 13(개미굴 입구):뿔버섯/좀비버섯, 14:이블아이/커즈아이, 15:커즈아이/박쥐(비행형)/이블아이,
+	-- 16(그림자 존):내면의 그림자(비행형)/그림자 보어, 17:그림자 스텀프/그림자 엑스텀프. 18은 몬스터 없음
+	-- (MonsterSpawner.IsNoMonsterZone에서 스폰 자체를 건너뛰므로 여기 값은 안 쓰인다).
 	@ExecSpace("ServerOnly")
 	method integer GetMapMonsterCount(integer mapIndex)
 		if mapIndex == 7 then return 2
@@ -489,6 +566,11 @@ script GameManager extends Logic
 		elseif mapIndex == 9 then return 3
 		elseif mapIndex == 11 then return 3
 		elseif mapIndex == 12 then return 3
+		elseif mapIndex == 13 then return 2
+		elseif mapIndex == 14 then return 2
+		elseif mapIndex == 15 then return 3
+		elseif mapIndex == 16 then return 2
+		elseif mapIndex == 17 then return 2
 		end
 		return 1
 	end
@@ -501,6 +583,11 @@ script GameManager extends Logic
 			[9] = {"4286356e1f6a4c03a6ef125123a49bbe", "e6c2fd7213d44cd3a5dd5eed2e8fb1ce", "67523b05f66f470cb86b2c6cc46af861"},
 			[11] = {"4c306c0ee5ba4ae4ae196578aba3c079", "7ddae18f519d4c80973744fd43f3e763", "377c34e44a3e430ca02c71daeeb96b4b"},  -- 로랑/엄티/클랑
 			[12] = {"8037209a35ea435c99de75071eef88fb", "51884d41c7964a0dbec042d7e8718d64", "b84366b1179b42b98e7a096ce8536470"},  -- 날치/보라조개/불가사리문어 슬라임
+			[13] = {"574596d79f004965a293d2551343633f", "3ee3fc0f4d2e443cbb9ec424dd2c012f"},  -- 뿔버섯/좀비버섯
+			[14] = {"81f20348f7c24712922569a2ea4eb0db", "39701cc34097421bb4254e857a57076f"},  -- 이블아이/커즈아이
+			[15] = {"39701cc34097421bb4254e857a57076f", "c0d1dd5966c945b9acb0af29c173faa0", "81f20348f7c24712922569a2ea4eb0db"},  -- 커즈아이/박쥐/이블아이
+			[16] = {"f474edeec3174f87bfa3d392baa4b5f9", "017e6b488b0845b4a6cb2a4ffe02319e"},  -- 내면의 그림자(비행형)/그림자 보어
+			[17] = {"9ecfbf934fc242b89fb12bedfcf6da34", "b1ad4e54249d4415aa21aabb3f8c4188"},  -- 그림자 스텀프/그림자 엑스텀프
 		}
 		local pool = pools[mapIndex]
 		if pool == nil then return "" end
@@ -516,6 +603,11 @@ script GameManager extends Logic
 			[9] = {"6a7cbad766b54e8c904d4c3738d4b151", "340205d6b9e44fa393a21afe3a7ecd37", "aa0b899e8dc84bfe859001bd9238c3ed"},
 			[11] = {"b093cc7dfe0445c2b0a229e0ac624021", "389cd513903b4a13a2120d7eec297c6a", "454f9337c1d543ba80d2d615c6ea3f4a"},  -- 로랑/엄티/클랑
 			[12] = {"982aec9f77294c58b7c56338dba3d776", "2e36af63570a4787b28c05fd9380d546", "a2b32d65313b44aeb100b3785317442e"},  -- 날치/보라조개/불가사리문어 슬라임
+			[13] = {"5007e0c04c374f2d9731c084f5a7f56e", "e47274fe9ecd47989d9a9480ee04def4"},  -- 뿔버섯/좀비버섯
+			[14] = {"885a9d456ecc4cb6a0bc5d980cfe733c", "125b36b6ffd441d995f76b432ba1d19d"},  -- 이블아이/커즈아이
+			[15] = {"125b36b6ffd441d995f76b432ba1d19d", "5bbe31964b654ddfbd36715de53200ba", "885a9d456ecc4cb6a0bc5d980cfe733c"},  -- 커즈아이/박쥐/이블아이
+			[16] = {"acdaa2ef5c3b4d42bd48bfb097b6671a", "38ab8e6747a342138c263cbcc16d00ad"},  -- 내면의 그림자/그림자 보어
+			[17] = {"6d20710bc80047d9a870a8a29d329614", "35e7323d0fe74a4cb8ae7059b7c8c2aa"},  -- 그림자 스텀프/그림자 엑스텀프
 		}
 		local pool = pools[mapIndex]
 		if pool == nil then return "" end
@@ -531,6 +623,11 @@ script GameManager extends Logic
 			[9] = {"6efc89e6e0cd4d4abcbfa35b8e6ee51a", "5885fa79e25e4cb8880991f15ee57572", "f71e007e35634cd5b05f6c51e24d8154"},
 			[11] = {"396aeccf33ff4450b7565e86a8c5a679", "ce7b546f17c34cdd873c158fa9de8e49", "20206700fd1b47d592bfe12e6ad6148f"},  -- 로랑/엄티/클랑
 			[12] = {"2d7c20c8e93a4ae595e8f1adc19ecc59", "3e0bf51c15524c7ab695dc0c258dd2b2", "541ebe896a904e8f8e626b28e050004e"},  -- 날치/보라조개/불가사리문어 슬라임
+			[13] = {"0864ecd7c28144939c2ecd6abb33893b", "0be38336b56b477993d5809b1a6ca977"},  -- 뿔버섯/좀비버섯
+			[14] = {"e998acf954cd4ec2b9521372a6d1dfd5", "f68053f8c69341599832f14909ffc513"},  -- 이블아이/커즈아이
+			[15] = {"f68053f8c69341599832f14909ffc513", "20259b51459644abb50e0b6a9e32c11c", "e998acf954cd4ec2b9521372a6d1dfd5"},  -- 커즈아이/박쥐/이블아이
+			[16] = {"a0044de5e0aa4d0ba18680bdf12969a0", "54210e27a6004ff6aeeb02a81998794a"},  -- 내면의 그림자/그림자 보어
+			[17] = {"d8efb8701dd24e0ab4dbf9633772facf", "8cd517d140e443b7841a506adaee340f"},  -- 그림자 스텀프/그림자 엑스텀프
 		}
 		local pool = pools[mapIndex]
 		if pool == nil then return "" end
@@ -546,6 +643,11 @@ script GameManager extends Logic
 			[9] = {0.55, 0.45, 0.25},
 			[11] = {0.45, 0.35, 0.25},  -- 로랑(4프레임)/엄티(3프레임)/클랑(2프레임)
 			[12] = {0.95, 0.85, 1.15},  -- 날치(9프레임)/보라조개(8프레임)/불가사리문어(11프레임)
+			[13] = {0.45, 0.35},  -- 뿔버섯(4프레임)/좀비버섯(3프레임)
+			[14] = {0.35, 0.35},  -- 이블아이(3프레임)/커즈아이(3프레임)
+			[15] = {0.35, 0.95, 0.35},  -- 커즈아이(3프레임)/박쥐(9프레임)/이블아이(3프레임)
+			[16] = {1.45, 0.55},  -- 내면의 그림자(14프레임)/그림자 보어(5프레임)
+			[17] = {0.65, 0.75},  -- 그림자 스텀프(6프레임)/그림자 엑스텀프(7프레임)
 		}
 		local pool = pools[mapIndex]
 		if pool == nil then return 0.5 end
@@ -557,6 +659,16 @@ script GameManager extends Logic
 	@ExecSpace("ServerOnly")
 	method boolean GetMapIsRanged(integer mapIndex, integer idx)
 		return mapIndex == 12 and idx == 3
+	end
+
+	-- 맵 전용 몬스터 풀 중 비행형 종인지 여부 — 맵15의 2번째 종(박쥐), 맵16의 1번째 종(내면의 그림자).
+	-- 비행형은 발판 레이캐스트로 바닥에 고정되지 않고 화면 안 임의의 높이(공중)에 스폰된다
+	-- (MonsterSpawner.GetSpawnPosition 참고)
+	@ExecSpace("ServerOnly")
+	method boolean GetMapIsFlying(integer mapIndex, integer idx)
+		if mapIndex == 15 and idx == 2 then return true end
+		if mapIndex == 16 and idx == 1 then return true end
+		return false
 	end
 
 	-- 몬스터가 플레이어에게 도달했을 때 MonsterAI가 호출 (엘리트는 dmgMultiplier로 공격력 가산)
@@ -613,6 +725,8 @@ script GameManager extends Logic
 			end
 		end
 		self._goldBonusCheckpoint = self.Gold
+		-- 가방 환전은 여기서 하지 않는다 — "이어하기"를 고르면 가방 아이템은 그대로 유지되어야 하므로,
+		-- 실제로 "처음부터 다시하기"를 선택했을 때(RestartGame)만 환전+초기화한다
 		log("Game Over!")
 	end
 
@@ -665,6 +779,8 @@ script GameManager extends Logic
 		-- 이전 런에서 맵4+까지 진행했더라도 시작 맵(map02)으로 되돌린다. 이미 시작 맵이면 내부에서 no-op
 		_MapManager:SilentMoveToMap(_MapManager.CurrentMapIndex, _MapManager.DesiredStartMapIndex)
 		_CardManager:ResetAllCards()
+		-- "처음부터 다시하기": 이번 런에 가방에 쌓인 잡템은 골드로 환전한 뒤 가방을 비운다
+		_PlayerInventory:ConvertAllToCoins()
 		_MonsterSpawner:ClearAllMonsters()
 		_MonsterSpawner:ResetEliteTracking()
 		_MonsterSpawner:RestartSpawning()
@@ -695,7 +811,7 @@ script GameManager extends Logic
 	end
 
 	@ExecSpace("ServerOnly")
-	method void TryDropHealPotion(Vector3 worldPos)
+	method void TryDropHealPotion(Vector3 worldPos, number fallHeight)
 		-- 일반 몬스터 처치 시 가끔 회복 포션을 드롭한다 (빨강/흰색은 배타적 — 합쳐서 15% 확률)
 		if self.GameOver then return end
 
@@ -713,7 +829,263 @@ script GameManager extends Logic
 		end
 		if potionType == 0 then return end
 
-		self:ApplyPotionDrop(potionType, worldPos)
+		self:ApplyPotionDrop(potionType, worldPos, fallHeight)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void TryDropLootItem(Vector3 worldPos, number fallHeight)
+		-- 존16~17을 제외한 전 구간에서 몬스터 처치 시 확률로 잡템 1개를 지급한다.
+		-- 포션과 동일하게 사망 위치에서 바닥에 떨어지는 연출을 보여준 뒤, 가방에 도착하는 시점에 실제로 지급한다
+		if self.GameOver then return end
+		if _UtilLogic:RandomDouble() >= self.LootItemDropChance then return end
+		local itemIds = { "slime_ooze", "monster_bone", "monster_claw", "old_leather", "mana_crystal" }
+		local pickIndex = math.floor(_UtilLogic:RandomDouble() * #itemIds) + 1
+		local itemId = itemIds[pickIndex]
+		local iconRuid = _PlayerInventory:GetItemDef(itemId).icon
+		-- 실제 지급(AddItem)은 연출이 끝나야 일어나므로, 순번은 드롭이 확정된 지금 미리 예약해둔다
+		-- (그래야 나중에 죽은 몬스터의 아이템이 랜덤 딜레이가 짧아 먼저 도착해도 순서가 안 뒤바뀐다)
+		_PlayerInventory:ReserveAcquisitionOrder(itemId)
+
+		self:ScheduleLootDrop(worldPos, iconRuid, fallHeight, function()
+			_PlayerInventory:AddItem(itemId, 1)
+		end)
+	end
+
+	-- 잡템/야누스의 검 교환권 공용 — 포션과 동일하게, 드랍 연출이 끝나기 전에 맵을 이동하면
+	-- 그 자리에서 바로 주운 것으로 치고 즉시 지급 + 클라이언트에 조기수거를 알린다.
+	-- fallHeight: 비행형 몬스터처럼 사망 위치가 공중일 때, 바닥(타일) 높이까지 먼저 빙그르르 돌며
+	-- 떨어지는 연출에 걸리는 추가 시간(UI px 기준, 0이면 생략)만큼 arrivalDelay에도 함께 반영한다
+	@ExecSpace("ServerOnly")
+	method void ScheduleLootDrop(Vector3 worldPos, string iconRuid, number fallHeight, any onGrant)
+		local dropZone = _MapManager.CurrentMapIndex
+		local groundDelay = 0.6 + _UtilLogic:RandomDouble() * 0.6
+		local fallDuration = 0
+		if fallHeight > 0 then fallDuration = math.min(0.6, 0.15 + fallHeight / 500) end
+		local arrivalDelay = fallDuration + self.PotionPopDuration + groundDelay + self.PotionFlyDuration
+
+		local granted = false
+		local watchTimerId = 0
+		watchTimerId = _TimerService:SetTimerRepeat(function()
+			if not isvalid(self) or granted then return end
+			if _MapManager.CurrentMapIndex ~= dropZone then
+				granted = true
+				onGrant()
+				_TimerService:ClearTimer(watchTimerId)
+				self:RequestLootCollectNow()
+			end
+		end, 0.15)
+
+		_TimerService:SetTimerOnce(function()
+			if isvalid(self) and not granted then
+				granted = true
+				onGrant()
+				_TimerService:ClearTimer(watchTimerId)
+			end
+		end, arrivalDelay)
+
+		self:PlayLootDropVisual(Vector2(worldPos.x, worldPos.y), iconRuid, groundDelay, fallHeight)
+	end
+
+	-- _lootSlots를 지연 생성해서 돌려준다 — OnBeginPlay가 아니라 여기서 만드는 이유는 클라이언트
+	-- 바인딩(icon1~4)이 전부 준비된 뒤 아무 때나 안전하게 호출할 수 있게 하기 위해서다
+	@ExecSpace("ClientOnly")
+	method table GetLootSlots()
+		if self._lootSlots == nil then
+			self._lootSlots = {
+				{ icon = self.lootFlyIcon1, busy = false, landed = false, landUI = Vector2(0, 0), collectRequested = false, flown = false, token = 0 },
+				{ icon = self.lootFlyIcon2, busy = false, landed = false, landUI = Vector2(0, 0), collectRequested = false, flown = false, token = 0 },
+				{ icon = self.lootFlyIcon3, busy = false, landed = false, landUI = Vector2(0, 0), collectRequested = false, flown = false, token = 0 },
+				{ icon = self.lootFlyIcon4, busy = false, landed = false, landUI = Vector2(0, 0), collectRequested = false, flown = false, token = 0 },
+			}
+		end
+		return self._lootSlots
+	end
+
+	@ExecSpace("Multicast")
+	method void PlayLootDropVisual(Vector2 worldPos, string iconRuid, number groundDelay, number fallHeight)
+		-- 사망 위치에 잡템이 떨어진 것처럼 보여준 뒤, 잠시 멈췄다가 가방 아이콘으로 날아간다.
+		-- 비행형 몬스터(fallHeight>0)는 먼저 바닥 높이까지 빙그르르 돌며 떨어진 뒤 이어서 홉 연출을 재생한다.
+		-- 아이콘 슬롯 4개 중 비어있는 첫 슬롯을 쓴다 — 몰려 죽어서 4개가 전부 busy면 이번 드롭은
+		-- 연출 없이 스킵한다(데이터 지급 자체는 서버 타이머로 별도 처리되어 영향 없음)
+		if self:IsServer() then return end
+		local slots = self:GetLootSlots()
+		local slotIndex = 0
+		for i = 1, #slots do
+			if not slots[i].busy then
+				slotIndex = i
+				break
+			end
+		end
+		if slotIndex == 0 then return end
+
+		local slot = slots[slotIndex]
+		slot.busy = true
+		slot.landed = false
+		slot.collectRequested = false
+		slot.flown = false
+		slot.token = slot.token + 1
+		local myToken = slot.token
+		local icon = slot.icon
+
+		-- 어떤 이유로든 정상 경로(가방으로 날아가서 PunchBagIcon)가 끝까지 완주되지 못하면, 아이템이
+		-- 화면에 영구히 남아있는 대신 5초 뒤 강제로 정리되도록 안전장치를 걸어둔다
+		_TimerService:SetTimerOnce(function()
+			self:WatchdogClearLootIcon(slotIndex, myToken)
+		end, 5.0)
+
+		local rawUI = _UILogic:ScreenToUIPosition(_UILogic:WorldToScreenPosition(worldPos))
+		local startUI = Vector2(rawUI.x, rawUI.y + self.DropYOffset)
+		icon.ImageRUID = iconRuid
+		icon.Color = Color(1, 1, 1, 1)
+		icon.Entity:SetEnable(true)
+		local tc = icon.Entity.UITransformComponent
+		tc.anchoredPosition = startUI
+		tc.Scale = Vector3(0.3, 0.3, 1)
+		tc.ZRotation = 0
+
+		-- 등장 순간 살짝 통통 튀듯 팝(작게 시작 → 확 커졌다가 → 원래 크기로) 연출
+		_TweenLogic:PlayTween(0.3, 1.2, 0.12, EaseType.BackEaseOut, function(scale)
+			if isvalid(icon) then icon.Entity.UITransformComponent.Scale = Vector3(scale, scale, 1) end
+		end)
+		_TimerService:SetTimerOnce(function()
+			if isvalid(icon) then icon.Entity.UITransformComponent.Scale = Vector3(1, 1, 1) end
+		end, 0.12)
+
+		local continueFromGround = function(groundUI)
+			self:PlayDropPop(icon, groundUI, function(landUI)
+				slot.landed = true
+				slot.landUI = landUI
+				if slot.collectRequested then
+					self:TryFlyLootToBag(slotIndex, landUI)
+					return
+				end
+				_TimerService:SetTimerOnce(function()
+					self:TryFlyLootToBag(slotIndex, landUI)
+				end, groundDelay)
+			end)
+		end
+
+		if fallHeight > 0 then
+			self:PlayFallSpin(icon, startUI, fallHeight, continueFromGround)
+		else
+			continueFromGround(startUI)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayFallSpin(SpriteGUIRendererComponent icon, Vector2 startUI, number fallHeight, any onGrounded)
+		-- 비행형 몬스터 전용: 사망 위치가 공중이므로, 바닥(타일) 높이까지 빙그르르 돌면서 떨어지는 연출을 먼저 재생한다
+		if not isvalid(icon) then return end
+		local groundUI = Vector2(startUI.x, startUI.y - fallHeight)
+		local duration = math.min(0.6, 0.15 + fallHeight / 500)
+		local spinDegrees = 540 + fallHeight
+
+		_TweenLogic:PlayTween(0.0, 1.0, duration, EaseType.QuadEaseIn, function(t)
+			if not isvalid(icon) then return end
+			local y = startUI.y + (groundUI.y - startUI.y) * t
+			icon.Entity.UITransformComponent.anchoredPosition = Vector2(startUI.x, y)
+			icon.Entity.UITransformComponent.ZRotation = spinDegrees * t
+		end)
+
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(icon) then return end
+			icon.Entity.UITransformComponent.ZRotation = 0
+			if onGrounded ~= nil then onGrounded(groundUI) end
+		end, duration)
+	end
+
+	-- 서버가 "플레이어가 드랍된 존을 떠났다"고 판단한 시점에 호출 — 현재 비행 중인 잡템 슬롯이 있으면
+	-- 이미 착지했으면 바로 가방으로 날아가게 하고, 아직 홉 중이면 착지 콜백이 대기 없이 바로 날아가게 한다
+	@ExecSpace("Multicast")
+	method void RequestLootCollectNow()
+		if self:IsServer() then return end
+		local slots = self:GetLootSlots()
+		for i = 1, #slots do
+			local slot = slots[i]
+			if slot.busy then
+				slot.collectRequested = true
+				if slot.landed then self:TryFlyLootToBag(i, slot.landUI) end
+			end
+		end
+	end
+
+	-- 맵 이동으로 화면(카메라)이 통째로 바뀔 때 호출됨(MapManager.OnSyncProperty) — 드롭 아이콘은
+	-- 화면 고정 UI 좌표라 맵이 바뀌어도 스스로는 안 움직인다. 존을 떠났다는 걸 서버가 감지해 조기수거를
+	-- 알려주는 경로(RequestLootCollectNow)는 있지만, 그 시점에 아이콘이 아직 낙하/홉 애니메이션 중이면
+	-- 그 연출을 끝까지 재생한 뒤에야 날아가서 "화면에 잠깐 남아있는 것처럼" 보일 수 있었다 — 여기서는
+	-- 지금 화면에 떠 있는 위치 그대로에서 곧장 가방으로 날아가도록 강제로 건너뛴다
+	@ExecSpace("ClientOnly")
+	method void ForceFinishLootDrops()
+		local slots = self:GetLootSlots()
+		for i = 1, #slots do
+			local slot = slots[i]
+			if slot.busy and not slot.flown and isvalid(slot.icon) then
+				slot.flown = true
+				local pos = slot.icon.Entity.UITransformComponent.anchoredPosition
+				self:FlyLootToBag(i, pos)
+			end
+		end
+	end
+
+	-- FlyLootToBag 진입점을 하나로 모아서, 조기 수거 경로와 정상 groundDelay 타이머 경로가 겹쳐도
+	-- 실제로는 딱 한 번만 날아가도록 가드한다 (TryFlyPotionToHpBar와 동일한 목적)
+	@ExecSpace("ClientOnly")
+	method void TryFlyLootToBag(integer slotIndex, Vector2 landUI)
+		local slot = self:GetLootSlots()[slotIndex]
+		if slot.flown then return end
+		slot.flown = true
+		self:FlyLootToBag(slotIndex, landUI)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void FlyLootToBag(integer slotIndex, Vector2 startUI)
+		local slot = self:GetLootSlots()[slotIndex]
+		local icon = slot.icon
+		if not isvalid(icon) then return end
+		local endUI = self.LootFlyTargetUI
+		local arcHeight = 150
+
+		_TweenLogic:PlayTween(0.0, 1.0, self.PotionFlyDuration, EaseType.QuadEaseOut, function(t)
+			if not isvalid(icon) then return end
+			local x = startUI.x + (endUI.x - startUI.x) * t
+			local y = startUI.y + (endUI.y - startUI.y) * t + math.sin(t * math.pi) * arcHeight
+			icon.Entity.UITransformComponent.anchoredPosition = Vector2(x, y)
+			local scale = 1.0 - 0.5 * t
+			icon.Entity.UITransformComponent.Scale = Vector3(scale, scale, 1)
+			icon.Color = Color(1, 1, 1, 1.0 - 0.6 * t)
+		end)
+
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(icon) then return end
+			icon.Entity:SetEnable(false)
+			slot.busy = false
+			self:PunchBagIcon()
+		end, self.PotionFlyDuration)
+	end
+
+	-- 어떤 이유로든(예상 못한 버그, 아이콘 무효화 등) 정상 경로가 끝까지 완주되지 못해 5초가 지나도
+	-- 여전히 그 드롭이 busy 상태면, 화면에 아이템이 영구히 남지 않도록 강제로 숨기고 슬롯을 반납한다.
+	-- token으로 "그 사이 같은 슬롯이 이미 새 드롭에 재사용됐는지"를 구분해 새 드롭을 잘못 지우지 않는다
+	@ExecSpace("ClientOnly")
+	method void WatchdogClearLootIcon(integer slotIndex, integer token)
+		local slot = self:GetLootSlots()[slotIndex]
+		if slot.token ~= token then return end
+		if not slot.busy then return end
+		if isvalid(slot.icon) then slot.icon.Entity:SetEnable(false) end
+		slot.busy = false
+		log_warning("Loot drop visual watchdog: force-cleared a stuck icon (slot " .. slotIndex .. ")")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PunchBagIcon()
+		-- 잡템 도착 시 가방 아이콘을 잠깐 확대-축소시켜 도착감을 준다
+		if not isvalid(self.btnInventory) then return end
+		_TweenLogic:ScaleTo(self.btnInventory.Entity, Vector2(1.15, 1.15), 0.12, EaseType.BackEaseOut)
+		_TimerService:SetTimerOnce(function()
+			if isvalid(self.btnInventory) then
+				_TweenLogic:ScaleTo(self.btnInventory.Entity, Vector2(1, 1), 0.15, EaseType.QuadEaseOut)
+			end
+		end, 0.12)
 	end
 
 	-- 맵10 보너스 보스 전용: 드롭 여부 확률은 호출측(MonsterAI.OnBonusBossHit)이 이미 굴렸으므로
@@ -722,12 +1094,16 @@ script GameManager extends Logic
 	method void ForceDropPotion(Vector3 worldPos)
 		if self.GameOver then return end
 		local potionType = (_UtilLogic:RandomDouble() < 0.7) and 1 or 2
-		self:ApplyPotionDrop(potionType, worldPos)
+		-- 보너스 보스는 비행형이 아니라 사망 위치가 항상 바닥이므로 fallHeight=0 고정
+		self:ApplyPotionDrop(potionType, worldPos, 0)
 	end
 
 	-- TryDropHealPotion / ForceDropPotion 공용 — 회복량 계산 + 드롭 연출/타이밍 적용
+	-- fallHeight: 비행형 몬스터처럼 사망 위치가 공중일 때, 바닥(타일) 높이까지 먼저 빙그르르 돌며
+	-- 떨어지는 연출에 걸리는 추가 시간(UI px 기준, 0이면 생략)만큼 arrivalDelay에도 함께 반영한다
+	-- (TryDropLootItem/ScheduleLootDrop과 동일한 패턴)
 	@ExecSpace("ServerOnly")
-	method void ApplyPotionDrop(integer potionType, Vector3 worldPos)
+	method void ApplyPotionDrop(integer potionType, Vector3 worldPos, number fallHeight)
 		local basePercent = (potionType == 1) and self.RedPotionHealPercent or self.WhitePotionHealPercent
 		-- 유물 레벨업 보너스(레벨 합계 1당 +1%p)를 회복 비율에 더한다
 		local healPercent = basePercent + (_RelicInventory:GetPotionHealBonusPercent() / 100)
@@ -740,7 +1116,9 @@ script GameManager extends Logic
 		-- 바뀌는 즉시 회복을 적용하고 클라이언트에 "지금 바로 수거하라"고 알린다.
 		local dropZone = _MapManager.CurrentMapIndex
 		local groundDelay = 0.6 + _UtilLogic:RandomDouble() * 0.6
-		local arrivalDelay = self.PotionPopDuration + groundDelay + self.PotionFlyDuration
+		local fallDuration = 0
+		if fallHeight > 0 then fallDuration = math.min(0.6, 0.15 + fallHeight / 500) end
+		local arrivalDelay = fallDuration + self.PotionPopDuration + groundDelay + self.PotionFlyDuration
 
 		local healed = false
 		local watchTimerId = 0
@@ -762,12 +1140,14 @@ script GameManager extends Logic
 			end
 		end, arrivalDelay)
 
-		self:PlayPotionDropVisual(Vector2(worldPos.x, worldPos.y), potionType, groundDelay)
+		self:PlayPotionDropVisual(Vector2(worldPos.x, worldPos.y), potionType, groundDelay, fallHeight)
 	end
 
 	@ExecSpace("Multicast")
-	method void PlayPotionDropVisual(Vector2 worldPos, integer potionType, number groundDelay)
-		-- 사망 위치에 포션이 떨어진 것처럼 보여준 뒤, 잠시 멈췄다가 HP바로 날아간다
+	method void PlayPotionDropVisual(Vector2 worldPos, integer potionType, number groundDelay, number fallHeight)
+		-- 사망 위치에 포션이 떨어진 것처럼 보여준 뒤, 잠시 멈췄다가 HP바로 날아간다.
+		-- 비행형 몬스터(fallHeight>0)는 먼저 바닥 높이까지 빙그르르 돌며 떨어진 뒤 이어서 홉 연출을 재생한다
+		-- (PlayLootDropVisual과 동일한 패턴 — PlayFallSpin은 공용 메서드).
 		if self:IsServer() then return end
 		-- 이전 드롭 연출이 아직 진행 중이면 스킵 (회복은 서버에서 별도로 처리됨)
 		if self._potionFlyActive then return end
@@ -785,21 +1165,30 @@ script GameManager extends Logic
 		local tc = icon.Entity.UITransformComponent
 		tc.anchoredPosition = startUI
 		tc.Scale = Vector3(1, 1, 1)
+		tc.ZRotation = 0
 
 		-- 메이플식 드롭: 좌우 랜덤 방향으로 포물선 홉 → 점점 작아지는 바운스 2회로 바닥에 안착한 뒤,
 		-- groundDelay만큼 머물렀다가 HP바로 날아간다. 단, 그 사이 존을 떠나 조기 수거 요청이 이미
 		-- 와있었다면(홉 중에 존이 바뀐 경우) 대기 없이 바로 날아간다.
-		self:PlayDropPop(icon, startUI, function(landUI)
-			self._potionLanded = true
-			self._potionLandUI = landUI
-			if self._potionCollectRequested then
-				self:TryFlyPotionToHpBar(icon, landUI)
-				return
-			end
-			_TimerService:SetTimerOnce(function()
-				self:TryFlyPotionToHpBar(icon, landUI)
-			end, groundDelay)
-		end)
+		local continueFromGround = function(groundUI)
+			self:PlayDropPop(icon, groundUI, function(landUI)
+				self._potionLanded = true
+				self._potionLandUI = landUI
+				if self._potionCollectRequested then
+					self:TryFlyPotionToHpBar(icon, landUI)
+					return
+				end
+				_TimerService:SetTimerOnce(function()
+					self:TryFlyPotionToHpBar(icon, landUI)
+				end, groundDelay)
+			end)
+		end
+
+		if fallHeight > 0 then
+			self:PlayFallSpin(icon, startUI, fallHeight, continueFromGround)
+		else
+			continueFromGround(startUI)
+		end
 	end
 
 	-- 서버가 "플레이어가 드랍된 존을 떠났다"고 판단한 시점에 호출 — 이미 바닥에 착지해 대기 중이면
@@ -935,6 +1324,7 @@ script GameManager extends Logic
 	method void OnEndPlay()
 		if self._coinFlushTimerId then _TimerService:ClearTimer(self._coinFlushTimerId) end
 		self:FlushCoinsIfDirty()
+		self:FlushVoucherIfDirty()
 	end
 
 end

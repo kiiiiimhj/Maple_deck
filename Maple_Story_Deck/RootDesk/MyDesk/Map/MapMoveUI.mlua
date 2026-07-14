@@ -41,13 +41,29 @@ script MapMoveUI extends Logic
 		log("MapMoveUI: NotifyBossDefeated bossDefeated=" .. tostring(bossDefeated) .. " showLock=" .. tostring(showLock))
 	end
 
+	-- Zone15PuzzleLogic.OnSwitchTouched()가 정답을 다 맞췄을 때 호출 — 지금 존15에 있는 클라이언트라면
+	-- 자물쇠를 즉시 ">"로 바꿔준다(IsSolved의 @Sync 전파를 기다리지 않고 명시적으로 알려줌 — 위 두
+	-- Notify*와 동일한 이유)
+	@ExecSpace("Multicast")
+	method void NotifyZone15Solved()
+		if not self:IsClient() then return end
+		if _MapManager.CurrentMapIndex ~= 15 then return end
+		self:ApplyLockState(false)
+		log("MapMoveUI: NotifyZone15Solved")
+	end
+
 	-- mapIndex를 파라미터로 직접 받는다 — CurrentMapIndex의 @Sync 전파와 이 Multicast 호출은 서로 다른
 	-- 채널이라 순서 보장이 없어서, 여기서 다시 _MapManager.CurrentMapIndex를 읽으면 아직 갱신 전(이전
 	-- 값)을 볼 수 있다
 	@ExecSpace("Multicast")
 	method void NotifyMapChanged(integer mapIndex)
 		if not self:IsClient() then return end
-		local showLock = (mapIndex == 3) and (not _GameManager.BossDefeated)
+		local showLock = false
+		if mapIndex == 3 then
+			showLock = not _GameManager.BossDefeated
+		elseif mapIndex == 15 then
+			showLock = not _Zone15PuzzleLogic.IsSolved
+		end
 		self:ApplyLockState(showLock)
 		self:UpdateButtonVisibility(mapIndex)
 	end
@@ -62,9 +78,15 @@ script MapMoveUI extends Logic
 
 	@ExecSpace("ClientOnly")
 	method void UpdateLockVisual()
-		-- 자물쇠는 "지금 맵3에 있고 아직 보스를 못 잡았을 때"만 보여준다 — 맵1~2는 어차피 잠긴 경계가
-		-- 아니라서 항상 ">"가 맞고, 맵4 이상은 이미 보스를 잡았어야만 올 수 있으니 항상 ">"가 맞다
-		local showLock = (_MapManager.CurrentMapIndex == 3) and (not _GameManager.BossDefeated)
+		-- 자물쇠는 (a) 지금 맵3에 있고 아직 보스를 못 잡았을 때, 또는 (b) 존15에 있고 아직 불꽃
+		-- 이스터에그를 못 풀었을 때만 보여준다. 그 외 맵은 항상 ">"가 맞다
+		local mapIndex = _MapManager.CurrentMapIndex
+		local showLock = false
+		if mapIndex == 3 then
+			showLock = not _GameManager.BossDefeated
+		elseif mapIndex == 15 then
+			showLock = not _Zone15PuzzleLogic.IsSolved
+		end
 		self:ApplyLockState(showLock)
 	end
 
@@ -81,6 +103,11 @@ script MapMoveUI extends Logic
 
 	@ExecSpace("ClientOnly")
 	method void OnRightClicked()
+		-- 존15 자물쇠가 걸려있는 동안 ">"를 누르면 이동 대신 힌트 토스트만 띄운다
+		if _MapManager.CurrentMapIndex == 15 and not _Zone15PuzzleLogic.IsSolved then
+			_UIToast:ShowMessage("불꽃과 기둥은 답을 알고있다")
+			return
+		end
 		_MapManager:RequestMoveRight()
 	end
 

@@ -11,6 +11,22 @@ script GachaUI extends Logic
 	property Entity magicImpactTemplate = "5335103c-6880-41cc-bed6-4f77e97f2af5"
 	property Entity relicDropTemplate = "e79b0aae-286d-472b-9cc5-2827b34250cc"
 	property Entity characterIcon = "4f95f489-53d3-4b53-9c80-d118abd5b2a0"
+	property Entity bgCover = "08fe0c58-c75d-4415-827d-bb6f9381f30d"
+	property Entity resultSlotTemplate = "58b478c3-efa9-422a-a587-aa1ff73e3a60"
+	property Entity resultTitle = "9f2dba68-7c6c-40dc-9988-ed588530d3a3"
+	property ButtonComponent btnSkip = "cf78fd7c-c466-482f-8218-97978aa80d59"
+
+	-- Bg_cover가 위로 올라가는 거리 / 열고 닫을 때 걸리는 시간 (팝 연출 0.08초는 별도)
+	property number _coverLiftDistance = 140
+	property number _coverAnimDuration = 0.32
+
+	property any _coverBasePos = nil
+	property any _coverBaseColor = nil
+	property integer _pullTotal = 0
+	property integer _pullDropsDone = 0
+	property any _pullResultCounts = nil -- { [slotIndex]=count, ... }
+	property any _pullResultOrder = nil -- { slotIndex, ... } 처음 나온 순서
+	property any _resultIcons = nil -- 이번에 Clone된 결과 아이콘들, 다음 뽑기 시작 시 정리한다
 
 	property any _openHandler = nil
 	property any _closeHandler = nil
@@ -20,6 +36,8 @@ script GachaUI extends Logic
 	property any _closeStateHandler = nil
 	property any _pull1StateHandler = nil
 	property any _pull10StateHandler = nil
+	property any _skipHandler = nil
+	property any _skipStateHandler = nil
 
 	-- 필드 안에서 몬스터가 돌아다닐 수 있는 범위 (Panel/Field 900x540 기준, 가장자리 여백 제외)
 	property number _fieldHalfWidth = 380
@@ -94,15 +112,28 @@ script GachaUI extends Logic
 		-- 팝업은 기본적으로 닫힌 상태로 시작한다
 		self.gachaGroup.Enable = false
 		self._monsters = {}
+		self._pullResultCounts = {}
+		self._pullResultOrder = {}
+		self._resultIcons = {}
+		-- Bg_cover의 "닫힌(덮인)" 상태 기준값을 미리 기억해둔다 - 열기/닫기 애니메이션이 항상 이 값을 기준으로 움직인다
+		if isvalid(self.bgCover) then
+			self._coverBasePos = self.bgCover.UITransformComponent.anchoredPosition
+			self._coverBaseColor = self.bgCover.SpriteGUIRendererComponent.Color
+		end
+		if isvalid(self.resultSlotTemplate) then self.resultSlotTemplate:SetEnable(false) end
+		if isvalid(self.resultTitle) then self.resultTitle.Enable = false end
+		self.btnSkip.Entity.Enable = false
 		self._openHandler = self.btnOpen.Entity:ConnectEvent(ButtonClickEvent, self.Open)
 		self._closeHandler = self.btnClose.Entity:ConnectEvent(ButtonClickEvent, self.Close)
 		self._pull1Handler = self.btnPull1.Entity:ConnectEvent(ButtonClickEvent, self.OnPull1Clicked)
 		self._pull10Handler = self.btnPull10.Entity:ConnectEvent(ButtonClickEvent, self.OnPull10Clicked)
+		self._skipHandler = self.btnSkip.Entity:ConnectEvent(ButtonClickEvent, self.OnSkipClicked)
 		-- 패딩(눌림) 연출 — 누르는 순간 작아지고 떼는 순간 원래 크기로 돌아온다 (클릭 시점이 아니라 프레스/릴리즈 상태 자체에 붙인다)
 		self._openStateHandler = self.btnOpen.Entity:ConnectEvent(ButtonStateChangeEvent, function(event) self:OnButtonStateChanged(event, self.btnOpen.Entity) end)
 		self._closeStateHandler = self.btnClose.Entity:ConnectEvent(ButtonStateChangeEvent, function(event) self:OnButtonStateChanged(event, self.btnClose.Entity) end)
 		self._pull1StateHandler = self.btnPull1.Entity:ConnectEvent(ButtonStateChangeEvent, function(event) self:OnButtonStateChanged(event, self.btnPull1.Entity) end)
 		self._pull10StateHandler = self.btnPull10.Entity:ConnectEvent(ButtonStateChangeEvent, function(event) self:OnButtonStateChanged(event, self.btnPull10.Entity) end)
+		self._skipStateHandler = self.btnSkip.Entity:ConnectEvent(ButtonStateChangeEvent, function(event) self:OnButtonStateChanged(event, self.btnSkip.Entity) end)
 		log("GachaUI started")
 	end
 
@@ -113,6 +144,9 @@ script GachaUI extends Logic
 
 	@ExecSpace("ClientOnly")
 	method void Close()
+		-- 뽑기 도중에 닫으면(전투/드롭 애니메이션이 아직 안 끝난 채로) 다음에 다시 열었을 때
+		-- Bg_cover가 반쯤 들린 채로 남아있지 않도록 덮인 기본 상태로 즉시 되돌려놓는다
+		self:ResetCoverToClosedState()
 		self.gachaGroup.Enable = false
 	end
 
@@ -121,6 +155,7 @@ script GachaUI extends Logic
 		-- 이미 진행 중인 뽑기가 있으면 무시 — 버튼이 비활성화되어 있어도 이중 안전장치로 한 번 더 막는다
 		if self._fieldActive then return end
 		-- TODO: 재화(다이아) 차감은 재화 시스템 붙을 때 추가
+		self:BeginPull(1)
 		self:StartField(1, 1.0)
 	end
 
@@ -128,6 +163,7 @@ script GachaUI extends Logic
 	method void OnPull10Clicked()
 		if self._fieldActive then return end
 		-- TODO: 재화(다이아) 차감은 재화 시스템 붙을 때 추가
+		self:BeginPull(10)
 		self:StartField(10, 0.35)
 	end
 
@@ -156,6 +192,156 @@ script GachaUI extends Logic
 	end
 
 	@ExecSpace("ClientOnly")
+	method void BeginPull(integer count)
+		-- 이번 뽑기에서 몇 개를 기대하는지 기록해두고(전부 도착해야 결과창을 띄운다), 결과 집계를 초기화한 뒤
+		-- Bg_cover를 들어올려 뽑기 연출이 보이도록 연다
+		self._pullTotal = count
+		self._pullDropsDone = 0
+		self._pullResultCounts = {}
+		self._pullResultOrder = {}
+		self:ClearResultIcons()
+		-- 뽑기 진행 중에는 닫기 버튼을 아예 눌러 끄고 숨긴다 - 연출 도중 나가버리는 것을 막는다
+		self.btnClose.Entity.Enable = false
+		-- 대신 스킵 버튼을 켜서 필드 연출을 건너뛸 수 있게 한다
+		self.btnSkip.Entity.Enable = true
+		self:PlayCoverOpen()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnSkipClicked()
+		-- 남아있는 몬스터는 사망 연출(다이 클립 + 축소)만 재생하고 전투 없이 즉시 죽는다.
+		-- 유물은 각자 자리에서 톡 튀어오른 뒤, 전부 착지하면 한 번에 다같이 아바타로 모여든다(개별로 하나씩 날아가지 않는다).
+		-- 이미 죽어서 드롭 연출이 날아가는 중인 몬스터는 건드리지 않는다(중복 지급 방지, 그쪽은 스스로 끝까지 흐른다)
+		if not self._fieldActive then return end
+		if self._attackTimerId then _TimerService:ClearTimer(self._attackTimerId) end
+		self._attackTimerId = nil
+
+		local dropPositions = {}
+		for _, m in ipairs(self._monsters) do
+			if isvalid(m.entity) and not m.dead then
+				m.dead = true
+				if m.stateTimerId then _TimerService:ClearTimer(m.stateTimerId) end
+				local sprite = m.entity.SpriteGUIRendererComponent
+				sprite.ImageRUID = DataRef(m.clips.die)
+				sprite.AnimClipPlayType = SpriteAnimClipPlayType.Onetime
+				table.insert(dropPositions, m.entity.UITransformComponent.anchoredPosition)
+				_TweenLogic:ScaleTo(m.entity, Vector2(0, 0), 0.3, EaseType.QuadEaseIn)
+				m.entity:Destroy(0.3)
+			end
+		end
+		self._monsters = {}
+		self.btnSkip.Entity.Enable = false
+
+		if #dropPositions > 0 then
+			self:PlaySkipRelicCollect(dropPositions)
+		end
+		log("GachaUI: skipped, " .. tostring(#dropPositions) .. " monster(s) instant-killed, relics collecting together")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlaySkipRelicCollect(table positions)
+		-- 각 위치에서 유물이 톡 튀어올랐다가 착지하고, 잠깐 멈춘 뒤 전부 동시에 아바타로 빨려들어간다.
+		-- 획득 연출/지급도 다같이 도착하는 그 순간 한 번에 처리한다(하나씩 순서대로가 아니라)
+		local pickedSlots = {}
+		local relics = {}
+		local popDuration = 0.15
+		local fallDuration = 0.2
+
+		for _, pos in ipairs(positions) do
+			local popPos = Vector2(pos.x, pos.y + 35)
+			local relic = self.relicDropTemplate:Clone("SkipRelicDrop_" .. tostring(_UtilLogic.ElapsedSeconds) .. "_" .. tostring(#relics))
+			relic.Enable = true
+			relic.UITransformComponent.anchoredPosition = pos
+			local pickedSlot = _UtilLogic:RandomIntegerRange(1, #self._relicIconRuids)
+			relic.SpriteGUIRendererComponent.ImageRUID = DataRef(self._relicIconRuids[pickedSlot])
+			table.insert(pickedSlots, pickedSlot)
+			table.insert(relics, relic)
+
+			local capturedRelic = relic
+			_TweenLogic:PlayTween(pos, popPos, popDuration, EaseType.QuadEaseOut, function(value)
+				if isvalid(capturedRelic) then capturedRelic.UITransformComponent.anchoredPosition = value end
+			end)
+			_TimerService:SetTimerOnce(function()
+				if isvalid(capturedRelic) then
+					_TweenLogic:PlayTween(popPos, pos, fallDuration, EaseType.QuadEaseIn, function(value)
+						if isvalid(capturedRelic) then capturedRelic.UITransformComponent.anchoredPosition = value end
+					end)
+				end
+			end, popDuration)
+		end
+
+		-- 전부 착지할 시간을 준 뒤 짧게 멈췄다가, 한 번에 다같이 아바타로 모여든다
+		local landDuration = popDuration + fallDuration
+		_TimerService:SetTimerOnce(function()
+			local flyDuration = 0.3
+			for _, relic in ipairs(relics) do
+				if isvalid(relic) then
+					local fromPos = relic.UITransformComponent.anchoredPosition
+					local capturedRelic = relic
+					_TweenLogic:ScaleTo(capturedRelic, Vector2(0.5, 0.5), flyDuration, EaseType.QuadEaseIn)
+					_TweenLogic:PlayTween(fromPos, self._avatarPosition, flyDuration, EaseType.QuadEaseIn, function(value)
+						if isvalid(capturedRelic) then capturedRelic.UITransformComponent.anchoredPosition = value end
+					end)
+					capturedRelic:Destroy(flyDuration)
+				end
+			end
+			_TimerService:SetTimerOnce(function()
+				-- 다같이 도착했으니 획득 연출도 한 번만, 지급도 한 번에 몰아서 처리한다
+				self:PlayAcquireEffect()
+				for _, pickedSlot in ipairs(pickedSlots) do
+					_RelicInventory:RequestAddRelic(pickedSlot - 1)
+					self:RegisterPullResult(pickedSlot - 1)
+				end
+			end, flyDuration)
+		end, landDuration + 0.25)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ResetCoverToClosedState()
+		-- 애니메이션 도중이든 아니든 상관없이 Bg_cover를 "닫힌" 기본 상태로 즉시 되돌린다 (팝업을 도중에 닫을 때 사용)
+		if not isvalid(self.bgCover) or self._coverBasePos == nil then return end
+		self.bgCover.Enable = true
+		self.bgCover.UITransformComponent.anchoredPosition = self._coverBasePos
+		local baseColor = self._coverBaseColor
+		self.bgCover.SpriteGUIRendererComponent.Color = Color(baseColor.r, baseColor.g, baseColor.b, baseColor.a)
+		self.bgCover.UITransformComponent.Scale = Vector3(1, 1, 1)
+		self:ClearResultIcons()
+		self.btnClose.Entity.Enable = true
+		self.btnSkip.Entity.Enable = false
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayCoverOpen()
+		-- 살짝 들썩이는 팝 연출 이후, 위로 슥 올라가면서 알파가 빠져 사라진다 -> 그 뒤로 뽑기 필드가 드러난다
+		if not isvalid(self.bgCover) or self._coverBasePos == nil then return end
+		self.bgCover.Enable = true
+		local basePos = self._coverBasePos
+		local baseColor = self._coverBaseColor
+		self.bgCover.UITransformComponent.anchoredPosition = basePos
+		self.bgCover.SpriteGUIRendererComponent.Color = Color(baseColor.r, baseColor.g, baseColor.b, baseColor.a)
+		local liftPos = Vector2(basePos.x, basePos.y + self._coverLiftDistance)
+		local capturedCover = self.bgCover
+		local duration = self._coverAnimDuration
+
+		_TweenLogic:ScaleTo(capturedCover, Vector2(1.04, 1.04), 0.08, EaseType.QuadEaseOut)
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(capturedCover) then return end
+			_TweenLogic:ScaleTo(capturedCover, Vector2(1, 1), 0.1, EaseType.QuadEaseOut)
+			_TweenLogic:PlayTween(basePos, liftPos, duration, EaseType.QuadEaseOut, function(value)
+				if isvalid(capturedCover) then capturedCover.UITransformComponent.anchoredPosition = value end
+			end)
+			_TweenLogic:PlayTween(baseColor.a, 0.0, duration, EaseType.QuadEaseOut, function(value)
+				if isvalid(capturedCover) then
+					capturedCover.SpriteGUIRendererComponent.Color = Color(baseColor.r, baseColor.g, baseColor.b, value)
+				end
+			end)
+			_TimerService:SetTimerOnce(function()
+				if isvalid(capturedCover) then capturedCover.Enable = false end
+			end, duration)
+		end, 0.08)
+	end
+
+	@ExecSpace("ClientOnly")
 	method void StartField(integer monsterCount, number attackInterval)
 		-- 팝업(Panel/Field) 초록 영역 안에서만 몬스터가 등장/배회/전투/드롭까지 전부 일어난다 (맵 이동 없음)
 		self:ClearMonsters()
@@ -172,7 +358,7 @@ script GachaUI extends Logic
 			local cloneSprite = clone.SpriteGUIRendererComponent
 			cloneSprite.ImageRUID = DataRef(species.stand)
 			cloneSprite.AnimClipPlayType = SpriteAnimClipPlayType.Loop
-			local monsterData = { entity = clone, hp = 2, stateTimerId = nil, clips = species, dead = false }
+			local monsterData = { entity = clone, hp = 1, stateTimerId = nil, clips = species, dead = false }
 			table.insert(self._monsters, monsterData)
 			-- 몬스터마다 살짝 다른 타이밍에 배회를 시작하도록 약간의 지연을 준다
 			local capturedData = monsterData
@@ -506,6 +692,7 @@ script GachaUI extends Logic
 			_TimerService:SetTimerOnce(function()
 				self:PlayAcquireEffect()
 				_RelicInventory:RequestAddRelic(pickedSlot - 1)
+				self:RegisterPullResult(pickedSlot - 1)
 			end, flyDuration)
 		end, landDuration + 1.0)
 	end
@@ -525,12 +712,128 @@ script GachaUI extends Logic
 	end
 
 	@ExecSpace("ClientOnly")
-	method void StopField()
-		-- 획득 연출은 이제 유물 하나하나가 아바타에게 도착할 때(PlayRelicDrop) 재생되므로 여기서는 정리만 한다
-		if self._attackTimerId then _TimerService:ClearTimer(self._attackTimerId) end
-		self._attackTimerId = nil
+	method void RegisterPullResult(integer slotIndex)
+		-- 유물이 아바타에게 도착할 때마다(= PlayAcquireEffect가 재생되는 시점마다) 호출되어 이번 뽑기 결과에 누적한다.
+		-- 이번 뽑기에서 기대한 개수(_pullTotal)만큼 전부 모이면 그 시점에 결과창을 띄운다
+		if self._pullTotal <= 0 then return end
+		if self._pullResultCounts[slotIndex] == nil then
+			self._pullResultCounts[slotIndex] = 0
+			table.insert(self._pullResultOrder, slotIndex)
+		end
+		self._pullResultCounts[slotIndex] = self._pullResultCounts[slotIndex] + 1
+		self._pullDropsDone = self._pullDropsDone + 1
+		if self._pullDropsDone >= self._pullTotal then
+			self:ShowPullResults()
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ShowPullResults()
+		-- 이 시점이 진짜 "이번 뽑기가 완전히 끝난" 시점이다(마지막 유물까지 전부 도착) — 여기서 필드 활성 상태를
+		-- 풀어주고 뽑기 버튼을 다시 켠다. StopField()는 전투(공격 타이머)만 멈출 뿐 아직 날아오는 중인 유물
+		-- 드롭 연출까지는 기다려주지 않으므로, 여기서 풀지 않으면 이전 결과창이 채 안 덮였는데 다음 뽑기를
+		-- 시작할 수 있어 Bg_cover 애니메이션끼리 충돌한다
 		self._fieldActive = false
 		self:SetPullButtonsEnabled(true)
+		-- 뽑기가 완전히 끝났으니 닫기 버튼을 다시 켜고, 더 이상 스킵할 게 없으니 스킵 버튼은 끈다
+		self.btnClose.Entity.Enable = true
+		self.btnSkip.Entity.Enable = false
+		-- Bg_cover가 열 때와 반대로(위/투명 -> 제자리/불투명) 다시 덮이고, 다 덮인 뒤 그 위에 획득한 유물들을 보여준다
+		if not isvalid(self.bgCover) or self._coverBasePos == nil then return end
+		local basePos = self._coverBasePos
+		local baseColor = self._coverBaseColor
+		local liftPos = Vector2(basePos.x, basePos.y + self._coverLiftDistance)
+		self.bgCover.Enable = true
+		self.bgCover.UITransformComponent.anchoredPosition = liftPos
+		self.bgCover.SpriteGUIRendererComponent.Color = Color(baseColor.r, baseColor.g, baseColor.b, 0)
+		local capturedCover = self.bgCover
+		local duration = self._coverAnimDuration
+
+		_TweenLogic:PlayTween(liftPos, basePos, duration, EaseType.QuadEaseIn, function(value)
+			if isvalid(capturedCover) then capturedCover.UITransformComponent.anchoredPosition = value end
+		end)
+		_TweenLogic:PlayTween(0.0, baseColor.a, duration, EaseType.QuadEaseIn, function(value)
+			if isvalid(capturedCover) then
+				capturedCover.SpriteGUIRendererComponent.Color = Color(baseColor.r, baseColor.g, baseColor.b, value)
+			end
+		end)
+		_TimerService:SetTimerOnce(function()
+			self:DisplayResultIcons()
+		end, duration)
+		log("GachaUI: pull finished, total=" .. tostring(self._pullTotal) .. ", uniqueRelics=" .. tostring(#self._pullResultOrder))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void DisplayResultIcons()
+		-- Bg_cover 위에 이번에 획득한 유물 종류마다 아이콘 + "xN" 개수를 가로로 나열해 보여준다
+		if not isvalid(self.resultSlotTemplate) then return end
+		local uniqueCount = #self._pullResultOrder
+		if uniqueCount == 0 then return end
+
+		-- "획득한 유물!" 타이틀은 뽑기가 실제로 완료되어 아이콘이 나타나는 이 순간에만 같이 보여준다
+		if isvalid(self.resultTitle) then self.resultTitle.Enable = true end
+
+		-- 한 줄에 최대 maxPerRow개까지만 놓고, 그보다 많으면(예: 유물 종류가 늘어나거나 더 큰 뽑기가 생기면)
+		-- 다음 줄로 넘긴다 — 계속 줄여서 한 줄에 욱여넣지 않는다. 각 줄은 그 줄의 개수 기준으로 가운데 정렬하고,
+		-- 줄 전체 블록은 세로로도 가운데 정렬한다
+		local maxPerRow = 6
+		local cellWidth = 128
+		local cellHeight = 128
+		local rowCount = math.ceil(uniqueCount / maxPerRow)
+		local topY = (rowCount - 1) * cellHeight / 2
+
+		for i, slotIndex in ipairs(self._pullResultOrder) do
+			local rowIndex = math.floor((i - 1) / maxPerRow)
+			local colIndex = (i - 1) % maxPerRow
+			local itemsInRow = math.min(maxPerRow, uniqueCount - rowIndex * maxPerRow)
+			local rowWidth = itemsInRow * cellWidth
+			local rowStartX = -rowWidth / 2 + cellWidth / 2
+
+			local clone = self.resultSlotTemplate:Clone("ResultIcon_" .. tostring(i) .. "_" .. tostring(_UtilLogic.ElapsedSeconds))
+			clone.Enable = true
+			local x = rowStartX + colIndex * cellWidth
+			local y = topY - rowIndex * cellHeight - 10
+			clone.UITransformComponent.anchoredPosition = Vector2(x, y)
+
+			local icon = clone:GetChildByName("Icon", false)
+			if isvalid(icon) then
+				icon.SpriteGUIRendererComponent.ImageRUID = DataRef(self._relicIconRuids[slotIndex + 1])
+			end
+			local countText = clone:GetChildByName("CountText", false)
+			if isvalid(countText) then
+				countText.TextComponent.Text = "x" .. tostring(self._pullResultCounts[slotIndex])
+			end
+
+			-- 톡 하고 튀어나오는 팝 연출로 하나씩 나타난다
+			clone.UITransformComponent.Scale = Vector3(0, 0, 1)
+			local capturedClone = clone
+			_TimerService:SetTimerOnce(function()
+				if isvalid(capturedClone) then
+					_TweenLogic:ScaleTo(capturedClone, Vector2(1, 1), 0.2, EaseType.BackEaseOut)
+				end
+			end, (i - 1) * 0.05)
+
+			table.insert(self._resultIcons, clone)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ClearResultIcons()
+		if self._resultIcons == nil then self._resultIcons = {} end
+		for _, icon in ipairs(self._resultIcons) do
+			if isvalid(icon) then icon:Destroy() end
+		end
+		self._resultIcons = {}
+		-- 결과 아이콘을 치울 때는 항상 타이틀도 같이 숨긴다 (다음 뽑기가 끝나기 전까지는 다시 뜨면 안 된다)
+		if isvalid(self.resultTitle) then self.resultTitle.Enable = false end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void StopField()
+		-- 전투(공격 타이머)만 멈춘다. _fieldActive 해제와 뽑기 버튼 재활성화는 유물 드롭 연출까지 전부 끝나는
+		-- ShowPullResults()에서 처리한다 — 그래야 결과 수집이 덜 끝난 상태로 다음 뽑기가 시작되지 않는다
+		if self._attackTimerId then _TimerService:ClearTimer(self._attackTimerId) end
+		self._attackTimerId = nil
 		log("GachaUI: field cleared, all monsters defeated")
 	end
 
@@ -555,6 +858,8 @@ script GachaUI extends Logic
 		if self._closeStateHandler then self.btnClose.Entity:DisconnectEvent(ButtonStateChangeEvent, self._closeStateHandler) end
 		if self._pull1StateHandler then self.btnPull1.Entity:DisconnectEvent(ButtonStateChangeEvent, self._pull1StateHandler) end
 		if self._pull10StateHandler then self.btnPull10.Entity:DisconnectEvent(ButtonStateChangeEvent, self._pull10StateHandler) end
+		if self._skipHandler then self.btnSkip.Entity:DisconnectEvent(ButtonClickEvent, self._skipHandler) end
+		if self._skipStateHandler then self.btnSkip.Entity:DisconnectEvent(ButtonStateChangeEvent, self._skipStateHandler) end
 	end
 
 end

@@ -1,0 +1,204 @@
+@Logic
+script Zone15PuzzleLogic extends Logic
+
+	-- 존15 이스터에그. 스위치 번호(왼쪽부터): 1=왼쪽, 2=가운데, 3=오른쪽.
+	-- 정답 순서 = 가운데→오른쪽→왼쪽 = {2, 3, 1}.
+	-- 어떤 불꽃을 누르든 그 자리 불은 즉시 켜지고(순서 판정과 무관하게), 3번 다 누른 시점에만
+	-- 지금까지 누른 순서 전체를 정답과 비교한다 — 중간에 틀렸다고 바로 리셋하지 않는다.
+	-- 한 번 풀리면(IsSolved) 존15를 나갔다 다시 들어와도 계속 풀린 채로 유지한다.
+	@Sync property boolean IsSolved = false
+
+	property any _pressedSequence = nil  -- 지금까지 누른 순서 (최대 3개)
+
+	-- object-481 계열 3개 엔티티 (map13.map/Zone15 실측 UUID 직접 주입)
+	property Entity FlameLeft = "2d1f9f5b-0b7e-4683-8d58-14ecfe7bd831"    -- object-481
+	property Entity FlameCenter = "8f173a71-5bef-435c-a0c6-a1b897936f0d"  -- object-481_1
+	property Entity FlameRight = "2fa1b133-c35f-4c4d-ba26-0947435b6b2b"   -- object-481_2
+
+	-- 각 불꽃과 짝을 이루는 foothold-848 오브젝트 — 꺼질 때 이 앵커 위치로 가라앉는다
+	property Entity SinkAnchorLeft = "9e591620-aa5a-49c1-b23b-d9907ec6f3ba"    -- foothold-848_1
+	property Entity SinkAnchorCenter = "35bc9d79-4793-4039-8357-b37c2cda364a"  -- foothold-848_2
+	property Entity SinkAnchorRight = "7b48d3a1-c42a-4f2c-8a13-efefddea1917"   -- foothold-848_3
+
+	-- 진입 시 불이 꺼지는 연출을 1회만 재생하기 위한 토큰 — 그 사이 플레이어가 이미 스위치를 누르기
+	-- 시작했으면(아래 OnSwitchTouched) 이 예약된 "전부 끄기"가 방금 누른 진행상황을 덮어쓰면 안 된다
+	property integer _enterToken = 0
+
+	-- 불꽃 원래 Position/Scale(최초 1회만 캡처, 꺼지는 트윈이 끝나면 이 값으로 되돌린다)
+	property boolean _baseCaptured = false
+	property Vector3 _basePosLeft = Vector3(0, 0, 0)
+	property Vector3 _baseScaleLeft = Vector3(1, 1, 1)
+	property Vector3 _basePosCenter = Vector3(0, 0, 0)
+	property Vector3 _baseScaleCenter = Vector3(1, 1, 1)
+	property Vector3 _basePosRight = Vector3(0, 0, 0)
+	property Vector3 _baseScaleRight = Vector3(1, 1, 1)
+
+	-- 재점화 시 진행 중이던 소화 트윈을 즉시 취소하기 위한 핸들
+	property any _tweenLeft = nil
+	property any _tweenCenter = nil
+	property any _tweenRight = nil
+
+	property number ExtinguishDuration = 0.4
+	property number ExtinguishSinkAmount = 0.35
+
+	-- MapManager.DoMapChange/DoScrollMapChange/SilentMoveToMap가 targetIndex==15일 때 호출한다.
+	@ExecSpace("ServerOnly")
+	method void OnEnterZone15()
+		if self.IsSolved then
+			-- 이미 풀었으면 계속 켜진 채로 유지 (다시 꺼지는 연출 없음)
+			self:SetAllFlames(true)
+			return
+		end
+
+		-- 아직 안 풀렸으면 진입할 때마다 처음부터: 일단 전부 켜진 상태로 보여줬다가(원래 배경 장식처럼),
+		-- 1초 뒤 전부 꺼져서 "뭔가 있다"는 걸 암시한다.
+		self._pressedSequence = {}
+		self:SetAllFlames(true)
+
+		self._enterToken = self._enterToken + 1
+		local myToken = self._enterToken
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) then return end
+			if self._enterToken ~= myToken then return end  -- 그 사이 재입장 등으로 새 예약이 생겼으면 무시
+			if #self._pressedSequence > 0 then return end   -- 이미 누르기 시작했으면 덮어쓰지 않음
+			self:SetAllFlames(false)
+		end, 1.0)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SetAllFlames(boolean lit)
+		self:SetFlameLitByIndex(1, lit)
+		self:SetFlameLitByIndex(2, lit)
+		self:SetFlameLitByIndex(3, lit)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void CaptureBaseStateIfNeeded()
+		-- 최초 1회, 불꽃들의 원래 Position/Scale을 기록해둔다(꺼지는 트윈이 끝나면 이 값으로 리셋)
+		if self._baseCaptured then return end
+		self._baseCaptured = true
+		self._basePosLeft = self.FlameLeft.TransformComponent.Position
+		self._baseScaleLeft = self.FlameLeft.TransformComponent.Scale
+		self._basePosCenter = self.FlameCenter.TransformComponent.Position
+		self._baseScaleCenter = self.FlameCenter.TransformComponent.Scale
+		self._basePosRight = self.FlameRight.TransformComponent.Position
+		self._baseScaleRight = self.FlameRight.TransformComponent.Scale
+	end
+
+	@ExecSpace("ServerOnly")
+	method Vector3 GetBasePos(integer switchIndex)
+		if switchIndex == 1 then return self._basePosLeft
+		elseif switchIndex == 2 then return self._basePosCenter
+		else return self._basePosRight end
+	end
+
+	@ExecSpace("ServerOnly")
+	method Vector3 GetSinkAnchorPos(integer switchIndex)
+		if switchIndex == 1 then return self.SinkAnchorLeft.TransformComponent.Position
+		elseif switchIndex == 2 then return self.SinkAnchorCenter.TransformComponent.Position
+		else return self.SinkAnchorRight.TransformComponent.Position end
+	end
+
+	@ExecSpace("ServerOnly")
+	method Vector3 GetBaseScale(integer switchIndex)
+		if switchIndex == 1 then return self._baseScaleLeft
+		elseif switchIndex == 2 then return self._baseScaleCenter
+		else return self._baseScaleRight end
+	end
+
+	@ExecSpace("ServerOnly")
+	method any GetTween(integer switchIndex)
+		if switchIndex == 1 then return self._tweenLeft
+		elseif switchIndex == 2 then return self._tweenCenter
+		else return self._tweenRight end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SetTween(integer switchIndex, any tween)
+		if switchIndex == 1 then self._tweenLeft = tween
+		elseif switchIndex == 2 then self._tweenCenter = tween
+		else self._tweenRight = tween end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SetFlameLitByIndex(integer switchIndex, boolean lit)
+		self:CaptureBaseStateIfNeeded()
+		local flame = self:GetFlameByIndex(switchIndex)
+		if not isvalid(flame) then return end
+
+		local runningTween = self:GetTween(switchIndex)
+		if runningTween ~= nil then
+			runningTween:Stop()
+			self:SetTween(switchIndex, nil)
+		end
+
+		local basePos = self:GetBasePos(switchIndex)
+		local baseScale = self:GetBaseScale(switchIndex)
+		local r = flame.SpriteRendererComponent
+
+		if lit then
+			-- 누르는 즉시 반응해야 하므로 트윈 없이 원래 크기/위치/불투명도로 즉시 복구하고 켠다
+			flame.TransformComponent.Position = basePos
+			flame.TransformComponent.Scale = baseScale
+			if r ~= nil then
+				r.Enable = true
+				r.Color = Color(1.0, 1.0, 1.0, 1.0)
+			end
+		else
+			-- 꺼질 때만 아래로 가라앉으며 서서히 투명해지는 연출 후 비활성화.
+			-- Scale은 Transform.Position(스프라이트 이미지 자체와는 어긋난 앵커) 기준으로 줄어들어
+			-- 줄어들수록 이미지가 앵커 쪽으로 쏠려 보이므로 사용하지 않고, 알파 페이드로 대체한다.
+			-- foothold-848 쪽 앵커로 이동시키는 방식도 시도했으나, foothold-848이 그릇 바로 아래가
+			-- 아니라 옆으로 어긋나 있어(3개 다 동일하게 X -1.53) 대각선으로 미끄러지는 것처럼 보여 폐기.
+			if r ~= nil then r.Enable = true end
+			local tween = _TweenLogic:PlayTween(0.0, 1.0, self.ExtinguishDuration, EaseType.QuadEaseIn, function(t)
+				if not isvalid(self) or not isvalid(flame) then return end
+				flame.TransformComponent.Position = Vector3(basePos.x, basePos.y - self.ExtinguishSinkAmount * t, basePos.z)
+				if r ~= nil then r.Color = Color(1.0, 1.0, 1.0, 1.0 - t) end
+				if t >= 1.0 then
+					if r ~= nil then r.Enable = false end
+					self:SetTween(switchIndex, nil)
+				end
+			end)
+			self:SetTween(switchIndex, tween)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method Entity GetFlameByIndex(integer switchIndex)
+		if switchIndex == 1 then return self.FlameLeft
+		elseif switchIndex == 2 then return self.FlameCenter
+		else return self.FlameRight end
+	end
+
+	-- Zone15FlameSwitch.RequestTouch()가 호출 — switchIndex: 1=왼쪽, 2=가운데, 3=오른쪽.
+	-- 누르는 즉시 그 불은 켜진다(정답 여부와 무관). 3번째 입력이 들어온 시점에만 전체 순서를 판정한다.
+	@ExecSpace("ServerOnly")
+	method void OnSwitchTouched(integer switchIndex)
+		if self.IsSolved then return end
+		if self._pressedSequence == nil then self._pressedSequence = {} end
+
+		self:SetFlameLitByIndex(switchIndex, true)
+		table.insert(self._pressedSequence, switchIndex)
+		log("Zone15Puzzle: pressed " .. switchIndex .. " (" .. #self._pressedSequence .. "/3)")
+
+		if #self._pressedSequence < 3 then return end
+
+		if self:IsCorrectSequence() then
+			self.IsSolved = true
+			_MapMoveUI:NotifyZone15Solved()
+			log("Zone15Puzzle: solved!")
+		else
+			log("Zone15Puzzle: wrong order, resetting")
+			self._pressedSequence = {}
+			self:SetAllFlames(false)
+		end
+	end
+
+	-- 정답 순서 = 가운데(2) → 오른쪽(3) → 왼쪽(1)
+	@ExecSpace("ServerOnly")
+	method boolean IsCorrectSequence()
+		return self._pressedSequence[1] == 2 and self._pressedSequence[2] == 3 and self._pressedSequence[3] == 1
+	end
+
+end

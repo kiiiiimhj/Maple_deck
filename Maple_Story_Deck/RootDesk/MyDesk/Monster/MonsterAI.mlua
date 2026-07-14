@@ -25,6 +25,9 @@ script MonsterAI extends Component
 	property number _currentScale = 0.3
 	property boolean _reachedPlayer = false
 	property number _attackTimer = 0
+	-- 스폰된 존 번호(InitializeStats가 넘겨준 zoneIndex를 저장) — Die()에서 존16~17 전용
+	-- 재화(야누스의 검 교환권) 드롭 판정에 쓴다
+	property integer _spawnZoneIndex = 0
 
 	-- 슬로우 상태 (콜드 빔)
 	property boolean _isSlowed = false
@@ -73,6 +76,30 @@ script MonsterAI extends Component
 	property number _reachedScaleThreshold = 1.5
 	property number RangedReachedScale = 1.15
 
+	-- 존14(이블아이/커즈아이) 전용 — 공격 시 살짝 위로 뛰는 모션 추가
+	property boolean _hopOnAttack = false
+	property number AttackHopHeight = 0.2
+
+	-- 비행형 종(맵15 박쥐) 전용 — 스케일로 "접근"을 표현하는 대신 화면 안에서 2D로 자유롭게
+	-- 날아다니다가(접근/도달 개념 없음) 일정 간격으로 공격한다. "목표점 찍고 걸어가기" 방식은 X범위가
+	-- Y범위보다 훨씬 넓어서 사실상 가로로만 움직이는 것처럼 보이는 문제가 있었다(실측 확인) — 대신
+	-- X/Y를 각각 다른 주기의 사인파로 동시에 흔들어(리사주 곡선) 항상 두 축이 같이 바뀌는 나풀거리는
+	-- 궤적을 만든다. 개체마다 위상/속도를 무작위로 달리해 여러 마리가 같은 패턴으로 겹쳐 보이지 않게 한다.
+	property boolean _isFlying = false
+	property number FlyRangeX = 3.0    -- 좌우 진폭
+	property number FlyingWanderMinY = -0.3
+	property number FlyingWanderMaxY = 2.0
+	property number FlySpeedX = 1.1    -- 좌우 기본 각속도
+	property number FlySpeedY = 1.7    -- 상하 기본 각속도 (좌우와 다르게 잡아 단순 대각선 왕복이 되지 않게 함)
+	property number FlyAttackInterval = 1.5  -- 도달 판정 없이 이 간격으로 계속 공격
+	property number _flyCenterX = 0
+	property number _flyBaseY = 0
+	property number _flyTime = 0
+	property number _flyPhaseX = 0
+	property number _flyPhaseY = 0
+	property number _flySpeedMultX = 1.0
+	property number _flySpeedMultY = 1.0
+
 	-- 이어하기 밀려나는 중 OnUpdate 스킵 플래그
 	property boolean _isPushingBack = false
 
@@ -114,6 +141,7 @@ script MonsterAI extends Component
 	-- MonsterSpawner가 미리 뽑아서 넘겨주는 값. 0 이하면 기존처럼 여기서 무작위로 고른다.
 	@ExecSpace("ServerOnly")
 	method void InitializeStats(integer zoneIndex, integer wave, boolean isBoss, integer forcedSpeciesIdx)
+		self._spawnZoneIndex = zoneIndex
 		self._isBoss = isBoss
 		self._reachedScaleThreshold = 1.5
 		local hp = _GameManager:GetWaveHp(wave)
@@ -153,6 +181,27 @@ script MonsterAI extends Component
 			if self._isRangedInk then
 				self._reachedScaleThreshold = self.RangedReachedScale
 			end
+			self._isFlying = _GameManager:GetMapIsFlying(appearanceZone, speciesIdx)
+			if self._isFlying then
+				-- 접근 애니메이션 없이 스폰 즉시 고정 크기로 보이게 하고, 스폰 X를 중심으로 X/Y 동시
+				-- 사인파 비행 시작 (개체별 위상/속도를 무작위로 달리해 여러 마리가 겹쳐 보이지 않게 함).
+				-- UpdateFlying은 TransformComponent.Position(부모 기준 로컬)에 직접 쓰므로, 중심값도
+				-- 반드시 로컬 Position 기준이어야 한다 — WorldPosition(존 오프셋 포함)을 쓰면 존14/15처럼
+				-- 오프셋이 있는 존에서 오프셋이 두 번 겹쳐 적용돼 화면 밖으로 날아가 버린다(실측 확인 —
+				-- 존15에서 박쥐가 안 보이던 원인이 바로 이것).
+				self._currentScale = 1.0
+				self._flyCenterX = self.Entity.TransformComponent.Position.x
+				self._flyBaseY = (self.FlyingWanderMinY + self.FlyingWanderMaxY) * 0.5
+				self._flyTime = 0
+				self._flyPhaseX = _UtilLogic:RandomDouble() * math.pi * 2
+				self._flyPhaseY = _UtilLogic:RandomDouble() * math.pi * 2
+				self._flySpeedMultX = 0.8 + _UtilLogic:RandomDouble() * 0.4
+				self._flySpeedMultY = 0.8 + _UtilLogic:RandomDouble() * 0.4
+				self._attackTimer = self.FlyAttackInterval
+			end
+			-- 존14/15(이블아이/커즈아이) 전용 — 공격 시 스케일 들이받기에 더해 살짝 위로 뛰는 모션 추가.
+			-- 존15의 박쥐(비행형)는 _isFlying 분기가 OnReachPlayer에서 먼저 처리되므로 이 플래그와 무관하다.
+			self._hopOnAttack = appearanceZone == 14 or appearanceZone == 15
 		elseif zoneIndex >= 4 then
 			-- 맵4~6 전용 몬스터 풀: 스폰마다 1~4 중 무작위로 외형을 고른다 (보스도 이 풀에서 고름 — 별도 존 보스는 없음)
 			local speciesIdx = _UtilLogic:RandomIntegerRange(1, _GameManager:GetZoneMonsterCount())
@@ -237,6 +286,11 @@ script MonsterAI extends Component
 			return
 		end
 
+		if self._isFlying then
+			self:UpdateFlying(delta)
+			return
+		end
+
 		-- 빙결/스턴 인디케이터는 map(=Entity.CurrentMap, 맵 루트)의 자식으로 스폰되는데 이 몬스터
 		-- 자신은 Zone12 같은 오프셋 컨테이너의 자식일 수 있다 — 로컬 Position을 그대로 쓰면 존 오프셋만큼
 		-- 어긋난 곳으로 계속 갱신되므로 WorldPosition을 써야 한다.
@@ -305,6 +359,24 @@ script MonsterAI extends Component
 	method void PickNewWanderTarget()
 		self._wanderTargetX = self._wanderMinX + _UtilLogic:RandomDouble() * (self._wanderMaxX - self._wanderMinX)
 		self._wanderRetargetTimer = 0.4 + _UtilLogic:RandomDouble() * 0.6
+	end
+
+	-- 비행형(박쥐) 전용: 접근/도달 개념 없이 화면 안에서 2D로 자유롭게 날아다니다가, FlyAttackInterval마다 계속 공격한다.
+	-- X/Y를 서로 다른 각속도의 사인파로 동시에 움직여(리사주 곡선) 항상 두 축이 같이 바뀌는 궤적을 만든다.
+	@ExecSpace("ServerOnly")
+	method void UpdateFlying(number delta)
+		self._flyTime = self._flyTime + delta
+		local x = self._flyCenterX + math.sin(self._flyTime * self.FlySpeedX * self._flySpeedMultX + self._flyPhaseX) * self.FlyRangeX
+		local yAmplitude = (self.FlyingWanderMaxY - self.FlyingWanderMinY) * 0.5
+		local y = self._flyBaseY + math.sin(self._flyTime * self.FlySpeedY * self._flySpeedMultY + self._flyPhaseY) * yAmplitude
+		local pos = self.Entity.TransformComponent.Position
+		self.Entity.TransformComponent.Position = Vector3(x, y, pos.z)
+
+		self._attackTimer = self._attackTimer - delta
+		if self._attackTimer <= 0 then
+			self:OnReachPlayer()
+			self._attackTimer = self.FlyAttackInterval
+		end
 	end
 
 	-- MonsterSpawner.EndBonusStage()가 보너스 보스 지속시간 종료 시 호출 — 즉시 사라지는 대신
@@ -596,6 +668,17 @@ script MonsterAI extends Component
 		self._isStunned = false
 		self:DestroyStunStars()
 		self._reachedPlayer = false
+
+		-- 비행형(박쥐)은 접근/스케일 개념이 없으므로 되밀기 트윈 없이 배회만 잠깐 멈췄다 재개한다
+		if self._isFlying then
+			self._isPushingBack = true
+			_TimerService:SetTimerOnce(function()
+				if not isvalid(self) then return end
+				self._isPushingBack = false
+			end, 0.75)
+			return
+		end
+
 		self._isPushingBack = true
 		-- 먼지 이펙트 스폰 — 몬스터 바닥(y 최하단)에 붙도록 y 오프셋 적용. Entity.CurrentMap은 맵
 		-- 루트를 가리키므로(Zone12 같은 자식 컨테이너가 아니라) 로컬 Position이 아니라 WorldPosition을
@@ -657,13 +740,65 @@ script MonsterAI extends Component
 		else
 			_GameManager:OnMonsterKilled()
 		end
+		-- 비행형(박쥐 등)은 사망 위치가 공중이므로, 드랍 연출이 실제 발판(몬스터가 걸어다니는 바닥) 높이까지
+		-- 먼저 빙그르르 돌며 떨어지도록 그 높이차(UI px)를 같이 넘긴다. FlyingWanderMinY는 배회 궤적의
+		-- 하한일 뿐 실제 지면이 아니므로(맵마다 발판 높이가 다름), 사망 지점에서 실제로 아래로 레이캐스트해
+		-- FootholdComponent 표면 Y를 구한다 — 걷는 몬스터는 이미 바닥에 있으니 0.
+		-- 발판은 "그 위에 서 있을 수 있는 표면"이지, 타일 몸통 자체가 아니다 — 사망 지점이 어떤 타일의
+		-- 발판 인식선보다 낮으면(타일 몸통을 관통해서 죽은 경우 포함) 그 타일 위에 서 있는 게 아니므로,
+		-- 거리가 가깝다는 이유로 그 타일에 착지시키면 안 된다. 아래 방향으로만 쏴서, 사망 지점과 같거나
+		-- 더 낮은 위치의 발판만 착지 후보로 삼는다 — 타일을 관통해서 죽었다면 그보다 더 아래(멀더라도)
+		-- 있는 다음 발판까지 정상적으로 떨어지는 게 맞다.
+		-- 발판을 못 찾으면(hit==nil) groundY를 함부로 0으로 가정하지 않고 낙하 연출 자체를 건너뛴다
+		-- (존 오프셋이 있는 맵에서 잘못된 Y로 잘못 계산하면 아이템이 엉뚱한 자리에 멈춰 보이는 문제가 있었다).
+		-- 존15는 중앙 기둥 대신 유저가 깔아둔 CustomFootholdComponent 오브젝트(foothold-848_1~3)가
+		-- 있는데, 이건 몬스터 스폰 위치로도 이미 제외 처리된(MonsterSpawner.IsExcludedZone15Foothold)
+		-- "장식용" 발판이라 눈에 보이는 타일이 없다 — Raycast(첫 번째 하나만) 대신 RaycastAll로 사망
+		-- 지점 아래의 모든 발판을 훑어서, 이 제외 대상이 아닌 것 중 가장 가까운 것을 착지 지점으로 쓴다.
+		-- 이 값은 포션/잡템/야누스의 검 교환권 드롭 전부(엘리트 처치의 카드 드롭 화면 연출은 제외)가
+		-- 공유하므로, 아래 elite/potion 분기보다 먼저 계산해둔다.
+		local fallHeight = 0
+		if self._isFlying then
+			local worldPos = self.Entity.TransformComponent.WorldPosition
+			local map = self.Entity.CurrentMap
+			if map ~= nil then
+				---@type FootholdComponent
+				local foothold = map:GetComponent("FootholdComponent")
+				if foothold ~= nil then
+					local hits = foothold:RaycastAll(Vector2(worldPos.x, worldPos.y), Vector2(0, -1), 50)
+					local groundY = nil
+					local bestDist = nil
+					for i = 1, #hits do
+						local h = hits[i]
+						if not _MonsterSpawner:IsExcludedZone15Foothold(h.OwnerId) then
+							local y = h:GetYByX(worldPos.x)
+							local dist = worldPos.y - y
+							if bestDist == nil or dist < bestDist then
+								bestDist = dist
+								groundY = y
+							end
+						end
+					end
+					if groundY ~= nil and worldPos.y > groundY then
+						fallHeight = (worldPos.y - groundY) * 100
+					end
+				end
+			end
+		end
 		-- OnEliteKilled/TryDropHealPotion 둘 다 월드 좌표를 기대한다(카드 드롭 화면 연출·포션 드롭 연출) —
 		-- 로컬 Position을 넘기면 Zone12처럼 오프셋을 가진 존에서 드롭 연출이 화면 밖으로 어긋난다(실측 확인).
 		if self._isElite then
 			_CardManager:OnEliteKilled(self.Entity.TransformComponent.WorldPosition)
 			_MonsterSpawner:OnEliteKilled()
 		else
-			_GameManager:TryDropHealPotion(self.Entity.TransformComponent.WorldPosition)
+			_GameManager:TryDropHealPotion(self.Entity.TransformComponent.WorldPosition, fallHeight)
+		end
+		-- 존16~17(그림자 존) 전용: 야누스의 검 교환권 5% 확률 드롭 (보스/일반/엘리트 무관하게 처치마다 판정)
+		if self._spawnZoneIndex == 16 or self._spawnZoneIndex == 17 then
+			_GameManager:TryDropShadowVoucher(self.Entity.TransformComponent.WorldPosition, fallHeight)
+		else
+			-- 그 외 전 구간: 확률로 일반 잡템 1개를 가방에 지급 (보스/일반/엘리트 무관)
+			_GameManager:TryDropLootItem(self.Entity.TransformComponent.WorldPosition, fallHeight)
 		end
 		self:PlayDeathAnimation(self._dieRUID, self._dieDuration)
 		self.Entity:Destroy(self._dieDuration + 0.2)
@@ -704,14 +839,21 @@ script MonsterAI extends Component
 		local dmgMultiplier = self._isElite and 1.15 or 1.0
 		_GameManager:OnMonsterReached(dmgMultiplier)
 
-		-- attack1 리소스가 있는 웨이브는 스프라이트 교체, 원거리(먹물) 종은 화면 잉크 스플랫,
-		-- 그 외(없는 웨이브)는 스케일 들이받기로 대체
-		if self._attackRUID ~= "" then
+		-- 비행형(박쥐)은 배회 중 스케일이 고정돼 있어 "접근감"이 없고 공격이 잘 안 보인다는 피드백이 있어,
+		-- 공격 순간 2배 크기까지 확 커졌다가 돌아오는 들이받기로 임팩트를 준다(boost=1.0, baseScale 1.0
+		-- 기준 피크 2.0). 존14/15(이블아이/커즈아이)는 들이받기에 더해 살짝 위로 뛰는 모션을 얹는다.
+		-- attack1 리소스가 있는 웨이브는 스프라이트 교체, 원거리(먹물) 종은 화면 잉크 스플랫, 그 외
+		-- (없는 웨이브)는 기본 들이받기로 대체
+		if self._isFlying then
+			self:PlayLungeAnimation(1.0, 0)
+		elseif self._attackRUID ~= "" then
 			self:PlayAttackAnimation(self._attackRUID, self.MonsterSprite)
 		elseif self._isRangedInk then
 			self:PlayInkAttack()
+		elseif self._hopOnAttack then
+			self:PlayLungeAnimation(0.25, self.AttackHopHeight)
 		else
-			self:PlayLungeAnimation()
+			self:PlayLungeAnimation(0.25, 0)
 		end
 	end
 
@@ -763,17 +905,23 @@ script MonsterAI extends Component
 
 	-- attack1 애니메이션 리소스가 없는 몬스터용 대체 연출. 이 게임은 몬스터 스케일 자체가
 	-- "카메라와의 거리"를 표현하므로(접근할수록 커짐), 같은 방식으로 순간적으로 더 커졌다가
-	-- 되돌아오게 해서 위치를 옮기지 않고도 "들이받는" 느낌을 준다
+	-- 되돌아오게 해서 위치를 옮기지 않고도 "들이받는" 느낌을 준다. lungeBoost는 baseScale 대비
+	-- 최대로 커지는 양(예: baseScale=1.0에 0.4를 주면 피크 스케일 1.4). hopHeight가 0보다 크면
+	-- 같은 타이밍에 위로 살짝 뛰었다 착지하는 Y 모션을 더한다(0이면 기존과 동일하게 제자리 들이받기).
 	@ExecSpace("ServerOnly")
-	method void PlayLungeAnimation()
+	method void PlayLungeAnimation(number lungeBoost, number hopHeight)
 		if self._dead then return end
 		local mult = self._scaleMultiplier
 		local baseScale = self._currentScale
-		local lungeBoost = 0.25
+		local baseY = self.Entity.TransformComponent.Position.y
 		_TweenLogic:PlayTween(0.0, 1.0, 0.18, EaseType.QuadEaseOut, function(t)
 			if not isvalid(self) or not isvalid(self.Entity) then return end
 			local s = baseScale + lungeBoost * math.sin(t * math.pi)
 			self.Entity.TransformComponent.Scale = Vector3(s * mult, s * mult, 1.0)
+			if hopHeight > 0 then
+				local pos = self.Entity.TransformComponent.Position
+				self.Entity.TransformComponent.Position = Vector3(pos.x, baseY + hopHeight * math.sin(t * math.pi), pos.z)
+			end
 		end)
 	end
 

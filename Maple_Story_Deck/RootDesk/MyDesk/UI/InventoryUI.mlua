@@ -1,0 +1,143 @@
+@Logic
+script InventoryUI extends Logic
+
+	-- UI 바인딩 (클라이언트 전용)
+	property Entity inventoryGroup = "6e428b67-5349-4903-8189-29b867f505d9"
+	property ButtonComponent btnClose = "4e9e579b-db4b-429f-8e47-952ab768d7a3"
+	property ButtonComponent btnInventory = "22519eca-9947-4040-bbd4-45afb7d9f95a"
+	-- 창을 드래그로 옮기는 데 쓰는 바인딩 — 타이틀바를 잡고 끌면 Panel 전체가 같이 움직인다
+	property Entity panel = "dd851708-25f4-42d7-96b9-1d7bf85085b9"
+	property Entity titleBar = "72f54432-68f5-454d-9764-95086df18cbb"
+
+	property any _openHandler = nil
+	property any _closeHandler = nil
+	property any _dragHandler = nil
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		self.inventoryGroup.Enable = false
+		self._openHandler = self.btnInventory.Entity:ConnectEvent(ButtonClickEvent, self.Open)
+		self._closeHandler = self.btnClose.Entity:ConnectEvent(ButtonClickEvent, self.Close)
+		self._dragHandler = self.titleBar:ConnectEvent(UITouchDragEvent, self.OnTitleBarDrag)
+		-- GroupOrder만으로는 다른 UIGroup(DefaultGroup 등)보다 항상 앞에 그려진다는 보장이 없어서,
+		-- 실제 렌더 순서를 결정하는 형제 인덱스를 확정적으로 맨 뒤(=맨 앞)로 올려둔다
+		_UILogic:SetSiblingIndex(self.inventoryGroup.UITransformComponent, 1000000)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnTitleBarDrag(UITouchDragEvent event)
+		-- 타이틀바를 끌면 그만큼 인벤토리 창(Panel) 전체를 같이 옮긴다
+		local tc = self.panel.UITransformComponent
+		local pos = tc.anchoredPosition
+		tc.anchoredPosition = Vector2(pos.x + event.TouchDelta.x, pos.y + event.TouchDelta.y)
+	end
+
+	property string _shadowVoucherIcon = "b4ef5ecaa6584954831a86bd844e287e"
+	-- itemId별 마지막으로 확인한 개수 — 실시간 갱신 시 "늘어났는지"를 판단해 획득 연출을 재생하는 데 쓴다
+	property any _lastKnownCounts = nil
+
+	@ExecSpace("ClientOnly")
+	method void Open()
+		self.inventoryGroup.Enable = true
+		-- 처음 여는 시점엔 그동안 쌓인 아이템이 한꺼번에 "획득 연출"로 팝핑되면 안 되니 조용히 채운다
+		self:RefreshSlots(false)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void NotifyInventoryChanged()
+		-- 인벤토리를 열어둔 상태에서 아이템을 실시간으로 얻었을 때 호출됨 — 늘어난 슬롯만 획득 연출과 함께 갱신
+		if not self.inventoryGroup.Enable then return end
+		self:RefreshSlots(true)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshSlots(boolean playPopEffect)
+		-- "획득한 순서대로" PlayerInventory 잡템을 채우고, 그 뒤에 야누스의 검 교환권을 표시한다
+		local displayItemIds = _PlayerInventory:GetOrderedItemIds()
+		if _GameManager.ShadowVoucher > 0 then
+			table.insert(displayItemIds, "shadow_voucher")
+		end
+		local panel = self.inventoryGroup:GetChildByName("Panel")
+		if not isvalid(panel) then return end
+		local grid = panel:GetChildByName("SlotGrid")
+		if not isvalid(grid) then return end
+
+		for i = 0, 19 do
+			local slot = grid:GetChildByName("Slot_" .. tostring(i))
+			if isvalid(slot) then
+				local itemId = nil
+				if i < #displayItemIds then itemId = displayItemIds[i + 1] end
+				self:RefreshSlot(slot, itemId, playPopEffect)
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshSlot(Entity slot, any itemId, boolean playPopEffect)
+		local iconEntity = slot:GetChildByName("Icon")
+		local countEntity = slot:GetChildByName("Count")
+
+		local count = 0
+		local iconRuid = ""
+		if itemId ~= nil then
+			if itemId == "shadow_voucher" then
+				count = _GameManager.ShadowVoucher
+				iconRuid = self._shadowVoucherIcon
+			else
+				count = _PlayerInventory:GetItemCount(itemId)
+				local def = _PlayerInventory:GetItemDef(itemId)
+				if def ~= nil then iconRuid = def.icon end
+			end
+		end
+
+		if isvalid(iconEntity) then
+			local show = count > 0 and iconRuid ~= ""
+			if show then iconEntity.SpriteGUIRendererComponent.ImageRUID = iconRuid end
+			-- Icon은 빌드 시점에 SpriteGUIRendererComponent 자체가 Disable로 만들어져 있어서,
+			-- Entity:SetEnable이 아니라 그 컴포넌트의 Enable을 직접 켜줘야 한다
+			iconEntity.SpriteGUIRendererComponent.Enable = show
+		end
+		if isvalid(countEntity) then
+			if count > 1 then
+				countEntity.TextComponent.Text = tostring(count)
+			else
+				countEntity.TextComponent.Text = ""
+			end
+		end
+
+		if itemId ~= nil then
+			if self._lastKnownCounts == nil then self._lastKnownCounts = {} end
+			local previousCount = 0
+			if self._lastKnownCounts[itemId] ~= nil then previousCount = self._lastKnownCounts[itemId] end
+			if playPopEffect and count > previousCount then
+				self:PlayItemPopEffect(iconEntity)
+			end
+			self._lastKnownCounts[itemId] = count
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayItemPopEffect(Entity iconEntity)
+		-- 아이템을 새로 획득/추가로 얻었을 때 그 슬롯 자리에서 살짝 커졌다 작아지는 연출
+		if not isvalid(iconEntity) then return end
+		_TweenLogic:ScaleTo(iconEntity, Vector2(1.35, 1.35), 0.12, EaseType.BackEaseOut)
+		_TimerService:SetTimerOnce(function()
+			if isvalid(iconEntity) then
+				_TweenLogic:ScaleTo(iconEntity, Vector2(1, 1), 0.15, EaseType.QuadEaseOut)
+			end
+		end, 0.12)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Close()
+		self.inventoryGroup.Enable = false
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		if self._openHandler then self.btnInventory.Entity:DisconnectEvent(ButtonClickEvent, self._openHandler) end
+		if self._closeHandler then self.btnClose.Entity:DisconnectEvent(ButtonClickEvent, self._closeHandler) end
+		if self._dragHandler then self.titleBar:DisconnectEvent(UITouchDragEvent, self._dragHandler) end
+	end
+
+end

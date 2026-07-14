@@ -10,7 +10,14 @@ script MapManager extends Logic
 	-- 맵10→11 방향의 일반 순차 이동은 MoveByDelta에서 별도로 막아, "10 다음이 11"이 아니라
 	-- "6의 분기가 11"이라는 의도를 유지한다. 반면 11→12는 진짜 순차 연장이라 별도 분기 없이
 	-- 일반 델타(+1/-1) 이동으로 자연스럽게 처리된다.
-	property integer MaxMapIndex = 12
+	-- 그룹E(맵13~15, 개미굴 테마)가 맵12의 순차적 연장으로 추가되면서 15로 올린다. 12→13은 물리적으로
+	-- 다른 파일(map11→map13)이라 GetMapName이 다른 값을 반환하므로, MoveToMap의 "같은 파일이면 스크롤"
+	-- 분기를 타지 않고 자동으로 기존 와이프 전환(DoMapChange)을 탄다 — 6→11 같은 별도 delta 분기가 필요 없다.
+	-- 그룹F(존16~18, 그림자 존)가 존15 이스터에그를 풀어야 열리는 다음 단계로 추가되면서 18로 올린다.
+	-- map13을 덤프해서 만든 map16.map 하나를 host로 존17/18을 Zone17/Zone18 자식 컨테이너로 병합한다
+	-- (그룹A/B/C/E와 동일한 패턴). MapMoveUI가 존15에서 ">'를 잠가두므로 경계값을 올린 것만으로
+	-- 실수로 먼저 뚫리지는 않는다.
+	property integer MaxMapIndex = 18
 
 	-- 맵 이동 시 플레이어를 위치시킬 좌표. Y는 DefaultUserEnterLeaveLogic이 원래 스폰시키는 높이(0.2)와
 	-- 반드시 맞춰야 한다 — 다르면 카메라가 그 차이만큼 밀려서 몬스터가 화면 아래(UI 위)로 잘못 표시된다
@@ -45,7 +52,7 @@ script MapManager extends Logic
 
 	-- 게임을 시작할 맵 번호. DefaultUserEnterLeaveLogic.StartPoint(Maker 전용 설정, 기본 /maps/map01)를
 	-- 직접 바꾸기 전까지의 코드측 임시 우회 — 유저 접속이 확인되는 즉시 이 맵으로 이동시킨다
-	property integer DesiredStartMapIndex = 1
+	property integer DesiredStartMapIndex = 15
 
 	property boolean _startRedirectDone = false
 
@@ -91,11 +98,33 @@ script MapManager extends Logic
 			[10] = { file = "map07", container = "Zone10", spawnX = 46.5 },
 			[11] = { file = "map11", container = nil, spawnX = 0 },
 			[12] = { file = "map11", container = "Zone12", spawnX = 15 },
+			-- 그룹E(맵13~15) 병합: map13.map을 host로 map14/15를 Zone14/Zone15 자식 컨테이너로 병합.
+			-- 발판폭(14.36) + 버퍼로 spawnX 공식 계산(15.5, 31.0 — A/B/C와 동일 값 재사용). 맵13/14/15는
+			-- 지면 Y가 전부 -1.25로 동일해서 Y 정렬 불필요(그룹C의 맵10 같은 보정이 필요 없었음).
+			[13] = { file = "map13", container = nil, spawnX = 0 },
+			[14] = { file = "map13", container = "Zone14", spawnX = 15.5 },
+			[15] = { file = "map13", container = "Zone15", spawnX = 31.0 },
+			-- 그룹F(존16~18, 그림자 존) 병합: map13을 덤프해서 만든 map16.map을 host로 존17/18을
+			-- Zone17/Zone18 자식 컨테이너로 병합. 그룹A/B/C/E와 동일한 오프셋(15.5, 31.0) 재사용.
+			-- 존15에서 이스터에그를 풀고 ">'를 누르면 존16으로 온다.
+			[16] = { file = "map16", container = nil, spawnX = 0 },
+			[17] = { file = "map16", container = "Zone17", spawnX = 15.5 },
+			[18] = { file = "map16", container = "Zone18", spawnX = 31.0 },
 		}
 		-- 몬스터 스폰/시작맵 리다이렉트는 GameStarted가 될 때까지 미룬다(BeginGameplay 참고) —
 		-- 타이틀 화면을 보는 동안 몬스터가 먼저 쌓이면 안 된다. 여기서는 현재 위치만 계산해둔다.
 		self.CurrentMapIndex = self:ResolveCurrentMapIndex()
 		log("MapManager started at " .. self:GetMapName(self.CurrentMapIndex))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnSyncProperty(string name, any value)
+		if name == "CurrentMapIndex" then
+			-- 화면(카메라)이 통째로 바뀌는 시점 — 바닥까지 낙하/홉 중이던 잡템 드롭 아이콘이 있으면
+			-- 그 연출을 마저 재생하지 않고 지금 위치에서 곧장 가방으로 날아가게 해서, 이전 화면의
+			-- 아이템이 새 화면 위에 그대로 남아있는 것처럼 보이지 않게 한다
+			_GameManager:ForceFinishLootDrops()
+		end
 	end
 
 	-- GameManager.StartGame()이 "게임 시작" 클릭 시 호출 — 여기서 처음으로 몬스터 스폰을 활성화한다
@@ -192,6 +221,8 @@ script MapManager extends Logic
 
 		log("MapManager: silent-started at " .. mapName)
 		_MapMoveUI:NotifyMapChanged(targetIndex)
+		-- 존15 이스터에그: 도착했을 때만 알려준다(재입장 시 불꽃이 아직 안 풀렸으면 다시 꺼지는 연출)
+		if targetIndex == 15 then _Zone15PuzzleLogic:OnEnterZone15() end
 	end
 
 	-- 실제로 플레이어가 있는 맵 번호를 엔티티 기준으로 다시 계산한다. Maker Play Test는 world 시작 시점의
@@ -272,17 +303,36 @@ script MapManager extends Logic
 		end
 	end
 
+	-- 이동 요청 사이 최소 간격 — 이보다 빠르게 연달아 이동 요청이 들어오면(예: ">"를 빠르게 연타)
+	-- 뒤 요청을 무시한다. 실측 확인: 두 이동 요청이 이 간격보다 가깝게 겹치면, 먼저 요청한 이동의
+	-- 위치 확정이 나중에 처리되면서 이미 화면에 반영된 나중 이동 결과를 몇 초 뒤 조용히 덮어써버리는
+	-- 경합(race condition)이 있었다(존13→14→15를 빠르게 연달아 누르면 마지막 도착 화면이 잠시 후
+	-- 예전 존으로 되돌아가는 버그의 원인 — 2초 간격을 두면 전혀 재현되지 않음을 확인).
+	property number MoveCooldownDuration = 2.0
+	property boolean _moveLocked = false
+
 	@ExecSpace("ServerOnly")
 	method void MoveToMap(integer fromIndex, integer targetIndex)
 		-- 범위를 벗어나면 무시 (map1에서 좌 / 마지막 맵에서 우 — 아무 반응 없음)
 		if targetIndex < self.MinMapIndex or targetIndex > self.MaxMapIndex then return end
 		if targetIndex == fromIndex then return end
 
-		-- 맵4 이상은 웨이브10 보스(리본돼지)를 잡기 전까지 잠겨있다
-		if targetIndex >= 4 and not _GameManager.BossDefeated then
-			log("MapManager: map" .. targetIndex .. " locked until boss is defeated")
+		-- 이전 이동이 아직 "확정 대기" 중이면 이번 요청은 무시한다(연타 방지)
+		if self._moveLocked then
+			log("MapManager: move ignored (cooldown) fromIndex=" .. fromIndex .. " targetIndex=" .. targetIndex)
 			return
 		end
+		self._moveLocked = true
+		_TimerService:SetTimerOnce(function()
+			if isvalid(self) then self._moveLocked = false end
+		end, self.MoveCooldownDuration)
+
+		-- 맵4 이상은 웨이브10 보스(리본돼지)를 잡기 전까지 잠겨있다
+		-- TEMP_TEST_DISABLED(존13~15 테스트용 임시 해제 — 테스트 끝나면 이 if문 복원할 것):
+		-- if targetIndex >= 4 and not _GameManager.BossDefeated then
+		-- 	log("MapManager: map" .. targetIndex .. " locked until boss is defeated")
+		-- 	return
+		-- end
 
 		-- 그룹D(맵11↔12)처럼 물리적으로 같은 파일(map11.map)을 공유하는 존 사이 이동은 와이프 대신
 		-- 카메라가 옆으로 쓸려가는 스크롤 전환을 쓴다. GetMapName이 같은 파일명을 반환한다는 것 자체가
@@ -365,6 +415,8 @@ script MapManager extends Logic
 
 		log("MapManager: scrolled to zone " .. targetIndex .. " (" .. mapName .. ")")
 		_MapMoveUI:NotifyMapChanged(targetIndex)
+		-- 존15 이스터에그: 도착했을 때만 알려준다(재입장 시 불꽃이 아직 안 풀렸으면 다시 꺼지는 연출)
+		if targetIndex == 15 then _Zone15PuzzleLogic:OnEnterZone15() end
 	end
 
 	-- CameraComponent는 CameraService.GetCurrentCameraComponent()가 ClientOnly라 서버에서 직접 만질 수
@@ -465,6 +517,8 @@ script MapManager extends Logic
 		-- 서로 다른 채널이라 순서 보장이 없어서, 클라이언트가 NotifyMapChanged 시점에 CurrentMapIndex를
 		-- 다시 읽으면 아직 갱신 전(이전 값)을 볼 수 있다 — 값 자체를 인자로 넘겨야 확실하다
 		_MapMoveUI:NotifyMapChanged(targetIndex)
+		-- 존15 이스터에그: 도착했을 때만 알려준다(재입장 시 불꽃이 아직 안 풀렸으면 다시 꺼지는 연출)
+		if targetIndex == 15 then _Zone15PuzzleLogic:OnEnterZone15() end
 
 		-- 텔레포트 직후 카메라가 새 맵 발판 범위에 맞춰 자리 잡는 데 실측 0.5~0.8초 정도 걸린다
 		-- (Damping을 낮춰도 confine 영역 자체가 바뀌는 건 즉시 스냅되지 않음) — 그 시간만큼 화면을
