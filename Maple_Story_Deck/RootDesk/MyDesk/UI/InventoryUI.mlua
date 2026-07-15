@@ -3,15 +3,27 @@ script InventoryUI extends Logic
 
 	-- UI 바인딩 (클라이언트 전용)
 	property Entity inventoryGroup = "6e428b67-5349-4903-8189-29b867f505d9"
-	property ButtonComponent btnClose = "4e9e579b-db4b-429f-8e47-952ab768d7a3"
+	property ButtonComponent btnClose = "d61aef80-bbd3-46f6-8920-97286e648070"
 	property ButtonComponent btnInventory = "22519eca-9947-4040-bbd4-45afb7d9f95a"
 	-- 창을 드래그로 옮기는 데 쓰는 바인딩 — 타이틀바를 잡고 끌면 Panel 전체가 같이 움직인다
 	property Entity panel = "dd851708-25f4-42d7-96b9-1d7bf85085b9"
 	property Entity titleBar = "72f54432-68f5-454d-9764-95086df18cbb"
+	-- 슬롯 스크롤 바인딩 — 유물/상점 패널과 동일한 구조(터치드래그 + 커스텀 슬라이더)
+	property Entity slotList = "cbdf58ee-5ede-42e9-abf6-2be578c29043"
+	property Entity scrollTouchArea = "a78e53db-e4bb-4a8e-939c-e087d45fa098"
+	property SliderComponent scrollBar = "2aafc23e-d8c1-4829-a477-a23847b1d305"
+	property integer slotCount = 75
+	-- 콘텐츠 높이(15줄*96 + 14간격*14) - 뷰포트 높이(460) = 실제로 드래그 가능한 스크롤 폭(px)
+	property number scrollableRangePx = 1176
 
 	property any _openHandler = nil
 	property any _closeHandler = nil
 	property any _dragHandler = nil
+	property any _scrollDragHandler = nil
+	property any _scrollBarHandler = nil
+	-- SyncScrollBar()가 코드로 scrollBar.Value를 갱신할 때 true로 세워서, 그 갱신이 다시
+	-- SliderValueChangedEvent로 되돌아와 리스트를 또 움직이는 무한 루프를 막는다
+	property boolean _syncingScrollBar = false
 
 	@ExecSpace("ClientOnly")
 	method void OnBeginPlay()
@@ -22,6 +34,13 @@ script InventoryUI extends Logic
 		-- GroupOrder만으로는 다른 UIGroup(DefaultGroup 등)보다 항상 앞에 그려진다는 보장이 없어서,
 		-- 실제 렌더 순서를 결정하는 형제 인덱스를 확정적으로 맨 뒤(=맨 앞)로 올려둔다
 		_UILogic:SetSiblingIndex(self.inventoryGroup.UITransformComponent, 1000000)
+
+		self._scrollDragHandler = self.scrollTouchArea:ConnectEvent(UITouchDragEvent, self.OnScrollDrag)
+		self._scrollBarHandler = self.scrollBar.Entity:ConnectEvent(SliderValueChangedEvent, self.OnScrollBarChanged)
+		-- 슬롯 리스트/스크롤바가 항상 맨 위(첫 줄)부터 시작하도록 확정적으로 리셋한다
+		-- (세로축은 0=맨 위, 1=맨 아래 — 가로 스크롤의 0=시작점과 같은 의미)
+		self.slotList.ScrollLayoutGroupComponent:SetScrollNormalizedPosition(UITransformAxis.Vertical, 0)
+		self:SyncScrollBar(0)
 	end
 
 	@ExecSpace("ClientOnly")
@@ -30,6 +49,33 @@ script InventoryUI extends Logic
 		local tc = self.panel.UITransformComponent
 		local pos = tc.anchoredPosition
 		tc.anchoredPosition = Vector2(pos.x + event.TouchDelta.x, pos.y + event.TouchDelta.y)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnScrollDrag(UITouchDragEvent event)
+		-- 세로축은 0=맨 위, 1=맨 아래. 위로 끌면(TouchDelta.y > 0) 아래쪽 슬롯이 보이도록
+		-- (정규화 값 증가) 스크롤한다
+		local layout = self.slotList.ScrollLayoutGroupComponent
+		local current = layout:GetScrollNormalizedPosition(UITransformAxis.Vertical)
+		local delta = event.TouchDelta.y / self.scrollableRangePx
+		local newValue = math.max(0, math.min(1, current + delta))
+		layout:SetScrollNormalizedPosition(UITransformAxis.Vertical, newValue)
+		self:SyncScrollBar(newValue)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SyncScrollBar(number normalizedValue)
+		-- 리스트 쪽 스크롤(드래그)이 바뀔 때 오른쪽 스크롤바 핸들 위치를 따라오게 한다
+		self._syncingScrollBar = true
+		self.scrollBar.Value = normalizedValue
+		self._syncingScrollBar = false
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnScrollBarChanged(SliderValueChangedEvent event)
+		-- 방금 SyncScrollBar()가 코드로 쓴 값이 되돌아온 것이면 무시 — 사용자가 직접 핸들을 끈 경우만 처리
+		if self._syncingScrollBar then return end
+		self.slotList.ScrollLayoutGroupComponent:SetScrollNormalizedPosition(UITransformAxis.Vertical, event.Value)
 	end
 
 	property string _shadowVoucherIcon = "b4ef5ecaa6584954831a86bd844e287e"
@@ -57,13 +103,10 @@ script InventoryUI extends Logic
 		if _GameManager.ShadowVoucher > 0 then
 			table.insert(displayItemIds, "shadow_voucher")
 		end
-		local panel = self.inventoryGroup:GetChildByName("Panel")
-		if not isvalid(panel) then return end
-		local grid = panel:GetChildByName("SlotGrid")
-		if not isvalid(grid) then return end
+		if not isvalid(self.slotList) then return end
 
-		for i = 0, 19 do
-			local slot = grid:GetChildByName("Slot_" .. tostring(i))
+		for i = 0, self.slotCount - 1 do
+			local slot = self.slotList:GetChildByName("Slot_" .. tostring(i))
 			if isvalid(slot) then
 				local itemId = nil
 				if i < #displayItemIds then itemId = displayItemIds[i + 1] end
@@ -138,6 +181,8 @@ script InventoryUI extends Logic
 		if self._openHandler then self.btnInventory.Entity:DisconnectEvent(ButtonClickEvent, self._openHandler) end
 		if self._closeHandler then self.btnClose.Entity:DisconnectEvent(ButtonClickEvent, self._closeHandler) end
 		if self._dragHandler then self.titleBar:DisconnectEvent(UITouchDragEvent, self._dragHandler) end
+		if self._scrollDragHandler then self.scrollTouchArea:DisconnectEvent(UITouchDragEvent, self._scrollDragHandler) end
+		if self._scrollBarHandler then self.scrollBar.Entity:DisconnectEvent(SliderValueChangedEvent, self._scrollBarHandler) end
 	end
 
 end
