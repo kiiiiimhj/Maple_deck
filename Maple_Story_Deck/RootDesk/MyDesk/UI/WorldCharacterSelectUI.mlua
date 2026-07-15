@@ -1,0 +1,319 @@
+@Logic
+script WorldCharacterSelectUI extends Logic
+
+	property Entity popupGroup = "ae6db2b2-e539-46c5-93fd-1a5595f685ed"
+	property ButtonComponent btnClose = "28981970-caed-44f0-bbfd-bfe77126c36a"
+	-- 3장짜리 캐로셀 — 슬롯(왼쪽/가운데/오른쪽)은 화면상 고정 위치지만, 어느 물리 엔티티가 어느 슬롯
+	-- 역할을 맡는지는 ChangeWorld()가 애니메이션 끝에 서로 바꿔치기(rotate)한다. 그래서 이 3개는
+	-- @Sync 없는 순수 참조 변수처럼 런타임에 재할당된다
+	property SpriteGUIRendererComponent worldImageLeft = "a5041526-84dc-4aaa-8e8a-100caee46fc0"
+	property SpriteGUIRendererComponent worldImageCenter = "5b8023e4-072c-4f27-a5b1-ccf9a6e86069"
+	property SpriteGUIRendererComponent worldImageRight = "a65d7294-37d0-4f30-bcce-1a95741b427d"
+	property ButtonComponent btnWorldPrev = "bf49b83d-eacc-46fc-b45d-1e58fb82baaf"
+	property ButtonComponent btnWorldNext = "0db5a96a-2709-4487-b184-53f1c43baa23"
+	property TextComponent worldNameText = "fc8be4ee-112c-4399-bfad-5eea397ec3b9"
+	property boolean _carouselAnimating = false
+	property number _carouselDuration = 0.32
+	property Vector2 _leftPos = Vector2(-430, 300)
+	property Vector2 _centerPos = Vector2(0, 300)
+	property Vector2 _rightPos = Vector2(430, 300)
+	property Vector2 _farLeftPos = Vector2(-560, 300)
+	property Vector2 _farRightPos = Vector2(560, 300)
+	property number _sideScale = 0.55
+	property number _farScale = 0.2
+	property Entity charList = "e268de69-d6c8-43ae-8eeb-20758c36bfc5"
+	property TextComponent charDescNameText = "39cc8743-5098-45f8-91e1-00177775d7c4"
+	property TextComponent charDescText = "3b71b228-4884-40e8-80ba-3d89f487661d"
+	property ButtonComponent btnConfirm = "c2e1c1e2-d89c-48ff-a7ac-745e9f6ecc2f"
+
+	-- 월드 목록 — 지금은 실제 입장 가능한 월드가 1개뿐이라, </> 이동 기능이 실제로 동작하는 걸 보여주기
+	-- 위해 "준비중" 더미 월드를 하나 더 둔다. enterable=false인 월드는 확인을 눌러도 입장하지 않는다.
+	property any _worlds = nil
+	property integer _worldIndex = 1
+
+	-- 캐릭터 목록 — 0번(썬콜법사)만 실제 캐릭터, 나머지는 향후 캐릭터 추가를 위한 잠금 슬롯
+	property any _characters = nil
+	property integer _selectedCharIndex = -1
+
+	property any _closeHandler = nil
+	property any _confirmHandler = nil
+	property any _prevHandler = nil
+	property any _nextHandler = nil
+	property any _dragHandler = nil
+	property any _scrollBarHandler = nil
+	property boolean _syncingScrollBar = false
+	property number scrollableRangePx = 200
+	property SliderComponent charScrollBar = "89d7fa0f-8bb6-4bac-b6e8-f903fd2b5e50"
+	property Entity charScrollTouchArea = "a03e29e8-5f03-4a07-ae1d-88ee7ad7642f"
+	property any _slotHandlers = nil
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		self._worlds = {
+			{ name = "메이플 덱 크롤러", imageRuid = "95ce798ac8fd4b1ab8177405c18c9949", enterable = true },
+			{ name = "다음 월드 (준비중)", imageRuid = "4fea64a3307cda641809ad8be0d4890b", enterable = false },
+		}
+		self._characters = {
+			{ name = "썬콜법사", desc = "CC기를 보유한 마법사", iconRuid = "287e3875c3d742d88cc90f947a67fccf", locked = false },
+			{ name = "", desc = "", iconRuid = "", locked = true },
+			{ name = "", desc = "", iconRuid = "", locked = true },
+			{ name = "", desc = "", iconRuid = "", locked = true },
+			{ name = "", desc = "", iconRuid = "", locked = true },
+			{ name = "", desc = "", iconRuid = "", locked = true },
+			{ name = "", desc = "", iconRuid = "", locked = true },
+			{ name = "", desc = "", iconRuid = "", locked = true },
+		}
+		self._slotHandlers = {}
+
+		self._closeHandler = self.btnClose.Entity:ConnectEvent(ButtonClickEvent, self.Close)
+		self._confirmHandler = self.btnConfirm.Entity:ConnectEvent(ButtonClickEvent, self.OnConfirmClicked)
+		self._prevHandler = self.btnWorldPrev.Entity:ConnectEvent(ButtonClickEvent, function() self:ChangeWorld(-1) end)
+		self._nextHandler = self.btnWorldNext.Entity:ConnectEvent(ButtonClickEvent, function() self:ChangeWorld(1) end)
+		self._dragHandler = self.charScrollTouchArea:ConnectEvent(UITouchDragEvent, self.OnScrollDrag)
+		self._scrollBarHandler = self.charScrollBar.Entity:ConnectEvent(SliderValueChangedEvent, self.OnScrollBarChanged)
+
+		self:ConnectCharSlots()
+		log("WorldCharacterSelectUI started")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ConnectCharSlots()
+		for i = 0, #self._characters - 1 do
+			local slot = self.charList:GetChildByName("CharSlot_" .. tostring(i))
+			if isvalid(slot) then
+				local capturedIndex = i
+				local h = slot:ConnectEvent(UITouchUpEvent, function(event) self:OnCharSlotClicked(capturedIndex) end)
+				local dragH = slot:ConnectEvent(UITouchDragEvent, self.OnScrollDrag)
+				table.insert(self._slotHandlers, { entity = slot, upHandler = h, dragHandler = dragH })
+			end
+		end
+	end
+
+	-- TitleUI가 "게임 시작" 버튼을 눌렀을 때 호출 — 바로 입장하지 않고 이 팝업을 연다
+	@ExecSpace("ClientOnly")
+	method void Open()
+		self.popupGroup.Enable = true
+		self._worldIndex = 1
+		self._selectedCharIndex = -1
+		self:RefreshWorld()
+		self:RefreshCharList()
+		self:RefreshConfirmState()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Close()
+		self.popupGroup.Enable = false
+	end
+
+	@ExecSpace("ClientOnly")
+	method integer WrapWorldIndex(integer idx)
+		local n = #self._worlds
+		while idx < 1 do idx = idx + n end
+		while idx > n do idx = idx - n end
+		return idx
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetWorldSlotImage(SpriteGUIRendererComponent img, integer worldIdx)
+		local w = self._worlds[worldIdx]
+		img.ImageRUID = DataRef(w.imageRuid)
+	end
+
+	-- 팝업 최초 오픈 시 애니메이션 없이 3슬롯을 현재 _worldIndex 기준으로 즉시 세팅한다
+	@ExecSpace("ClientOnly")
+	method void RefreshWorld()
+		self:SetWorldSlotImage(self.worldImageLeft, self:WrapWorldIndex(self._worldIndex - 1))
+		self:SetWorldSlotImage(self.worldImageCenter, self._worldIndex)
+		self:SetWorldSlotImage(self.worldImageRight, self:WrapWorldIndex(self._worldIndex + 1))
+
+		local leftT = self.worldImageLeft.Entity.UITransformComponent
+		leftT.anchoredPosition = self._leftPos
+		leftT.Scale = Vector3(self._sideScale, self._sideScale, 1)
+		self.worldImageLeft.Color = Color(1, 1, 1, 0.85)
+
+		local centerT = self.worldImageCenter.Entity.UITransformComponent
+		centerT.anchoredPosition = self._centerPos
+		centerT.Scale = Vector3(1, 1, 1)
+
+		local rightT = self.worldImageRight.Entity.UITransformComponent
+		rightT.anchoredPosition = self._rightPos
+		rightT.Scale = Vector3(self._sideScale, self._sideScale, 1)
+		self.worldImageRight.Color = Color(1, 1, 1, 0.85)
+
+		local w = self._worlds[self._worldIndex]
+		self.worldImageCenter.Color = w.enterable and Color(1, 1, 1, 1) or Color(0.5, 0.5, 0.5, 1)
+		self.worldNameText.Text = w.name
+	end
+
+	-- </> 클릭 — 기존 가운데는 옆으로 밀려나며 작아지고, 옆에 있던 월드가 가운데로 커지면서 들어온다.
+	-- 물리 엔티티 3개(Left/Center/Right)는 그대로 두고 애니메이션이 끝난 뒤 슬롯 "역할"만 서로
+	-- 돌려가며(rotate) 재배정한다 — 그래야 밀려나는 중이던 화면이 그대로 다음 프레임에 이어진다
+	@ExecSpace("ClientOnly")
+	method void ChangeWorld(integer delta)
+		if self._carouselAnimating then return end
+		if #self._worlds <= 1 then return end
+		local newIndex = self:WrapWorldIndex(self._worldIndex + delta)
+		self._carouselAnimating = true
+
+		if delta > 0 then
+			-- 다음: 왼쪽은 더 왼쪽으로 사라지고, 가운데->왼쪽 자리로, 오른쪽->가운데 자리로
+			self:AnimateSlot(self.worldImageLeft, self._farLeftPos, self._farScale)
+			self:AnimateSlot(self.worldImageCenter, self._leftPos, self._sideScale)
+			self:AnimateSlot(self.worldImageRight, self._centerPos, 1.0)
+		else
+			-- 이전: 오른쪽은 더 오른쪽으로 사라지고, 가운데->오른쪽 자리로, 왼쪽->가운데 자리로
+			self:AnimateSlot(self.worldImageRight, self._farRightPos, self._farScale)
+			self:AnimateSlot(self.worldImageCenter, self._rightPos, self._sideScale)
+			self:AnimateSlot(self.worldImageLeft, self._centerPos, 1.0)
+		end
+
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) then return end
+			self._worldIndex = newIndex
+
+			if delta > 0 then
+				local vacating = self.worldImageLeft
+				self.worldImageLeft = self.worldImageCenter
+				self.worldImageCenter = self.worldImageRight
+				self.worldImageRight = vacating
+				self:SetWorldSlotImage(self.worldImageRight, self:WrapWorldIndex(self._worldIndex + 1))
+				local t = self.worldImageRight.Entity.UITransformComponent
+				t.anchoredPosition = self._rightPos
+				t.Scale = Vector3(self._sideScale, self._sideScale, 1)
+				self.worldImageRight.Color = Color(1, 1, 1, 0.85)
+			else
+				local vacating = self.worldImageRight
+				self.worldImageRight = self.worldImageCenter
+				self.worldImageCenter = self.worldImageLeft
+				self.worldImageLeft = vacating
+				self:SetWorldSlotImage(self.worldImageLeft, self:WrapWorldIndex(self._worldIndex - 1))
+				local t = self.worldImageLeft.Entity.UITransformComponent
+				t.anchoredPosition = self._leftPos
+				t.Scale = Vector3(self._sideScale, self._sideScale, 1)
+				self.worldImageLeft.Color = Color(1, 1, 1, 0.85)
+			end
+
+			local w = self._worlds[self._worldIndex]
+			self.worldImageCenter.Color = w.enterable and Color(1, 1, 1, 1) or Color(0.5, 0.5, 0.5, 1)
+			self.worldNameText.Text = w.name
+			self._carouselAnimating = false
+			self:RefreshConfirmState()
+		end, self._carouselDuration)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void AnimateSlot(SpriteGUIRendererComponent img, Vector2 targetPos, number targetScale)
+		local entity = img.Entity
+		_TweenLogic:MoveTo(entity, targetPos, self._carouselDuration, EaseType.QuadEaseOut)
+		_TweenLogic:ScaleTo(entity, Vector2(targetScale, targetScale), self._carouselDuration, EaseType.QuadEaseOut)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshCharList()
+		for i = 0, #self._characters - 1 do
+			local charData = self._characters[i + 1]
+			local slot = self.charList:GetChildByName("CharSlot_" .. tostring(i))
+			if isvalid(slot) then
+				local icon = slot:GetChildByName("Icon")
+				if isvalid(icon) then
+					if not charData.locked then
+						icon.SpriteGUIRendererComponent.ImageRUID = DataRef(charData.iconRuid)
+						icon.SpriteGUIRendererComponent.Color = Color(1, 1, 1, 1)
+					end
+				end
+			end
+		end
+		self:RefreshCharSelection()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnCharSlotClicked(integer index)
+		local charData = self._characters[index + 1]
+		if charData == nil or charData.locked then return end
+		self._selectedCharIndex = index
+		self:RefreshCharSelection()
+		self.charDescNameText.Text = charData.name
+		self.charDescText.Text = charData.desc
+		self:RefreshConfirmState()
+	end
+
+	-- 선택된 슬롯에 알파를 살짝 뺀 파란색 네온 테두리를 표시한다
+	@ExecSpace("ClientOnly")
+	method void RefreshCharSelection()
+		for i = 0, #self._characters - 1 do
+			local slot = self.charList:GetChildByName("CharSlot_" .. tostring(i))
+			if isvalid(slot) then
+				local sp = slot.SpriteGUIRendererComponent
+				if i == self._selectedCharIndex then
+					sp.Outline = true
+					sp.OutlineColor = Color(0.2, 0.6, 1.0, 0.75)
+					sp.OutlineWidth = 4
+				else
+					sp.Outline = false
+				end
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshConfirmState()
+		local world = self._worlds[self._worldIndex]
+		local canConfirm = self._selectedCharIndex >= 0 and world.enterable
+		self.btnConfirm.Enable = canConfirm
+		local sprite = self.btnConfirm.Entity.SpriteGUIRendererComponent
+		if canConfirm then
+			sprite.Color = Color(0.94, 0.78, 0.32, 1.0)
+		else
+			sprite.Color = Color(0.94 * 0.4, 0.78 * 0.4, 0.32 * 0.4, 1.0)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnConfirmClicked()
+		local world = self._worlds[self._worldIndex]
+		if self._selectedCharIndex < 0 or not world.enterable then return end
+		self:Close()
+		_TitleUI:OnStartClicked()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnScrollDrag(UITouchDragEvent event)
+		local current = self.charList.ScrollLayoutGroupComponent:GetScrollNormalizedPosition(UITransformAxis.Vertical)
+		local delta = event.TouchDelta.y / self.scrollableRangePx
+		local newValue = math.max(0, math.min(1, current + delta))
+		self.charList.ScrollLayoutGroupComponent:SetScrollNormalizedPosition(UITransformAxis.Vertical, newValue)
+		self:SyncScrollBar(newValue)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SyncScrollBar(number normalizedValue)
+		self._syncingScrollBar = true
+		self.charScrollBar.Value = normalizedValue
+		self._syncingScrollBar = false
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnScrollBarChanged(SliderValueChangedEvent event)
+		if self._syncingScrollBar then return end
+		self.charList.ScrollLayoutGroupComponent:SetScrollNormalizedPosition(UITransformAxis.Vertical, event.Value)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		if self._closeHandler then self.btnClose.Entity:DisconnectEvent(ButtonClickEvent, self._closeHandler) end
+		if self._confirmHandler then self.btnConfirm.Entity:DisconnectEvent(ButtonClickEvent, self._confirmHandler) end
+		if self._prevHandler then self.btnWorldPrev.Entity:DisconnectEvent(ButtonClickEvent, self._prevHandler) end
+		if self._nextHandler then self.btnWorldNext.Entity:DisconnectEvent(ButtonClickEvent, self._nextHandler) end
+		if self._dragHandler then self.charScrollTouchArea:DisconnectEvent(UITouchDragEvent, self._dragHandler) end
+		if self._scrollBarHandler then self.charScrollBar.Entity:DisconnectEvent(SliderValueChangedEvent, self._scrollBarHandler) end
+		if self._slotHandlers then
+			for _, rec in ipairs(self._slotHandlers) do
+				if isvalid(rec.entity) then
+					rec.entity:DisconnectEvent(UITouchUpEvent, rec.upHandler)
+					rec.entity:DisconnectEvent(UITouchDragEvent, rec.dragHandler)
+				end
+			end
+		end
+	end
+
+end

@@ -4,30 +4,41 @@ script GameOverUI extends Logic
 	-- UI 바인딩 (클라이언트 전용)
 	property Entity gameOverGroup = "b9492c26-9cc9-4719-b52b-01045e8aa925"
 	property TextComponent statsText = "1f4dd02c-dcf3-4a2f-9f01-27939d3ad424"
-	property ButtonComponent btnRestart = "64ea7c86-3aad-4013-a052-cd9303048b86"
+	property TextComponent scoreValueText = "a339fc14-faa5-4c63-baf9-b9a85313905b"
+	property Entity itemList = "e7c2fb10-720a-49c4-8790-d00695cd8635"
+	property Entity itemScrollTouchArea = "f3ed1070-d413-4def-9228-0adf9c4a750a"
+	property SliderComponent itemScrollBar = "f0e09184-2970-406f-88ff-97b738fb5816"
 	property ButtonComponent btnContinue = "fe47e2f9-a3d9-4dc3-a1f0-11907891ae05"
-	-- 이어하기/다시하기 말고 그냥 로비(타이틀 화면)로 돌아가고 싶을 때 누르는 X 버튼
+	-- 이어하기 말고 그냥 로비(타이틀 화면)로 돌아가고 싶을 때 누르는 X 버튼. "다시하기"는 없앴다 —
+	-- 처음부터 다시 하고 싶으면 X로 로비에 돌아가서 "게임 시작"을 다시 누르면 된다
 	property ButtonComponent btnClose = "18fdab71-ac7c-4dc0-b262-dbc4a0c9c63e"
+
+	property integer itemSlotCount = 26
+	property number scrollableRangePx = 670
 
 	-- 내부 상태
 	property boolean _prevGameOver = false
-	property any _restartHandler = nil
 	property any _continueHandler = nil
 	property any _closeHandler = nil
+	property any _dragHandler = nil
+	property any _scrollBarHandler = nil
+	property boolean _syncingScrollBar = false
 
 	@ExecSpace("ClientOnly")
 	method void OnBeginPlay()
 		-- 게임오버 패널을 숨기고 버튼 클릭 이벤트를 연결한다
 		self.gameOverGroup.Enable = false
-		self._restartHandler = self.btnRestart.Entity:ConnectEvent(ButtonClickEvent, self.OnRestartClicked)
 		self._continueHandler = self.btnContinue.Entity:ConnectEvent(ButtonClickEvent, self.OnContinueClicked)
 		self._closeHandler = self.btnClose.Entity:ConnectEvent(ButtonClickEvent, self.OnCloseClicked)
+		self._dragHandler = self.itemScrollTouchArea:ConnectEvent(UITouchDragEvent, self.OnScrollDrag)
+		self._scrollBarHandler = self.itemScrollBar.Entity:ConnectEvent(SliderValueChangedEvent, self.OnScrollBarChanged)
 		log("GameOverUI started")
 	end
 
 	@ExecSpace("ClientOnly")
 	method void OnUpdate(number delta)
-		-- GameManager.GameOver는 @Sync지만 OnSyncProperty는 자기 자신의 속성에만 호출되므로 매 프레임 폴링한다
+		-- GameManager.GameOver는 @Sync지만 OnSyncProperty는 자기 자신의 속성에만 호출되므로 매 프레임 폴링한다.
+		-- ContinueCount/TotalCoins가 서버에서 바뀌어도(이어하기 성공 등) 여기서 같이 갱신된다
 		local isOver = _GameManager.GameOver
 		if isOver ~= self._prevGameOver then
 			self._prevGameOver = isOver
@@ -37,33 +48,91 @@ script GameOverUI extends Logic
 				self.gameOverGroup.Enable = false
 			end
 		end
+		if isOver and isvalid(self.gameOverGroup) and self.gameOverGroup.Enable then
+			self:RefreshContinueButton()
+		end
 	end
 
 	@ExecSpace("ClientOnly")
 	method void ShowGameOver()
-		-- 최종 웨이브/레벨 정보를 표시하고 패널을 연다
+		-- 최종 웨이브/레벨/스코어 정보를 표시하고 패널을 연다
 		self.statsText.Text = "Wave " .. _GameManager.Wave .. "  |  Lv." .. _GameManager.Level
+		self:RefreshScore()
+		self:RefreshContinueButton()
 		self.gameOverGroup.Enable = true
+		self.itemList.ScrollLayoutGroupComponent:SetScrollNormalizedPosition(UITransformAxis.Horizontal, 0)
+		self:SyncScrollBar(0)
 		log("GameOverUI: shown (Wave " .. _GameManager.Wave .. ", Lv." .. _GameManager.Level .. ")")
 	end
 
+	-- 이번 런에 가방에 쌓인 잡템을 "획득 스코어"로 환산해 보여준다 — 아직 실제로 환전/차감하지는
+	-- 않는다("이어하기"는 가방을 그대로 유지해야 하므로). 실제 환전은 "다시하기"(RestartGame)에서만 일어난다
 	@ExecSpace("ClientOnly")
-	method void OnRestartClicked()
-		-- 처음부터 다시 시작
-		log("GameOverUI: Restart clicked")
-		_GameManager:RequestRestart()
+	method void RefreshScore()
+		local defs = _PlayerInventory:GetAllItemDefs()
+		local orderedIds = _PlayerInventory:GetOrderedItemIds()
+		local totalScore = 0
+		for i, itemId in ipairs(orderedIds) do
+			local count = _PlayerInventory:GetItemCount(itemId)
+			local def = defs[itemId]
+			totalScore = totalScore + count * def.coinValue
+			local slot = self.itemList:GetChildByName("ItemSlot_" .. tostring(i - 1))
+			if isvalid(slot) then
+				slot.Enable = true
+				local icon = slot:GetChildByName("Icon")
+				if isvalid(icon) then icon.SpriteGUIRendererComponent.ImageRUID = DataRef(def.icon) end
+				local countText = slot:GetChildByName("CountText")
+				if isvalid(countText) then countText.TextComponent.Text = "x" .. tostring(count) end
+			end
+		end
+		-- 이번 런에 안 나온 아이템 슬롯은 숨긴다
+		for i = #orderedIds, self.itemSlotCount - 1 do
+			local slot = self.itemList:GetChildByName("ItemSlot_" .. tostring(i))
+			if isvalid(slot) then slot.Enable = false end
+		end
+		self.scoreValueText.Text = self:FormatNumber(totalScore) .. " 점"
+	end
+
+	@ExecSpace("ClientOnly")
+	method string FormatNumber(integer n)
+		-- 천 단위 콤마: 253353 -> "253,353"
+		local s = tostring(n)
+		local formatted = s
+		local count = 0
+		formatted, count = s:reverse():gsub("(%d%d%d)", "%1,")
+		formatted = formatted:reverse()
+		if formatted:sub(1, 1) == "," then formatted = formatted:sub(2) end
+		return formatted
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshContinueButton()
+		local cost = _GameManager:GetContinueCost()
+		local textComp = self.btnContinue.Entity.TextComponent
+		if isvalid(textComp) then
+			textComp.Text = "이어하기\n재화 " .. self:FormatNumber(cost)
+		end
+		local canAfford = _GameManager.TotalCoins >= cost
+		self.btnContinue.Enable = canAfford
+		local sprite = self.btnContinue.Entity.SpriteGUIRendererComponent
+		if canAfford then
+			sprite.Color = Color(0.2509804, 0.4509804, 0.8509804, 1.0)
+		else
+			sprite.Color = Color(0.2509804 * 0.4, 0.4509804 * 0.4, 0.8509804 * 0.4, 1.0)
+		end
 	end
 
 	@ExecSpace("ClientOnly")
 	method void OnContinueClicked()
-		-- 현재 진행 상태를 유지한 채 이어하기
+		-- 실제 차감/검증은 서버(GameManager.RequestContinue)에서 한다. 성공하면 GameOver가 false로
+		-- 바뀌고 OnUpdate 폴링이 패널을 자동으로 닫는다 — 여기서 직접 닫지 않는다(실패 시 계속 보여야 함)
 		log("GameOverUI: Continue clicked")
 		_GameManager:RequestContinue()
 	end
 
 	@ExecSpace("ClientOnly")
 	method void OnCloseClicked()
-		-- 이어하기/다시하기 없이 그냥 로비(타이틀 화면)로 돌아간다. 런 상태(웨이브/레벨/골드)는 건드리지
+		-- 이어하기 없이 그냥 로비(타이틀 화면)로 돌아간다. 런 상태(웨이브/레벨/골드)는 건드리지
 		-- 않고 그대로 둔다 — 나중에 로비에서 "게임 시작"을 다시 누르면 그때 TitleUI가 새로 시작할지 판단한다
 		log("GameOverUI: Close(X) clicked, returning to lobby")
 		self.gameOverGroup.Enable = false
@@ -71,10 +140,33 @@ script GameOverUI extends Logic
 	end
 
 	@ExecSpace("ClientOnly")
+	method void OnScrollDrag(UITouchDragEvent event)
+		local current = self.itemList.ScrollLayoutGroupComponent:GetScrollNormalizedPosition(UITransformAxis.Horizontal)
+		local delta = -event.TouchDelta.x / self.scrollableRangePx
+		local newValue = math.max(0, math.min(1, current + delta))
+		self.itemList.ScrollLayoutGroupComponent:SetScrollNormalizedPosition(UITransformAxis.Horizontal, newValue)
+		self:SyncScrollBar(newValue)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SyncScrollBar(number normalizedValue)
+		self._syncingScrollBar = true
+		self.itemScrollBar.Value = normalizedValue
+		self._syncingScrollBar = false
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnScrollBarChanged(SliderValueChangedEvent event)
+		if self._syncingScrollBar then return end
+		self.itemList.ScrollLayoutGroupComponent:SetScrollNormalizedPosition(UITransformAxis.Horizontal, event.Value)
+	end
+
+	@ExecSpace("ClientOnly")
 	method void OnEndPlay()
-		if self._restartHandler then self.btnRestart.Entity:DisconnectEvent(ButtonClickEvent, self._restartHandler) end
 		if self._continueHandler then self.btnContinue.Entity:DisconnectEvent(ButtonClickEvent, self._continueHandler) end
 		if self._closeHandler then self.btnClose.Entity:DisconnectEvent(ButtonClickEvent, self._closeHandler) end
+		if self._dragHandler then self.itemScrollTouchArea:DisconnectEvent(UITouchDragEvent, self._dragHandler) end
+		if self._scrollBarHandler then self.itemScrollBar.Entity:DisconnectEvent(SliderValueChangedEvent, self._scrollBarHandler) end
 	end
 
 end

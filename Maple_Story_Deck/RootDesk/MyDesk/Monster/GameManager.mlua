@@ -40,6 +40,11 @@ script GameManager extends Logic
 	-- 게임 상태
 	@Sync property boolean GameOver = false
 
+	-- 이번 런에서 "이어하기"를 누른 횟수 — 누를 때마다 다음 이어하기 비용이 비싸진다.
+	-- "다시하기"(처음부터, RestartGame)로만 0으로 리셋된다
+	@Sync property integer ContinueCount = 0
+	property any _continueCostTable = { 900, 1500, 2400, 3600 }
+
 	-- 타이틀 화면에서 "게임 시작" 버튼을 눌러야 실제 웨이브/스폰이 시작된다 (그 전까지는 대기)
 	@Sync property boolean GameStarted = false
 
@@ -764,9 +769,23 @@ script GameManager extends Logic
 		self:RestartGame()
 	end
 
-	-- 클라이언트의 "이어하기" 버튼 요청
+	-- 이번에 "이어하기"를 누르면 얼마가 드는지 — GameOverUI가 표시/가능여부 판정에 쓴다.
+	-- 서버/클라 어느 쪽에서 불러도 동일(ContinueCount는 @Sync, 표는 정적)
+	method integer GetContinueCost()
+		local idx = self.ContinueCount + 1
+		if idx > #self._continueCostTable then idx = #self._continueCostTable end
+		return self._continueCostTable[idx]
+	end
+
+	-- 클라이언트의 "이어하기" 버튼 요청 — 비용(코인)을 지불해야 이어할 수 있다
 	@ExecSpace("Server")
 	method void RequestContinue()
+		local cost = self:GetContinueCost()
+		if not self:SpendCoins(cost) then
+			log("RequestContinue: not enough coins (cost=" .. cost .. ", have=" .. self.TotalCoins .. ")")
+			return
+		end
+		self.ContinueCount = self.ContinueCount + 1
 		self:ContinueGame()
 	end
 
@@ -782,6 +801,7 @@ script GameManager extends Logic
 		self._goldBonusCheckpoint = 0
 		self.Wave = 1
 		self.GameOver = false
+		self.ContinueCount = 0
 		self._hitImmune = false
 		-- 보스를 잡아서 열렸던 맵4+ 잠금도 "처음부터"에 포함된다 — 새 런에서는 다시 잠근다
 		if self.BossDefeated then
