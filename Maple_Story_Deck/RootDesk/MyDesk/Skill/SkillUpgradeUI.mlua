@@ -1,0 +1,126 @@
+@Logic
+script SkillUpgradeUI extends Logic
+
+	property Entity popupGroup = "7233983e-f2c7-43f2-aacd-64596ab2459a"
+	property ButtonComponent btnClose = "f6a7377b-4b3e-4e45-9213-b43726e21a70"
+	property ButtonComponent btnUpgrade = "a80001a0-bc09-43fd-85e3-b7ed893c76e2"
+	property TextComponent levelText = "7b32452e-e9b1-4dfc-a51d-0957bd542e50"
+	property SpriteGUIRendererComponent iconSprite = "6f8a9bb9-bbfa-4def-99d8-08f38fb4294b"
+	property TextComponent nameText = "d23ee014-65a4-4fd9-aee3-daa1d85dfbf6"
+	property TextComponent optionText = "eabf1a42-e091-4aa6-8563-a8a4a825f7ef"
+	property TextComponent costText = "331ebb1e-6f3c-4ef5-ba3c-68e81329fa7c"
+	property TextComponent upgradeTitleText = "ad2fc439-017d-4b24-8987-26239f239b5d"
+	-- 스킬명 아래 조각 진행바 — 버튼의 코인 비용과 분리해서 여기서 "N/다음레벨요구치"를 보여준다
+	property SpriteGUIRendererComponent fragmentBarFill = "a02b3b4a-e856-492f-a83e-145d3a1038e6"
+	property TextComponent fragmentBarText = "ce3a08fc-06cf-4454-bad3-b6c2e755b64f"
+
+	property integer _currentSkillIndex = -1
+	property any _closeHandler = nil
+	property any _upgradeHandler = nil
+	property any _closeStateHandler = nil
+	property any _upgradeStateHandler = nil
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		self._closeHandler = self.btnClose.Entity:ConnectEvent(ButtonClickEvent, self.Close)
+		self._upgradeHandler = self.btnUpgrade.Entity:ConnectEvent(ButtonClickEvent, self.OnUpgradeClicked)
+		-- 패딩(눌림) 연출 — 누르는 순간 작아지고 떼는 순간 원래 크기로 돌아온다
+		self._closeStateHandler = self.btnClose.Entity:ConnectEvent(ButtonStateChangeEvent, function(event) self:OnButtonStateChanged(event, self.btnClose.Entity) end)
+		self._upgradeStateHandler = self.btnUpgrade.Entity:ConnectEvent(ButtonStateChangeEvent, function(event) self:OnButtonStateChanged(event, self.btnUpgrade.Entity) end)
+		log("SkillUpgradeUI started")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OpenForSkill(integer skillIndex)
+		-- 스킬 탭에서 아이콘을 눌렀을 때 SkillUI가 호출 — 상세/업그레이드 팝업을 연다
+		self._currentSkillIndex = skillIndex
+		self.popupGroup.Enable = true
+		self:RefreshPanel()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Close()
+		self._currentSkillIndex = -1
+		self.popupGroup.Enable = false
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnButtonStateChanged(ButtonStateChangeEvent event, Entity buttonEntity)
+		if not isvalid(buttonEntity) then return end
+		if event.state == ButtonState.Pressed then
+			_TweenLogic:ScaleTo(buttonEntity, Vector2(0.9, 0.9), 0.06, EaseType.QuadEaseOut)
+		else
+			_TweenLogic:ScaleTo(buttonEntity, Vector2(1, 1), 0.12, EaseType.QuadEaseOut)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshPanel()
+		-- 현재 선택된 스킬의 레벨/조각/골드 상태를 다시 그린다. 업그레이드 성공 후에도 이 메서드로 갱신한다
+		if self._currentSkillIndex < 0 then return end
+		local key = tostring(self._currentSkillIndex)
+
+		local level = 0
+		if _SkillInventory.Levels[key] ~= nil then level = _SkillInventory.Levels[key] end
+		local fragments = 0
+		if _SkillInventory.Counts[key] ~= nil then fragments = _SkillInventory.Counts[key] end
+
+		self.levelText.Text = "Lv." .. tostring(level)
+		self.nameText.Text = _SkillUI:GetSkillBaseName(self._currentSkillIndex)
+		self.iconSprite.ImageRUID = DataRef(_SkillUI:GetSkillIconRuid(self._currentSkillIndex))
+
+		-- 실제 게임 효과는 아직 연결하지 않았다(UI 골격만) — 레벨/조각/코인 흐름은 유물과 동일하게 동작한다
+		local maxLevel = _SkillInventory.maxLevel
+		if level >= maxLevel then
+			self.optionText.Text = "최대 레벨입니다"
+			self.costText.Text = "MAX"
+			self.fragmentBarText.Text = "MAX"
+			self.fragmentBarFill.FillAmount = 1
+			self:SetUpgradeEnabled(false)
+			return
+		end
+
+		local nextLevel = level + 1
+		local fragmentCost = _SkillInventory:GetFragmentCostForLevel(nextLevel)
+		local coinCost = _SkillInventory:GetGoldCostForLevel(nextLevel)
+		self.optionText.Text = "다음 레벨: Lv." .. tostring(nextLevel) .. "\n(효과는 추후 연결 예정)"
+		self.costText.Text = tostring(coinCost) .. "코인"
+
+		self.fragmentBarText.Text = tostring(fragments) .. "/" .. tostring(fragmentCost)
+		local fragmentRatio = fragments / fragmentCost
+		if fragmentRatio > 1 then fragmentRatio = 1 end
+		self.fragmentBarFill.FillAmount = fragmentRatio
+
+		local canAfford = fragments >= fragmentCost and _GameManager.TotalCoins >= coinCost
+		self:SetUpgradeEnabled(canAfford)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetUpgradeEnabled(boolean enabled)
+		self.btnUpgrade.Enable = enabled
+		local sprite = self.btnUpgrade.Entity.SpriteGUIRendererComponent
+		if enabled then
+			sprite.Color = Color(0.94, 0.78, 0.32, 1.0)
+			self.upgradeTitleText.FontColor = Color(0.169, 0.141, 0.071, 1.0)
+			self.costText.FontColor = Color(0.169, 0.141, 0.071, 1.0)
+		else
+			sprite.Color = Color(0.94 * 0.4, 0.78 * 0.4, 0.32 * 0.4, 1.0)
+			self.upgradeTitleText.FontColor = Color(1.0, 1.0, 1.0, 1.0)
+			self.costText.FontColor = Color(1.0, 1.0, 1.0, 1.0)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUpgradeClicked()
+		_SkillInventory:RequestLevelUpSkill(self._currentSkillIndex)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		if self._closeHandler then self.btnClose.Entity:DisconnectEvent(ButtonClickEvent, self._closeHandler) end
+		if self._upgradeHandler then self.btnUpgrade.Entity:DisconnectEvent(ButtonClickEvent, self._upgradeHandler) end
+		if self._closeStateHandler then self.btnClose.Entity:DisconnectEvent(ButtonStateChangeEvent, self._closeStateHandler) end
+		if self._upgradeStateHandler then self.btnUpgrade.Entity:DisconnectEvent(ButtonStateChangeEvent, self._upgradeStateHandler) end
+	end
+
+end

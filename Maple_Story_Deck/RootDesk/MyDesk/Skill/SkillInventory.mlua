@@ -1,0 +1,137 @@
+@Logic
+script SkillInventory extends Logic
+
+	-- 스킬별 획득 조각 개수 / 현재 레벨 — key = 스킬 인덱스 "0".."17" 문자열, value = 개수/레벨.
+	-- RelicInventory와 완전히 동일한 구조. SyncTable은 next/pairs를 못 쓰므로 항상 0~skillCount-1 범위를 직접 순회한다
+	@Sync property SyncTable<string, integer> Counts
+	@Sync property SyncTable<string, integer> Levels
+
+	property integer skillCount = 18
+	property integer maxLevel = 5
+
+	-- 레벨업에 필요한 조각/코인 (인덱스 1=Lv1, ..., 5=Lv5). RelicInventory와 동일한 표를 재사용 — 추후 조정 가능
+	property any _levelFragmentCost = { 2, 4, 10, 20, 30 }
+	property any _levelGoldCost = { 2000, 4000, 10000, 20000, 30000 }
+
+	property any _storage = nil
+	property boolean _dirty = false
+	property any _flushTimerId = nil
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		-- 월드 시작 시 저장된 스킬 조각/레벨을 전역 저장소에서 불러온다
+		self._storage = _DataStorageService:GetGlobalDataStorage("SkillInventory")
+		local errorCode, raw = self._storage:GetAndWait("Counts")
+		if errorCode == 0 and raw ~= nil and raw ~= "" then
+			local loaded = _UtilLogic:StringToTable(raw)
+			if loaded ~= nil then
+				for i = 0, self.skillCount - 1 do
+					local key = tostring(i)
+					if loaded[key] ~= nil then
+						self.Counts[key] = loaded[key]
+					end
+				end
+			end
+		end
+		local levelErrorCode, levelRaw = self._storage:GetAndWait("Levels")
+		if levelErrorCode == 0 and levelRaw ~= nil and levelRaw ~= "" then
+			local loadedLevels = _UtilLogic:StringToTable(levelRaw)
+			if loadedLevels ~= nil then
+				for i = 0, self.skillCount - 1 do
+					local key = tostring(i)
+					if loadedLevels[key] ~= nil then
+						self.Levels[key] = loadedLevels[key]
+					end
+				end
+			end
+		end
+		-- 5초마다 변경이 있을 때만 저장한다 (RelicInventory와 동일한 dirty-flag 패턴)
+		self._flushTimerId = _TimerService:SetTimerRepeat(function() self:FlushIfDirty() end, 3.0)
+		log("SkillInventory started")
+	end
+
+	@ExecSpace("Server")
+	method void RequestAddSkill(integer skillIndex)
+		-- 스킬 조각을 획득했을 때 호출할 진입점 (RelicInventory.RequestAddRelic과 동일 패턴) —
+		-- 아직 어떤 시스템도 이걸 호출하지 않는다(조각 획득처는 추후 결정). 구조만 미리 맞춰둔다
+		if skillIndex < 0 or skillIndex >= self.skillCount then return end
+		local key = tostring(skillIndex)
+		local current = 0
+		if self.Counts[key] ~= nil then current = self.Counts[key] end
+		self.Counts[key] = current + 1
+		self._dirty = true
+	end
+
+	@ExecSpace("Server")
+	method void RequestLevelUpSkill(integer skillIndex)
+		-- 스킬 탭에서 슬롯을 눌러 업그레이드 팝업에서 강화 버튼을 눌렀을 때 호출된다
+		if skillIndex < 0 or skillIndex >= self.skillCount then return end
+		local key = tostring(skillIndex)
+		local currentLevel = 0
+		if self.Levels[key] ~= nil then currentLevel = self.Levels[key] end
+		if currentLevel >= self.maxLevel then
+			log("SkillInventory: skill " .. key .. " already at max level")
+			return
+		end
+
+		local nextLevel = currentLevel + 1
+		local fragmentCost = self._levelFragmentCost[nextLevel]
+		local goldCost = self._levelGoldCost[nextLevel]
+
+		local haveFragments = 0
+		if self.Counts[key] ~= nil then haveFragments = self.Counts[key] end
+		if haveFragments < fragmentCost then
+			log("SkillInventory: not enough fragments for skill " .. key)
+			return
+		end
+		-- 유물 강화와 동일하게 런과 무관한 메인화면 누적 코인(TotalCoins)으로 결제한다
+		if not _GameManager:SpendCoins(goldCost) then
+			log("SkillInventory: not enough coins for skill " .. key)
+			return
+		end
+
+		self.Counts[key] = haveFragments - fragmentCost
+		self.Levels[key] = nextLevel
+		self._dirty = true
+		log("SkillInventory: skill " .. key .. " leveled up to " .. tostring(nextLevel))
+	end
+
+	method integer GetFragmentCostForLevel(integer level)
+		return self._levelFragmentCost[level]
+	end
+
+	method integer GetGoldCostForLevel(integer level)
+		return self._levelGoldCost[level]
+	end
+
+	@ExecSpace("ServerOnly")
+	method void FlushIfDirty()
+		if not self._dirty then return end
+		self._dirty = false
+		local plainCounts = {}
+		local plainLevels = {}
+		for i = 0, self.skillCount - 1 do
+			local key = tostring(i)
+			if self.Counts[key] ~= nil then plainCounts[key] = self.Counts[key] end
+			if self.Levels[key] ~= nil then plainLevels[key] = self.Levels[key] end
+		end
+		self._storage:SetAndWait("Counts", _UtilLogic:TableToString(plainCounts))
+		self._storage:SetAndWait("Levels", _UtilLogic:TableToString(plainLevels))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnSyncProperty(string name, any value)
+		-- 획득 개수나 레벨이 갱신될 때마다 스킬 탭 UI를 새로고침한다
+		if name == "Counts" or name == "Levels" then
+			_SkillUI:RefreshAllSkillSlots()
+			_SkillUpgradeUI:RefreshPanel()
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnEndPlay()
+		if self._flushTimerId then _TimerService:ClearTimer(self._flushTimerId) end
+		self:FlushIfDirty()
+	end
+
+end

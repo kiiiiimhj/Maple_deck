@@ -1,0 +1,190 @@
+@Logic
+script SkillUI extends Logic
+
+	property ScrollLayoutGroupComponent skillScroll = "69d26c23-c095-4b87-b830-576271f284ca"
+	property Entity scrollTouchArea = "60dae9c2-f2b6-492f-9cd6-2a7e4f0171f2"
+	property SliderComponent scrollBar = "cbae2326-3e77-4bd1-b607-82549c0280d5"
+	-- 그리드 총 폭 - 뷰포트 폭(1300) = 실제로 드래그 가능한 스크롤 폭(px). RelicUI와 동일한 그리드 규격이라 동일 값
+	property number scrollableRangePx = 1042
+
+	property any _dragHandler = nil
+	property any _scrollBarHandler = nil
+	-- 카드 쪽 스크롤(드래그)이 스크롤바 핸들 위치를 코드로 갱신할 때 true로 세워서,
+	-- 그 갱신이 다시 SliderValueChangedEvent로 되돌아와 카드를 또 움직이는 무한 루프를 막는다
+	property boolean _syncingScrollBar = false
+
+	-- 스킬 원래 이름 캐시 — 업그레이드 팝업(GetSkillBaseName)에서 재사용하기 위해 최초 1회만 읽어서 저장해둔다
+	property any _skillBaseNames = nil
+
+	-- 드래그(스크롤)와 탭(클릭)을 구분하는 최대 이동 거리(px) — 이보다 적게 움직였으면 탭으로 간주
+	property number _tapMoveThreshold = 12
+	-- 슬롯별 Down/Up/Drag 핸들러 목록 — OnEndPlay에서 전부 해제한다
+	property any _slotHandlers = nil
+	-- 슬롯별 터치 시작 좌표 (한 번에 하나의 터치만 가정)
+	property any _slotTouchDownPoints = nil
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		-- 스킬 그리드를 좌우로 끌면 스크롤되고, 하단 스크롤바를 직접 끌어도 그리드가 같이 움직이도록 연결한다
+		self._dragHandler = self.scrollTouchArea:ConnectEvent(UITouchDragEvent, self.OnScrollDrag)
+		self._scrollBarHandler = self.scrollBar.Entity:ConnectEvent(SliderValueChangedEvent, self.OnScrollBarChanged)
+		self._skillBaseNames = {}
+		self._slotHandlers = {}
+		self._slotTouchDownPoints = {}
+		self:CacheSkillBaseNamesAndConnectSlots()
+		self:RefreshAllSkillSlots()
+		-- 스크롤/스크롤바가 항상 맨 처음(왼쪽)부터 시작하도록 강제한다
+		self.skillScroll:SetScrollNormalizedPosition(UITransformAxis.Horizontal, 0)
+		self:SyncScrollBar(0)
+		log("SkillUI started")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void CacheSkillBaseNamesAndConnectSlots()
+		-- SkillSlot_N에는 ButtonComponent 대신 UITouchReceiveComponent가 붙어있다 — RelicUI와 동일 패턴
+		local list = self.skillScroll.Entity
+		if not isvalid(list) then return end
+		for i = 0, _SkillInventory.skillCount - 1 do
+			local slot = list:GetChildByName("SkillSlot_" .. tostring(i))
+			if isvalid(slot) then
+				local nameEntity = slot:GetChildByName("Name")
+				if isvalid(nameEntity) then
+					self._skillBaseNames[tostring(i)] = nameEntity.TextComponent.Text
+				end
+				local capturedIndex = i
+				local downH = slot:ConnectEvent(UITouchDownEvent, function(event) self:OnSlotTouchDown(event, capturedIndex) end)
+				local upH = slot:ConnectEvent(UITouchUpEvent, function(event) self:OnSlotTouchUp(event, capturedIndex) end)
+				local dragH = slot:ConnectEvent(UITouchDragEvent, self.OnScrollDrag)
+				table.insert(self._slotHandlers, { entity = slot, downHandler = downH, upHandler = upH, dragHandler = dragH })
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnSlotTouchDown(UITouchDownEvent event, integer skillIndex)
+		self._slotTouchDownPoints[tostring(skillIndex)] = event.TouchPoint
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnSlotTouchUp(UITouchUpEvent event, integer skillIndex)
+		-- 누른 지점과 뗀 지점이 거의 같으면(드래그가 아니면) 탭으로 판정한다
+		local downPoint = self._slotTouchDownPoints[tostring(skillIndex)]
+		if downPoint == nil then return end
+		local dx = event.TouchPoint.x - downPoint.x
+		local dy = event.TouchPoint.y - downPoint.y
+		local distance = math.sqrt(dx * dx + dy * dy)
+		if distance > self._tapMoveThreshold then return end
+		self:OnSkillSlotClicked(skillIndex)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnSkillSlotClicked(integer skillIndex)
+		-- 스킬을 누르면 바로 레벨업하지 않고, 상세/업그레이드 팝업을 띄운다
+		_SkillUpgradeUI:OpenForSkill(skillIndex)
+	end
+
+	@ExecSpace("ClientOnly")
+	method string GetSkillBaseName(integer skillIndex)
+		local baseName = self._skillBaseNames[tostring(skillIndex)]
+		if baseName ~= nil then return baseName end
+		return "스킬"
+	end
+
+	@ExecSpace("ClientOnly")
+	method string GetSkillIconRuid(integer skillIndex)
+		-- SkillSlot_N/Icon에서 실제 사용 중인 아이콘 RUID를 그대로 읽어온다 (업그레이드 팝업에서 재사용)
+		local list = self.skillScroll.Entity
+		if not isvalid(list) then return "" end
+		local slot = list:GetChildByName("SkillSlot_" .. tostring(skillIndex))
+		if not isvalid(slot) then return "" end
+		local icon = slot:GetChildByName("Icon")
+		if not isvalid(icon) then return "" end
+		return icon.SpriteGUIRendererComponent.ImageRUID.DataId
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshAllSkillSlots()
+		-- 스킬 획득 개수/레벨(SkillInventory.Counts/Levels)이 바뀔 때마다 슬롯을 전부 다시 그린다
+		local list = self.skillScroll.Entity
+		if not isvalid(list) then return end
+		for i = 0, _SkillInventory.skillCount - 1 do
+			local slot = list:GetChildByName("SkillSlot_" .. tostring(i))
+			if isvalid(slot) then
+				local key = tostring(i)
+				local count = 0
+				if _SkillInventory.Counts[key] ~= nil then count = _SkillInventory.Counts[key] end
+				local level = 0
+				if _SkillInventory.Levels[key] ~= nil then level = _SkillInventory.Levels[key] end
+				local maxLevel = _SkillInventory.maxLevel
+
+				local progressText = slot:GetChildByName("ProgressText")
+				local progressFill = slot:GetChildByName("ProgressFill")
+				if level >= maxLevel then
+					if isvalid(progressText) then progressText.TextComponent.Text = "MAX" end
+					if isvalid(progressFill) then progressFill.SpriteGUIRendererComponent.FillAmount = 1 end
+				else
+					local nextFragmentCost = _SkillInventory:GetFragmentCostForLevel(level + 1)
+					if isvalid(progressText) then
+						progressText.TextComponent.Text = tostring(count) .. "/" .. tostring(nextFragmentCost)
+					end
+					if isvalid(progressFill) then
+						local amount = count / nextFragmentCost
+						if amount > 1 then amount = 1 end
+						progressFill.SpriteGUIRendererComponent.FillAmount = amount
+					end
+				end
+
+				local nameEntity = slot:GetChildByName("Name")
+				if isvalid(nameEntity) then
+					local baseName = self._skillBaseNames[key]
+					if baseName == nil then baseName = nameEntity.TextComponent.Text end
+					nameEntity.TextComponent.Text = baseName
+				end
+
+				local levelEntity = slot:GetChildByName("Level")
+				if isvalid(levelEntity) then
+					levelEntity.TextComponent.Text = "Lv." .. tostring(level)
+				end
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnScrollDrag(UITouchDragEvent event)
+		-- 좌로 끌면(TouchDelta.x < 0) 오른쪽 열 쪽(정규화 값 증가)으로, 우로 끌면 반대로 스크롤한다
+		local current = self.skillScroll:GetScrollNormalizedPosition(UITransformAxis.Horizontal)
+		local delta = -event.TouchDelta.x / self.scrollableRangePx
+		local newValue = math.max(0, math.min(1, current + delta))
+		self.skillScroll:SetScrollNormalizedPosition(UITransformAxis.Horizontal, newValue)
+		self:SyncScrollBar(newValue)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SyncScrollBar(number normalizedValue)
+		self._syncingScrollBar = true
+		self.scrollBar.Value = normalizedValue
+		self._syncingScrollBar = false
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnScrollBarChanged(SliderValueChangedEvent event)
+		if self._syncingScrollBar then return end
+		self.skillScroll:SetScrollNormalizedPosition(UITransformAxis.Horizontal, event.Value)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		if self._dragHandler then self.scrollTouchArea:DisconnectEvent(UITouchDragEvent, self._dragHandler) end
+		if self._scrollBarHandler then self.scrollBar.Entity:DisconnectEvent(SliderValueChangedEvent, self._scrollBarHandler) end
+		if self._slotHandlers then
+			for _, rec in ipairs(self._slotHandlers) do
+				if isvalid(rec.entity) then
+					rec.entity:DisconnectEvent(UITouchDownEvent, rec.downHandler)
+					rec.entity:DisconnectEvent(UITouchUpEvent, rec.upHandler)
+					rec.entity:DisconnectEvent(UITouchDragEvent, rec.dragHandler)
+				end
+			end
+		end
+	end
+
+end

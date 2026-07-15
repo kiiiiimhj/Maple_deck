@@ -1391,16 +1391,24 @@ script CardManager extends Logic
 		-- 같은 공격을 재실행해서 짧은 2연타를 만든다. isRepeat=true인 재귀 호출은 다시 예약하지 않는다.
 		local map = self:GetCurrentMap()
 		-- 존 경계(예: 15→16 이동) 순간에는 _MapManager.CurrentMapIndex가 이미 다음 존을 가리키는데
-		-- 이전 존 엔티티는 아직 파괴 처리 중이라, map은 non-nil이어도 map.TransformComponent가 이미
-		-- nil인 "죽어가는" 참조일 수 있다 (LEA-2007 AttemptToIndex의 원인). 반드시 같이 가드한다.
-		if map == nil or not isvalid(map) or not isvalid(map.TransformComponent) then return end
+		-- 이전 존 엔티티는 아직 파괴 처리 중이라 map은 non-nil이어도 "죽어가는" 참조일 수 있다 —
+		-- isvalid(map)만으로 이 경우를 막는다.
+		if map == nil or not isvalid(map) then return end
 		local level = self.KingPepeLevel
 		local rightActive = level >= 3
 		-- SpawnByModelId(..., map)의 좌표는 map 기준 "로컬" 좌표다 — GetPlayerCenterX()는 월드 좌표라서
 		-- 존 컨테이너 자체가 월드에서 0이 아닌 곳에 있으면(대부분의 존이 그렇다) 그 차이만큼 그대로 어긋난
 		-- 채로 스폰돼 화면 밖 허공에 떴었다. map의 WorldPosition을 빼서 로컬로 변환해야 한다
 		-- (MonsterSpawner.ToLocalSpawnPos와 동일한 이유/패턴).
-		local mapWorldPos = map.TransformComponent.WorldPosition
+		-- 단, map.TransformComponent 자체가 없는 "루트/host" 존(맵1/4/7/10/13/16처럼 container=nil인
+		-- 존)이 실존한다 — 실측 확인(map16.map 루트 엔티티에 TransformComponent가 아예 없음, 자식
+		-- 컨테이너 존(Zone14 등)만 갖고 있음). 예전엔 이 경우 조용히 return해버려서 존16 같은 루트
+		-- 존에서는 킹페페 연출이 영영 뜨지 않는 버그가 있었다. 루트 존은 애초에 에디터에서 이동된 적
+		-- 없는 원점(0,0,0) 취급이 맞으므로, TransformComponent가 없으면 월드 오프셋 0으로 폴백한다.
+		local mapWorldPos = Vector3(0, 0, 0)
+		if isvalid(map.TransformComponent) then
+			mapWorldPos = map.TransformComponent.WorldPosition
+		end
 		local centerX = self:GetPlayerCenterX() - mapWorldPos.x
 		local groundY = self.Card12FixedGroundY - mapWorldPos.y
 
