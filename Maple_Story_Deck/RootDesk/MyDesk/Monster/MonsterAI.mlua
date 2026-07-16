@@ -41,6 +41,13 @@ script MonsterAI extends Component
 	property integer _stunTimerId = 0
 	property number _stunSavedSpeed = 0
 
+	-- 공중 부양 상태 (아쿠아 트랩). 착지 타이머를 추적해야, 같은 대상이 아직 떠 있는 도중에
+	-- 다시 걸렸을 때(부스터로 쿨타임이 속박시간보다 짧아지면 실제로 발생) 기준 높이를 다시 잡지
+	-- 않고 그대로 재예약할 수 있다 — 안 그러면 기준 높이가 계속 위로 밀려 올라가 영영 안 내려온다.
+	property boolean _isLevitating = false
+	property integer _levitateTimerId = 0
+	property number _levitateBaseY = 0
+
 	-- 도트 데미지 상태 (메테오)
 	property number _dotDamage = 0
 	property integer _dotTicksLeft = 0
@@ -526,14 +533,16 @@ script MonsterAI extends Component
 		end, duration)
 	end
 
+	-- showIndicator=true: 썬더볼트 감전처럼 머리 위 빙글빙글 도는 별 이펙트를 같이 띄운다.
+	-- false: 아쿠아 트랩처럼 자체 연출(물 구속구)이 따로 있어 별 이펙트가 필요 없는 경우.
 	@ExecSpace("ServerOnly")
-	method void ApplyStun(number duration)
-		-- 썬더볼트 감전: 잠깐 완전히 멈췄다가 원래 속도로 돌아온다. 중복 적용 시 타이머만 갱신
+	method void ApplyStun(number duration, boolean showIndicator)
+		-- 잠깐 완전히 멈췄다가 원래 속도로 돌아온다. 중복 적용 시 타이머만 갱신
 		if not self._isStunned then
 			self._stunSavedSpeed = self.ApproachSpeed
 			self.ApproachSpeed = 0
 			self._isStunned = true
-			self:SpawnStunStars()
+			if showIndicator then self:SpawnStunStars() end
 		end
 		if self._stunTimerId ~= 0 then
 			_TimerService:ClearTimer(self._stunTimerId)
@@ -661,6 +670,82 @@ script MonsterAI extends Component
 		end, tickInterval)
 	end
 
+	-- 전투 중 넉백(예: 썬더 커터 Lv3) — 현재 스케일에서 targetScale까지 짧게 튕겨나가듯 줄어들며
+	-- "맨 뒤로 밀려난다". PushBack()과 달리 상태이상 타이머는 건드리지 않는다(넉백이 슬로우/스턴/도트를
+	-- 해제해서는 안 되므로) — 순수하게 접근 진행도(스케일)만 되돌린다.
+	@ExecSpace("ServerOnly")
+	method void ApplyKnockback(number targetScale)
+		if self._dead or self._isFlying or self._isBonusBoss then return end
+		if targetScale >= self._currentScale then return end
+		self._reachedPlayer = false
+		self._isPushingBack = true
+		local fromScale = self._currentScale
+		_TweenLogic:PlayTween(0.0, 1.0, 0.35, EaseType.QuadEaseOut, function(t)
+			if not isvalid(self) or not isvalid(self.Entity) then return end
+			local s = fromScale + (targetScale - fromScale) * t
+			self._currentScale = s
+			self.Entity.TransformComponent.Scale = Vector3(s * self._scaleMultiplier, s * self._scaleMultiplier, 1.0)
+			self:UpdateDepth()
+		end)
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) then return end
+			self._isPushingBack = false
+		end, 0.35)
+	end
+
+	-- 속박류 CC(예: 아쿠아 트랩)에 맞았을 때 공중으로 살짝 떠오르는 연출 — duration 동안 떠 있다가
+	-- 끝나는 시점에 맞춰 다시 내려온다. 비행 유닛은 이미 공중에 있으므로 띄우지 않는다.
+	-- 이미 떠 있는 도중에 다시 걸리면(부스터로 쿨타임이 속박시간보다 짧아지면 실제로 발생) 기준
+	-- 높이(_levitateBaseY)를 다시 잡지 않고 그대로 두고 착지 타이머만 새로 예약한다 — 안 그러면
+	-- 매번 "지금(이미 떠 있는) 높이"를 새 기준으로 잡아버려서 기준 높이가 계속 위로 밀려 올라가
+	-- 영영 안 내려오는 버그가 난다.
+	@ExecSpace("ServerOnly")
+	method void ApplyLevitate(number duration)
+		if self._dead or self._isFlying then return end
+		local liftHeight = 0.35
+		local fallDuration = math.min(0.25, duration * 0.3)
+
+		if not self._isLevitating then
+			self._isLevitating = true
+			self._levitateBaseY = self.Entity.TransformComponent.Position.y
+			local baseY = self._levitateBaseY
+			_TweenLogic:PlayTween(0.0, 1.0, fallDuration, EaseType.QuadEaseOut, function(t)
+				if not isvalid(self) or not isvalid(self.Entity) then return end
+				local pos = self.Entity.TransformComponent.Position
+				self.Entity.TransformComponent.Position = Vector3(pos.x, baseY + liftHeight * t, pos.z)
+			end)
+		end
+
+		if self._levitateTimerId ~= 0 then
+			_TimerService:ClearTimer(self._levitateTimerId)
+		end
+		local baseY = self._levitateBaseY
+		self._levitateTimerId = _TimerService:SetTimerOnce(function()
+			if isvalid(self) then self:LandFromLevitate(fallDuration) end
+		end, math.max(0, duration - fallDuration))
+	end
+
+	-- 지금 위치에서 원래 지상 높이(_levitateBaseY)로 내려오는 트윈을 재생하고 부양 상태를 해제한다.
+	-- 착지 타이머가 정상 만료됐을 때뿐 아니라, PushBack/Die처럼 상태이상을 강제로 정리하는 지점에서도
+	-- 호출해서 몬스터가 공중에 뜬 채로 영영 남는 일이 없게 한다.
+	@ExecSpace("ServerOnly")
+	method void LandFromLevitate(number duration)
+		if not self._isLevitating then return end
+		self._isLevitating = false
+		if self._levitateTimerId ~= 0 then
+			_TimerService:ClearTimer(self._levitateTimerId)
+			self._levitateTimerId = 0
+		end
+		if not isvalid(self) or not isvalid(self.Entity) then return end
+		local baseY = self._levitateBaseY
+		local liftHeight = 0.35
+		_TweenLogic:PlayTween(1.0, 0.0, duration, EaseType.QuadEaseIn, function(t)
+			if not isvalid(self) or not isvalid(self.Entity) then return end
+			local pos = self.Entity.TransformComponent.Position
+			self.Entity.TransformComponent.Position = Vector3(pos.x, baseY + liftHeight * t, pos.z)
+		end)
+	end
+
 	-- 이어하기 시 호출: 현재 스케일에서 0.85로 서버 트윈 (OnUpdate 잠금 후 복구)
 	@ExecSpace("ServerOnly")
 	method void PushBack()
@@ -672,6 +757,9 @@ script MonsterAI extends Component
 		self._isStunned = false
 		self:DestroyStunStars()
 		self._reachedPlayer = false
+		-- 아쿠아 트랩으로 공중에 뜬 채였다면(예: "이어하기"로 밀려날 때) 여기서 강제로 착지시킨다 —
+		-- 안 그러면 기존 착지 타이머가 뒤에서 따로 돌다가 꼬여서 영영 안 내려오는 경우가 생긴다.
+		if self._isLevitating then self:LandFromLevitate(0.2) end
 
 		-- 비행형(박쥐)은 접근/스케일 개념이 없으므로 되밀기 트윈 없이 배회만 잠깐 멈췄다 재개한다
 		if self._isFlying then
@@ -730,6 +818,9 @@ script MonsterAI extends Component
 		self._freezeSlowed = false
 		self._isStunned = false
 		self:DestroyStunStars()
+		-- 죽는 순간 공중에 떠 있던 착지 타이머가 남아있으면 정리한다(잔여 트윈이 나중에 잘못 발동하는 일 방지)
+		if self._levitateTimerId ~= 0 then _TimerService:ClearTimer(self._levitateTimerId) ; self._levitateTimerId = 0 end
+		self._isLevitating = false
 		if isvalid(self._freezeIndicator) then
 			self._freezeIndicator:Destroy()
 			self._freezeIndicator = nil

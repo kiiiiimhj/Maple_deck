@@ -42,10 +42,17 @@ script ShadowShopUI extends Logic
 	property any _item3Handler = nil
 	property any _item4Handler = nil
 	property any _item5Handler = nil
-	-- 이번 상점 오픈 동안 3/4/5번 슬롯에 배정된 cardIdx (없으면 0)
-	property integer _slot3Card = 0
-	property integer _slot4Card = 0
-	property integer _slot5Card = 0
+
+	-- 3/4/5번 스킬 슬롯 — 이번 "런"(다시하기 전까지) 동안 고정되는 서버 권위 상태. 상점을 몇 번을
+	-- 다시 열어도 재추첨되지 않고, 산 슬롯은 매진 상태로 계속 유지된다(이어하기에도 유지). 다시하기
+	-- (GameManager.RestartGame → ForceReroll)에서만 초기화 + 재추첨된다.
+	@Sync property integer LockedSlot3Card = 0
+	@Sync property integer LockedSlot4Card = 0
+	@Sync property integer LockedSlot5Card = 0
+	@Sync property boolean Slot3SoldOut = false
+	@Sync property boolean Slot4SoldOut = false
+	@Sync property boolean Slot5SoldOut = false
+	@Sync property boolean _rolledThisRun = false
 
 	@ExecSpace("ClientOnly")
 	method void OnBeginPlay()
@@ -64,20 +71,40 @@ script ShadowShopUI extends Logic
 		_UILogic:SetSiblingIndex(self.shopGroup.UITransformComponent, 1000000)
 	end
 
-	-- 상점을 여는 것 자체는 서버 상태를 바꾸지 않는 순수 UI 동작이라 서버 RPC 없이 존18 NPC의
-	-- 월드 터치 스크립트(ClientOnly)가 클라이언트에서 바로 호출한다
+	-- 상점을 여는 것 자체(팝업 표시)는 서버 상태를 바꾸지 않는 순수 UI 동작이지만, 슬롯 추첨은 이번
+	-- 런에서 아직 한 번도 안 뽑았을 수 있으므로(월드 시작 후 첫 오픈) 서버에 "필요하면 추첨" 요청을
+	-- 같이 보낸다 — 이미 뽑혀 있으면 서버에서 즉시 no-op하고, 화면은 지금 동기화된 값으로 우선 채운다.
 	@ExecSpace("ClientOnly")
 	method void Open()
 		self.currencyCountText.Text = tostring(_GameManager.ShadowVoucher)
-		self:RollSkillSlots()
+		self:RequestRollIfNeeded()
+		self:RefreshSlotDisplay()
 		self.shopGroup.Enable = true
 	end
 
-	@ExecSpace("ClientOnly")
-	method void RollSkillSlots()
-		-- 현재 보유 중인 스킬(패시브 포함) 중 최대 3개를 무작위로 뽑아 3~5번 슬롯에 채운다.
-		-- 보유 스킬이 3개 미만이면 남는 슬롯은 비활성화한다
-		local candidates = { 2, 3, 4, 5, 7, 8, 9, 10, 11, 12 }
+	@ExecSpace("Server")
+	method void RequestRollIfNeeded()
+		self:RollSkillSlotsIfNeeded()
+	end
+
+	@ExecSpace("ServerOnly")
+	method void RollSkillSlotsIfNeeded()
+		if self._rolledThisRun then return end
+		self:RollSkillSlotsServer()
+	end
+
+	-- 다시하기(GameManager.RestartGame)에서만 호출 — 이미 뽑혀 있어도 강제로 초기화 후 재추첨한다.
+	@ExecSpace("ServerOnly")
+	method void ForceReroll()
+		self._rolledThisRun = false
+		self:RollSkillSlotsServer()
+	end
+
+	@ExecSpace("ServerOnly")
+	method void RollSkillSlotsServer()
+		-- 현재 보유 중인 스킬(패시브 포함) 중 최대 3개를 무작위로 뽑아 3~5번 슬롯에 고정 배정한다.
+		-- 보유 스킬이 3개 미만이면 남는 슬롯은 0(비활성)으로 둔다 — 무조건 3개를 채우지 않는다.
+		local candidates = { 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15 }
 		local pool = {}
 		for _, cardIdx in ipairs(candidates) do
 			if _CardManager:IsCardUnlocked(cardIdx) then table.insert(pool, cardIdx) end
@@ -87,27 +114,54 @@ script ShadowShopUI extends Logic
 			local tmp = pool[i] ; pool[i] = pool[j] ; pool[j] = tmp
 		end
 
-		self._slot3Card = 0
-		self._slot4Card = 0
-		self._slot5Card = 0
-		if #pool >= 1 then self._slot3Card = pool[1] end
-		if #pool >= 2 then self._slot4Card = pool[2] end
-		if #pool >= 3 then self._slot5Card = pool[3] end
+		self.LockedSlot3Card = 0
+		self.LockedSlot4Card = 0
+		self.LockedSlot5Card = 0
+		self.Slot3SoldOut = false
+		self.Slot4SoldOut = false
+		self.Slot5SoldOut = false
+		if #pool >= 1 then self.LockedSlot3Card = pool[1] end
+		if #pool >= 2 then self.LockedSlot4Card = pool[2] end
+		if #pool >= 3 then self.LockedSlot5Card = pool[3] end
+		self._rolledThisRun = true
+	end
 
-		self:ApplySlotDisplay(self._slot3Card, self.item3Btn, self.item3Icon, self.item3Name)
-		self:ApplySlotDisplay(self._slot4Card, self.item4Btn, self.item4Icon, self.item4Name)
-		self:ApplySlotDisplay(self._slot5Card, self.item5Btn, self.item5Icon, self.item5Name)
+	-- LockedSlot{3,4,5}Card / Slot{3,4,5}SoldOut의 @Sync 갱신이 도착할 때마다(추첨 완료, 구매로 매진
+	-- 전환) 자동으로 다시 그린다 — Open() 시점에 아직 서버 응답이 안 왔어도 곧 이걸로 채워진다.
+	@ExecSpace("ClientOnly")
+	method void OnSyncProperty(string name, any value)
+		if name == "LockedSlot3Card" or name == "LockedSlot4Card" or name == "LockedSlot5Card"
+			or name == "Slot3SoldOut" or name == "Slot4SoldOut" or name == "Slot5SoldOut" then
+			self:RefreshSlotDisplay()
+		end
 	end
 
 	@ExecSpace("ClientOnly")
-	method void ApplySlotDisplay(integer cardIdx, ButtonComponent btn, SpriteGUIRendererComponent icon, TextComponent nameText)
+	method void RefreshSlotDisplay()
+		self:ApplySlotDisplay(self.LockedSlot3Card, self.Slot3SoldOut, self.item3Btn, self.item3Icon, self.item3Name)
+		self:ApplySlotDisplay(self.LockedSlot4Card, self.Slot4SoldOut, self.item4Btn, self.item4Icon, self.item4Name)
+		self:ApplySlotDisplay(self.LockedSlot5Card, self.Slot5SoldOut, self.item5Btn, self.item5Icon, self.item5Name)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ApplySlotDisplay(integer cardIdx, boolean soldOut, ButtonComponent btn, SpriteGUIRendererComponent icon, TextComponent nameText)
 		if cardIdx == 0 then
 			btn.Entity:SetEnable(false)
 			return
 		end
 		btn.Entity:SetEnable(true)
 		icon.ImageRUID = self:GetCardIconRUID(cardIdx)
-		nameText.Text = self:GetCardName(cardIdx) .. " 강화"
+		if soldOut then
+			-- 이미 구매한 슬롯 — 다시 사지 못하게 비활성화하고 매진으로 표시(콘티뉴 버튼이 재화 부족일 때
+			-- 쓰는 것과 동일한 "톤 낮추고 비활성" 패턴)
+			nameText.Text = "매진"
+			btn.Enable = false
+			icon.Color = Color(0.4, 0.4, 0.4, 1)
+		else
+			nameText.Text = self:GetCardName(cardIdx) .. " 강화"
+			btn.Enable = true
+			icon.Color = Color(1, 1, 1, 1)
+		end
 	end
 
 	@ExecSpace("ClientOnly")
@@ -120,6 +174,11 @@ script ShadowShopUI extends Logic
 		elseif cardIdx == 8 then return _CardManager.Card8Name
 		elseif cardIdx == 9 then return _CardManager.Card9Name
 		elseif cardIdx == 10 then return _CardManager.Card10Name
+		elseif cardIdx == 11 then return _CardManager.Card11Name
+		elseif cardIdx == 12 then return _CardManager.Card12Name
+		elseif cardIdx == 13 then return _CardManager.Card13Name
+		elseif cardIdx == 14 then return _CardManager.Card14Name
+		elseif cardIdx == 15 then return _CardManager.Card15Name
 		end
 		return "???"
 	end
@@ -136,6 +195,9 @@ script ShadowShopUI extends Logic
 		elseif cardIdx == 10 then return _CardManager.Card10IconRUID
 		elseif cardIdx == 11 then return _CardManager.Card11IconRUID
 		elseif cardIdx == 12 then return _CardManager.Card12IconRUID
+		elseif cardIdx == 13 then return _CardManager.Card13IconRUID
+		elseif cardIdx == 14 then return _CardManager.Card14IconRUID
+		elseif cardIdx == 15 then return _CardManager.Card15IconRUID
 		end
 		return ""
 	end
@@ -156,22 +218,22 @@ script ShadowShopUI extends Logic
 
 	@ExecSpace("ClientOnly")
 	method void OnBuySlot3()
-		self:OnBuySkillSlot(self._slot3Card)
+		self:OnBuySkillSlot(self.LockedSlot3Card, self.Slot3SoldOut)
 	end
 
 	@ExecSpace("ClientOnly")
 	method void OnBuySlot4()
-		self:OnBuySkillSlot(self._slot4Card)
+		self:OnBuySkillSlot(self.LockedSlot4Card, self.Slot4SoldOut)
 	end
 
 	@ExecSpace("ClientOnly")
 	method void OnBuySlot5()
-		self:OnBuySkillSlot(self._slot5Card)
+		self:OnBuySkillSlot(self.LockedSlot5Card, self.Slot5SoldOut)
 	end
 
 	@ExecSpace("ClientOnly")
-	method void OnBuySkillSlot(integer cardIdx)
-		if cardIdx == 0 then return end
+	method void OnBuySkillSlot(integer cardIdx, boolean soldOut)
+		if cardIdx == 0 or soldOut then return end
 		if _GameManager.ShadowVoucher < self.SkillPrice then return end
 		self:QueueReward(self:GetCardIconRUID(cardIdx), self:GetSkillFlyTargetUI(cardIdx), "skill", cardIdx)
 		self:RequestBuySkill(cardIdx)
@@ -296,9 +358,27 @@ script ShadowShopUI extends Logic
 
 	@ExecSpace("Server")
 	method void RequestBuySkill(integer cardIdx)
-		-- 클라이언트가 무작위로 배정한 슬롯을 그대로 신뢰하지 않고, 서버에서도 실제 보유 여부를 다시 확인한다
+		-- 클라이언트가 보낸 cardIdx를 그대로 신뢰하지 않고, 서버가 이번 런에 실제로 고정 배정한
+		-- 슬롯(LockedSlot{3,4,5}Card) 중 하나인지 + 아직 매진이 아닌지부터 확인한다. 스킬 하나당
+		-- 이번 런에 딱 1번만 구매 가능 — 매진된 슬롯은 다시하기 전까지 재구매 불가.
+		local matchedSlot = 0
+		if cardIdx ~= 0 and cardIdx == self.LockedSlot3Card then matchedSlot = 3
+		elseif cardIdx ~= 0 and cardIdx == self.LockedSlot4Card then matchedSlot = 4
+		elseif cardIdx ~= 0 and cardIdx == self.LockedSlot5Card then matchedSlot = 5
+		end
+		if matchedSlot == 0 then return end
+		if matchedSlot == 3 and self.Slot3SoldOut then return end
+		if matchedSlot == 4 and self.Slot4SoldOut then return end
+		if matchedSlot == 5 and self.Slot5SoldOut then return end
+
 		if not _CardManager:IsCardUnlocked(cardIdx) then return end
 		if not _GameManager:SpendShadowVoucher(self.SkillPrice) then return end
+
+		if matchedSlot == 3 then self.Slot3SoldOut = true
+		elseif matchedSlot == 4 then self.Slot4SoldOut = true
+		elseif matchedSlot == 5 then self.Slot5SoldOut = true
+		end
+
 		local upgradeType = "dmg"
 		if cardIdx == 7 then upgradeType = "booster_up"
 		elseif cardIdx == 8 then upgradeType = "critical_up"
@@ -306,6 +386,9 @@ script ShadowShopUI extends Logic
 		elseif cardIdx == 10 then upgradeType = "freeze_up"
 		elseif cardIdx == 11 then upgradeType = "icecutter_up"
 		elseif cardIdx == 12 then upgradeType = "kingpepe_up"
+		elseif cardIdx == 13 then upgradeType = "thundercutter_up"
+		elseif cardIdx == 14 then upgradeType = "aquatrap_up"
+		elseif cardIdx == 15 then upgradeType = "hailstone_up"
 		end
 		self:QueueGrant({ kind = "skill", cardIdx = cardIdx, upgradeType = upgradeType })
 	end
