@@ -272,7 +272,11 @@ script MonsterAI extends Component
 
 	@ExecSpace("ClientOnly")
 	method void OnSyncProperty(string name, any value)
-		-- MonsterSprite가 동기화되면 SpriteRendererComponent의 RUID를 교체한다
+		-- MonsterSprite가 동기화되면 SpriteRendererComponent의 RUID를 교체한다.
+		-- 사망 후에는 무시 — Die()가 죽는 스프라이트로 이미 바꿔놨는데, 사망 처리 직후(Entity가
+		-- 파괴 전 유예시간 동안 살아있는 동안) 뒤늦게 도착한 MonsterSprite 동기화가 이걸 다시
+		-- 비행/서 있는 포즈로 덮어써버리는 버그(죽는 연출 직후 날아다니는 포즈가 잠깐 보임)가 있었다.
+		if self._dead then return end
 		if name == "MonsterSprite" and self.MonsterSprite ~= "" then
 			local renderer = self.Entity.SpriteRendererComponent
 			if renderer ~= nil then
@@ -374,6 +378,9 @@ script MonsterAI extends Component
 	-- X/Y를 서로 다른 각속도의 사인파로 동시에 움직여(리사주 곡선) 항상 두 축이 같이 바뀌는 궤적을 만든다.
 	@ExecSpace("ServerOnly")
 	method void UpdateFlying(number delta)
+		-- 스턴/속박(ApplyStun) 중에는 지상 몬스터처럼 완전히 멈춰야 한다 — ApproachSpeed=0만으로는
+		-- 공중 몬스터(사인파 기반 UpdateFlying)를 막지 못해서 별도로 체크한다.
+		if self._isStunned then return end
 		self._flyTime = self._flyTime + delta
 		local x = self._flyCenterX + math.sin(self._flyTime * self.FlySpeedX * self._flySpeedMultX + self._flyPhaseX) * self.FlyRangeX
 		local yAmplitude = (self.FlyingWanderMaxY - self.FlyingWanderMinY) * 0.5

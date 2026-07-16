@@ -15,6 +15,13 @@ script CardManager extends Logic
 	@Sync property number Card4Cooldown = 3.2
 	@Sync property number Card5Cooldown = 5.0
 
+	-- 파이어샷(Card1)은 다른 카드처럼 5회까지만 "레벨" 배율(데미지×1.2 / 쿨타임×0.85)을 따르고,
+	-- 6번째 강화부터는 쿨타임 강화가 더 이상 나오지 않고(쿨타임은 5회째 값에 영구 고정) 데미지만
+	-- +20 고정값으로 무한 증가한다. 유일하게 상한 없이 무제한 강화 가능한 카드로 유지.
+	@Sync property integer Card1UpgradeCount = 0
+	property integer Card1MultiplierCap = 5
+	property number Card1FlatDamageBonus = 20
+
 	-- 카드별 스킬 이름
 	property string Card1Name = "파이어 샷"
 	-- 카드1(기본공격)은 원래 아이콘 개념이 없었다(카드슬롯에 못 들어가는 상시 공격) — 레벨업 선택지
@@ -46,12 +53,25 @@ script CardManager extends Logic
 	-- 두 번째 비주얼이 시작되는 시점에 맞춰 데미지를 반으로 나눠 한 번 더 적용한다.
 	property number Card3SecondHitDelay = 0.605
 
-	-- 업그레이드(데미지/쿨타임/해금 불문, 매번)할 때마다 누적되는 카운트 — 매직클로/콜드빔/썬더볼트의 타겟 수·확률 스케일링에 사용
+	-- 업그레이드(데미지/쿨타임/해금 불문, 매번)할 때마다 누적되는 카운트 — 매직클로의 타겟 수 스케일링에 사용
 	@Sync property integer Card2UpgradeCount = 0
-	@Sync property integer Card3UpgradeCount = 0
-	@Sync property integer Card4UpgradeCount = 0
 	-- 메테오는 타겟 수 스케일링은 없지만, 카드슬롯 라벨에 Lv를 보여주려고 같은 방식으로 카운트만 추적한다
 	@Sync property integer Card5UpgradeCount = 0
+
+	-- 썬더 볼트 (Card 4) — 스킬 대공사로 카드9~15와 동일한 Lv1~5 고정 레벨 트랙으로 전환(무제한
+	-- dmg/cd 반복강화 폐기). 데미지/쿨타임 기본값(Card4Damage/Card4Cooldown)은 레벨과 무관하게 고정 —
+	-- 레벨별 정확한 수치는 GetThunderBoltDamage 등 Get* 함수 참고.
+	-- Lv1(해금): 타겟2명 / Lv2: 스턴25%·2초 / Lv3: 데미지+40 / Lv4: 타겟+1(3명)·스턴3초(+1초) /
+	-- Lv5: 데미지+40·스턴30%(+5%). 보스/엘리트는 스턴 지속시간이 절반으로 적용된다.
+	@Sync property integer ThunderBoltLevel = 0
+
+	-- 콜드 빔 (Card 3) — 스킬 대공사로 Lv1~5 고정 레벨 트랙으로 전환(무제한 dmg/cd 반복강화 폐기).
+	-- Card3Damage/Card3Cooldown은 레벨과 무관하게 고정 — 레벨별 수치는 GetColdBeamDamage 참고.
+	-- 1타 적중 0.605초(Card3SecondHitDelay) 뒤 같은 대상에게 다시 데미지 — 단, 총 데미지는 레벨별
+	-- 기준값 그대로이고 1타/2타로 반씩 나눠 두 번 적용(추가 피해 아님). 슬로우는 Lv1부터 상시 3초 고정
+	-- (빙결 효과 레벨에 따른 4초 연장 시너지는 폐기).
+	-- Lv1(해금): 타겟1명·슬로우3초 / Lv2: 타겟+1(2명) / Lv3: 데미지+50 / Lv4: 타겟+1(3명) / Lv5: 데미지+50.
+	@Sync property integer ColdBeamLevel = 0
 
 	-- 슬롯별 카드 배치 (0=비어있음, 2~5=카드번호) — 1번 슬롯부터 순서대로 쌓임
 	@Sync property integer Slot1Card = 0
@@ -183,8 +203,8 @@ script CardManager extends Logic
 	property TextComponent choiceName3 = "257b6726-27a6-411a-9ef3-3053a44128de"
 
 	-- 패시브 카드 레벨 (max 5)
-	-- 부스터: 지속 20+(레벨 삼각수)초, 쿨타임 35초 / 크리티컬: 지속 15+(레벨 삼각수)초, 쿨타임 30초
-	-- 레벨 5 → 삼각수 15 → 지속=쿨타임 → 영구 활성
+	-- 부스터: 해금 즉시 영구 적용(GetMagicBoosterReduction 참고, 만료 없음) — Lv1:5%/Lv2:7%/Lv3:10%/Lv4:12%/Lv5:15%
+	-- 크리티컬: 해금 즉시 영구 적용(GetMagicCriticalChance 참고, 만료 없음) — Lv1:10%/Lv2:12%/Lv3:15%/Lv4:17%/Lv5:20%
 	@Sync property integer MagicBoosterLevel = 0
 	@Sync property integer MagicCriticalLevel = 0
 	property boolean _boosterActive = false
@@ -195,29 +215,35 @@ script CardManager extends Logic
 	property string Card8Name = "매직 크리티컬"
 	property string Card7IconRUID = "d189c25f4a0d4097b702106758500286"  -- 스태프 부스터 아이콘 (공속 증가 계열)
 	property string Card8IconRUID = "1b1eea5b619a4a57ba3f20649feda62c"  -- 매직 크리티컬 공식 아이콘
-	property number Card7Cooldown = 35.0   -- 매직 부스터 슬롯 쿨타임 (= max 레벨 지속시간 → 영구 활성)
-	property number Card8Cooldown = 30.0   -- 매직 크리티컬 슬롯 쿨타임
+	property number Card7Cooldown = 35.0   -- 매직 부스터 슬롯 자체 쿨타임(실제 쿨타임 감소 효과는 레벨만으로 영구 적용되며 이 값과 무관)
+	property number Card8Cooldown = 30.0   -- 매직 크리티컬 슬롯 자체 쿨타임(실제 치명타 확률 효과는 레벨만으로 영구 적용되며 이 값과 무관)
 
-	-- 에너지볼트 (Card 9) — 레벨업으로 해금/강화하는 주력 스킬 카드
-	-- Lv1: 볼트 1발 / Lv2: 데미지 +25% / Lv3: 2연발(0.1s) / Lv4: 치명타 +20% / Lv5: 폭발 추가
+	-- 에너지볼트 (Card 9) — 레벨업으로 해금/강화하는 주력 스킬 카드. 스킬 대공사로 파이어샷(Card1)
+	-- 데미지×레벨배율 참조를 없애고 자체 고정 데미지로 전환(GetEnergyBoltDamage 참고).
+	-- Lv1(해금): 150·단발 / Lv2: 타겟+1(2연발 0.1s 간격)·데미지+50(200) / Lv3: 치명타 20% /
+	-- Lv4: 데미지+50(250) / Lv5: 볼트 착탄 지점마다 좌우 2.0범위 추가 폭발(그 시점 볼트 데미지×1.2)
 	@Sync property integer EnergyBoltLevel = 0
-	property number  EnergyBoltCritBonus = 0.0   -- Lv4 치명타 추가 확률
+	property number  EnergyBoltCritBonus = 0.0   -- Lv3 치명타 추가 확률(매직 크리티컬 Card8 레벨 보너스와 합산)
 	property string Card9Name = "에너지볼트"
 	property string Card9IconRUID = "ff3bf7e0ef354e4a981aa5484053be66"
 	property string Card9EffectRUID = "d393500fd23f4537a2dd1f65089fc4a1"    -- 볼트 착탄 이펙트
 	property string Card9ExplosionRUID = "64180cd54e1d41e3a1b434f90ed76020" -- Lv5 폭발 이펙트
 	property number Card9Cooldown = 1.5
 
-	-- 프리징 이펙트 (Card 10) — 패시브, 콜드빔 빙결 스택 + 번개 보너스 데미지
-	-- Lv1: 시스템 활성 / Lv2: 슬로우+1s·보너스증가 / Lv3: 연쇄번개 1대상 / Lv4: 연쇄 3대상 / Lv5: 5스택+번개=빙결폭발
+	-- 프리징 이펙트 (Card 10) — 패시브. 아이스 계열(콜드빔/아이스커터/헤일스톤)이 빙결 스택 대상을 때리면
+	-- 스택당 데미지 보너스(GetIceStackBonus), 썬더계열(썬더볼트/에너지볼트)이 빙결된 대상을 때리면
+	-- 연쇄 번개(ApplyChainLightning)가 발동하는 아이스+썬더 콤보 카드.
+	-- Lv1(해금): 아이스 스킬 스택당 +5% 데미지 / Lv2: +6%로 상승 / Lv3: 연쇄 번개 1마리(50%) /
+	-- Lv4: 연쇄 2마리(50%,35%) / Lv5: 연쇄 3마리(50%,35%,15%) + 5스택 도달 시 썬더계열 적중으로 빙결폭발(AOE 80%, 스택초기화)
 	@Sync property integer FreezingEffectLevel = 0
 	property string Card10Name = "프리징 이펙트"
 	property string Card10IconRUID = "719213847fdf4b50a109a263e784f0c0"
 
-	-- 아이스 커터 (Card 11) — 레벨업으로 해금/강화하는 광역 스킬. 이펙트가 닿는 반경 안의 몬스터를 전부 타격한다
-	-- (연출 크기 = 판정 반경이라, 레벨이 올라가 반경이 커지면 실제로 더 많은 적이 자연히 맞는 구조).
-	-- Lv1: 반경1.2 데미지110 1명 안팎 / Lv2: 반경1.6 2명 안팎 / Lv3: +출혈(자기 최대체력 3%, 1초당1틱, 3초)
-	-- / Lv4: 반경2.0 3명 안팎 출혈5% / Lv5: 반경2.6 출혈10%
+	-- 아이스 커터 (Card 11) — 레벨업으로 해금/강화하는 광역 스킬. 판정 반경은 전 레벨 고정(0.96,
+	-- 더 이상 레벨별로 커지지 않음). 대신 "타겟 수"만큼 서로 다른 몬스터를 각각 조준해서
+	-- 그 위치마다 반경 판정 광역 공격을 낸다(썬더 커터의 다중 조준과 동일한 방식, FindNextThunderTarget 재사용).
+	-- Lv1(해금): 데미지110·타겟1명 / Lv2: 출혈(최대체력 3%, 1초당1틱, 3초) / Lv3: 타겟+1(2명) /
+	-- Lv4: 데미지+50(160) / Lv5: 출혈 5%로 증가
 	@Sync property integer IceCutterLevel = 0
 	property number Card11Damage = 110
 	property string Card11Name = "아이스 커터"
@@ -228,8 +254,10 @@ script CardManager extends Logic
 
 	-- 킹페페 (Card 12) — 타겟을 따라가지 않는 "고정 위치" 광역 스킬. 펭귄이 고정 위치에 서서 자기 주변
 	-- 반경(Card12HitRadius) 안의 몬스터를 전부 공격한다(지상/공중 구분 없음). Lv1~2는 좌펭귄(RUID_A)만,
-	-- Lv3부터 우펭귄(RUID_B)도 같이 나간다.
-	-- Lv1: 데미지300 / Lv2: 쿨타임 -10% / Lv4: 데미지 +10%(330) — Lv3/Lv5는 아직 미정(추후 확정)
+	-- Lv3부터 우펭귄(RUID_B, 시각상 좌측 위치)도 같이 나간다.
+	-- Lv1(해금): 데미지300·쿨타임7.0 / Lv2: 쿨타임 -10%(×0.9) / Lv3: 우펭귄(시각상 좌측) 공격범위 추가 /
+	-- Lv4: 데미지+70(370) / Lv5: 쿨타임 추가 -10%(곱연산, ×0.9) + 2연속 공격(Card12RepeatDelay) 시작
+	-- (2타는 1타의 50% 데미지만 적용)
 	@Sync property integer KingPepeLevel = 0
 	property number Card12BaseDamage = 300
 	property string Card12Name = "킹페페"
@@ -237,7 +265,7 @@ script CardManager extends Logic
 	property string Card12EffectRUID_A = "d1c805af5c4d442fa42dde6dda7f07dd"  -- 좌하단 펭귄
 	property string Card12EffectRUID_B = "b270754c54db4bae9bfdb0c25665e59e"  -- 우하단 펭귄
 	property number Card12BaseCooldown = 7.0
-	property number Card12Lv4RepeatDelay = 0.5  -- Lv4부터: 한 번 발동에 이 간격을 두고 2연속 공격
+	property number Card12RepeatDelay = 0.5  -- Lv5부터: 한 번 발동에 이 간격을 두고 2연속 공격
 	property number Card12HitDelay = 0.3  -- 연출 시작 후 이 시간 뒤에 실제 대미지 적용(타격 타이밍 싱크)
 	-- 좌/우 펭귄 연출의 X좌표 = 존 중심(centerX) + 이 값. 부호 헷갈림 방지를 위해 좌/우를 완전히 분리했다 —
 	-- 둘 다 값이 커질수록 오른쪽, 작아질수록(더 음수) 왼쪽으로 이동한다(공용 오프셋+부호반전 방식 아님).
@@ -249,7 +277,8 @@ script CardManager extends Logic
 
 	-- 썬더 커터 (Card 13) — 레벨업으로 해금/강화하는 광역 스킬. 시전 시점 primaryTarget 위치를 중심으로
 	-- 고정 반경 안의 몬스터를 전부 타격한다(아이스 커터와 동일한 위치 판정 방식, 반경은 레벨과 무관하게 고정).
-	-- Lv1: 범위 대미지100 1타 / Lv2: 2타(연속) / Lv3: 범위내 넉백(맨 뒤로 밀려남) / Lv4: 데미지 +20% / Lv5: 3타
+	-- Lv1(해금): 데미지100·1타 / Lv2: 타겟+1(2타) / Lv3: 넉백 추가(맨 뒤로 밀려남)·데미지+50(150) /
+	-- Lv4: 타겟+1(3타) / Lv5: 데미지+50(200). 보스/엘리트는 넉백 효율 50% 감소(밀려날 거리 절반).
 	@Sync property integer ThunderCutterLevel = 0
 	property number Card13Damage = 100
 	property string Card13Name = "썬더 커터"
@@ -266,21 +295,23 @@ script CardManager extends Logic
 	-- 아쿠아 트랩 (Card 14) — 메즈(속박) 스킬. 화면에 가장 가까이 접근한 순서로 여러 명을 한 번에
 	-- 타겟팅해서 각자 위치에 개별 연출을 띄우고 데미지 + MonsterAI:ApplyStun(기존 썬더볼트 감전과
 	-- 동일한 "완전 정지 + 별 이펙트" 연출)으로 속박한다.
-	-- Lv1: 3명 속박(각각 연출) 1초/75뎀 / Lv2: 데미지 +20% / Lv3: 쿨타임 -20% / Lv4: 5명 / Lv5: 속박 3초
+	-- Lv1(해금): 2명 속박(각각 연출) 1초/75뎀 / Lv2: 데미지+50(125) / Lv3: 타겟+1(3명)·속박+1s(2초) /
+	-- Lv4: 데미지+50(175) / Lv5: 타겟+1(4명). 쿨타임은 레벨 무관 4.0초 고정(기존 Lv3 -20% 감소 폐기).
 	@Sync property integer AquaTrapLevel = 0
 	property number Card14Damage = 75
 	property string Card14Name = "아쿠아 트랩"
 	property string Card14IconRUID = "77909f8233254133bb6919c386a2d77d"
 	property string Card14EffectRUID = "394e093ee86b4ad4acdfa52eb2e43d88"
-	property number Card14Cooldown = 6.5
+	property number Card14Cooldown = 4.0
 	property number Card14EffectLoopInterval = 0.6  -- 연출 1회 재생 추정 길이 — 속박 지속시간 내내 끊기지 않도록 이 간격마다 이어붙여 재생
 
-	-- 헤일 스톤 (Card 15) — 범위 빙결 스킬. 화면에 가장 가까이 접근한 순서로 여러 명을 골라
+	-- 헤일 스톤 (Card 15) — 범위 빙결 스킬. 지상 우선(GetGroundPriorityTargets) 순으로 여러 명을 골라
 	-- 데미지 + MonsterAI:AddFreezeStack(기존 콜드빔/프리징 이펙트와 동일한 빙결 스택 시스템 —
 	-- 슬로우/스택 인디케이터는 그 쪽에서 이미 다 처리해준다)으로 얼린다.
-	-- Lv1: 1명 타겟 120뎀 + 빙결스택1 / Lv2: 데미지 +20% / Lv3: 2명 타겟 / Lv4: 쿨타임 -20% / Lv5: 3명 타겟
-	-- 타겟마다 그 위치를 중심으로 반경(Card15SplashRadius) 안의 다른 몬스터(=타겟 몬스터 양옆 정도)는
-	-- 절반 데미지를 추가로 받는다 — 빙결 스택/이펙트는 원래 타겟에게만 적용(연출-판정 좌표 일치).
+	-- Lv1(해금): 120뎀·1명 타겟·빙결스택1(레벨 무관 항상 적용) / Lv2: 타겟+1(2명) / Lv3: 데미지+50(170) /
+	-- Lv4: 쿨타임 -10% / Lv5: 타겟+1(3명)
+	-- 타겟마다 그 위치 바로 위 세로 통로(Card15PathWidth×Card15PathHeight) 안에 있는 다른 몬스터는
+	-- 같은 전체 데미지를 추가로 받는다(빙결 스택은 원래 타겟에게만 적용).
 	@Sync property integer HailStoneLevel = 0
 	property number Card15Damage = 120
 	property string Card15Name = "헤일 스톤"
@@ -383,6 +414,8 @@ script CardManager extends Logic
 	end
 
 	method boolean IsCardUnlocked(integer cardIdx)
+		if cardIdx == 3 then return self.ColdBeamLevel > 0 end
+		if cardIdx == 4 then return self.ThunderBoltLevel > 0 end
 		if cardIdx == 7 then return self.MagicBoosterLevel > 0 end
 		if cardIdx == 8 then return self.MagicCriticalLevel > 0 end
 		if cardIdx == 9 then return self.EnergyBoltLevel > 0 end
@@ -452,10 +485,10 @@ script CardManager extends Logic
 	method number GetCardDamage(integer cardIdx)
 		if cardIdx == 1 then return self.Card1Damage
 		elseif cardIdx == 2 then return self.Card2Damage
-		elseif cardIdx == 3 then return self.Card3Damage
-		elseif cardIdx == 4 then return self.Card4Damage
+		elseif cardIdx == 3 then return self:GetColdBeamDamage()
+		elseif cardIdx == 4 then return self:GetThunderBoltDamage()
 		elseif cardIdx == 9 then return self:GetEnergyBoltDamage()
-		elseif cardIdx == 11 then return self.Card11Damage
+		elseif cardIdx == 11 then return self:GetIceCutterDamage(self.IceCutterLevel)
 		elseif cardIdx == 12 then return self:GetKingPepeDamage()
 		elseif cardIdx == 13 then return self:GetThunderCutterDamage()
 		elseif cardIdx == 14 then return self:GetAquaTrapDamage()
@@ -464,61 +497,125 @@ script CardManager extends Logic
 	end
 
 	method number GetKingPepeDamage()
-		if self.KingPepeLevel >= 5 then return self.Card12BaseDamage * 1.2 end
+		-- Lv1~3: 기본(300) / Lv4~5: +70(370)
+		if self.KingPepeLevel >= 4 then return self.Card12BaseDamage + 70 end
 		return self.Card12BaseDamage
 	end
 
-	-- Lv4부터 데미지 +20%
+	-- Lv2와 Lv5에서 각각 -10%씩 곱연산으로 감소(Lv1:7.0 / Lv2~4:6.3 / Lv5:5.67)
+	method number GetKingPepeCooldown()
+		local cd = self.Card12BaseCooldown
+		if self.KingPepeLevel >= 2 then cd = cd * 0.9 end
+		if self.KingPepeLevel >= 5 then cd = cd * 0.9 end
+		return cd
+	end
+
+	-- 썬더 볼트 (Card 4) 레벨별 수치 — Lv1~2: 기본(90) / Lv3~4: +40(130) / Lv5: +80(170)
+	method number GetThunderBoltDamage()
+		if self.ThunderBoltLevel >= 5 then return self.Card4Damage + 80
+		elseif self.ThunderBoltLevel >= 3 then return self.Card4Damage + 40
+		end
+		return self.Card4Damage
+	end
+
+	-- Lv1~3: 2명 / Lv4~5: 3명
+	method integer GetThunderBoltTargetCount()
+		if self.ThunderBoltLevel >= 4 then return 3 end
+		return 2
+	end
+
+	-- Lv1: 0%(스턴 없음) / Lv2~4: 25% / Lv5: 30%
+	method number GetThunderBoltStunChance()
+		if self.ThunderBoltLevel >= 5 then return 0.30
+		elseif self.ThunderBoltLevel >= 2 then return 0.25
+		end
+		return 0
+	end
+
+	-- Lv1: 0(해당없음) / Lv2~3: 2초 / Lv4~5: 3초 — 보스/엘리트는 호출부에서 별도로 절반 적용
+	method number GetThunderBoltStunDuration()
+		if self.ThunderBoltLevel >= 4 then return 3.0
+		elseif self.ThunderBoltLevel >= 2 then return 2.0
+		end
+		return 0
+	end
+
+	-- 콜드 빔 (Card 3) 레벨별 수치 — Lv1~2: 기본(110) / Lv3~4: +50(160) / Lv5: +100(210).
+	-- 1타/2타로 반씩 나눠 적용하는 건 ColdBeamAttack 호출부에서 처리(이 값은 총 데미지 기준값)
+	method number GetColdBeamDamage()
+		if self.ColdBeamLevel >= 5 then return self.Card3Damage + 100
+		elseif self.ColdBeamLevel >= 3 then return self.Card3Damage + 50
+		end
+		return self.Card3Damage
+	end
+
+	-- Lv1: 1명 / Lv2~3: 2명 / Lv4~5: 3명
+	method integer GetColdBeamTargetCount()
+		if self.ColdBeamLevel >= 4 then return 3
+		elseif self.ColdBeamLevel >= 2 then return 2
+		end
+		return 1
+	end
+
+	-- Lv1~2: 기본(100) / Lv3~4: +50(150) / Lv5: +100(200)
 	method number GetThunderCutterDamage()
-		if self.ThunderCutterLevel >= 4 then return self.Card13Damage * 1.2 end
+		if self.ThunderCutterLevel >= 5 then return self.Card13Damage + 100
+		elseif self.ThunderCutterLevel >= 3 then return self.Card13Damage + 50
+		end
 		return self.Card13Damage
 	end
 
-	-- Lv1~2: 1타 / Lv2~4: 2타 / Lv5+: 3타
+	-- Lv1: 1타 / Lv2~3: 2타 / Lv4~5: 3타
 	method integer GetThunderCutterShotCount()
-		if self.ThunderCutterLevel >= 5 then return 3
+		if self.ThunderCutterLevel >= 4 then return 3
 		elseif self.ThunderCutterLevel >= 2 then return 2
 		end
 		return 1
 	end
 
-	-- Lv2부터 데미지 +20%
+	-- Lv1: 기본(75) / Lv2~3: +50(125) / Lv4~5: +50(175)
 	method number GetAquaTrapDamage()
-		if self.AquaTrapLevel >= 2 then return self.Card14Damage * 1.2 end
+		if self.AquaTrapLevel >= 4 then return self.Card14Damage + 100
+		elseif self.AquaTrapLevel >= 2 then return self.Card14Damage + 50
+		end
 		return self.Card14Damage
 	end
 
-	-- Lv1~3: 3명 / Lv4+: 5명
+	-- Lv1~2: 2명 / Lv3~4: 3명 / Lv5: 4명
 	method integer GetAquaTrapTargetCount()
-		if self.AquaTrapLevel >= 4 then return 5 end
-		return 3
+		if self.AquaTrapLevel >= 5 then return 4
+		elseif self.AquaTrapLevel >= 3 then return 3
+		end
+		return 2
 	end
 
-	-- Lv1~4: 1초 / Lv5+: 3초
+	-- Lv1~2: 1초 / Lv3~5: 2초
 	method number GetAquaTrapRootDuration()
-		if self.AquaTrapLevel >= 5 then return 3.0 end
+		if self.AquaTrapLevel >= 3 then return 2.0 end
 		return 1.0
 	end
 
-	-- Lv2부터 데미지 +20%
+	-- Lv1~2: 기본(120) / Lv3~5: +50(170)
 	method number GetHailStoneDamage()
-		if self.HailStoneLevel >= 2 then return self.Card15Damage * 1.2 end
+		if self.HailStoneLevel >= 3 then return self.Card15Damage + 50 end
 		return self.Card15Damage
 	end
 
-	-- Lv1~2: 1명 / Lv3~4: 2명 / Lv5+: 3명
+	-- Lv1: 1명 / Lv2~4: 2명 / Lv5: 3명
 	method integer GetHailStoneTargetCount()
 		if self.HailStoneLevel >= 5 then return 3
-		elseif self.HailStoneLevel >= 3 then return 2
+		elseif self.HailStoneLevel >= 2 then return 2
 		end
 		return 1
 	end
 
 	method number GetEnergyBoltDamage()
-		-- 레벨별 Card1 기본공격 배율: Lv1=1.2 / Lv2=1.5 / Lv3=1.8 / Lv4=2.5 / Lv5=3.0
-		local multipliers = {1.2, 1.5, 1.8, 2.5, 3.0}
-		local idx = math.max(1, math.min(self.EnergyBoltLevel, 5))
-		return self.Card1Damage * multipliers[idx]
+		-- 스킬 대공사로 파이어샷(Card1) 데미지 참조를 없애고 고정값으로 전환.
+		-- Lv1: 150(기본) / Lv2~3: +50(200) / Lv4~5: +50(250)
+		if self.EnergyBoltLevel >= 4 then return 150 + 100
+		elseif self.EnergyBoltLevel >= 2 then return 150 + 50
+		end
+		return 150
 	end
 
 	method number GetCardCooldown(integer cardIdx)
@@ -531,10 +628,10 @@ script CardManager extends Logic
 		elseif cardIdx == 8 then return self.Card8Cooldown
 		elseif cardIdx == 9 then return self.Card9Cooldown
 		elseif cardIdx == 11 then return self.Card11Cooldown
-		elseif cardIdx == 12 then return (self.KingPepeLevel >= 2) and (self.Card12BaseCooldown * 0.9) or self.Card12BaseCooldown
+		elseif cardIdx == 12 then return self:GetKingPepeCooldown()
 		elseif cardIdx == 13 then return self.Card13Cooldown
-		elseif cardIdx == 14 then return (self.AquaTrapLevel >= 3) and (self.Card14Cooldown * 0.8) or self.Card14Cooldown
-		elseif cardIdx == 15 then return (self.HailStoneLevel >= 4) and (self.Card15Cooldown * 0.8) or self.Card15Cooldown
+		elseif cardIdx == 14 then return self.Card14Cooldown
+		elseif cardIdx == 15 then return (self.HailStoneLevel >= 4) and (self.Card15Cooldown * 0.9) or self.Card15Cooldown
 		end
 		return 1.0
 	end
@@ -581,8 +678,8 @@ script CardManager extends Logic
 	-- 카드 슬롯 라벨용 레벨 숫자 — 카드 2~5는 강화 횟수(누적 카운트)를 그대로 Lv로 보여준다
 	method integer GetSlotLevelNum(integer cardIdx)
 		if cardIdx == 2 then return self.Card2UpgradeCount
-		elseif cardIdx == 3 then return self.Card3UpgradeCount
-		elseif cardIdx == 4 then return self.Card4UpgradeCount
+		elseif cardIdx == 3 then return self.ColdBeamLevel
+		elseif cardIdx == 4 then return self.ThunderBoltLevel
 		elseif cardIdx == 5 then return self.Card5UpgradeCount
 		elseif cardIdx == 7 then return self.MagicBoosterLevel
 		elseif cardIdx == 8 then return self.MagicCriticalLevel
@@ -597,33 +694,43 @@ script CardManager extends Logic
 		return 0
 	end
 
-	-- 부스터 지속시간: 기본 20초 + 레벨 삼각수초 (L1=21, L2=23, L3=26, L4=30, L5=35)
-	@ExecSpace("ServerOnly")
-	method number GetBoosterDuration()
-		return 20.0 + self.MagicBoosterLevel * (self.MagicBoosterLevel + 1) / 2.0
+	-- 매직 부스터 레벨별 쿨타임 감소율 — Lv1:5% / Lv2:7% / Lv3:10% / Lv4:12% / Lv5:15%.
+	-- 획득(해금) 즉시 영구 적용(타이머/만료 없음), 다른 카드 쿨타임에 곱연산으로 적용된다.
+	method number GetMagicBoosterReduction()
+		if self.MagicBoosterLevel >= 5 then return 0.15
+		elseif self.MagicBoosterLevel >= 4 then return 0.12
+		elseif self.MagicBoosterLevel >= 3 then return 0.10
+		elseif self.MagicBoosterLevel >= 2 then return 0.07
+		elseif self.MagicBoosterLevel >= 1 then return 0.05
+		end
+		return 0
 	end
 
-	-- 크리티컬 지속시간: 기본 15초 + 레벨 삼각수초 (L1=16, L2=18, L3=21, L4=25, L5=30)
-	@ExecSpace("ServerOnly")
-	method number GetCritDuration()
-		return 15.0 + self.MagicCriticalLevel * (self.MagicCriticalLevel + 1) / 2.0
-	end
-
-	-- 매직 부스터 보유 시 항시 쿨타임 감소 적용 (레벨 1=−10%, 이후 +5%씩)
+	-- 매직 부스터 보유 시 항시 쿨타임 감소 적용(영구, 만료 없음)
 	@ExecSpace("ServerOnly")
 	method number GetEffectiveCooldown(integer cardIdx)
 		local base = self:GetCardCooldown(cardIdx)
 		if self.MagicBoosterLevel == 0 then return base end
-		local reduction = 0.10 + (self.MagicBoosterLevel - 1) * 0.05
-		reduction = math.min(reduction, 0.70)
-		return base * (1.0 - reduction)
+		return base * (1.0 - self:GetMagicBoosterReduction())
 	end
 
-	-- 매직 크리티컬 보유 시 항시 크리티컬 판정 (레벨당 +5%)
+	-- 매직 크리티컬 레벨별 치명타 확률 — Lv1:10% / Lv2:12% / Lv3:15% / Lv4:17% / Lv5:20%.
+	-- 획득(해금) 즉시 영구 적용(타이머/만료 없음), 치명타 시 대미지 ×2(곱연산).
+	method number GetMagicCriticalChance()
+		if self.MagicCriticalLevel >= 5 then return 0.20
+		elseif self.MagicCriticalLevel >= 4 then return 0.17
+		elseif self.MagicCriticalLevel >= 3 then return 0.15
+		elseif self.MagicCriticalLevel >= 2 then return 0.12
+		elseif self.MagicCriticalLevel >= 1 then return 0.10
+		end
+		return 0
+	end
+
+	-- 매직 크리티컬 보유 시 항시 크리티컬 판정(영구, 만료 없음)
 	@ExecSpace("ServerOnly")
 	method boolean RollCrit()
 		if self.MagicCriticalLevel == 0 then return false end
-		return _UtilLogic:RandomDouble() < (self.MagicCriticalLevel * 0.05)
+		return _UtilLogic:RandomDouble() < self:GetMagicCriticalChance()
 	end
 
 	-- ── 생명주기 ────────────────────────────────────────────────
@@ -721,9 +828,9 @@ script CardManager extends Logic
 		elseif name == "IceCutterLevel" then self:RefreshSlotIfHoldsCard(11)
 		elseif name == "KingPepeLevel" then self:RefreshSlotIfHoldsCard(12)
 		elseif name == "ThunderCutterLevel" then self:RefreshSlotIfHoldsCard(13)
+		elseif name == "ThunderBoltLevel" then self:RefreshSlotIfHoldsCard(4)
+		elseif name == "ColdBeamLevel" then self:RefreshSlotIfHoldsCard(3)
 		elseif name == "Card2UpgradeCount" then self:RefreshSlotIfHoldsCard(2)
-		elseif name == "Card3UpgradeCount" then self:RefreshSlotIfHoldsCard(3)
-		elseif name == "Card4UpgradeCount" then self:RefreshSlotIfHoldsCard(4)
 		elseif name == "Card5UpgradeCount" then self:RefreshSlotIfHoldsCard(5)
 		end
 	end
@@ -1043,9 +1150,9 @@ script CardManager extends Logic
 			name = "매직 클로"
 			if self.Card2UpgradeCount > 0 then name = name .. " (+" .. self.Card2UpgradeCount .. "강화)" end
 		elseif cardIdx == 3 then
-			name = "콜드 빔 Lv." .. self.Card3UpgradeCount
+			name = "콜드 빔 Lv." .. self.ColdBeamLevel
 		elseif cardIdx == 4 then
-			name = "썬더 볼트 Lv." .. self.Card4UpgradeCount
+			name = "썬더 볼트 Lv." .. self.ThunderBoltLevel
 		elseif cardIdx == 5 then name = "메테오"
 		elseif cardIdx == 7 then name = "매직 부스터 Lv." .. self.MagicBoosterLevel
 		elseif cardIdx == 8 then name = "매직 크리티컬 Lv." .. self.MagicCriticalLevel
@@ -1061,26 +1168,22 @@ script CardManager extends Logic
 		-- 데미지
 		local dmg = ""
 		if cardIdx == 2 then dmg = "데미지 : " .. math.floor(self.Card2Damage)
-		elseif cardIdx == 3 then dmg = "데미지 : " .. math.floor(self.Card3Damage)
-		elseif cardIdx == 4 then dmg = "데미지 : " .. math.floor(self.Card4Damage)
+		elseif cardIdx == 3 then dmg = "데미지 : " .. math.floor(self:GetColdBeamDamage())
+		elseif cardIdx == 4 then dmg = "데미지 : " .. math.floor(self:GetThunderBoltDamage())
 		elseif cardIdx == 5 then dmg = "데미지 : " .. math.floor(self.Card5Damage)
 		elseif cardIdx == 7 then
-			local lv = self.MagicBoosterLevel
-			dmg = "쿨타임 -" .. math.min(10 + (lv-1)*5, 70) .. "%  지속 " .. math.floor(20 + lv*(lv+1)/2) .. "s"
+			dmg = "쿨타임 -" .. math.floor(self:GetMagicBoosterReduction() * 100) .. "%  (영구)"
 		elseif cardIdx == 8 then
-			local lv = self.MagicCriticalLevel
-			dmg = "크리티컬 " .. (lv*5) .. "%  지속 " .. math.floor(15 + lv*(lv+1)/2) .. "s"
+			dmg = "크리티컬 " .. math.floor(self:GetMagicCriticalChance() * 100) .. "%  (영구)"
 		elseif cardIdx == 9 then
 			local lv = self.EnergyBoltLevel
-			local mults = {1.2, 1.5, 1.8, 2.5, 3.0}
-			local mult = mults[math.max(1, math.min(lv, 5))]
-			local hits = (lv >= 3) and "  ×2" or "  ×1"
-			dmg = "대미지 : " .. math.floor(self.Card1Damage * mult) .. hits
+			local hits = (lv >= 2) and "  ×2" or "  ×1"
+			dmg = "대미지 : " .. math.floor(self:GetEnergyBoltDamage()) .. hits
 		elseif cardIdx == 10 then
-			local bonusPct = (self.FreezingEffectLevel >= 2) and 15 or 10
-			dmg = "번개 보너스 : +" .. bonusPct .. "%/스택"
+			local bonusPct = (self.FreezingEffectLevel >= 2) and 6 or 5
+			dmg = "아이스 보너스 : +" .. bonusPct .. "%/스택"
 		elseif cardIdx == 11 then
-			dmg = "데미지 : " .. math.floor(self.Card11Damage) .. "  (반경 " .. string.format("%.1f", self:GetIceCutterRadius(self.IceCutterLevel)) .. ")"
+			dmg = "데미지 : " .. math.floor(self:GetIceCutterDamage(self.IceCutterLevel)) .. "  (반경 " .. string.format("%.1f", self:GetIceCutterRadius(self.IceCutterLevel)) .. ")"
 		elseif cardIdx == 12 then
 			dmg = "데미지 : " .. math.floor(self:GetKingPepeDamage())
 		elseif cardIdx == 13 then
@@ -1101,8 +1204,7 @@ script CardManager extends Logic
 			end
 		end
 		if boosterOn and self.MagicBoosterLevel > 0 then
-			local reduction = math.min(0.10 + (self.MagicBoosterLevel - 1) * 0.05, 0.70)
-			local effectiveCd = cd * (1.0 - reduction)
+			local effectiveCd = cd * (1.0 - self:GetMagicBoosterReduction())
 			cdStr = cdStr .. "  →  " .. string.format("%.1f", effectiveCd) .. "s ★"
 		end
 
@@ -1111,42 +1213,47 @@ script CardManager extends Logic
 		if cardIdx == 2 then
 			extraStr = "타겟 : " .. (1 + self.Card2UpgradeCount) .. "명"
 		elseif cardIdx == 3 then
-			extraStr = "타겟 : " .. (1 + self.Card3UpgradeCount) .. "명  |  슬로우 3s"
+			extraStr = "타겟 : " .. self:GetColdBeamTargetCount() .. "명  |  슬로우 3s  |  2타(0.605초 후)"
 		elseif cardIdx == 4 then
-			local targets = 2 + self.Card4UpgradeCount
-			local stunPct = math.floor((0.25 + self.Card4UpgradeCount * 0.05) * 100)
-			extraStr = "타겟 : " .. targets .. "명  |  스턴 " .. stunPct .. "%"
+			local targets = self:GetThunderBoltTargetCount()
+			local stunPct = math.floor(self:GetThunderBoltStunChance() * 100)
+			local stunDur = self:GetThunderBoltStunDuration()
+			if stunDur > 0 then
+				extraStr = "타겟 " .. targets .. "명  |  스턴 " .. stunPct .. "% " .. string.format("%.0f", stunDur) .. "초(보스/엘리트 " .. string.format("%.1f", stunDur * 0.5) .. "초)"
+			else
+				extraStr = "타겟 " .. targets .. "명"
+			end
 		elseif cardIdx == 5 then
 			extraStr = "전체 범위  |  화염 DoT 3회"
 		elseif cardIdx == 9 then
 			local lv = self.EnergyBoltLevel
-			if lv >= 3 then extraStr = "2연발  0.1초 간격" end
-			if lv >= 4 then
+			if lv >= 2 then extraStr = "2연발  0.1초 간격" end
+			if lv >= 3 then
 				if extraStr ~= "" then extraStr = extraStr .. "  |  " end
-				extraStr = extraStr .. "치명타 +20%"
+				extraStr = extraStr .. "치명타 20%"
 			end
 			if lv >= 5 then
 				if extraStr ~= "" then extraStr = extraStr .. "  |  " end
-				extraStr = extraStr .. "폭발 " .. math.floor(self.Card1Damage * 1.2) .. " 광역"
+				extraStr = extraStr .. "폭발 " .. math.floor(self:GetEnergyBoltDamage() * 1.2) .. " 광역"
 			end
 		elseif cardIdx == 10 then
 			local lv = self.FreezingEffectLevel
 			if lv >= 5 then
-				local aoe = math.floor(self.Card4Damage * 1.75 * 0.8)
-				extraStr = "연쇄 3마리  |  5스택 폭발 AOE≈" .. aoe
+				extraStr = "연쇄 3마리(50/35/15%)  |  5스택 시 빙결폭발(AOE 80%)"
 			elseif lv >= 4 then
-				extraStr = "연쇄 번개 3마리  (피해 ×0.5)"
+				extraStr = "연쇄 번개 2마리 (50%/35%)"
 			elseif lv >= 3 then
-				extraStr = "연쇄 번개 1마리  (피해 ×0.5)"
+				extraStr = "연쇄 번개 1마리 (50%)"
 			end
 		elseif cardIdx == 11 then
 			local lv = self.IceCutterLevel
 			local bleedPct = math.floor(self:GetIceCutterBleedPercent(lv) * 100)
-			extraStr = "범위 광역"
+			extraStr = "타겟 " .. self:GetIceCutterTargetCount(lv) .. "명  |  범위 광역"
 			if bleedPct > 0 then extraStr = extraStr .. "  |  출혈 " .. bleedPct .. "%/틱 (3초)" end
 		elseif cardIdx == 12 then
 			local coverage = (self.KingPepeLevel >= 3) and "2/4 범위" or "1/4 범위"
 			extraStr = "고정 위치  |  " .. coverage
+			if self.KingPepeLevel >= 5 then extraStr = extraStr .. "  |  2연타(2타 50%)" end
 		elseif cardIdx == 13 then
 			local lv = self.ThunderCutterLevel
 			local shots = self:GetThunderCutterShotCount()
@@ -1403,13 +1510,18 @@ script CardManager extends Logic
 
 	@ExecSpace("ServerOnly")
 	method void ColdBeamAttack(number damage, boolean isCrit)
-		-- 업그레이드할 때마다 타겟 1명씩 추가 (기본 1명). 연출상 빔이 두 번 발사되므로 데미지를 반으로 나눠 두 번째 발사 시점에 맞춰 적용한다
+		-- 레벨별 타겟 수는 GetColdBeamTargetCount 참고(Lv1:1명/Lv2~3:2명/Lv4~5:3명). 연출상 빔이 두 번
+		-- 발사되므로 데미지를 반으로 나눠 두 번째 발사 시점(Card3SecondHitDelay)에 맞춰 적용한다 —
+		-- 총 데미지는 레벨별 기준값 그대로(추가 피해 아님). 슬로우는 레벨/다른 카드와 무관하게 항상 3초 고정
 		local halfDamage = damage / 2
-		local targets = self:GetClosestTargets(1 + self.Card3UpgradeCount)
-		local slowDur = (self.FreezingEffectLevel >= 2) and 4.0 or 3.0
+		local targets = self:GetClosestTargets(self:GetColdBeamTargetCount())
+		local slowDur = 3.0
 		for _, target in ipairs(targets) do
-			if isCrit then target:TakeDamageCrit(halfDamage * 2)
-			else target:TakeDamage(halfDamage) end
+			-- 아이스 계열 스택 보너스는 이번 캐스트 시작 시점의 스택 기준으로 고정해 1타/2타에 동일하게 적용
+			local iceBonus = self:GetIceStackBonus(target)
+			local finalHalfDamage = halfDamage * iceBonus
+			if isCrit then target:TakeDamageCrit(finalHalfDamage * 2)
+			else target:TakeDamage(finalHalfDamage) end
 			target:ApplySlow(slowDur)
 			if self.FreezingEffectLevel > 0 then target:AddFreezeStack() end
 			-- 새 이펙트는 대상 주변으로 퍼지는 얼음 폭발이라 방향성이 없다 — 빔처럼 위쪽에 띄울 필요 없이 대상 위치에 바로 재생한다
@@ -1418,10 +1530,10 @@ script CardManager extends Logic
 
 			_TimerService:SetTimerOnce(function()
 				if isvalid(target) and isvalid(target.Entity) and not target._dead then
-					if isCrit then target:TakeDamageCrit(halfDamage * 2)
-					else target:TakeDamage(halfDamage) end
+					if isCrit then target:TakeDamageCrit(finalHalfDamage * 2)
+					else target:TakeDamage(finalHalfDamage) end
 					if self.FreezingEffectLevel > 0 then target:AddFreezeStack() end
-					log("ColdBeamAttack: second beam dmg=" .. math.floor(isCrit and halfDamage * 2 or halfDamage))
+					log("ColdBeamAttack: second beam dmg=" .. math.floor(isCrit and finalHalfDamage * 2 or finalHalfDamage))
 				end
 			end, self.Card3SecondHitDelay)
 		end
@@ -1429,13 +1541,14 @@ script CardManager extends Logic
 
 	@ExecSpace("ServerOnly")
 	method void ThunderAttack(number damage, boolean isCrit)
-		-- 업그레이드할 때마다 타겟 1명씩 추가 (기본 2명), 감전 확률도 5%씩 추가 (기본 25%)
-		local targets = self:GetClosestTargets(2 + self.Card4UpgradeCount)
-		local stunChance = 0.25 + self.Card4UpgradeCount * 0.05
-		log("ThunderAttack: hit=" .. #targets .. " dmg=" .. math.floor(damage) .. " stunChance=" .. stunChance)
+		-- 레벨별 타겟 수/스턴 확률/스턴 지속시간은 GetThunderBolt* 참고. 보스/엘리트는 스턴
+		-- 지속시간이 절반으로 적용된다(확률은 그대로).
+		local targets = self:GetClosestTargets(self:GetThunderBoltTargetCount())
+		local stunChance = self:GetThunderBoltStunChance()
+		local stunDuration = self:GetThunderBoltStunDuration()
+		log("ThunderAttack: hit=" .. #targets .. " dmg=" .. math.floor(damage) .. " stunChance=" .. stunChance .. " stunDuration=" .. stunDuration)
 		for _, target in ipairs(targets) do
-			local freezeBonus = self:GetFreezeBonus(target)
-			local finalDmg = damage * freezeBonus
+			local finalDmg = damage
 			-- 빙결폭발 체크 (Lv5, 5스택)
 			if self.FreezingEffectLevel >= 5 and target.FreezeStack >= 5 then
 				self:TriggerFreezeExplosion(target, finalDmg, isCrit)
@@ -1444,10 +1557,11 @@ script CardManager extends Logic
 				else target:TakeDamage(finalDmg) end
 			end
 			self:SpawnEffect(self.Card4EffectRUID, target.Entity.TransformComponent.Position, 0, 1, 1, 1)
-			if _UtilLogic:RandomDouble() < stunChance then
-				target:ApplyStun(1.0, true)
+			if stunDuration > 0 and _UtilLogic:RandomDouble() < stunChance then
+				local finalStunDuration = (target._isBoss or target._isElite) and (stunDuration * 0.5) or stunDuration
+				target:ApplyStun(finalStunDuration, true)
 			end
-			-- 연쇄번개 (Lv3+)
+			-- 연쇄번개 (Lv3+, 대상이 빙결 상태일 때만 발동 — ApplyChainLightning 내부에서 체크)
 			self:ApplyChainLightning(target, finalDmg, isCrit)
 		end
 	end
@@ -1476,37 +1590,59 @@ script CardManager extends Logic
 		end
 	end
 
-	-- 아이스 커터 (Card 11) 레벨별 판정 반경 — 이펙트 스케일도 이 값에 맞춰 키우므로, 반경이 커질수록
-	-- 시각적으로도 더 넓게 퍼져 "왜 더 많이 맞는지"가 자연스럽게 보인다.
+	-- 아이스 커터 (Card 11) 판정 반경 — 레벨 무관 고정값 0.96.
+	-- 파라미터는 다른 Get* 함수들과 시그니처를 맞추기 위해 유지하지만 값 자체는 레벨과 무관하다.
 	method number GetIceCutterRadius(integer level)
-		-- 연출 스케일을 0.2 줄인 만큼(scale = radius/1.2 이므로 radius는 0.2*1.2=0.24씩 축소) 반경도 같이 줄여
-		-- 시각적 크기와 판정 범위가 항상 일치하도록 유지한다.
-		if level <= 1 then return 0.96
-		elseif level == 2 then return 1.36
-		elseif level == 3 then return 1.36
-		elseif level == 4 then return 1.76
-		else return 2.36 end
+		return 0.96
 	end
 
-	-- 아이스 커터 Lv3부터 붙는 출혈 — 몬스터 자기 자신의 MaxHp 기준 %라서, 탱키한 몬스터일수록
-	-- 틱당 절대 피해량이 커진다(MonsterAI.ApplyDot에 미리 계산한 절대값을 넘긴다).
+	-- 아이스 커터 (Card 11) 레벨별 데미지 — Lv1~3: 기본(110) / Lv4~5: +50(160)
+	method number GetIceCutterDamage(integer level)
+		if level >= 4 then return self.Card11Damage + 50 end
+		return self.Card11Damage
+	end
+
+	-- 아이스 커터 (Card 11) 레벨별 조준 타겟 수 — Lv1~2: 1명 / Lv3~5: 2명 (서로 다른 몬스터를 각각 조준)
+	method integer GetIceCutterTargetCount(integer level)
+		if level >= 3 then return 2 end
+		return 1
+	end
+
+	-- 아이스 커터 Lv2부터 붙는 출혈 — 몬스터 자기 자신의 MaxHp 기준 %라서, 탱키한 몬스터일수록
+	-- 틱당 절대 피해량이 커진다(MonsterAI.ApplyDot에 미리 계산한 절대값을 넘긴다). Lv5에 5%로 증가.
 	method number GetIceCutterBleedPercent(integer level)
-		if level < 3 then return 0
-		elseif level == 3 then return 0.03
-		elseif level == 4 then return 0.05
-		else return 0.10 end
+		if level < 2 then return 0
+		elseif level < 5 then return 0.03
+		else return 0.05 end
 	end
 
 	@ExecSpace("ServerOnly")
 	method void IceCutterAttack(number damage, boolean isCrit, MonsterAI primaryTarget)
-		-- primaryTarget(카드가 기본적으로 조준하는, 화면에 가장 가까이 접근한 몬스터) 위치를 중심으로
-		-- 판정 반경 안의 몬스터를 전부 때린다 — "연출에 닿는 몬스터 전부 타격"을 반경 판정으로 구현.
+		-- 레벨별 타겟 수(GetIceCutterTargetCount)만큼 서로 다른 몬스터를 각각 조준해서, 조준한 위치마다
+		-- 고정 반경(GetIceCutterRadius, 레벨 무관 0.96) 광역 판정을 동시에 낸다 — 썬더 커터의 다중 조준과
+		-- 동일한 방식(FindNextThunderTarget 재사용), 다만 발사 간 딜레이 없이 즉시 전부 발동한다.
 		local map = self:GetCurrentMap()
 		if map == nil then return end
 		local level = self.IceCutterLevel
 		local radius = self:GetIceCutterRadius(level)
 		local bleedPercent = self:GetIceCutterBleedPercent(level)
-		local centerPos = primaryTarget.Entity.TransformComponent.Position
+		local targetCount = self:GetIceCutterTargetCount(level)
+
+		local target1 = primaryTarget
+		local target2 = nil
+		if targetCount >= 2 then
+			target2 = self:FindNextThunderTarget(target1, nil)
+		end
+
+		self:FireIceCutterShot(map, target1, damage, isCrit, radius, bleedPercent)
+		if target2 ~= nil then self:FireIceCutterShot(map, target2, damage, isCrit, radius, bleedPercent) end
+	end
+
+	-- 아이스 커터 한 방을 shotTarget 위치에 즉시 발동 — 이펙트 스폰 + 그 위치 기준 고정 반경 광역 판정.
+	@ExecSpace("ServerOnly")
+	method void FireIceCutterShot(Entity map, MonsterAI shotTarget, number damage, boolean isCrit, number radius, number bleedPercent)
+		if not isvalid(shotTarget) or not isvalid(shotTarget.Entity) or shotTarget._dead then return end
+		local centerPos = shotTarget.Entity.TransformComponent.Position
 		local fxPos = Vector3(centerPos.x, centerPos.y + self.Card11EffectYOffset, centerPos.z)
 		self:SpawnEffect(self.Card11EffectRUID, fxPos, 0, 1, radius / 1.2, 1)
 
@@ -1520,8 +1656,9 @@ script CardManager extends Logic
 				local dx = mp.x - centerPos.x
 				local dy = mp.y - centerPos.y
 				if (dx * dx + dy * dy) <= (radius * radius) then
-					if isCrit then m:TakeDamageCrit(damage * 2)
-					else m:TakeDamage(damage) end
+					local finalDmg = damage * self:GetIceStackBonus(m)
+					if isCrit then m:TakeDamageCrit(finalDmg * 2)
+					else m:TakeDamage(finalDmg) end
 					if bleedPercent > 0 then
 						m:ApplyDot(m.MaxHp * bleedPercent, 3, 1.0)
 					end
@@ -1614,7 +1751,14 @@ script CardManager extends Logic
 					if isPrimary or inRange then
 						if isCrit then m:TakeDamageCrit(damage * 2)
 						else m:TakeDamage(damage) end
-						if knockback then m:ApplyKnockback(self.Card13KnockbackScale) end
+						if knockback then
+							local kbScale = self.Card13KnockbackScale
+							if m._isBoss or m._isElite then
+								-- 보스/엘리트는 넉백 효율 50% 감소 — 밀려날 목표 스케일을 현재 스케일과의 중간값으로 절충
+								kbScale = m._currentScale - (m._currentScale - self.Card13KnockbackScale) * 0.5
+							end
+							m:ApplyKnockback(kbScale)
+						end
 						hitCount = hitCount + 1
 					end
 				end
@@ -1692,13 +1836,14 @@ script CardManager extends Logic
 
 			_TimerService:SetTimerOnce(function()
 				if not isvalid(self) or not isvalid(target) or not isvalid(target.Entity) or target._dead then return end
-				if isCrit then target:TakeDamageCrit(damage * 2)
-				else target:TakeDamage(damage) end
+				local finalDmg = damage * self:GetIceStackBonus(target)
+				if isCrit then target:TakeDamageCrit(finalDmg * 2)
+				else target:TakeDamage(finalDmg) end
 				target:AddFreezeStack()
 
 				-- 얼음이 타겟 머리 위(경로)에서 떨어지는 연출이라, 그 낙하 경로(타겟 바로 위 세로 통로)
-				-- 안에 있는 다른 몬스터는 착탄 시점 기준으로 같이 맞아서 전체 데미지를 받는다. 빙결
-				-- 스택은 원래 타겟에게만 적용 — 경로에 낀 몬스터는 데미지만.
+				-- 안에 있는 다른 몬스터는 착탄 시점 기준으로 같이 맞아서 전체 데미지를 받는다(각자 본인
+				-- 스택 기준 아이스 보너스 적용). 빙결 스택은 원래 타겟에게만 적용 — 경로에 낀 몬스터는 데미지만.
 				local pathHitCount = 0
 				if map ~= nil then
 					local monsters = map:GetChildComponentsByTypeName("script.MonsterAI", false)
@@ -1715,15 +1860,16 @@ script CardManager extends Logic
 								local dxPath = math.abs(mp.x - p.x)
 								local inPath = dxPath <= self.Card15PathWidth and mp.y > p.y and (mp.y - p.y) <= self.Card15PathHeight
 								if inPath then
-									if isCrit then m:TakeDamageCrit(damage * 2)
-									else m:TakeDamage(damage) end
+									local finalPathDmg = damage * self:GetIceStackBonus(m)
+									if isCrit then m:TakeDamageCrit(finalPathDmg * 2)
+									else m:TakeDamage(finalPathDmg) end
 									pathHitCount = pathHitCount + 1
 								end
 							end
 						end
 					end
 				end
-				log("HailStoneAttack: impact dmg=" .. math.floor(isCrit and damage * 2 or damage) .. " path=" .. pathHitCount)
+				log("HailStoneAttack: impact dmg=" .. math.floor(isCrit and finalDmg * 2 or finalDmg) .. " path=" .. pathHitCount)
 			end, self.Card15ImpactDelay)
 		end
 		log("HailStoneAttack: cast hit=" .. hitCount .. "/" .. targetCount)
@@ -1747,7 +1893,7 @@ script CardManager extends Logic
 		-- 타겟 위치와 무관하게, 존 중심(offsetX) 기준 좌/우 고정 위치에서 펭귄이 연출을 재생하고,
 		-- 그 위치를 중심으로 한 반경(Card12HitRadius) 안의 몬스터를 지상/공중 구분 없이 전부 타격한다.
 		-- Lv1~2는 좌펭귄(RUID_A)만, Lv3부터 우펭귄(RUID_B)도 같이 나간다.
-		-- Lv4부터: isRepeat이 아니면(=이번 발동의 첫 타격이면) Card12Lv4RepeatDelay 뒤에 한 번 더
+		-- Lv5부터: isRepeat이 아니면(=이번 발동의 첫 타격이면) Card12RepeatDelay 뒤에 한 번 더
 		-- 같은 공격을 재실행해서 짧은 2연타를 만든다. isRepeat=true인 재귀 호출은 다시 예약하지 않는다.
 		local map = self:GetCurrentMap()
 		-- 존 경계(예: 15→16 이동) 순간에는 _MapManager.CurrentMapIndex가 이미 다음 존을 가리키는데
@@ -1781,7 +1927,7 @@ script CardManager extends Logic
 		end
 
 		-- 대미지는 연출이 뜨자마자가 아니라, 펭귄이 실제로 내려찍는 타이밍(연출 시작 후 약 0.3초)에
-		-- 맞춰서 적용한다 — 이렇게 해야 Lv4의 2연타도 "효과 2번 = 대미지 2번"이 타이밍까지 맞게 보인다.
+		-- 맞춰서 적용한다 — 이렇게 해야 Lv5의 2연타도 "효과 2번 = 대미지 2번"이 타이밍까지 맞게 보인다.
 		_TimerService:SetTimerOnce(function()
 			if not isvalid(self) or not isvalid(map) then return end
 			-- 판정을 "화면 좌/우 절반" 러프 분할 대신, 실제 펭귄 이펙트가 뜨는 위치를 중심으로 한
@@ -1813,12 +1959,13 @@ script CardManager extends Logic
 			log("KingPepeAttack: hit=" .. hitCount .. " dmg=" .. math.floor(isCrit and damage * 2 or damage) .. " rightActive=" .. tostring(rightActive))
 		end, self.Card12HitDelay)
 
-		if not isRepeat and level >= 4 then
+		if not isRepeat and level >= 5 then
 			_TimerService:SetTimerOnce(function()
 				if isvalid(self) then
-					self:KingPepeAttack(damage, isCrit, primaryTarget, true)
+					-- 2번째 타격은 절반 데미지 — 1타는 온전히, 2타는 50%만 들어가도록
+					self:KingPepeAttack(damage * 0.5, isCrit, primaryTarget, true)
 				end
-			end, self.Card12Lv4RepeatDelay)
+			end, self.Card12RepeatDelay)
 		end
 	end
 
@@ -1844,8 +1991,8 @@ script CardManager extends Logic
 
 	@ExecSpace("ServerOnly")
 	method boolean RollEnergyBoltCrit()
-		-- MagicCritical 기본 확률 + Lv4 치명타 보너스
-		local chance = (self.MagicCriticalLevel > 0) and (self.MagicCriticalLevel * 0.05) or 0
+		-- MagicCritical 기본 확률 + Lv3 치명타 보너스
+		local chance = self:GetMagicCriticalChance()
 		chance = chance + self.EnergyBoltCritBonus
 		if chance <= 0 then return false end
 		return _UtilLogic:RandomDouble() < chance
@@ -1876,13 +2023,12 @@ script CardManager extends Logic
 		local damage = self:GetEnergyBoltDamage()
 		local isCrit = self:RollEnergyBoltCrit()
 
-		if self.EnergyBoltLevel >= 3 then
-			-- Lv3+: 1번째 볼트 → primaryTarget, Lv5이면 즉시 그 자리에서 폭발
+		if self.EnergyBoltLevel >= 2 then
+			-- Lv2+: 1번째 볼트 → primaryTarget, Lv5이면 즉시 그 자리에서 폭발
 			local isLv5 = self.EnergyBoltLevel >= 5
 			local boltScale = isLv5 and 1.73 or 1.5
 			local boltRate  = isLv5 and 1.28 or 1.5
-			local freezeBonus1 = self:GetFreezeBonus(primaryTarget)
-			local finalDmg1 = damage * freezeBonus1
+			local finalDmg1 = damage
 			if self.FreezingEffectLevel >= 5 and primaryTarget.FreezeStack >= 5 then
 				self:TriggerFreezeExplosion(primaryTarget, finalDmg1, isCrit)
 			else
@@ -1907,8 +2053,7 @@ script CardManager extends Logic
 					t2 = primaryTarget
 				end
 				if isvalid(t2) and isvalid(t2.Entity) and not t2._dead then
-					local freezeBonus2 = self:GetFreezeBonus(t2)
-					local finalDmg2 = damage * freezeBonus2
+					local finalDmg2 = damage
 					if self.FreezingEffectLevel >= 5 and t2.FreezeStack >= 5 then
 						self:TriggerFreezeExplosion(t2, finalDmg2, isCrit)
 					else
@@ -1926,9 +2071,8 @@ script CardManager extends Logic
 				end
 			end, 0.1)
 		else
-			-- Lv1~2: 단발
-			local freezeBonusSingle = self:GetFreezeBonus(primaryTarget)
-			local finalDmgSingle = damage * freezeBonusSingle
+			-- Lv1: 단발
+			local finalDmgSingle = damage
 			if self.FreezingEffectLevel >= 5 and primaryTarget.FreezeStack >= 5 then
 				self:TriggerFreezeExplosion(primaryTarget, finalDmgSingle, isCrit)
 			else
@@ -1945,8 +2089,8 @@ script CardManager extends Logic
 
 	@ExecSpace("ServerOnly")
 	method void EnergyBoltExplosion(MonsterAI center, boolean isCrit)
-		-- Lv5 폭발: 이펙트 1회, primaryTarget 기준 좌우 ±2.0 범위 내 몬스터에게 Card1×1.2 피해
-		local expDmg = self.Card1Damage * 1.2
+		-- Lv5 폭발: 이펙트 1회, primaryTarget 기준 좌우 ±2.0 범위 내 몬스터에게 그 시점 볼트 데미지×1.2 피해
+		local expDmg = self:GetEnergyBoltDamage() * 1.2
 		local map = self:GetCurrentMap()
 		if map == nil then return end
 
@@ -1990,29 +2134,32 @@ script CardManager extends Logic
 
 	-- ── 프리징 이펙트 헬퍼 ──────────────────────────────────────
 
+	-- 아이스 계열 스킬(콜드빔/아이스커터/헤일스톤) 전용 — 대상의 빙결 스택 수에 비례한 데미지 배율
+	-- (Lv1: +5%/스택, Lv2+: +6%/스택). 썬더계열(썬더볼트/에너지볼트)에는 더 이상 적용되지 않는다.
 	@ExecSpace("ServerOnly")
-	method number GetFreezeBonus(MonsterAI target)
-		-- 빙결 스택에 따른 번개 보너스 배율 반환 (Lv1: +10%/스택, Lv2+: +15%/스택)
+	method number GetIceStackBonus(MonsterAI target)
 		if self.FreezingEffectLevel <= 0 then return 1.0 end
 		if target == nil or not isvalid(target) then return 1.0 end
 		local stack = target.FreezeStack
 		if stack <= 0 then return 1.0 end
-		local bonusPct = stack * (self.FreezingEffectLevel >= 2 and 0.15 or 0.10)
+		local bonusPct = stack * (self.FreezingEffectLevel >= 2 and 0.06 or 0.05)
 		return 1.0 + bonusPct
 	end
 
 	@ExecSpace("ServerOnly")
 	method void ApplyChainLightning(MonsterAI source, number baseDmg, boolean isCrit)
-		-- Lv3: 1마리 / Lv4: 3마리 / Lv5: 4마리 (홉마다 피해 50%→75%→100%→125%)
+		-- 빙결된 몬스터(source)에게 썬더계열(썬더볼트/에너지볼트) 스킬이 적중했을 때만 발동(확률 없이 항상).
+		-- Lv3: 1마리(50%) / Lv4: 2마리(50%,35%) / Lv5: 3마리(50%,35%,15%). 아이스 스택 보너스는 적용되지 않는다.
 		if self.FreezingEffectLevel < 3 then return end
 		if source == nil or not isvalid(source) then return end
+		if source.FreezeStack <= 0 then return end
 		local maxHops
-		if self.FreezingEffectLevel >= 5 then maxHops = 4
-		elseif self.FreezingEffectLevel >= 4 then maxHops = 3
+		if self.FreezingEffectLevel >= 5 then maxHops = 3
+		elseif self.FreezingEffectLevel >= 4 then maxHops = 2
 		else maxHops = 1
 		end
+		local hopMults = {0.50, 0.35, 0.15}
 		local chainRadius = 2.5
-		local aoeRadius = 1.275  -- Lv5 연쇄 AOE 범위 (기존 1.5에서 연출 축소 비율(15%)만큼 같이 축소)
 		local map = self:GetCurrentMap()
 		if map == nil then return end
 		local sourcePos = source.Entity.TransformComponent.Position
@@ -2025,31 +2172,15 @@ script CardManager extends Logic
 				local dx = math.abs(m.Entity.TransformComponent.Position.x - sourcePos.x)
 				if dx <= chainRadius then
 					chainCount = chainCount + 1
-					-- 홉마다 50%→75%→100%→125% 증가, 연쇄 대상 빙결 스택 보너스 적용
-					local hopMult = 0.5 + 0.25 * (chainCount - 1)
-					local freezeBonus = self:GetFreezeBonus(m)
-					local chainDmg = baseDmg * hopMult * freezeBonus
+					local hopMult = hopMults[chainCount]
+					local chainDmg = baseDmg * hopMult
 					if isCrit then m:TakeDamageCrit(chainDmg * 2)
 					else m:TakeDamage(chainDmg) end
 					local mPos = m.Entity.TransformComponent.Position
 					local fxPos = Vector3(mPos.x, mPos.y + 0.4, mPos.z)
-					local fxScale = (self.FreezingEffectLevel >= 5) and 1.632 or (self.FreezingEffectLevel >= 4) and 1.32 or 0.8  -- Lv5는 기존 1.92에서 15% 축소
+					local fxScale = (self.FreezingEffectLevel >= 5) and 1.632 or (self.FreezingEffectLevel >= 4) and 1.32 or 0.8
 					self:SpawnEffect(self.ChainLightningEffectRUID, fxPos, 0, 1.2, fxScale, 1)
-					-- Lv5: 연쇄 타격 위치 주변 AOE 추가 공격
-					if self.FreezingEffectLevel >= 5 then
-						for _, mob2 in ipairs(monsters) do
-							---@type MonsterAI
-							local m2 = mob2
-							if not m2._dead and m2 ~= m and m2 ~= source then
-								local dx2 = math.abs(m2.Entity.TransformComponent.Position.x - mPos.x)
-								if dx2 <= aoeRadius then
-									if isCrit then m2:TakeDamageCrit(chainDmg * 2)
-									else m2:TakeDamage(chainDmg) end
-								end
-							end
-						end
-					end
-					log("ChainLightning hop" .. chainCount .. ": dmg=" .. math.floor(isCrit and chainDmg*2 or chainDmg) .. " (×" .. hopMult .. " freeze×" .. string.format("%.2f", freezeBonus) .. ")")
+					log("ChainLightning hop" .. chainCount .. ": dmg=" .. math.floor(isCrit and chainDmg*2 or chainDmg) .. " (×" .. hopMult .. ")")
 					if chainCount >= maxHops then break end
 				end
 			end
@@ -2197,9 +2328,9 @@ script CardManager extends Logic
 			table.insert(pool, { card = 15, type = "hailstone_up" })
 		end
 
-		-- Card1 기본공격 강화 (상시 강화 가능)
-		table.insert(pool, { card = 1, type = "dmg" })
-		table.insert(pool, { card = 1, type = "cd" })
+		-- Card1(파이어샷)은 더 이상 일반 선택지 풀에 상시로 끼지 않는다 — 다른 모든 카드가 업그레이드할
+		-- 게 남아있지 않을 때만(아래 "풀이 3개 미만이면 패딩" 로직) 등장한다. 유일하게 상한이 없어서
+		-- 항상 채워줄 수 있는 카드이기 때문.
 
 		-- 포션
 		if self.PotionLevel < 5 then
@@ -2218,24 +2349,18 @@ script CardManager extends Logic
 			table.insert(pool, { card = 8, type = "critical_up" })
 		end
 
-		-- 썬콜법사 빌드: 콜드빔 / 썬더볼트 (미해금 상태에서 새로 슬롯을 차지해야 하니 슬롯 여유 있을 때만)
-		if not self:IsCardUnlocked(3) then
-			if hasEmptySlot then
-				table.insert(pool, { card = 3, type = "unlock_dmg" })
-				table.insert(pool, { card = 3, type = "unlock_cd" })
-			end
-		else
-			table.insert(pool, { card = 3, type = "dmg" })
-			table.insert(pool, { card = 3, type = "cd" })
+		-- 콜드 빔: 미해금이면 해금(슬롯 여유 있을 때만), 해금 후 레벨 < 5이면 강화 (카드9~15와 동일한 Lv1~5 트랙)
+		if self.ColdBeamLevel == 0 then
+			if hasEmptySlot then table.insert(pool, { card = 3, type = "unlock" }) end
+		elseif self.ColdBeamLevel < 5 then
+			table.insert(pool, { card = 3, type = "coldbeam_up" })
 		end
-		if not self:IsCardUnlocked(4) then
-			if hasEmptySlot then
-				table.insert(pool, { card = 4, type = "unlock_dmg" })
-				table.insert(pool, { card = 4, type = "unlock_cd" })
-			end
-		else
-			table.insert(pool, { card = 4, type = "dmg" })
-			table.insert(pool, { card = 4, type = "cd" })
+
+		-- 썬더 볼트: 미해금이면 해금(슬롯 여유 있을 때만), 해금 후 레벨 < 5이면 강화 (카드9~15와 동일한 Lv1~5 트랙)
+		if self.ThunderBoltLevel == 0 then
+			if hasEmptySlot then table.insert(pool, { card = 4, type = "unlock" }) end
+		elseif self.ThunderBoltLevel < 5 then
+			table.insert(pool, { card = 4, type = "thunderbolt_up" })
 		end
 
 		-- 프리징 이펙트 (패시브) — 2개 항목으로 출현 확률 보강
@@ -2264,9 +2389,14 @@ script CardManager extends Logic
 			end
 		end
 
-		-- 풀이 3개 미만이면 Card1 강화로 패딩 (모든 선택지가 최대일 때 대비)
+		-- 풀이 3개 미만이면 Card1(파이어샷) 강화로 패딩 — 다른 모든 카드가 업그레이드할 게 없을 때
+		-- 진입하는 유일한 경로. 5회 이후로는 쿨타임 선택지가 없으므로(영구 고정) 데미지만 나온다.
 		while #chosen < 3 do
-			table.insert(chosen, { card = 1, type = (_UtilLogic:RandomDouble() < 0.5) and "dmg" or "cd" })
+			local card1Type = "dmg"
+			if self.Card1UpgradeCount < self.Card1MultiplierCap and _UtilLogic:RandomDouble() < 0.5 then
+				card1Type = "cd"
+			end
+			table.insert(chosen, { card = 1, type = card1Type })
 		end
 
 		self._choiceCard1 = chosen[1].card ; self._choiceType1 = chosen[1].type
@@ -2395,13 +2525,27 @@ script CardManager extends Logic
 			return
 		end
 
-		-- 카드 2~5(매직 클로/콜드 빔/썬더 볼트/메테오)
+		if cardIdx == 4 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.ThunderBoltLevel + 1)
+			icon.ImageRUID = self.Card4IconRUID
+			title.Text = "Lv" .. nextLevel
+			name.Text  = self.Card4Name
+			return
+		end
+
+		if cardIdx == 3 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.ColdBeamLevel + 1)
+			icon.ImageRUID = self.Card3IconRUID
+			title.Text = "Lv" .. nextLevel
+			name.Text  = self.Card3Name
+			return
+		end
+
+		-- 카드 2/5(매직 클로/메테오)
 		local skillNames = {self.Card1Name, self.Card2Name, self.Card3Name, self.Card4Name, self.Card5Name}
 		local skillName = (cardIdx >= 1 and cardIdx <= 5) and skillNames[cardIdx] or ("카드 " .. cardIdx)
 		local nextLevel = 1
 		if cardIdx == 2 then nextLevel = self.Card2UpgradeCount + 1
-		elseif cardIdx == 3 then nextLevel = self.Card3UpgradeCount + 1
-		elseif cardIdx == 4 then nextLevel = self.Card4UpgradeCount + 1
 		elseif cardIdx == 5 then nextLevel = self.Card5UpgradeCount + 1
 		end
 		icon.ImageRUID = self:GetCardIconRUID(cardIdx)
@@ -2473,7 +2617,7 @@ script CardManager extends Logic
 			end
 			self._critActive = true
 			self:NotifyCritOnPermanent()
-			log("MagicCritical L" .. self.MagicCriticalLevel .. " " .. (self.MagicCriticalLevel * 5) .. "% 영구 활성")
+			log("MagicCritical L" .. self.MagicCriticalLevel .. " " .. math.floor(self:GetMagicCriticalChance() * 100) .. "% 영구 활성")
 			return
 		end
 
@@ -2489,9 +2633,9 @@ script CardManager extends Logic
 				end
 			elseif upgradeType == "energybolt_up" and self.EnergyBoltLevel < 5 then
 				self.EnergyBoltLevel = self.EnergyBoltLevel + 1
-				if self.EnergyBoltLevel == 4 then
+				if self.EnergyBoltLevel == 3 then
 					self.EnergyBoltCritBonus = 0.20
-					log("EnergyBolt Lv4: 치명타 +20% 적용")
+					log("EnergyBolt Lv3: 치명타 +20% 적용")
 				end
 			end
 			log("EnergyBolt L" .. self.EnergyBoltLevel)
@@ -2593,30 +2737,76 @@ script CardManager extends Logic
 			return
 		end
 
-		-- 매직클로/콜드빔/썬더볼트는 (해금 포함) 업그레이드할 때마다 1씩 누적 — 타겟 수·확률 스케일링에 쓴다.
+		if cardIdx == 4 then
+			if upgradeType == "unlock" then
+				self.ThunderBoltLevel = 1
+				local slotIdx = self:GetNextEmptySlot()
+				if slotIdx > 0 then
+					self:AssignCardToSlot(slotIdx, 4)
+					self:ResetSlotTimer(slotIdx)
+					log("Card4(ThunderBolt) -> Slot" .. slotIdx)
+				end
+			elseif upgradeType == "thunderbolt_up" and self.ThunderBoltLevel < 5 then
+				self.ThunderBoltLevel = self.ThunderBoltLevel + 1
+			end
+			log("ThunderBolt L" .. self.ThunderBoltLevel)
+			return
+		end
+
+		if cardIdx == 3 then
+			if upgradeType == "unlock" then
+				self.ColdBeamLevel = 1
+				local slotIdx = self:GetNextEmptySlot()
+				if slotIdx > 0 then
+					self:AssignCardToSlot(slotIdx, 3)
+					self:ResetSlotTimer(slotIdx)
+					log("Card3(ColdBeam) -> Slot" .. slotIdx)
+				end
+			elseif upgradeType == "coldbeam_up" and self.ColdBeamLevel < 5 then
+				self.ColdBeamLevel = self.ColdBeamLevel + 1
+			end
+			log("ColdBeam L" .. self.ColdBeamLevel)
+			return
+		end
+
+		-- 매직클로는 (해금 포함) 업그레이드할 때마다 1씩 누적 — 타겟 수 스케일링에 쓴다.
 		-- 메테오는 스케일링 용도는 없지만 카드슬롯 Lv 표시용으로 동일하게 누적한다
 		if cardIdx == 2 then self.Card2UpgradeCount = self.Card2UpgradeCount + 1
-		elseif cardIdx == 3 then self.Card3UpgradeCount = self.Card3UpgradeCount + 1
-		elseif cardIdx == 4 then self.Card4UpgradeCount = self.Card4UpgradeCount + 1
 		elseif cardIdx == 5 then self.Card5UpgradeCount = self.Card5UpgradeCount + 1
+		end
+
+		-- 파이어샷(Card1)은 5회까지만 기존 배율을 따르고 그 이후로는 데미지 +20 고정 무한증가 —
+		-- 다른 카드와 증가 방식이 달라 별도로 분리해서 처리한다.
+		if cardIdx == 1 and (upgradeType == "dmg" or upgradeType == "cd") then
+			if upgradeType == "dmg" then
+				if self.Card1UpgradeCount < self.Card1MultiplierCap then
+					self.Card1Damage = self.Card1Damage * 1.2
+				else
+					self.Card1Damage = self.Card1Damage + self.Card1FlatDamageBonus
+				end
+				self.Card1UpgradeCount = self.Card1UpgradeCount + 1
+			elseif upgradeType == "cd" then
+				-- 5회 이후에는 쿨타임 강화 선택지 자체가 더 이상 안 나오지만(GenerateLevelUpChoices에서
+				-- 걸러짐), 혹시 모를 경로에 대비해 여기서도 상한을 넘으면 조용히 무시한다
+				if self.Card1UpgradeCount < self.Card1MultiplierCap then
+					self.Card1Cooldown = self.Card1Cooldown * 0.85
+					self.Card1UpgradeCount = self.Card1UpgradeCount + 1
+				end
+			end
+			log("Card1(파이어샷) upgrade: count=" .. self.Card1UpgradeCount .. " dmg=" .. math.floor(self.Card1Damage) .. " cd=" .. string.format("%.2f", self.Card1Cooldown))
+			return
 		end
 
 		-- 데미지 강화
 		if upgradeType == "dmg" or upgradeType == "unlock_dmg" then
-			if cardIdx == 1 then self.Card1Damage = self.Card1Damage * 1.2
-			elseif cardIdx == 2 then self.Card2Damage = self.Card2Damage * 1.2
-			elseif cardIdx == 3 then self.Card3Damage = self.Card3Damage * 1.2
-			elseif cardIdx == 4 then self.Card4Damage = self.Card4Damage * 1.2
+			if cardIdx == 2 then self.Card2Damage = self.Card2Damage * 1.2
 			elseif cardIdx == 5 then self.Card5Damage = self.Card5Damage * 1.2
 			end
 		end
 
 		-- 쿨타임 강화
 		if upgradeType == "cd" or upgradeType == "unlock_cd" then
-			if cardIdx == 1 then self.Card1Cooldown = self.Card1Cooldown * 0.85
-			elseif cardIdx == 2 then self.Card2Cooldown = self.Card2Cooldown * 0.85
-			elseif cardIdx == 3 then self.Card3Cooldown = self.Card3Cooldown * 0.85
-			elseif cardIdx == 4 then self.Card4Cooldown = self.Card4Cooldown * 0.85
+			if cardIdx == 2 then self.Card2Cooldown = self.Card2Cooldown * 0.85
 			elseif cardIdx == 5 then self.Card5Cooldown = self.Card5Cooldown * 0.85
 			end
 		end
@@ -2655,7 +2845,10 @@ script CardManager extends Logic
 		self.Card1Cooldown = 0.8 ; self.Card2Cooldown = 1.3
 		self.Card3Cooldown = 2.0 ; self.Card4Cooldown = 3.2 ; self.Card5Cooldown = 5.0
 
-		self.Card2UpgradeCount = 0 ; self.Card3UpgradeCount = 0 ; self.Card4UpgradeCount = 0 ; self.Card5UpgradeCount = 0
+		self.Card1UpgradeCount = 0
+		self.Card2UpgradeCount = 0 ; self.Card5UpgradeCount = 0
+		self.ThunderBoltLevel = 0
+		self.ColdBeamLevel = 0
 
 		self.Slot1Card = 0 ; self.Slot2Card = 0 ; self.Slot3Card = 0
 		self.Slot4Card = 0 ; self.Slot5Card = 0 ; self.Slot6Card = 0
@@ -2776,10 +2969,13 @@ script CardManager extends Logic
 	@ExecSpace("ServerOnly")
 	method void OnEliteKilled(Vector3 worldPos, number fallHeight, number groundWorldY)
 		-- 슬롯에 배치된 카드(2~5, 9, 11) 중에서 무작위로 1~3개를 강화. 강화할 카드가 없으면 골드 100 지급
+		-- 카드3/4는 Lv1~5 고정 트랙이라 아래 캡 체크가 있는 줄에서 별도로 추가한다(여기 루프에 포함하면
+		-- 무제한 카드처럼 상한 없이 중복 추가돼버린다)
 		local pool = {}
-		for cardIdx = 2, 5 do
-			if self:IsCardUnlocked(cardIdx) then table.insert(pool, cardIdx) end
-		end
+		if self:IsCardUnlocked(2) then table.insert(pool, 2) end
+		if self:IsCardUnlocked(5) then table.insert(pool, 5) end
+		if self:IsCardUnlocked(3) and self.ColdBeamLevel < 5 then table.insert(pool, 3) end
+		if self:IsCardUnlocked(4) and self.ThunderBoltLevel < 5 then table.insert(pool, 4) end
 		if self:IsCardUnlocked(9) and self.EnergyBoltLevel < 5 then table.insert(pool, 9) end
 		if self:IsCardUnlocked(11) and self.IceCutterLevel < 5 then table.insert(pool, 11) end
 		if self:IsCardUnlocked(12) and self.KingPepeLevel < 5 then table.insert(pool, 12) end
@@ -2796,7 +2992,11 @@ script CardManager extends Logic
 		for i = 1, dropCount do
 			local cardIdx = pool[_UtilLogic:RandomIntegerRange(1, #pool)]
 			local upgradeType = ""
-			if cardIdx == 9 then
+			if cardIdx == 3 then
+				upgradeType = "coldbeam_up"
+			elseif cardIdx == 4 then
+				upgradeType = "thunderbolt_up"
+			elseif cardIdx == 9 then
 				upgradeType = "energybolt_up"
 			elseif cardIdx == 11 then
 				upgradeType = "icecutter_up"
