@@ -3,24 +3,20 @@ script WorldCharacterSelectUI extends Logic
 
 	property Entity popupGroup = "ae6db2b2-e539-46c5-93fd-1a5595f685ed"
 	property ButtonComponent btnClose = "28981970-caed-44f0-bbfd-bfe77126c36a"
-	-- 3장짜리 캐로셀 — 슬롯(왼쪽/가운데/오른쪽)은 화면상 고정 위치지만, 어느 물리 엔티티가 어느 슬롯
-	-- 역할을 맡는지는 ChangeWorld()가 애니메이션 끝에 서로 바꿔치기(rotate)한다. 그래서 이 3개는
-	-- @Sync 없는 순수 참조 변수처럼 런타임에 재할당된다
-	property SpriteGUIRendererComponent worldImageLeft = "a5041526-84dc-4aaa-8e8a-100caee46fc0"
-	property SpriteGUIRendererComponent worldImageCenter = "5b8023e4-072c-4f27-a5b1-ccf9a6e86069"
-	property SpriteGUIRendererComponent worldImageRight = "a65d7294-37d0-4f30-bcce-1a95741b427d"
-	property ButtonComponent btnWorldPrev = "bf49b83d-eacc-46fc-b45d-1e58fb82baaf"
-	property ButtonComponent btnWorldNext = "0db5a96a-2709-4487-b184-53f1c43baa23"
-	property TextComponent worldNameText = "fc8be4ee-112c-4399-bfad-5eea397ec3b9"
-	property boolean _carouselAnimating = false
-	property number _carouselDuration = 0.32
-	property Vector2 _leftPos = Vector2(-430, 300)
-	property Vector2 _centerPos = Vector2(0, 300)
-	property Vector2 _rightPos = Vector2(430, 300)
-	property Vector2 _farLeftPos = Vector2(-560, 300)
-	property Vector2 _farRightPos = Vector2(560, 300)
-	property number _sideScale = 0.55
-	property number _farScale = 0.2
+	-- 프레임(왼쪽/가운데/오른쪽)은 .ui에 저장된 위치에 항상 고정 — </>를 눌러도 움직이지 않고,
+	-- 그 뒤에 깔린 Photo의 스샷만 바뀐다
+	property SpriteGUIRendererComponent worldImageLeft = "b5ff8b54-cc74-4ef2-8f2b-1a78b6bb6063"
+	property SpriteGUIRendererComponent worldImageCenter = "5f262546-66d3-4c41-aa4c-d8e66978835f"
+	property SpriteGUIRendererComponent worldImageRight = "e7cc45d2-6cdf-4c64-bee6-992ca5260d38"
+	-- 프레임(worldImageLeft/Center/Right)은 액자 그래픽이고, 실제 월드 스샷은 그 뒤에 깔린
+	-- 이 Photo 엔티티들이 보여준다
+	property SpriteGUIRendererComponent worldImageLeftPhoto = "8e4282d7-626d-4029-b302-48c10623d01e"
+	property SpriteGUIRendererComponent worldImageCenterPhoto = "11fbfd06-51c9-43e6-9568-0548b7a6bc22"
+	property SpriteGUIRendererComponent worldImageRightPhoto = "20b657ba-3745-44fe-9f7d-efeea0d7fb3e"
+	property ButtonComponent btnWorldPrev = "eae7a802-52e5-4b95-9494-8547b695febf"
+	property ButtonComponent btnWorldNext = "a37c4cb1-3e23-4a89-a230-38a538517378"
+	-- 가운데 프레임 아래에 표시되는 맵 이름
+	property TextComponent worldNameText = "e42ea462-d466-4a65-91fb-7dcec94effe2"
 	property Entity charList = "e268de69-d6c8-43ae-8eeb-20758c36bfc5"
 	property TextComponent charDescNameText = "39cc8743-5098-45f8-91e1-00177775d7c4"
 	property TextComponent charDescText = "3b71b228-4884-40e8-80ba-3d89f487661d"
@@ -50,7 +46,7 @@ script WorldCharacterSelectUI extends Logic
 	@ExecSpace("ClientOnly")
 	method void OnBeginPlay()
 		self._worlds = {
-			{ name = "메이플 덱 크롤러", imageRuid = "95ce798ac8fd4b1ab8177405c18c9949", enterable = true },
+			{ name = "태초의 마을", imageRuid = "95ce798ac8fd4b1ab8177405c18c9949", enterable = true },
 			{ name = "다음 월드 (준비중)", imageRuid = "4fea64a3307cda641809ad8be0d4890b", enterable = false },
 		}
 		self._characters = {
@@ -119,93 +115,28 @@ script WorldCharacterSelectUI extends Logic
 		img.ImageRUID = DataRef(w.imageRuid)
 	end
 
-	-- 팝업 최초 오픈 시 애니메이션 없이 3슬롯을 현재 _worldIndex 기준으로 즉시 세팅한다
+	-- 프레임(Left/Center/Right)은 .ui에 저장된 위치에 항상 고정 — 여기서는 Photo(스샷)와
+	-- 색상만 현재 _worldIndex 기준으로 갱신한다. 슬라이드/스케일 애니메이션은 없다
 	@ExecSpace("ClientOnly")
 	method void RefreshWorld()
-		self:SetWorldSlotImage(self.worldImageLeft, self:WrapWorldIndex(self._worldIndex - 1))
-		self:SetWorldSlotImage(self.worldImageCenter, self._worldIndex)
-		self:SetWorldSlotImage(self.worldImageRight, self:WrapWorldIndex(self._worldIndex + 1))
-
-		local leftT = self.worldImageLeft.Entity.UITransformComponent
-		leftT.anchoredPosition = self._leftPos
-		leftT.Scale = Vector3(self._sideScale, self._sideScale, 1)
-		self.worldImageLeft.Color = Color(1, 1, 1, 0.85)
-
-		local centerT = self.worldImageCenter.Entity.UITransformComponent
-		centerT.anchoredPosition = self._centerPos
-		centerT.Scale = Vector3(1, 1, 1)
-
-		local rightT = self.worldImageRight.Entity.UITransformComponent
-		rightT.anchoredPosition = self._rightPos
-		rightT.Scale = Vector3(self._sideScale, self._sideScale, 1)
-		self.worldImageRight.Color = Color(1, 1, 1, 0.85)
+		self:SetWorldSlotImage(self.worldImageLeftPhoto, self:WrapWorldIndex(self._worldIndex - 1))
+		self:SetWorldSlotImage(self.worldImageCenterPhoto, self._worldIndex)
+		self:SetWorldSlotImage(self.worldImageRightPhoto, self:WrapWorldIndex(self._worldIndex + 1))
 
 		local w = self._worlds[self._worldIndex]
-		self.worldImageCenter.Color = w.enterable and Color(1, 1, 1, 1) or Color(0.5, 0.5, 0.5, 1)
+		local centerColor = w.enterable and Color(1, 1, 1, 1) or Color(0.5, 0.5, 0.5, 1)
+		self.worldImageCenter.Color = centerColor
+		self.worldImageCenterPhoto.Color = centerColor
 		self.worldNameText.Text = w.name
 	end
 
-	-- </> 클릭 — 기존 가운데는 옆으로 밀려나며 작아지고, 옆에 있던 월드가 가운데로 커지면서 들어온다.
-	-- 물리 엔티티 3개(Left/Center/Right)는 그대로 두고 애니메이션이 끝난 뒤 슬롯 "역할"만 서로
-	-- 돌려가며(rotate) 재배정한다 — 그래야 밀려나는 중이던 화면이 그대로 다음 프레임에 이어진다
+	-- </> 클릭 — 프레임은 그대로 두고, 가운데(그리고 양옆 미리보기)의 스샷만 다음/이전 월드로 갱신한다
 	@ExecSpace("ClientOnly")
 	method void ChangeWorld(integer delta)
-		if self._carouselAnimating then return end
 		if #self._worlds <= 1 then return end
-		local newIndex = self:WrapWorldIndex(self._worldIndex + delta)
-		self._carouselAnimating = true
-
-		if delta > 0 then
-			-- 다음: 왼쪽은 더 왼쪽으로 사라지고, 가운데->왼쪽 자리로, 오른쪽->가운데 자리로
-			self:AnimateSlot(self.worldImageLeft, self._farLeftPos, self._farScale)
-			self:AnimateSlot(self.worldImageCenter, self._leftPos, self._sideScale)
-			self:AnimateSlot(self.worldImageRight, self._centerPos, 1.0)
-		else
-			-- 이전: 오른쪽은 더 오른쪽으로 사라지고, 가운데->오른쪽 자리로, 왼쪽->가운데 자리로
-			self:AnimateSlot(self.worldImageRight, self._farRightPos, self._farScale)
-			self:AnimateSlot(self.worldImageCenter, self._rightPos, self._sideScale)
-			self:AnimateSlot(self.worldImageLeft, self._centerPos, 1.0)
-		end
-
-		_TimerService:SetTimerOnce(function()
-			if not isvalid(self) then return end
-			self._worldIndex = newIndex
-
-			if delta > 0 then
-				local vacating = self.worldImageLeft
-				self.worldImageLeft = self.worldImageCenter
-				self.worldImageCenter = self.worldImageRight
-				self.worldImageRight = vacating
-				self:SetWorldSlotImage(self.worldImageRight, self:WrapWorldIndex(self._worldIndex + 1))
-				local t = self.worldImageRight.Entity.UITransformComponent
-				t.anchoredPosition = self._rightPos
-				t.Scale = Vector3(self._sideScale, self._sideScale, 1)
-				self.worldImageRight.Color = Color(1, 1, 1, 0.85)
-			else
-				local vacating = self.worldImageRight
-				self.worldImageRight = self.worldImageCenter
-				self.worldImageCenter = self.worldImageLeft
-				self.worldImageLeft = vacating
-				self:SetWorldSlotImage(self.worldImageLeft, self:WrapWorldIndex(self._worldIndex - 1))
-				local t = self.worldImageLeft.Entity.UITransformComponent
-				t.anchoredPosition = self._leftPos
-				t.Scale = Vector3(self._sideScale, self._sideScale, 1)
-				self.worldImageLeft.Color = Color(1, 1, 1, 0.85)
-			end
-
-			local w = self._worlds[self._worldIndex]
-			self.worldImageCenter.Color = w.enterable and Color(1, 1, 1, 1) or Color(0.5, 0.5, 0.5, 1)
-			self.worldNameText.Text = w.name
-			self._carouselAnimating = false
-			self:RefreshConfirmState()
-		end, self._carouselDuration)
-	end
-
-	@ExecSpace("ClientOnly")
-	method void AnimateSlot(SpriteGUIRendererComponent img, Vector2 targetPos, number targetScale)
-		local entity = img.Entity
-		_TweenLogic:MoveTo(entity, targetPos, self._carouselDuration, EaseType.QuadEaseOut)
-		_TweenLogic:ScaleTo(entity, Vector2(targetScale, targetScale), self._carouselDuration, EaseType.QuadEaseOut)
+		self._worldIndex = self:WrapWorldIndex(self._worldIndex + delta)
+		self:RefreshWorld()
+		self:RefreshConfirmState()
 	end
 
 	@ExecSpace("ClientOnly")
