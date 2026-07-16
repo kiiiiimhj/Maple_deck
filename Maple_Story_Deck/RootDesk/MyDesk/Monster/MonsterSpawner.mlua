@@ -13,10 +13,12 @@ script MonsterSpawner extends Logic
 	property integer SpawnCountPerWaves = 2   -- 이 웨이브마다 스폰 수 +1
 	property integer MaxSpawnCount = 6        -- 한 번에 최대 스폰 수
 
-	-- 맵 하나에 동시에 존재할 수 있는 일반 몬스터 총 개수 상한. 오랫동안 안 가본 맵은 계속 스폰만
-	-- 되고 아무도 안 죽여서 무한정 쌓일 수 있는데, 그러다 나중에 방문해서 한꺼번에 재개(Resume)되면
-	-- 과도한 엔티티 수로 성능 문제/불안정을 유발할 수 있어 상한을 둔다 (보스는 대상 아님 — 항상 1마리뿐)
+	-- 맵 하나에 동시에 존재할 수 있는 일반 몬스터 총 개수 상한(보스는 대상 아님 — 항상 1마리뿐).
+	-- 현재 플레이 중인 맵과 그 외(지나간/안 가본) 맵을 분리한다 — 지나간 맵은 아무도 안 죽이는데
+	-- 계속 스폰만 되다가 나중에 방문해서 한꺼번에 재개(Resume)되면 몰려있는 것처럼 보이는 현상이 있어서,
+	-- 지금 있는 맵보다 더 낮은 상한을 둔다.
 	property integer MaxMonstersPerMap = 20
+	property integer MaxMonstersPerMapBackground = 10
 
 	-- 내부
 	property number _timer = 0
@@ -94,6 +96,13 @@ script MonsterSpawner extends Logic
 		if self._activeMaps == nil then self._activeMaps = {} end
 	end
 
+	-- 웨이브1~5는 4.0초로 고정, 웨이브6부터 6.0초에서 시작해 웨이브당 IntervalDecay(0.1초)씩 감소
+	-- (최소 MinInterval까지). Wave10 보스는 OnUpdate에서 별도로 20초 고정 처리한다.
+	method number GetSpawnInterval(integer wave)
+		if wave <= 5 then return 4.0 end
+		return math.max(self.MinInterval, 6.0 - self.IntervalDecay * (wave - 6))
+	end
+
 	@ExecSpace("ServerOnly")
 	method void OnUpdate(number delta)
 		if not self._running then return end
@@ -106,7 +115,7 @@ script MonsterSpawner extends Logic
 			if _GameManager.Wave == 10 then
 				self._timer = 20.0
 			else
-				self._timer = math.max(self.MinInterval, self.SpawnInterval - self.IntervalDecay * _GameManager.Wave)
+				self._timer = self:GetSpawnInterval(_GameManager.Wave)
 			end
 		end
 
@@ -240,9 +249,11 @@ script MonsterSpawner extends Logic
 			count = math.min(count, self.MaxSpawnCount)
 
 			-- 이미 이 맵에 몬스터가 상한만큼 쌓여있으면 이번 스폰은 건너뛴다 (오래 방치된 맵 몬스터 무한 누적 방지)
+			-- — 지금 있는 맵은 MaxMonstersPerMap, 그 외(지나간/안 가본) 맵은 더 낮은 MaxMonstersPerMapBackground 적용
+			local maxForThisMap = isCurrentMap and self.MaxMonstersPerMap or self.MaxMonstersPerMapBackground
 			local existingCount = #map:GetChildComponentsByTypeName("script.MonsterAI", false)
-			if existingCount >= self.MaxMonstersPerMap then return {} end
-			count = math.min(count, self.MaxMonstersPerMap - existingCount)
+			if existingCount >= maxForThisMap then return {} end
+			count = math.min(count, maxForThisMap - existingCount)
 			if count <= 0 then return {} end
 		end
 

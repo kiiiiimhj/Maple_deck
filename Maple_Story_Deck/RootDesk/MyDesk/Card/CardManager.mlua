@@ -441,16 +441,18 @@ script CardManager extends Logic
 		return 0
 	end
 
-	-- 슬롯별 카드 아이콘 화면 좌표 (DefaultGroup 기준, 6슬롯 배치로 재조정된 절대 좌표)
+	-- 슬롯별 "아이콘" 실제 화면 좌표 (DefaultGroup 기준). CardSlots 컨테이너(-455.5)에 각 Card{N} 슬롯
+	-- 프레임의 중심 오프셋을 더한 값이 슬롯 "프레임" 좌표인데, 실제 아이콘(Icon 엔티티)은 그 프레임
+	-- 중심에서 다시 (0, +22)만큼 위로 떨어져 있다(이름/레벨 텍스트가 아래쪽에 자리잡아서) — 이 +22를
+	-- 빼먹어서 드롭/구매 연출이 전부 아이콘보다 22px 아래로 착지하던 버그를 수정(.ui 실측: UIBuilder로
+	-- CardSlots/Card{N}/Icon의 anchoredPosition을 직접 대조해서 확인함, 6슬롯 전부 동일하게 (0,22)).
 	method Vector2 GetSlotUIPosition(integer slotIdx)
-		-- Card1~6가 화면 중앙 기준 pitch144로 대칭 배치되면서(centers -360~360) 절대 Y도 -456으로 이동했다.
-		-- DropFlyIcon(화면 정중앙 앵커)과 같은 좌표계이므로 이 값을 그대로 쓴다.
-		if slotIdx == 1 then return Vector2(-360, -456)
-		elseif slotIdx == 2 then return Vector2(-216, -456)
-		elseif slotIdx == 3 then return Vector2(-72, -456)
-		elseif slotIdx == 4 then return Vector2(72, -456)
-		elseif slotIdx == 5 then return Vector2(216, -456)
-		else return Vector2(360, -456)
+		if slotIdx == 1 then return Vector2(-360, -341)
+		elseif slotIdx == 2 then return Vector2(-216, -341)
+		elseif slotIdx == 3 then return Vector2(-72, -341)
+		elseif slotIdx == 4 then return Vector2(72, -341)
+		elseif slotIdx == 5 then return Vector2(216, -341)
+		else return Vector2(360, -341)
 		end
 	end
 
@@ -1800,6 +1802,11 @@ script CardManager extends Logic
 	@ExecSpace("ServerOnly")
 	method void PlayAquaTrapEffectLoop(MonsterAI target, number remaining, number baseScale)
 		if not isvalid(self) or not isvalid(target) or not isvalid(target.Entity) or target._dead then return end
+		-- SpawnEffect는 항상 "플레이어의 현재 맵"(GetCurrentMap)에 스폰한다 — 플레이어가 target이 있는
+		-- 맵을 떠나버리면, target의(다른 맵 기준) 좌표를 그대로 써서 지금 맵에 엉뚱하게 이펙트가 뜨는
+		-- 버그가 있었다. target이 더 이상 플레이어의 현재 맵에 없으면 조용히 멈춘다(재예약도 안 함).
+		local currentMap = self:GetCurrentMap()
+		if currentMap == nil or target.Entity.CurrentMap ~= currentMap then return end
 		local step = math.min(self.Card14EffectLoopInterval, remaining)
 		local p = target.Entity.TransformComponent.Position
 		local curScale = target._currentScale * target._scaleMultiplier
