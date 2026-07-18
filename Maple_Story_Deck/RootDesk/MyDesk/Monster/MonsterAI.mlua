@@ -90,6 +90,18 @@ script MonsterAI extends Component
 	property number _reachedScaleThreshold = 1.5
 	property number RangedReachedScale = 1.15
 
+	-- 깊이감 연출: 몬스터 위에 같은 스프라이트를 검게 덧씌운 자식 엔티티(.model의 "DepthOverlay")를
+	-- 스폰 시점(뒤쪽, 알파 최대)부터 도달 시점(앞쪽, 알파 0)까지 _currentScale 진행도에 맞춰 점점
+	-- 투명하게 만들어 "멀리 있을수록 어둡고 다가올수록 원래 색이 드러나는" 것처럼 보이게 한다.
+	-- 몬스터 자체의 Color를 바꾸는 게 아니라 별도 오버레이 레이어라서, 슬로우/빙결 틴트(ApplySlow 등)와
+	-- 절대 간섭하지 않는다.
+	property number DepthOverlayMaxAlpha = 0.5
+	property SpriteRendererComponent _depthOverlayRenderer = nil
+	-- 히트 리액션(PlayHitAnimation)이 몬스터 본체 스프라이트를 hitRUID로 잠깐 바꾸는 동안, 오버레이가
+	-- 여전히 서 있는 포즈 실루엣을 보여주면 서로 어긋나 보인다 — 이 구간만 오버레이를 꺼둔다.
+	-- PlayHitAnimation의 복귀 타이머와 반드시 같은 값을 써야 한다(하드코딩 이중관리 방지).
+	property number HitFlashDuration = 0.15
+
 	-- 공격 시 살짝 위로 뛰는 모션 높이 — 비행형을 제외한 모든 몬스터의 공격 연출에 공용으로 쓰인다
 	property number AttackHopHeight = 0.2
 
@@ -134,6 +146,7 @@ script MonsterAI extends Component
 			-- OnBeginPlay는 그 정보를 모른다(스폰 파라미터로 전달받지 않는 한 알 수 없음).
 			self._currentScale = 0.85
 			self.Entity.TransformComponent.Scale = Vector3(0.85 * self._scaleMultiplier, 0.85 * self._scaleMultiplier, 1.0)
+			self:GetDepthOverlayRenderer()
 			self:UpdateDepth()
 		else
 			-- 클라이언트: MonsterSprite가 이미 초기 동기화되어 도착해 있을 수 있으므로(스폰 직후 등)
@@ -162,7 +175,8 @@ script MonsterAI extends Component
 		self.CurrentHp = hp
 		self.ApproachSpeed = _GameManager:GetWaveApproachSpeed(wave)
 
-		-- 보스는 속도 분산 없이 일정하게 접근 + 임팩트를 위해 비주얼 스케일 5배 (엘리트와 곱연산으로 같이 적용됨)
+		-- 보스는 속도 분산 없이 일정하게 접근 + 임팩트를 위해 비주얼 스케일 2.5배(기존 5배가 너무 커서 50% 축소)
+		-- (엘리트와 곱연산으로 같이 적용됨)
 		if not isBoss then
 			local variance = (_UtilLogic:RandomDouble() * 2 - 1) * self.ApproachSpeedVariance
 			self.ApproachSpeed = self.ApproachSpeed + variance
@@ -173,7 +187,7 @@ script MonsterAI extends Component
 				self._scaleMultiplier = self._scaleMultiplier * growth
 			end
 		else
-			self._scaleMultiplier = self._scaleMultiplier * 5
+			self._scaleMultiplier = self._scaleMultiplier * 2.5
 		end
 
 		if zoneIndex >= 7 then
@@ -238,7 +252,12 @@ script MonsterAI extends Component
 		end
 
 		self.Entity.TransformComponent.Scale = Vector3(self._currentScale * self._scaleMultiplier, self._currentScale * self._scaleMultiplier, 1.0)
+		self:SyncDepthOverlaySprite()
 		self:UpdateDepth()
+		if self._isFlying then
+			-- 비행형은 스폰 즉시 고정 크기로 "도달"해 있는 상태라 UpdateDepth의 점진적 페이드가 의미가 없다 — 꺼둔다
+			self:HideDepthOverlay()
+		end
 		log("MonsterAI: Zone=" .. zoneIndex .. " Wave=" .. wave .. " HP=" .. self.CurrentHp .. " Speed=" .. self.ApproachSpeed)
 	end
 
@@ -255,6 +274,8 @@ script MonsterAI extends Component
 		self._currentScale = 1.3
 		self.Entity.TransformComponent.Position = Vector3(0, groundY, 0)
 		self.Entity.TransformComponent.Scale = Vector3(1.3, 1.3, 1.0)
+		self:SyncDepthOverlaySprite()
+		self:HideDepthOverlay()
 		self:PickNewWanderTarget()
 		log("MonsterAI: bonus boss initialized")
 	end
@@ -324,6 +345,11 @@ script MonsterAI extends Component
 		end
 
 		if self._reachedPlayer then
+			-- 스턴/속박(ApplyStun) 중에는 이미 도달해서 공격 중이던 지상(근접) 유닛도 완전히 멈춰야
+			-- 한다 — UpdateFlying(비행형)엔 이미 있던 체크인데 이 지상형 분기엔 빠져 있어서, 속박 중에도
+			-- 이미 붙어있던 몬스터는 계속 공격이 나가는 버그가 있었다. 타이머 자체를 멈춰서 스턴이
+			-- 끝나면 정상적으로 AttackInterval부터 다시 카운트되게 한다.
+			if self._isStunned then return end
 			-- 정면에 멈춰서 일정 간격으로 계속 공격
 			self._attackTimer = self._attackTimer - delta
 			if self._attackTimer <= 0 then
@@ -441,6 +467,60 @@ script MonsterAI extends Component
 		local pos = self.Entity.TransformComponent.Position
 		local depth = 1.5 - self._currentScale
 		self.Entity.TransformComponent.Position = Vector3(pos.x, pos.y, depth)
+
+		-- 깊이 오버레이 알파도 같이 갱신: 스폰(0.3) 시점엔 DepthOverlayMaxAlpha(가장 어두움),
+		-- 도달 임계값(_reachedScaleThreshold — 근접/원거리 몬스터마다 다름)에 가까워질수록 0(원래 색)으로 선형 보간
+		local overlay = self:GetDepthOverlayRenderer()
+		if overlay ~= nil then
+			local span = self._reachedScaleThreshold - 0.3
+			local t = 0
+			if span > 0 then t = (self._currentScale - 0.3) / span end
+			if t < 0 then t = 0 elseif t > 1 then t = 1 end
+			overlay.Color = Color(0, 0, 0, self.DepthOverlayMaxAlpha * (1 - t))
+		end
+	end
+
+	-- .model의 "DepthOverlay" 자식 엔티티(같은 스프라이트를 검게 덧씌운 깊이감 연출용)의
+	-- SpriteRendererComponent를 찾아 캐시해둔다. Color/SpriteRUID는 전부 @Sync 네이티브 필드라
+	-- 서버에서 이 캐시를 통해 값만 바꾸면 클라이언트에 자동 반영된다(ApplySlow와 동일한 방식).
+	@ExecSpace("ServerOnly")
+	method SpriteRendererComponent GetDepthOverlayRenderer()
+		if self._depthOverlayRenderer == nil then
+			local overlayEntity = self.Entity:GetChildByName("DepthOverlay")
+			if overlayEntity ~= nil then
+				self._depthOverlayRenderer = overlayEntity.SpriteRendererComponent
+			end
+		end
+		return self._depthOverlayRenderer
+	end
+
+	-- 오버레이가 실제 이 몬스터의 현재 외형(MonsterSprite)을 그대로 따라가도록 RUID를 동기화한다.
+	-- 외형이 바뀌는 모든 지점(InitializeStats/InitializeBonusBoss)에서 호출해야 한다.
+	@ExecSpace("ServerOnly")
+	method void SyncDepthOverlaySprite()
+		local overlay = self:GetDepthOverlayRenderer()
+		if overlay ~= nil then
+			overlay.SpriteRUID = self.MonsterSprite
+		end
+	end
+
+	-- 접근 연출이 없는 특수 개체(비행형/보너스 보스)는 UpdateDepth의 점진적 페이드가 적용되지 않으므로
+	-- 오버레이를 아예 꺼서(알파 0) 매번 다른 색으로 겹쳐 보이는 일이 없게 한다.
+	@ExecSpace("ServerOnly")
+	method void HideDepthOverlay()
+		local overlay = self:GetDepthOverlayRenderer()
+		if overlay ~= nil then overlay.Color = Color(0, 0, 0, 0) end
+	end
+
+	-- 피격 시 몬스터 본체가 잠깐 hitRUID로 바뀌는 동안(PlayHitAnimation, HitFlashDuration) 오버레이가
+	-- 여전히 서 있는 포즈 실루엣을 보여주면 서로 어긋나 보인다 — 그 구간만 꺼뒀다가, 본체가 원래
+	-- 포즈로 돌아오는 시점에 맞춰 UpdateDepth()로 알파를 다시 정확히 계산해 복원한다.
+	@ExecSpace("ServerOnly")
+	method void FlashHideDepthOverlay()
+		self:HideDepthOverlay()
+		_TimerService:SetTimerOnce(function()
+			if isvalid(self) and not self._dead then self:UpdateDepth() end
+		end, self.HitFlashDuration)
 	end
 
 	@ExecSpace("ServerOnly")
@@ -456,6 +536,7 @@ script MonsterAI extends Component
 		log("Monster HP: " .. self.CurrentHp .. "/" .. self.MaxHp)
 		self:PlayDamageSkin(damage, false)
 		self:PlayHitAnimation(self._hitRUID, self.MonsterSprite)
+		self:FlashHideDepthOverlay()
 		if self.CurrentHp <= 0 then
 			self:Die()
 		end
@@ -474,7 +555,7 @@ script MonsterAI extends Component
 			if renderer.SpriteRUID == hitRUID then
 				renderer.SpriteRUID = standRUID
 			end
-		end, 0.15)
+		end, self.HitFlashDuration)
 	end
 
 
@@ -498,6 +579,7 @@ script MonsterAI extends Component
 		log("Monster HP (CRIT): " .. self.CurrentHp .. "/" .. self.MaxHp)
 		self:PlayDamageSkin(damage, true)
 		self:PlayHitAnimation(self._hitRUID, self.MonsterSprite)
+		self:FlashHideDepthOverlay()
 		if self.CurrentHp <= 0 then
 			self:Die()
 		end
@@ -525,9 +607,12 @@ script MonsterAI extends Component
 		if not self._isSlowed then
 			self.ApproachSpeed = self.ApproachSpeed * 0.5
 			self._isSlowed = true
-			-- 슬로우 상태를 눈에 보이게 하늘색으로 틴트 (SpriteRendererComponent.Color는 @Sync라 서버에서 바꾸면 클라이언트에 자동 반영)
+			-- 슬로우 상태를 눈에 보이게 하늘색으로 틴트. 알파는 반드시 1.0(불투명) — 원작 메이플스토리의
+			-- 빙결 연출처럼 몸 전체가 통짜 색으로 바뀌는 느낌을 내기 위함이고, 알파를 낮추면(반투명) 몬스터끼리
+			-- 겹칠 때 뒤에 있는 몬스터가 비쳐 보여 지저분해 보인다(깊이 오버레이와는 별개 문제).
+			-- (SpriteRendererComponent.Color는 @Sync라 서버에서 바꾸면 클라이언트에 자동 반영)
 			local renderer = self.Entity.SpriteRendererComponent
-			if renderer ~= nil then renderer.Color = Color(0.6, 0.85, 1.0, 0.7) end
+			if renderer ~= nil then renderer.Color = Color(0.6, 0.85, 1.0, 1.0) end
 		end
 		if self._slowTimerId ~= 0 then
 			_TimerService:ClearTimer(self._slowTimerId)
@@ -601,7 +686,7 @@ script MonsterAI extends Component
 				self.ApproachSpeed = self.ApproachSpeed * 0.5
 				self._isSlowed = true
 				local renderer = self.Entity.SpriteRendererComponent
-				if renderer ~= nil then renderer.Color = Color(0.6, 0.85, 1.0, 0.7) end
+				if renderer ~= nil then renderer.Color = Color(0.6, 0.85, 1.0, 1.0) end
 			end
 			self._freezeSlowed = true
 		end
@@ -821,6 +906,9 @@ script MonsterAI extends Component
 	method void Die()
 		if self._dead then return end
 		self._dead = true
+		-- 죽는 연출(die 스프라이트)과 깊이 오버레이(서 있는 포즈를 검게 덧씌운 것)가 서로 어긋나 보이지
+		-- 않도록, 죽는 순간 오버레이부터 즉시 꺼버린다
+		self:HideDepthOverlay()
 		-- 상태이상 타이머 즉시 정리 (죽는 연출 중 색상 간섭 방지)
 		if self._slowTimerId ~= 0 then _TimerService:ClearTimer(self._slowTimerId) ; self._slowTimerId = 0 end
 		if self._stunTimerId ~= 0 then _TimerService:ClearTimer(self._stunTimerId) ; self._stunTimerId = 0 end
