@@ -129,6 +129,7 @@ script GameManager extends Logic
 
 	-- 클라이언트 전용: 포션 드롭 연출이 진행 중이면 true — 공용 potionFlyIcon을 덮어쓰지 않도록 가드
 	property boolean _potionFlyActive = false
+	property number _potionDropScale = 1.0
 	-- 드롭 팝(홉) 애니메이션이 끝나 바닥에 착지했는지, 착지 지점이 어디인지 — 존 이탈로 조기 수거를
 	-- 요청받았을 때 이미 착지해 있으면 그 자리에서 바로 HP바로 날아가게 하기 위해 기억해둔다
 	property boolean _potionLanded = false
@@ -207,12 +208,12 @@ script GameManager extends Logic
 	-- 존16~17 몬스터 처치 시 MonsterAI.Die()가 호출 — 확률 판정 후 성공하면 1개 지급.
 	-- 일반 잡템과 동일하게 사망 위치에서 바닥에 떨어졌다가 가방으로 날아가는 연출을 보여준 뒤 지급한다
 	@ExecSpace("ServerOnly")
-	method void TryDropShadowVoucher(Vector3 worldPos, number fallHeight, number groundWorldY)
+	method void TryDropShadowVoucher(Vector3 worldPos, number fallHeight, number groundWorldY, number dropScale)
 		if self.GameOver then return end
 		if _UtilLogic:RandomDouble() >= self.ShadowVoucherDropChance then return end
 		self:ScheduleLootDrop(worldPos, self.ShadowVoucherIconRUID, fallHeight, groundWorldY, function()
 			self:AddShadowVoucher(1)
-		end)
+		end, dropScale)
 		log("ShadowVoucher dropped!")
 	end
 
@@ -847,7 +848,7 @@ script GameManager extends Logic
 	end
 
 	@ExecSpace("ServerOnly")
-	method void TryDropHealPotion(Vector3 worldPos, number fallHeight, number groundWorldY)
+	method void TryDropHealPotion(Vector3 worldPos, number fallHeight, number groundWorldY, number dropScale)
 		-- 일반 몬스터 처치 시 가끔 회복 포션을 드롭한다 (빨강/흰색은 배타적 — 합쳐서 15% 확률)
 		if self.GameOver then return end
 
@@ -865,7 +866,7 @@ script GameManager extends Logic
 		end
 		if potionType == 0 then return end
 
-		self:ApplyPotionDrop(potionType, worldPos, fallHeight, groundWorldY)
+		self:ApplyPotionDrop(potionType, worldPos, fallHeight, groundWorldY, dropScale)
 	end
 
 	-- zoneIndex(맵)와 speciesIdx(MonsterAI가 스폰 시 뽑은 외형 인덱스 — MonsterAI._speciesIdx)로
@@ -908,7 +909,7 @@ script GameManager extends Logic
 	end
 
 	@ExecSpace("ServerOnly")
-	method void TryDropLootItem(Vector3 worldPos, number fallHeight, number groundWorldY, string itemId)
+	method void TryDropLootItem(Vector3 worldPos, number fallHeight, number groundWorldY, string itemId, number dropScale)
 		-- 존16~17을 제외한 전 구간에서 몬스터 처치 시 확률로, 그 몬스터의 실제 드롭템 1개를 지급한다.
 		-- 포션과 동일하게 사망 위치에서 바닥에 떨어지는 연출을 보여준 뒤, 가방에 도착하는 시점에 실제로 지급한다
 		if self.GameOver then return end
@@ -921,7 +922,7 @@ script GameManager extends Logic
 
 		self:ScheduleLootDrop(worldPos, iconRuid, fallHeight, groundWorldY, function()
 			_PlayerInventory:AddItem(itemId, 1)
-		end)
+		end, dropScale)
 	end
 
 	-- 잡템/야누스의 검 교환권 공용 — 포션과 동일하게, 드랍 연출이 끝나기 전에 맵을 이동하면
@@ -929,7 +930,7 @@ script GameManager extends Logic
 	-- fallHeight: 비행형 몬스터처럼 사망 위치가 공중일 때, 바닥(타일) 높이까지 먼저 빙그르르 돌며
 	-- 떨어지는 연출에 걸리는 추가 시간(UI px 기준, 0이면 생략)만큼 arrivalDelay에도 함께 반영한다
 	@ExecSpace("ServerOnly")
-	method void ScheduleLootDrop(Vector3 worldPos, string iconRuid, number fallHeight, number groundWorldY, any onGrant)
+	method void ScheduleLootDrop(Vector3 worldPos, string iconRuid, number fallHeight, number groundWorldY, any onGrant, number dropScale)
 		local dropZone = _MapManager.CurrentMapIndex
 		local groundDelay = 0.6 + _UtilLogic:RandomDouble() * 0.6
 		local fallDuration = 0
@@ -956,7 +957,7 @@ script GameManager extends Logic
 			end
 		end, arrivalDelay)
 
-		self:PlayLootDropVisual(Vector2(worldPos.x, worldPos.y), iconRuid, groundDelay, fallHeight, groundWorldY)
+		self:PlayLootDropVisual(Vector2(worldPos.x, worldPos.y), iconRuid, groundDelay, fallHeight, groundWorldY, dropScale)
 	end
 
 	-- _lootSlots를 지연 생성해서 돌려준다 — OnBeginPlay가 아니라 여기서 만드는 이유는 클라이언트
@@ -965,17 +966,17 @@ script GameManager extends Logic
 	method table GetLootSlots()
 		if self._lootSlots == nil then
 			self._lootSlots = {
-				{ icon = self.lootFlyIcon1, busy = false, landed = false, landUI = Vector2(0, 0), collectRequested = false, flown = false, token = 0 },
-				{ icon = self.lootFlyIcon2, busy = false, landed = false, landUI = Vector2(0, 0), collectRequested = false, flown = false, token = 0 },
-				{ icon = self.lootFlyIcon3, busy = false, landed = false, landUI = Vector2(0, 0), collectRequested = false, flown = false, token = 0 },
-				{ icon = self.lootFlyIcon4, busy = false, landed = false, landUI = Vector2(0, 0), collectRequested = false, flown = false, token = 0 },
+				{ icon = self.lootFlyIcon1, busy = false, landed = false, landUI = Vector2(0, 0), collectRequested = false, flown = false, token = 0, dropScale = 1.0 },
+				{ icon = self.lootFlyIcon2, busy = false, landed = false, landUI = Vector2(0, 0), collectRequested = false, flown = false, token = 0, dropScale = 1.0 },
+				{ icon = self.lootFlyIcon3, busy = false, landed = false, landUI = Vector2(0, 0), collectRequested = false, flown = false, token = 0, dropScale = 1.0 },
+				{ icon = self.lootFlyIcon4, busy = false, landed = false, landUI = Vector2(0, 0), collectRequested = false, flown = false, token = 0, dropScale = 1.0 },
 			}
 		end
 		return self._lootSlots
 	end
 
 	@ExecSpace("Multicast")
-	method void PlayLootDropVisual(Vector2 worldPos, string iconRuid, number groundDelay, number fallHeight, number groundWorldY)
+	method void PlayLootDropVisual(Vector2 worldPos, string iconRuid, number groundDelay, number fallHeight, number groundWorldY, number dropScale)
 		-- 사망 위치에 잡템이 떨어진 것처럼 보여준 뒤, 잠시 멈췄다가 가방 아이콘으로 날아간다.
 		-- 비행형 몬스터(fallHeight>0)는 먼저 바닥 높이까지 빙그르르 돌며 떨어진 뒤 이어서 홉 연출을 재생한다.
 		-- 아이콘 슬롯 4개 중 비어있는 첫 슬롯을 쓴다 — 몰려 죽어서 4개가 전부 busy면 이번 드롭은
@@ -997,6 +998,7 @@ script GameManager extends Logic
 		slot.collectRequested = false
 		slot.flown = false
 		slot.token = slot.token + 1
+		slot.dropScale = dropScale
 		local myToken = slot.token
 		local icon = slot.icon
 
@@ -1013,15 +1015,15 @@ script GameManager extends Logic
 		icon.Entity:SetEnable(true)
 		local tc = icon.Entity.UITransformComponent
 		tc.anchoredPosition = startUI
-		tc.Scale = Vector3(0.3, 0.3, 1)
+		tc.Scale = Vector3(0.3 * dropScale, 0.3 * dropScale, 1)
 		tc.ZRotation = 0
 
 		-- 등장 순간 살짝 통통 튀듯 팝(작게 시작 → 확 커졌다가 → 원래 크기로) 연출
-		_TweenLogic:PlayTween(0.3, 1.2, 0.12, EaseType.BackEaseOut, function(scale)
+		_TweenLogic:PlayTween(0.3 * dropScale, 1.2 * dropScale, 0.12, EaseType.BackEaseOut, function(scale)
 			if isvalid(icon) then icon.Entity.UITransformComponent.Scale = Vector3(scale, scale, 1) end
 		end)
 		_TimerService:SetTimerOnce(function()
-			if isvalid(icon) then icon.Entity.UITransformComponent.Scale = Vector3(1, 1, 1) end
+			if isvalid(icon) then icon.Entity.UITransformComponent.Scale = Vector3(dropScale, dropScale, 1) end
 		end, 0.12)
 
 		local continueFromGround = function(groundUI)
@@ -1132,7 +1134,7 @@ script GameManager extends Logic
 			local x = startUI.x + (endUI.x - startUI.x) * t
 			local y = startUI.y + (endUI.y - startUI.y) * t + math.sin(t * math.pi) * arcHeight
 			icon.Entity.UITransformComponent.anchoredPosition = Vector2(x, y)
-			local scale = 1.0 - 0.5 * t
+			local scale = (1.0 - 0.5 * t) * slot.dropScale
 			icon.Entity.UITransformComponent.Scale = Vector3(scale, scale, 1)
 			icon.Color = Color(1, 1, 1, 1.0 - 0.6 * t)
 		end)
@@ -1173,11 +1175,11 @@ script GameManager extends Logic
 	-- 맵10 보너스 보스 전용: 드롭 여부 확률은 호출측(MonsterAI.OnBonusBossHit)이 이미 굴렸으므로
 	-- 여기서는 무조건 드롭한다 (빨강/흰색만 배타적으로 선택)
 	@ExecSpace("ServerOnly")
-	method void ForceDropPotion(Vector3 worldPos)
+	method void ForceDropPotion(Vector3 worldPos, number dropScale)
 		if self.GameOver then return end
 		local potionType = (_UtilLogic:RandomDouble() < 0.7) and 1 or 2
 		-- 보너스 보스는 비행형이 아니라 사망 위치가 항상 바닥이므로 fallHeight=0 고정(groundWorldY는 미사용)
-		self:ApplyPotionDrop(potionType, worldPos, 0, worldPos.y)
+		self:ApplyPotionDrop(potionType, worldPos, 0, worldPos.y, dropScale)
 	end
 
 	-- TryDropHealPotion / ForceDropPotion 공용 — 회복량 계산 + 드롭 연출/타이밍 적용
@@ -1185,7 +1187,7 @@ script GameManager extends Logic
 	-- 떨어지는 연출에 걸리는 추가 시간(UI px 기준, 0이면 생략)만큼 arrivalDelay에도 함께 반영한다
 	-- (TryDropLootItem/ScheduleLootDrop과 동일한 패턴)
 	@ExecSpace("ServerOnly")
-	method void ApplyPotionDrop(integer potionType, Vector3 worldPos, number fallHeight, number groundWorldY)
+	method void ApplyPotionDrop(integer potionType, Vector3 worldPos, number fallHeight, number groundWorldY, number dropScale)
 		local basePercent = (potionType == 1) and self.RedPotionHealPercent or self.WhitePotionHealPercent
 		-- 유물 레벨업 보너스(레벨 합계 1당 +1%p)를 회복 비율에 더한다
 		local healPercent = basePercent + (_RelicInventory:GetPotionHealBonusPercent() / 100)
@@ -1222,11 +1224,11 @@ script GameManager extends Logic
 			end
 		end, arrivalDelay)
 
-		self:PlayPotionDropVisual(Vector2(worldPos.x, worldPos.y), potionType, groundDelay, fallHeight, groundWorldY)
+		self:PlayPotionDropVisual(Vector2(worldPos.x, worldPos.y), potionType, groundDelay, fallHeight, groundWorldY, dropScale)
 	end
 
 	@ExecSpace("Multicast")
-	method void PlayPotionDropVisual(Vector2 worldPos, integer potionType, number groundDelay, number fallHeight, number groundWorldY)
+	method void PlayPotionDropVisual(Vector2 worldPos, integer potionType, number groundDelay, number fallHeight, number groundWorldY, number dropScale)
 		-- 사망 위치에 포션이 떨어진 것처럼 보여준 뒤, 잠시 멈췄다가 HP바로 날아간다.
 		-- 비행형 몬스터(fallHeight>0)는 먼저 바닥 높이까지 빙그르르 돌며 떨어진 뒤 이어서 홉 연출을 재생한다
 		-- (PlayLootDropVisual과 동일한 패턴 — PlayFallSpin은 공용 메서드).
@@ -1238,6 +1240,9 @@ script GameManager extends Logic
 		self._potionLanded = false
 		self._potionCollectRequested = false
 		self._potionFlown = false
+		-- HP바로 날아가는 마지막 단계(FlyPotionToHpBar)는 서버가 별도로 트리거하는 조기수거
+		-- (RequestPotionCollectNow)에서도 다시 필요하므로 클로저가 아니라 프로퍼티로 저장해둔다.
+		self._potionDropScale = dropScale
 		local rawUI = _UILogic:ScreenToUIPosition(_UILogic:WorldToScreenPosition(worldPos))
 		local startUI = Vector2(rawUI.x, rawUI.y + self.DropYOffset)
 		local icon = self.potionFlyIcon
@@ -1246,7 +1251,7 @@ script GameManager extends Logic
 		icon.Entity:SetEnable(true)
 		local tc = icon.Entity.UITransformComponent
 		tc.anchoredPosition = startUI
-		tc.Scale = Vector3(1, 1, 1)
+		tc.Scale = Vector3(dropScale, dropScale, 1)
 		tc.ZRotation = 0
 
 		-- 메이플식 드롭: 좌우 랜덤 방향으로 포물선 홉 → 점점 작아지는 바운스 2회로 바닥에 안착한 뒤,
@@ -1339,7 +1344,7 @@ script GameManager extends Logic
 			local x = startUI.x + (endUI.x - startUI.x) * t
 			local y = startUI.y + (endUI.y - startUI.y) * t + math.sin(t * math.pi) * arcHeight
 			icon.Entity.UITransformComponent.anchoredPosition = Vector2(x, y)
-			local scale = 1.0 - 0.5 * t
+			local scale = (1.0 - 0.5 * t) * self._potionDropScale
 			icon.Entity.UITransformComponent.Scale = Vector3(scale, scale, 1)
 			icon.Color = Color(1, 1, 1, 1.0 - 0.6 * t)
 		end)
