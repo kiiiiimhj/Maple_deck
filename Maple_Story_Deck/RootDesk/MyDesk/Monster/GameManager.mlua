@@ -106,10 +106,30 @@ script GameManager extends Logic
 
 	-- 아이템 드롭 등장 Y 좌표 보정 (죽은 위치를 화면 좌표로 환산한 값에 더해 살짝 위로 띄운다)
 	property number DropYOffset = 60
+	-- 드롭(잡템/포션/카드 공용) 착지 지점 Y 보정 — 몬스터 사망 위치(WorldPosition)를 그대로 착지 좌표로
+	-- 쓰면 타일 표면보다 살짝 낮게 보정되어 아이템이 바닥을 뚫고 내려간 것처럼 보인다(유저 실측 확인).
+	-- 착지 시점에만 이만큼 위로 올린다 — 등장 시작점(DropYOffset)과는 별개다
+	property number DropLandYOffset = 30
+	-- 깊이(dropScale) 보정 — 몬스터 스프라이트가 의사3D 깊이 시스템(MonsterAI._currentScale)으로 작아질수록
+	-- (멀리, 뒤쪽에서 잡힐수록) 중심 피벗 기준 축소라 발이 실제 WorldPosition보다 화면상 더 위로 보인다.
+	-- dropScale이 1(가까움)에 가까울수록 보정 0, 0.75(가장 멂 — GetEffectScaleRatio 하한)에 가까울수록
+	-- 이 값의 최대치만큼 DropLandYOffset에 추가로 더한다 — 뒤에서 잡힌 몬스터일수록 보정량이 자동으로
+	-- 커지므로 앞/뒤 몬스터에 서로 다른 보정이 걸린다(유저 실측: 멀리서 죽은 몬스터의 드롭일수록 더 깊이 파고들어 보임)
+	property number DropLandDepthCompensation = 100
+
+	-- 잡템/포션/카드 드롭이 공통으로 쓰는 착지 Y 보정치. dropScale은 각 드롭 시점에 계산되는
+	-- CardManager.GetEffectScaleRatio(mob) 값을 그대로 넘겨받는다(죽은 몬스터가 화면상 얼마나
+	-- 멀리/뒤에 있었는지)
+	method number GetDropLandYCorrection(number dropScale)
+		return self.DropLandYOffset + math.max(0, 1.0 - dropScale) * self.DropLandDepthCompensation
+	end
 
 	-- 회복 포션 RUID (CardManager의 포션 강화 아이콘과 동일한 스프라이트 재사용 — 빨간 포션/하얀 포션)
 	property string RedPotionRUID = "234aca1a4ce946119b68e3717991e775"
 	property string WhitePotionRUID = "289c7bdcbdc8484ab7bad688b2519ca7"
+	-- 보스 처치 확정 드롭 — 체력 완전회복 + 모든 스킬 쿨타임 즉시 초기화 (potionType=3, 포션과 동일한
+	-- 낙하→HP바 비행 연출을 재사용하되 회복량 대신 전용 효과를 적용한다)
+	property string PowerElixirRUID = "f2a7edd1b67a4f8cb4b85a33dc0230a2"
 
 	-- 포션별 회복량 (최대 HP 비율)
 	property number RedPotionHealPercent = 0.08
@@ -341,6 +361,12 @@ script GameManager extends Logic
 		self.Exp = self.Exp + self:GetExpPerKill()
 		log("Kill! EXP:" .. self.Exp .. "/" .. self.ExpNeeded .. " Gold:" .. self.Gold)
 
+		-- 보스 등장 타이밍을 웨이브10 시작이 아니라 웨이브9 마지막쯤(경험치 80% 도달 시점)으로 앞당긴다.
+		-- MonsterSpawner._currentBoss 전역 1마리 제한이 있어서 여러 번 호출돼도 실제로는 한 번만 스폰된다.
+		if self.Wave == 9 and self.Exp >= self.ExpNeeded * 0.8 then
+			_MonsterSpawner:TrySpawnBossEarly()
+		end
+
 		if self.Exp >= self.ExpNeeded then
 			self:LevelUp()
 		else
@@ -350,7 +376,7 @@ script GameManager extends Logic
 
 	-- 웨이브10 리본돼지 보스가 죽을 때 MonsterAI가 호출 — 맵4 이상 이동 잠금 해제
 	@ExecSpace("ServerOnly")
-	method void OnBossDefeated()
+	method void OnBossDefeated(Vector3 worldPos, number fallHeight, number groundWorldY, number dropScale)
 		if self.BossDefeated then return end
 		self.BossDefeated = true
 		_MapMoveUI:NotifyBossDefeated(true)
@@ -370,6 +396,10 @@ script GameManager extends Logic
 		self:AddGold(self:GetGoldPerKill())
 		self.Exp = self.Exp + self:GetExpPerKill() + self.ExpNeeded
 		self:LevelUp()
+		-- 엘리트 드롭과 동일한 방식(이미 장착/해금된 카드 레벨업)으로 액티브 1개 + 패시브 1개 확정 지급
+		_CardManager:GrantBossCardRewards(worldPos, fallHeight, groundWorldY, dropScale)
+		-- 파워 엘릭서 확정 드롭 (potionType=3 — 체력완전회복 + 전체 스킬 쿨타임 초기화)
+		self:ApplyPotionDrop(3, worldPos, fallHeight, groundWorldY, dropScale)
 		log("GameManager: Boss defeated, map4+ unlocked")
 	end
 
@@ -724,6 +754,12 @@ script GameManager extends Logic
 		self.Wave = self.Wave + 1
 		self.PlayerMaxHp = self.PlayerMaxHp + 15
 		self.PlayerHp = math.min(self.PlayerHp + 15, self.PlayerMaxHp)
+		-- 맵4+ 잠금 기준이 보스 처치 대신 레벨10이라, 맵 이동 없이 그 자리에서 레벨업만으로 10을
+		-- 찍을 수도 있다 — NotifyBossDefeated(true)를 그대로 재사용해 맵3에 있는 클라이언트의
+		-- 자물쇠를 즉시 갱신한다(파라미터 이름과 달리 실제로는 "맵4+ 잠금 해제 알림"으로 동작한다)
+		if self.Level == 10 then
+			_MapMoveUI:NotifyBossDefeated(true)
+		end
 		log("Level Up! Lv." .. self.Level .. " | Wave:" .. self.Wave .. " | MaxHP:" .. self.PlayerMaxHp)
 		_CardManager:GenerateLevelUpChoices()
 		self:NotifyExpChanged(self.Exp, self.ExpNeeded, self.Level, true)
@@ -806,11 +842,11 @@ script GameManager extends Logic
 		self.GameOver = false
 		self.ContinueCount = 0
 		self._hitImmune = false
-		-- 보스를 잡아서 열렸던 맵4+ 잠금도 "처음부터"에 포함된다 — 새 런에서는 다시 잠근다
-		if self.BossDefeated then
-			self.BossDefeated = false
-			_MapMoveUI:NotifyBossDefeated(false)
-		end
+		-- 레벨10(또는 보스 처치)으로 열렸던 맵4+ 잠금도 "처음부터"에 포함된다 — 새 런에서는 다시 잠근다.
+		-- 위에서 Level을 이미 1로 되돌렸기 때문에 여기서 Level로 조건을 걸면 항상 거짓이 되어 버린다 —
+		-- 그냥 무조건 다시 잠그고 알린다(이미 잠겨있었어도 아무 부작용 없는 멱등 호출)
+		self.BossDefeated = false
+		_MapMoveUI:NotifyBossDefeated(false)
 		-- 이전 런에서 맵4+까지 진행했더라도 시작 맵(map02)으로 되돌린다. 이미 시작 맵이면 내부에서 no-op
 		_MapManager:SilentMoveToMap(_MapManager.CurrentMapIndex, _MapManager.DesiredStartMapIndex)
 		_CardManager:ResetAllCards()
@@ -1040,14 +1076,18 @@ script GameManager extends Logic
 			end)
 		end
 
+		local landYCorrection = self:GetDropLandYCorrection(dropScale)
+
 		if fallHeight > 0 then
 			-- 착지 지점(groundUI)에는 DropYOffset을 더하지 않는다 — 여기 더하면 최종적으로 안착하는
 			-- 높이가 실제 바닥보다 계속 떠 보인다(유저 실측 확인: 아이템이 바닥에 안 붙고 공중에 떠있음).
 			-- 등장 시작점(startUI)에만 오프셋을 남겨서 "몸에서 팡 튀어나오는" 연출은 그대로 유지한다.
+			-- 다만 landYCorrection만큼은 착지 지점에도 더한다 — 안 그러면 타일 표면보다 낮게 박힌다(유저 실측 확인)
 			local groundUI = _UILogic:ScreenToUIPosition(_UILogic:WorldToScreenPosition(Vector2(worldPos.x, groundWorldY)))
+			groundUI = Vector2(groundUI.x, groundUI.y + landYCorrection)
 			self:PlayFallSpin(icon, startUI, groundUI, fallHeight, continueFromGround)
 		else
-			continueFromGround(rawUI)
+			continueFromGround(Vector2(rawUI.x, rawUI.y + landYCorrection))
 		end
 	end
 
@@ -1203,12 +1243,23 @@ script GameManager extends Logic
 	-- (TryDropLootItem/ScheduleLootDrop과 동일한 패턴)
 	@ExecSpace("ServerOnly")
 	method void ApplyPotionDrop(integer potionType, Vector3 worldPos, number fallHeight, number groundWorldY, number dropScale)
-		local basePercent = (potionType == 1) and self.RedPotionHealPercent or self.WhitePotionHealPercent
-		-- 유물 레벨업 보너스(레벨 합계 1당 +1%p)를 회복 비율에 더한다.
-		-- SkillInventory 포션(스킬 인덱스1) 레벨의 +5%/+7%/+9%도 카드 자체 레벨과 별개로 항상 가산된다.
-		local healPercent = basePercent + (_RelicInventory:GetPotionHealBonusPercent() / 100) + self:GetSkillInvPotionHealBonusPercent()
-		local healAmount = math.floor(self.PlayerMaxHp * healPercent)
+		-- potionType 3 = 파워 엘릭서(보스 확정 드롭) — 비율 회복 대신 완전 회복 + 전체 스킬 쿨타임 초기화
+		local healAmount = 0
+		if potionType == 3 then
+			healAmount = self.PlayerMaxHp
+		else
+			local basePercent = (potionType == 1) and self.RedPotionHealPercent or self.WhitePotionHealPercent
+			-- 유물 레벨업 보너스(레벨 합계 1당 +1%p)를 회복 비율에 더한다.
+			-- SkillInventory 포션(스킬 인덱스1) 레벨의 +5%/+7%/+9%도 카드 자체 레벨과 별개로 항상 가산된다.
+			local healPercent = basePercent + (_RelicInventory:GetPotionHealBonusPercent() / 100) + self:GetSkillInvPotionHealBonusPercent()
+			healAmount = math.floor(self.PlayerMaxHp * healPercent)
+		end
 		log("HealPotion dropped: type=" .. potionType .. " heal=" .. healAmount)
+
+		local applyEffect = function()
+			self:HealPlayer(healAmount)
+			if potionType == 3 then _CardManager:ResetAllCooldowns() end
+		end
 
 		-- 포션은 "드랍된 존에 있다가 그 존에서 획득"하는 아이템이지만, 존을 떠났다고 그냥 사라지면
 		-- 억울하다 — 이동한 순간 그 자리에서 바로 주운 것으로 치고 획득 연출(HP바로 날아가는 것)로
@@ -1226,7 +1277,7 @@ script GameManager extends Logic
 			if not isvalid(self) or healed then return end
 			if _MapManager.CurrentMapIndex ~= dropZone then
 				healed = true
-				self:HealPlayer(healAmount)
+				applyEffect()
 				_TimerService:ClearTimer(watchTimerId)
 				self:RequestPotionCollectNow()
 			end
@@ -1235,7 +1286,7 @@ script GameManager extends Logic
 		_TimerService:SetTimerOnce(function()
 			if isvalid(self) and not healed then
 				healed = true
-				self:HealPlayer(healAmount)
+				applyEffect()
 				_TimerService:ClearTimer(watchTimerId)
 			end
 		end, arrivalDelay)
@@ -1262,7 +1313,13 @@ script GameManager extends Logic
 		local rawUI = _UILogic:ScreenToUIPosition(_UILogic:WorldToScreenPosition(worldPos))
 		local startUI = Vector2(rawUI.x, rawUI.y + self.DropYOffset)
 		local icon = self.potionFlyIcon
-		icon.ImageRUID = (potionType == 1) and self.RedPotionRUID or self.WhitePotionRUID
+		if potionType == 1 then
+			icon.ImageRUID = self.RedPotionRUID
+		elseif potionType == 2 then
+			icon.ImageRUID = self.WhitePotionRUID
+		else
+			icon.ImageRUID = self.PowerElixirRUID
+		end
 		icon.Color = Color(1, 1, 1, 1)
 		icon.Entity:SetEnable(true)
 		local tc = icon.Entity.UITransformComponent
@@ -1287,14 +1344,17 @@ script GameManager extends Logic
 			end)
 		end
 
+		local landYCorrection = self:GetDropLandYCorrection(dropScale)
+
 		if fallHeight > 0 then
 			-- 착지 지점(groundUI)에는 DropYOffset을 더하지 않는다 — 여기 더하면 최종적으로 안착하는
 			-- 높이가 실제 바닥보다 계속 떠 보인다(유저 실측 확인: 아이템이 바닥에 안 붙고 공중에 떠있음).
 			-- 등장 시작점(startUI)에만 오프셋을 남겨서 "몸에서 팡 튀어나오는" 연출은 그대로 유지한다.
 			local groundUI = _UILogic:ScreenToUIPosition(_UILogic:WorldToScreenPosition(Vector2(worldPos.x, groundWorldY)))
+			groundUI = Vector2(groundUI.x, groundUI.y + landYCorrection)
 			self:PlayFallSpin(icon, startUI, groundUI, fallHeight, continueFromGround)
 		else
-			continueFromGround(rawUI)
+			continueFromGround(Vector2(rawUI.x, rawUI.y + landYCorrection))
 		end
 	end
 
