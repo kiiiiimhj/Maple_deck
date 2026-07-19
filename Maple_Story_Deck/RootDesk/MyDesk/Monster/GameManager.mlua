@@ -1041,11 +1041,13 @@ script GameManager extends Logic
 		end
 
 		if fallHeight > 0 then
-			local groundRawUI = _UILogic:ScreenToUIPosition(_UILogic:WorldToScreenPosition(Vector2(worldPos.x, groundWorldY)))
-			local groundUI = Vector2(groundRawUI.x, groundRawUI.y + self.DropYOffset)
+			-- 착지 지점(groundUI)에는 DropYOffset을 더하지 않는다 — 여기 더하면 최종적으로 안착하는
+			-- 높이가 실제 바닥보다 계속 떠 보인다(유저 실측 확인: 아이템이 바닥에 안 붙고 공중에 떠있음).
+			-- 등장 시작점(startUI)에만 오프셋을 남겨서 "몸에서 팡 튀어나오는" 연출은 그대로 유지한다.
+			local groundUI = _UILogic:ScreenToUIPosition(_UILogic:WorldToScreenPosition(Vector2(worldPos.x, groundWorldY)))
 			self:PlayFallSpin(icon, startUI, groundUI, fallHeight, continueFromGround)
 		else
-			continueFromGround(startUI)
+			continueFromGround(rawUI)
 		end
 	end
 
@@ -1182,6 +1184,19 @@ script GameManager extends Logic
 		self:ApplyPotionDrop(potionType, worldPos, 0, worldPos.y, dropScale)
 	end
 
+	-- SkillInventory 포션(스킬 인덱스1) 레벨의 회복량 보너스 — Lv1:+5% / Lv2:+7% / Lv3:+9%,
+	-- 카드 자체 PotionLevel과 완전히 별개로 항상 가산된다
+	@ExecSpace("ServerOnly")
+	method number GetSkillInvPotionHealBonusPercent()
+		local lv = 0
+		if _SkillInventory.Levels["1"] ~= nil then lv = _SkillInventory.Levels["1"] end
+		if lv >= 3 then return 0.09
+		elseif lv >= 2 then return 0.07
+		elseif lv >= 1 then return 0.05
+		end
+		return 0
+	end
+
 	-- TryDropHealPotion / ForceDropPotion 공용 — 회복량 계산 + 드롭 연출/타이밍 적용
 	-- fallHeight: 비행형 몬스터처럼 사망 위치가 공중일 때, 바닥(타일) 높이까지 먼저 빙그르르 돌며
 	-- 떨어지는 연출에 걸리는 추가 시간(UI px 기준, 0이면 생략)만큼 arrivalDelay에도 함께 반영한다
@@ -1189,8 +1204,9 @@ script GameManager extends Logic
 	@ExecSpace("ServerOnly")
 	method void ApplyPotionDrop(integer potionType, Vector3 worldPos, number fallHeight, number groundWorldY, number dropScale)
 		local basePercent = (potionType == 1) and self.RedPotionHealPercent or self.WhitePotionHealPercent
-		-- 유물 레벨업 보너스(레벨 합계 1당 +1%p)를 회복 비율에 더한다
-		local healPercent = basePercent + (_RelicInventory:GetPotionHealBonusPercent() / 100)
+		-- 유물 레벨업 보너스(레벨 합계 1당 +1%p)를 회복 비율에 더한다.
+		-- SkillInventory 포션(스킬 인덱스1) 레벨의 +5%/+7%/+9%도 카드 자체 레벨과 별개로 항상 가산된다.
+		local healPercent = basePercent + (_RelicInventory:GetPotionHealBonusPercent() / 100) + self:GetSkillInvPotionHealBonusPercent()
 		local healAmount = math.floor(self.PlayerMaxHp * healPercent)
 		log("HealPotion dropped: type=" .. potionType .. " heal=" .. healAmount)
 
@@ -1272,11 +1288,13 @@ script GameManager extends Logic
 		end
 
 		if fallHeight > 0 then
-			local groundRawUI = _UILogic:ScreenToUIPosition(_UILogic:WorldToScreenPosition(Vector2(worldPos.x, groundWorldY)))
-			local groundUI = Vector2(groundRawUI.x, groundRawUI.y + self.DropYOffset)
+			-- 착지 지점(groundUI)에는 DropYOffset을 더하지 않는다 — 여기 더하면 최종적으로 안착하는
+			-- 높이가 실제 바닥보다 계속 떠 보인다(유저 실측 확인: 아이템이 바닥에 안 붙고 공중에 떠있음).
+			-- 등장 시작점(startUI)에만 오프셋을 남겨서 "몸에서 팡 튀어나오는" 연출은 그대로 유지한다.
+			local groundUI = _UILogic:ScreenToUIPosition(_UILogic:WorldToScreenPosition(Vector2(worldPos.x, groundWorldY)))
 			self:PlayFallSpin(icon, startUI, groundUI, fallHeight, continueFromGround)
 		else
-			continueFromGround(startUI)
+			continueFromGround(rawUI)
 		end
 	end
 

@@ -275,11 +275,24 @@ script CardManager extends Logic
 	-- (mult-1.0)*100으로 역산하면 부동소수점 오차로 14가 나올 수 있어(1.15-1.0=0.14999...99),
 	-- 툴팁 등 화면 표시는 항상 이 함수를 써야 한다.
 	method integer GetMeditationPercent()
-		if self.MeditationLevel >= 5 then return 15
-		elseif self.MeditationLevel >= 4 then return 12
-		elseif self.MeditationLevel >= 3 then return 9
-		elseif self.MeditationLevel >= 2 then return 6
-		elseif self.MeditationLevel >= 1 then return 3
+		local base = 0
+		if self.MeditationLevel >= 5 then base = 15
+		elseif self.MeditationLevel >= 4 then base = 12
+		elseif self.MeditationLevel >= 3 then base = 9
+		elseif self.MeditationLevel >= 2 then base = 6
+		elseif self.MeditationLevel >= 1 then base = 3
+		end
+		return base + self:GetSkillInvMeditationBonusPercent()
+	end
+
+	-- SkillInventory 메디테이션(인덱스10, 최대레벨 9 예외)의 +2%/+4%/+6% — Lv3/6/9에서만 상승하고
+	-- 카드 자체 MeditationLevel과 별개로 항상 가산된다
+	@ExecSpace("ServerOnly")
+	method integer GetSkillInvMeditationBonusPercent()
+		local lv = self:GetSkillInvLevelByIndex(10)
+		if lv >= 9 then return 6
+		elseif lv >= 6 then return 4
+		elseif lv >= 3 then return 2
 		end
 		return 0
 	end
@@ -363,6 +376,12 @@ script CardManager extends Logic
 				if isCrit then target:TakeDamageCrit(finalDmg * 2)
 				else target:TakeDamage(finalDmg) end
 				target:AddFreezeStack()
+				-- SkillInventory 헤일버스트(인덱스19) Lv9: 10% 확률로 빙결스택 +3 추가, 카드 자체 레벨과 별개
+				if self:GetSkillInvLevel(23) >= 9 and _UtilLogic:RandomDouble() < 0.10 then
+					target:AddFreezeStack()
+					target:AddFreezeStack()
+					target:AddFreezeStack()
+				end
 
 				-- 바닥 범위기: 착탄 위치(p) 반경 안의 다른 몬스터는 레벨별 비율만큼 추가 데미지(빙결 스택 없음)
 				local splashHitCount = 0
@@ -503,10 +522,13 @@ script CardManager extends Logic
 	end
 
 	method number GetGrandPepeProcChance()
-		if self.GrandPepeLevel >= 3 then return 0.40
-		elseif self.GrandPepeLevel >= 2 then return 0.30
+		local base = 0.25
+		if self.GrandPepeLevel >= 3 then base = 0.40
+		elseif self.GrandPepeLevel >= 2 then base = 0.30
 		end
-		return 0.25
+		-- SkillInventory 킹페페(인덱스18) Lv9: 2연타 확률 +10%, 카드 자체 레벨과 별개로 항상 가산
+		if self:GetSkillInvLevel(21) >= 9 then base = base + 0.10 end
+		return base
 	end
 
 	@ExecSpace("ServerOnly")
@@ -970,9 +992,70 @@ script CardManager extends Logic
 		return _MonsterSpawner:GetZoneEntity(_MapManager.CurrentMapIndex)
 	end
 
+	-- ── SkillInventory 연동 (조각모아 레벨업 — 카드 자체 레벨과 완전히 별개로, 카드 슬롯의 현재
+	-- 능력치에 항상 가산된다. 카드 자체가 Lv1이든 Lv5든 상관없이 SkillInventory 레벨만으로 결정) ──
+	-- cardIdx -> SkillInventory 스킬 인덱스(0~19) 매핑. 포션(인덱스1)은 GameManager.ApplyPotionDrop에서
+	-- 직접 참조하므로 여기엔 없다.
+	property any _skillInvCardIdxMap = {
+		[7] = 0,   -- 매직 부스터 (전역 쿨타임 추가 감소)
+		[18] = 2,  -- 매직 아머 (전역 피격 데미지 추가 감소)
+		[4] = 3,   -- 썬더 볼트
+		[3] = 4,   -- 콜드 빔
+		[11] = 5,  -- 아이스 커터
+		[9] = 6,   -- 에너지볼트
+		[13] = 7,  -- 썬더 커터
+		[8] = 8,   -- 매직 크리티컬 (전역 크리티컬 확률 추가)
+		[10] = 9,  -- 프리징 이펙트 (전역 빙결스택 보너스대미지 추가)
+		[22] = 10, -- 메디테이션 (전역 데미지 추가, 최대레벨 9 예외)
+		[12] = 11, -- 페페
+		[15] = 12, -- 헤일 스톤
+		[14] = 13, -- 아쿠아 트랩
+		[16] = 14, -- 썬더스톰
+		[17] = 15, -- 아이스 스트라이크
+		[19] = 16, -- 체인 라이트닝
+		[20] = 17, -- 더블 커터
+		[21] = 18, -- 킹페페(GrandPepe)
+		[23] = 19, -- 헤일 버스트
+	}
+	-- 썬더볼트만 예외로 SkillInventory 쿨타임 감소 줄이 없다(대신 스턴 지속시간/확률 2줄)
+	property any _skillInvNoCooldownBonus = { [4] = true }
+
+	@ExecSpace("ServerOnly")
+	method integer GetSkillInvLevel(integer cardIdx)
+		local skillIdx = self._skillInvCardIdxMap[cardIdx]
+		if skillIdx == nil then return 0 end
+		local key = tostring(skillIdx)
+		if _SkillInventory.Levels[key] ~= nil then return _SkillInventory.Levels[key] end
+		return 0
+	end
+
+	-- 패시브(매직부스터/매직아머/매직크리티컬/프리징이펙트)는 카드 인덱스가 아니라 SkillInventory
+	-- 스킬 인덱스로 직접 조회한다(자기 자신 전용 cardIdx가 없는 전역 효과라서)
+	@ExecSpace("ServerOnly")
+	method integer GetSkillInvLevelByIndex(integer skillIndex)
+		local key = tostring(skillIndex)
+		if _SkillInventory.Levels[key] ~= nil then return _SkillInventory.Levels[key] end
+		return 0
+	end
+
+	-- 액티브 14개 스킬 공통 Lv3 보너스: 대미지 +10% (Lv1,2는 효과 없음)
+	@ExecSpace("ServerOnly")
+	method number GetSkillInvDamageMult(integer cardIdx)
+		if self:GetSkillInvLevel(cardIdx) >= 3 then return 1.10 end
+		return 1.0
+	end
+
+	-- 액티브 14개 스킬 공통 Lv6 보너스: 쿨타임 -5% (썬더볼트 제외, Lv4,5는 효과 없음)
+	@ExecSpace("ServerOnly")
+	method number GetSkillInvCooldownMult(integer cardIdx)
+		if self._skillInvNoCooldownBonus[cardIdx] then return 1.0 end
+		if self:GetSkillInvLevel(cardIdx) >= 6 then return 0.95 end
+		return 1.0
+	end
+
 	method number GetCardDamage(integer cardIdx)
 		-- 메디테이션(Card22)의 영구 데미지 증가는 모든 스킬이 거쳐가는 이 함수 한 곳에서만 곱해서
-		-- 개별 스킬마다 따로 적용할 필요가 없게 한다.
+		-- 개별 스킬마다 따로 적용할 필요가 없게 한다. SkillInventory의 액티브 스킬 대미지 보너스도 동일하게 여기서 일괄 적용.
 		local base = self.Card5Damage
 		if cardIdx == 1 then base = self.Card1Damage
 		elseif cardIdx == 2 then base = self.Card2Damage
@@ -992,7 +1075,7 @@ script CardManager extends Logic
 		elseif cardIdx == 23 then base = self:GetHailBurstDamage()
 		elseif cardIdx == 24 then base = self:GetAquaSurgeDamage()
 		end
-		return base * self:GetMeditationMult()
+		return base * self:GetMeditationMult() * self:GetSkillInvDamageMult(cardIdx)
 	end
 
 	method number GetKingPepeDamage()
@@ -1025,18 +1108,28 @@ script CardManager extends Logic
 
 	-- Lv1: 0%(스턴 없음) / Lv2~4: 25% / Lv5: 30%
 	method number GetThunderBoltStunChance()
-		if self.ThunderBoltLevel >= 5 then return 0.30
-		elseif self.ThunderBoltLevel >= 2 then return 0.25
+		local base = 0
+		if self.ThunderBoltLevel >= 5 then base = 0.30
+		elseif self.ThunderBoltLevel >= 2 then base = 0.25
 		end
-		return 0
+		-- SkillInventory 썬더볼트(인덱스3) Lv9: 스턴 확률 +10%, 카드 자체 레벨과 별개로 항상 가산
+		if self:GetSkillInvLevel(4) >= 9 then base = base + 0.10 end
+		return base
 	end
 
 	-- Lv1: 0(해당없음) / Lv2~3: 2초 / Lv4~5: 3초 — 보스/엘리트는 호출부에서 별도로 절반 적용
 	method number GetThunderBoltStunDuration()
-		if self.ThunderBoltLevel >= 4 then return 3.0
-		elseif self.ThunderBoltLevel >= 2 then return 2.0
+		local base = 0
+		if self.ThunderBoltLevel >= 4 then base = 3.0
+		elseif self.ThunderBoltLevel >= 2 then base = 2.0
 		end
-		return 0
+		-- SkillInventory 썬더볼트(인덱스3) Lv6: 스턴 지속시간 +1초, 카드 자체 레벨과 별개로 항상 가산.
+		-- 카드 자체가 아직 스턴을 못 얻은 상태(0초)여도 SkillInventory만으로 스턴이 발생할 수 있어야 하므로
+		-- 여기서도 최소 1초를 보장한다.
+		if self:GetSkillInvLevel(4) >= 6 then
+			if base <= 0 then base = 1.0 else base = base + 1.0 end
+		end
+		return base
 	end
 
 	-- 콜드 빔 (Card 3) 레벨별 수치 — Lv1~2: 기본(110) / Lv3~4: +50(160) / Lv5: +100(210).
@@ -1282,54 +1375,85 @@ script CardManager extends Logic
 		return 0
 	end
 
+	-- SkillInventory 3단계 공통 헬퍼 — Lv3/6/9에서만 값이 상승(패시브 4종 전용, 메디테이션 제외)
+	@ExecSpace("ServerOnly")
+	method number GetSkillInvTierPercent(integer skillIndex, number lv1, number lv2, number lv3)
+		local lv = self:GetSkillInvLevelByIndex(skillIndex)
+		if lv >= 9 then return lv3
+		elseif lv >= 6 then return lv2
+		elseif lv >= 3 then return lv1
+		end
+		return 0
+	end
+
 	-- 매직 부스터 레벨별 쿨타임 감소율 — Lv1:5% / Lv2:7% / Lv3:10% / Lv4:12% / Lv5:15%.
 	-- 획득(해금) 즉시 영구 적용(타이머/만료 없음), 다른 카드 쿨타임에 곱연산으로 적용된다.
+	-- SkillInventory 매직부스터(인덱스0) 레벨의 -2%/-4%/-6%가 카드 자체 레벨과 별개로 항상 가산된다.
 	method number GetMagicBoosterReduction()
-		if self.MagicBoosterLevel >= 5 then return 0.15
-		elseif self.MagicBoosterLevel >= 4 then return 0.12
-		elseif self.MagicBoosterLevel >= 3 then return 0.10
-		elseif self.MagicBoosterLevel >= 2 then return 0.07
-		elseif self.MagicBoosterLevel >= 1 then return 0.05
+		local base = 0
+		if self.MagicBoosterLevel >= 5 then base = 0.15
+		elseif self.MagicBoosterLevel >= 4 then base = 0.12
+		elseif self.MagicBoosterLevel >= 3 then base = 0.10
+		elseif self.MagicBoosterLevel >= 2 then base = 0.07
+		elseif self.MagicBoosterLevel >= 1 then base = 0.05
 		end
-		return 0
+		return base + self:GetSkillInvTierPercent(0, 0.02, 0.04, 0.06)
 	end
 
-	-- 매직 아머 보유 시 항시 피해 감소 적용(영구, 만료 없음) — GameManager.OnMonsterReached에서 사용
+	-- 매직 아머 보유 시 항시 피해 감소 적용(영구, 만료 없음) — GameManager.OnMonsterReached에서 사용.
+	-- SkillInventory 매직아머(인덱스2) 레벨의 +3%/+6%/+9%가 카드 자체 레벨과 별개로 항상 가산된다.
 	method number GetMagicArmorReduction()
-		if self.MagicArmorLevel >= 5 then return 0.15
-		elseif self.MagicArmorLevel >= 4 then return 0.12
-		elseif self.MagicArmorLevel >= 3 then return 0.10
-		elseif self.MagicArmorLevel >= 2 then return 0.07
-		elseif self.MagicArmorLevel >= 1 then return 0.05
+		local base = 0
+		if self.MagicArmorLevel >= 5 then base = 0.15
+		elseif self.MagicArmorLevel >= 4 then base = 0.12
+		elseif self.MagicArmorLevel >= 3 then base = 0.10
+		elseif self.MagicArmorLevel >= 2 then base = 0.07
+		elseif self.MagicArmorLevel >= 1 then base = 0.05
 		end
-		return 0
+		return base + self:GetSkillInvTierPercent(2, 0.03, 0.06, 0.09)
 	end
 
-	-- 매직 부스터 보유 시 항시 쿨타임 감소 적용(영구, 만료 없음)
+	-- 매직 부스터 보유 시 항시 쿨타임 감소 적용(영구, 만료 없음). SkillInventory의 액티브 스킬
+	-- 자체 쿨타임 감소(Lv2, -5%)도 이 최종 소비 지점에서 함께 적용한다.
 	@ExecSpace("ServerOnly")
 	method number GetEffectiveCooldown(integer cardIdx)
-		local base = self:GetCardCooldown(cardIdx)
-		if self.MagicBoosterLevel == 0 then return base end
+		local base = self:GetCardCooldown(cardIdx) * self:GetSkillInvCooldownMult(cardIdx)
+		if self.MagicBoosterLevel == 0 and self:GetSkillInvLevelByIndex(0) == 0 then return base end
 		return base * (1.0 - self:GetMagicBoosterReduction())
 	end
 
 	-- 매직 크리티컬 레벨별 치명타 확률 — Lv1:10% / Lv2:12% / Lv3:15% / Lv4:17% / Lv5:20%.
 	-- 획득(해금) 즉시 영구 적용(타이머/만료 없음), 치명타 시 대미지 ×2(곱연산).
+	-- SkillInventory 매직크리티컬(인덱스8) 레벨의 +2%/+4%/+6%가 카드 자체 레벨과 별개로 항상 가산된다.
 	method number GetMagicCriticalChance()
-		if self.MagicCriticalLevel >= 5 then return 0.20
-		elseif self.MagicCriticalLevel >= 4 then return 0.17
-		elseif self.MagicCriticalLevel >= 3 then return 0.15
-		elseif self.MagicCriticalLevel >= 2 then return 0.12
-		elseif self.MagicCriticalLevel >= 1 then return 0.10
+		local base = 0
+		if self.MagicCriticalLevel >= 5 then base = 0.20
+		elseif self.MagicCriticalLevel >= 4 then base = 0.17
+		elseif self.MagicCriticalLevel >= 3 then base = 0.15
+		elseif self.MagicCriticalLevel >= 2 then base = 0.12
+		elseif self.MagicCriticalLevel >= 1 then base = 0.10
+		end
+		return base + self:GetSkillInvTierPercent(8, 0.02, 0.04, 0.06)
+	end
+
+	-- 액티브 스킬별 고유 SkillInventory 크리티컬 보너스(Lv9에서 활성화) — 썬더커터/아쿠아트랩 +5%, 더블커터 +10%
+	@ExecSpace("ServerOnly")
+	method number GetSkillInvCardCritBonus(integer cardIdx)
+		if cardIdx == 13 or cardIdx == 14 then
+			if self:GetSkillInvLevel(cardIdx) >= 9 then return 0.05 end
+		elseif cardIdx == 20 then
+			if self:GetSkillInvLevel(cardIdx) >= 9 then return 0.10 end
 		end
 		return 0
 	end
 
-	-- 매직 크리티컬 보유 시 항시 크리티컬 판정(영구, 만료 없음)
+	-- 매직 크리티컬(카드 자체 또는 SkillInventory) 보유 시 크리티컬 판정. cardIdx가 주어지면
+	-- 해당 액티브 스킬 고유의 SkillInventory 크리티컬 보너스도 더한다.
 	@ExecSpace("ServerOnly")
-	method boolean RollCrit()
-		if self.MagicCriticalLevel == 0 then return false end
-		return _UtilLogic:RandomDouble() < self:GetMagicCriticalChance()
+	method boolean RollCrit(integer cardIdx)
+		local chance = self:GetMagicCriticalChance() + self:GetSkillInvCardCritBonus(cardIdx)
+		if chance <= 0 then return false end
+		return _UtilLogic:RandomDouble() < chance
 	end
 
 	-- ── 생명주기 ────────────────────────────────────────────────
@@ -2034,7 +2158,7 @@ script CardManager extends Logic
 
 			-- 적이 없으면 활성화 상태로 대기만 한다 (연출 재생/재시작 없음)
 			if aliveTarget then
-				local isCrit = self:RollCrit()
+				local isCrit = self:RollCrit(cardIndex)
 				if cardIndex == 2 then
 					self:MagicClawAttack(damage, isCrit)
 				elseif cardIndex == 3 then
@@ -2290,6 +2414,8 @@ script CardManager extends Logic
 							else target:TakeDamage(finalDamage) end
 							target:ApplySlow(slowDur)
 							if self.FreezingEffectLevel > 0 then target:AddFreezeStack() end
+							-- SkillInventory 콜드빔(인덱스4) Lv9: 20% 확률로 빙결스택 +1 추가, 카드 자체 레벨과 별개
+							if self:GetSkillInvLevel(3) >= 9 and _UtilLogic:RandomDouble() < 0.20 then target:AddFreezeStack() end
 							log("ColdBeamAttack: impact dmg=" .. math.floor(isCrit and finalDamage * 2 or finalDamage))
 						end
 					end, self.Card3SecondEffectDamageDelay)
@@ -2352,8 +2478,11 @@ script CardManager extends Logic
 
 	-- Lv1~2: 40% / Lv3: 50%
 	method number GetThunderStormStunChance(integer level)
-		if level >= 3 then return 0.5 end
-		return 0.4
+		local base = 0.4
+		if level >= 3 then base = 0.5 end
+		-- SkillInventory 썬더스톰(인덱스14) Lv9: 스턴 확률 +10%, 카드 자체 레벨과 별개로 항상 가산
+		if self:GetSkillInvLevel(16) >= 9 then base = base + 0.10 end
+		return base
 	end
 
 	-- 조준한 타겟 수(레벨별)만큼 서로 다른 몬스터를 각각 조준해서, 각 위치마다 독립적으로 "구름 1개 소환 +
@@ -2496,6 +2625,11 @@ script CardManager extends Logic
 					target:AddFreezeStack()
 					target:AddFreezeStack()
 				end
+				-- SkillInventory 아이스스트라이크(인덱스15) Lv9: 10% 확률로 빙결스택 +2 추가, 카드 자체 레벨과 별개
+				if not target._dead and self:GetSkillInvLevel(17) >= 9 and _UtilLogic:RandomDouble() < 0.10 then
+					target:AddFreezeStack()
+					target:AddFreezeStack()
+				end
 				log("IceStrikeAttack: target dmg=" .. math.floor(isCrit and finalDmg * 2 or finalDmg))
 			end, impactDelay)
 		end
@@ -2555,6 +2689,7 @@ script CardManager extends Logic
 	@ExecSpace("ServerOnly")
 	method boolean RollChainLightningCrit()
 		local chance = self:GetMagicCriticalChance() + 0.20
+		if self:GetSkillInvLevel(19) >= 9 then chance = chance + 0.10 end
 		return _UtilLogic:RandomDouble() < chance
 	end
 
@@ -2698,9 +2833,13 @@ script CardManager extends Logic
 	-- 아이스 커터 Lv2부터 붙는 출혈 — 몬스터 자기 자신의 MaxHp 기준 %라서, 탱키한 몬스터일수록
 	-- 틱당 절대 피해량이 커진다(MonsterAI.ApplyDot에 미리 계산한 절대값을 넘긴다). Lv5에 5%로 증가.
 	method number GetIceCutterBleedPercent(integer level)
-		if level < 2 then return 0
-		elseif level < 5 then return 0.03
-		else return 0.05 end
+		local base = 0
+		if level < 2 then base = 0
+		elseif level < 5 then base = 0.03
+		else base = 0.05 end
+		-- SkillInventory 아이스커터(인덱스5) Lv9: 출혈 대미지 +2%, 카드 자체 레벨과 별개로 항상 가산
+		if self:GetSkillInvLevel(11) >= 9 then base = base + 0.02 end
+		return base
 	end
 
 	@ExecSpace("ServerOnly")
@@ -3083,6 +3222,8 @@ script CardManager extends Logic
 				if isCrit then target:TakeDamageCrit(finalDmg * 2)
 				else target:TakeDamage(finalDmg) end
 				target:AddFreezeStack()
+				-- SkillInventory 헤일스톤(인덱스12) Lv9: 10% 확률로 빙결스택 +1 추가, 카드 자체 레벨과 별개
+				if self:GetSkillInvLevel(15) >= 9 and _UtilLogic:RandomDouble() < 0.10 then target:AddFreezeStack() end
 
 				-- 얼음이 타겟 머리 위(경로)에서 떨어지는 연출이라, 그 낙하 경로(타겟 바로 위 세로 통로)
 				-- 안에 있는 다른 몬스터는 착탄 시점 기준으로 같이 맞아서 전체 데미지를 받는다(각자 본인
@@ -3202,7 +3343,11 @@ script CardManager extends Logic
 			log("KingPepeAttack: hit=" .. hitCount .. " dmg=" .. math.floor(isCrit and damage * 2 or damage) .. " rightActive=" .. tostring(rightActive))
 		end, self.Card12HitDelay)
 
-		if not isRepeat and level >= 5 and _UtilLogic:RandomDouble() < self.Card12RepeatChance then
+		-- SkillInventory 페페(인덱스11) Lv9: 2연타 확률 +5%. 카드 자체 레벨이 5 미만이라 원래
+		-- 2연타가 없는 상태여도, 이 보너스만으로 독립적으로 2연타가 발동할 수 있어야 한다.
+		local repeatChance = (level >= 5) and self.Card12RepeatChance or 0
+		if self:GetSkillInvLevel(12) >= 9 then repeatChance = repeatChance + 0.05 end
+		if not isRepeat and repeatChance > 0 and _UtilLogic:RandomDouble() < repeatChance then
 			_TimerService:SetTimerOnce(function()
 				if isvalid(self) then
 					-- 2번째 타격은 절반 데미지 — 1타는 온전히, 2타는 50%만 들어가도록
@@ -3234,9 +3379,10 @@ script CardManager extends Logic
 
 	@ExecSpace("ServerOnly")
 	method boolean RollEnergyBoltCrit()
-		-- MagicCritical 기본 확률 + Lv3 치명타 보너스
+		-- MagicCritical 기본 확률 + Lv3 치명타 보너스 + SkillInventory 에너지볼트 Lv9 보너스(+5%)
 		local chance = self:GetMagicCriticalChance()
 		chance = chance + self.EnergyBoltCritBonus
+		if self:GetSkillInvLevel(9) >= 9 then chance = chance + 0.05 end
 		if chance <= 0 then return false end
 		return _UtilLogic:RandomDouble() < chance
 	end
@@ -3388,11 +3534,18 @@ script CardManager extends Logic
 	-- (Lv1: +5%/스택, Lv2+: +6%/스택). 썬더계열(썬더볼트/에너지볼트)에는 더 이상 적용되지 않는다.
 	@ExecSpace("ServerOnly")
 	method number GetIceStackBonus(MonsterAI target)
-		if self.FreezingEffectLevel <= 0 then return 1.0 end
+		local skillInvLevel = self:GetSkillInvLevelByIndex(9)
+		if self.FreezingEffectLevel <= 0 and skillInvLevel <= 0 then return 1.0 end
 		if target == nil or not isvalid(target) then return 1.0 end
 		local stack = target.FreezeStack
 		if stack <= 0 then return 1.0 end
-		local bonusPct = stack * (self.FreezingEffectLevel >= 2 and 0.06 or 0.05)
+		local basePct = 0
+		if self.FreezingEffectLevel >= 2 then basePct = 0.06
+		elseif self.FreezingEffectLevel >= 1 then basePct = 0.05
+		end
+		-- SkillInventory 프리징이펙트(인덱스9) 레벨의 +3%/+6%/+9%가 스택당 추가로 항상 가산된다
+		local skillInvPct = self:GetSkillInvTierPercent(9, 0.03, 0.06, 0.09)
+		local bonusPct = stack * (basePct + skillInvPct)
 		return 1.0 + bonusPct
 	end
 
@@ -4682,11 +4835,14 @@ script CardManager extends Logic
 		-- _UILogic으로 직접 변환해서 착지 UI 좌표를 구한다. world 1유닛=100px 같은 근사 상수는 실제 화면
 		-- 변환 비율과 달라서 쓰면 안 된다 — 자세한 이유는 GameManager.PlayFallSpin 주석 참고).
 		if fallHeight > 0 then
+			-- 착지 지점(groundUI)에는 DropYOffset을 더하지 않는다 — 여기 더하면 최종적으로 안착하는
+			-- 높이가 실제 바닥보다 계속 떠 보인다(유저 실측 확인: 아이템이 바닥에 안 붙고 공중에 떠있음).
+			-- 등장 시작점(startUI)에만 오프셋을 남겨서 "몸에서 팡 튀어나오는" 연출은 그대로 유지한다.
 			local groundRawUI = _UILogic:ScreenToUIPosition(_UILogic:WorldToScreenPosition(Vector2(worldPos.x, groundWorldY)))
-			local groundUI = Vector2(groundRawUI.x + spreadX, groundRawUI.y + self.DropYOffset)
+			local groundUI = Vector2(groundRawUI.x + spreadX, groundRawUI.y)
 			self:PlayFallSpin(icon, startUI, groundUI, fallHeight, continueFromGround)
 		else
-			continueFromGround(startUI)
+			continueFromGround(Vector2(rawUI.x + spreadX, rawUI.y))
 		end
 	end
 

@@ -80,7 +80,8 @@ script SkillUpgradeUI extends Logic
 		if self._currentSkillIndex < 0 then return end
 		local key = tostring(self._currentSkillIndex)
 
-		local level = 0
+		-- 강화 안 한 기본 상태는 Lv.1(0이 아니다)
+		local level = 1
 		if _SkillInventory.Levels[key] ~= nil then level = _SkillInventory.Levels[key] end
 		local fragments = 0
 		if _SkillInventory.Counts[key] ~= nil then fragments = _SkillInventory.Counts[key] end
@@ -89,8 +90,9 @@ script SkillUpgradeUI extends Logic
 		self.nameText.Text = _SkillUI:GetSkillBaseName(self._currentSkillIndex)
 		self.iconSprite.ImageRUID = DataRef(_SkillUI:GetSkillIconRuid(self._currentSkillIndex))
 
-		-- 실제 게임 효과는 아직 연결하지 않았다(UI 골격만) — 레벨/조각/코인 흐름은 유물과 동일하게 동작한다
-		local maxLevel = _SkillInventory.maxLevel
+		-- 레벨/조각/코인 흐름은 유물과 동일하게 동작하고, 실제 게임 효과는 CardManager가 카드 자체
+		-- 레벨과 별개로 가산 적용한다(ApplyGradeBackground 근처 참고 없음 — CardManager Get* 게이트웨이 참고)
+		local maxLevel = _SkillInventory:GetMaxLevelForSkill(self._currentSkillIndex)
 		if level >= maxLevel then
 			self.optionText.Text = "최대 레벨입니다"
 			self.costText.Text = "MAX"
@@ -101,9 +103,10 @@ script SkillUpgradeUI extends Logic
 		end
 
 		local nextLevel = level + 1
-		local fragmentCost = _SkillInventory:GetFragmentCostForLevel(nextLevel)
-		local coinCost = _SkillInventory:GetGoldCostForLevel(nextLevel)
-		self.optionText.Text = "다음 레벨: Lv." .. tostring(nextLevel) .. "\n(효과는 추후 연결 예정)"
+		local grade = _SkillInventory:GetSkillGrade(self._currentSkillIndex)
+		local fragmentCost = _SkillInventory:GetFragmentCostForLevel(level, grade)
+		local coinCost = _SkillInventory:GetGoldCostForLevel(level, grade)
+		self.optionText.Text = "다음 레벨: Lv." .. tostring(nextLevel) .. "\n" .. self:GetSkillLevelUpDescription(self._currentSkillIndex, nextLevel)
 		self.costText.Text = tostring(coinCost) .. "코인"
 
 		self.fragmentBarText.Text = tostring(fragments) .. "/" .. tostring(fragmentCost)
@@ -113,6 +116,98 @@ script SkillUpgradeUI extends Logic
 
 		local canAfford = fragments >= fragmentCost and _GameManager.TotalCoins >= coinCost
 		self:SetUpgradeEnabled(canAfford)
+	end
+
+	-- 스킬탭 카드 자체 레벨과 별개로 항상 가산되는 SkillInventory 레벨업 보너스 설명(CardManager 실제
+	-- 적용 로직과 1:1로 맞춘 텍스트). 20개 전부 최대레벨9, 보너스는 Lv3/6/9에서만 상승 —
+	-- Lv1,2,4,5,7,8은 조각/골드만 소모하고 효과는 없다.
+	@ExecSpace("ClientOnly")
+	method string GetSkillLevelUpDescription(integer skillIndex, integer nextLevel)
+		if nextLevel ~= 3 and nextLevel ~= 6 and nextLevel ~= 9 then
+			return "다음 효과 상승 구간(Lv3/6/9)까지의 축적 단계 (효과 없음)"
+		end
+		if skillIndex == 0 then -- 매직 부스터
+			if nextLevel == 3 then return "전체 쿨타임 2% 감소"
+			elseif nextLevel == 6 then return "전체 쿨타임 4% 감소"
+			else return "전체 쿨타임 6% 감소" end
+		elseif skillIndex == 1 then -- 포션
+			if nextLevel == 3 then return "회복량 5% 증가"
+			elseif nextLevel == 6 then return "회복량 7% 증가"
+			else return "회복량 9% 증가" end
+		elseif skillIndex == 2 then -- 매직 아머
+			if nextLevel == 3 then return "받는 피해 3% 감소"
+			elseif nextLevel == 6 then return "받는 피해 6% 감소"
+			else return "받는 피해 9% 감소" end
+		elseif skillIndex == 3 then -- 썬더볼트
+			if nextLevel == 3 then return "대미지 10% 증가"
+			elseif nextLevel == 6 then return "스턴 지속시간 1초 증가"
+			else return "스턴 확률 10% 증가" end
+		elseif skillIndex == 4 then -- 콜드빔
+			if nextLevel == 3 then return "대미지 10% 증가"
+			elseif nextLevel == 6 then return "쿨타임 5% 감소"
+			else return "20% 확률로 빙결 스택 +1" end
+		elseif skillIndex == 5 then -- 아이스커터
+			if nextLevel == 3 then return "대미지 10% 증가"
+			elseif nextLevel == 6 then return "쿨타임 5% 감소"
+			else return "출혈 대미지 2% 증가" end
+		elseif skillIndex == 6 then -- 에너지볼트
+			if nextLevel == 3 then return "대미지 10% 증가"
+			elseif nextLevel == 6 then return "쿨타임 5% 감소"
+			else return "크리티컬 확률 5% 증가" end
+		elseif skillIndex == 7 then -- 썬더커터
+			if nextLevel == 3 then return "대미지 10% 증가"
+			elseif nextLevel == 6 then return "쿨타임 5% 감소"
+			else return "크리티컬 확률 5% 증가" end
+		elseif skillIndex == 8 then -- 매직 크리티컬
+			if nextLevel == 3 then return "크리티컬 확률 +2%"
+			elseif nextLevel == 6 then return "크리티컬 확률 +4%"
+			else return "크리티컬 확률 +6%" end
+		elseif skillIndex == 9 then -- 프리징 이펙트
+			if nextLevel == 3 then return "빙결 스택당 보너스대미지 +3%"
+			elseif nextLevel == 6 then return "빙결 스택당 보너스대미지 +6%"
+			else return "빙결 스택당 보너스대미지 +9%" end
+		elseif skillIndex == 10 then -- 메디테이션
+			if nextLevel == 3 then return "전체 스킬 피해량 2% 증가"
+			elseif nextLevel == 6 then return "전체 스킬 피해량 4% 증가"
+			else return "전체 스킬 피해량 6% 증가" end
+		elseif skillIndex == 11 then -- 페페
+			if nextLevel == 3 then return "대미지 10% 증가"
+			elseif nextLevel == 6 then return "쿨타임 5% 감소"
+			else return "2연타 확률 +5%" end
+		elseif skillIndex == 12 then -- 헤일 스톤
+			if nextLevel == 3 then return "대미지 10% 증가"
+			elseif nextLevel == 6 then return "쿨타임 5% 감소"
+			else return "10% 확률로 빙결 스택 +1" end
+		elseif skillIndex == 13 then -- 아쿠아 트랩
+			if nextLevel == 3 then return "대미지 10% 증가"
+			elseif nextLevel == 6 then return "쿨타임 5% 감소"
+			else return "크리티컬 확률 5% 증가" end
+		elseif skillIndex == 14 then -- 썬더스톰
+			if nextLevel == 3 then return "대미지 10% 증가"
+			elseif nextLevel == 6 then return "쿨타임 5% 감소"
+			else return "스턴 확률 10% 증가" end
+		elseif skillIndex == 15 then -- 아이스 스트라이크
+			if nextLevel == 3 then return "대미지 10% 증가"
+			elseif nextLevel == 6 then return "쿨타임 5% 감소"
+			else return "10% 확률로 빙결 스택 +2" end
+		elseif skillIndex == 16 then -- 체인 라이트닝
+			if nextLevel == 3 then return "대미지 10% 증가"
+			elseif nextLevel == 6 then return "쿨타임 5% 감소"
+			else return "크리티컬 확률 10% 추가" end
+		elseif skillIndex == 17 then -- 더블 커터
+			if nextLevel == 3 then return "대미지 10% 증가"
+			elseif nextLevel == 6 then return "쿨타임 5% 감소"
+			else return "크리티컬 확률 10% 추가" end
+		elseif skillIndex == 18 then -- 킹페페
+			if nextLevel == 3 then return "대미지 10% 증가"
+			elseif nextLevel == 6 then return "쿨타임 5% 감소"
+			else return "2연타 확률 +10%" end
+		elseif skillIndex == 19 then -- 헤일 버스트
+			if nextLevel == 3 then return "대미지 10% 증가"
+			elseif nextLevel == 6 then return "쿨타임 5% 감소"
+			else return "10% 확률로 빙결 스택 +3" end
+		end
+		return ""
 	end
 
 	@ExecSpace("ClientOnly")
