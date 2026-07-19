@@ -4,17 +4,14 @@ script SkillUI extends Logic
 	property ScrollLayoutGroupComponent skillScroll = "69d26c23-c095-4b87-b830-576271f284ca"
 	property Entity scrollTouchArea = "60dae9c2-f2b6-492f-9cd6-2a7e4f0171f2"
 	property SliderComponent scrollBar = "cbae2326-3e77-4bd1-b607-82549c0280d5"
-	-- 그리드 총 폭 - 뷰포트 폭(1300) = 실제로 드래그 가능한 스크롤 폭(px). RelicUI와 동일한 그리드 규격이라 동일 값
-	property number scrollableRangePx = 1042
+	-- 그리드 총 폭(10칸) - 뷰포트 폭(1300) = 실제로 드래그 가능한 스크롤 폭(px)
+	property number scrollableRangePx = 1296
 
 	property any _dragHandler = nil
 	property any _scrollBarHandler = nil
 	-- 카드 쪽 스크롤(드래그)이 스크롤바 핸들 위치를 코드로 갱신할 때 true로 세워서,
 	-- 그 갱신이 다시 SliderValueChangedEvent로 되돌아와 카드를 또 움직이는 무한 루프를 막는다
 	property boolean _syncingScrollBar = false
-
-	-- 스킬 원래 이름 캐시 — 업그레이드 팝업(GetSkillBaseName)에서 재사용하기 위해 최초 1회만 읽어서 저장해둔다
-	property any _skillBaseNames = nil
 
 	-- 드래그(스크롤)와 탭(클릭)을 구분하는 최대 이동 거리(px) — 이보다 적게 움직였으면 탭으로 간주
 	property number _tapMoveThreshold = 12
@@ -23,15 +20,30 @@ script SkillUI extends Logic
 	-- 슬롯별 터치 시작 좌표 (한 번에 하나의 터치만 가정)
 	property any _slotTouchDownPoints = nil
 
+	-- 등급 필터 드롭다운 — 0=전체(기본) / 1=일반 / 2=매직 / 3=레어
+	property integer _gradeFilter = 0
+	property ButtonComponent gradeFilterBtn = "1c20f564-9f18-414d-a59e-7b988f943e5b"
+	property Entity gradeFilterList = "b5d00ddf-2cc1-4549-9f43-496d1a3eca8c"
+	property ButtonComponent btnGradeAll = "0e9a077f-b82a-49c0-a183-32d552531228"
+	property ButtonComponent btnGradeNormal = "51003d72-db87-4ba6-ac1b-69cf593e87c9"
+	property ButtonComponent btnGradeMagic = "8461d3f2-18f5-4f54-bd92-0937c425f62a"
+	property ButtonComponent btnGradeRare = "7f706512-fbfe-474f-8fde-908dba52b0f2"
+	property any _filterBtnHandler = nil
+	property any _filterAllHandler = nil
+	property any _filterNormalHandler = nil
+	property any _filterMagicHandler = nil
+	property any _filterRareHandler = nil
+
 	@ExecSpace("ClientOnly")
 	method void OnBeginPlay()
 		-- 스킬 그리드를 좌우로 끌면 스크롤되고, 하단 스크롤바를 직접 끌어도 그리드가 같이 움직이도록 연결한다
 		self._dragHandler = self.scrollTouchArea:ConnectEvent(UITouchDragEvent, self.OnScrollDrag)
 		self._scrollBarHandler = self.scrollBar.Entity:ConnectEvent(SliderValueChangedEvent, self.OnScrollBarChanged)
-		self._skillBaseNames = {}
 		self._slotHandlers = {}
 		self._slotTouchDownPoints = {}
-		self:CacheSkillBaseNamesAndConnectSlots()
+		self:PopulateSkillSlotsAndConnectSlots()
+		self:ConnectGradeFilterUI()
+		self:ApplyGradeFilter(0)
 		self:RefreshAllSkillSlots()
 		-- 스크롤/스크롤바가 항상 맨 처음(왼쪽)부터 시작하도록 강제한다
 		self.skillScroll:SetScrollNormalizedPosition(UITransformAxis.Horizontal, 0)
@@ -40,7 +52,9 @@ script SkillUI extends Logic
 	end
 
 	@ExecSpace("ClientOnly")
-	method void CacheSkillBaseNamesAndConnectSlots()
+	method void PopulateSkillSlotsAndConnectSlots()
+		-- 슬롯 인덱스는 SkillInventory._skillDefs에 등급 오름차순으로 미리 정렬돼 있으므로,
+		-- 여기서 인덱스 순서 그대로 이름/아이콘을 채우기만 하면 "낮은 등급부터" 노출된다.
 		-- SkillSlot_N에는 ButtonComponent 대신 UITouchReceiveComponent가 붙어있다 — RelicUI와 동일 패턴
 		local list = self.skillScroll.Entity
 		if not isvalid(list) then return end
@@ -49,7 +63,11 @@ script SkillUI extends Logic
 			if isvalid(slot) then
 				local nameEntity = slot:GetChildByName("Name")
 				if isvalid(nameEntity) then
-					self._skillBaseNames[tostring(i)] = nameEntity.TextComponent.Text
+					nameEntity.TextComponent.Text = _SkillInventory:GetSkillName(i)
+				end
+				local iconEntity = slot:GetChildByName("Icon")
+				if isvalid(iconEntity) then
+					iconEntity.SpriteGUIRendererComponent.ImageRUID = DataRef(_SkillInventory:GetSkillIconRuid(i))
 				end
 				local capturedIndex = i
 				local downH = slot:ConnectEvent(UITouchDownEvent, function(event) self:OnSlotTouchDown(event, capturedIndex) end)
@@ -58,6 +76,44 @@ script SkillUI extends Logic
 				table.insert(self._slotHandlers, { entity = slot, downHandler = downH, upHandler = upH, dragHandler = dragH })
 			end
 		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ConnectGradeFilterUI()
+		self._filterBtnHandler = self.gradeFilterBtn.Entity:ConnectEvent(ButtonClickEvent, self.OnGradeFilterBtnClicked)
+		self._filterAllHandler = self.btnGradeAll.Entity:ConnectEvent(ButtonClickEvent, function() self:OnGradeOptionClicked(0) end)
+		self._filterNormalHandler = self.btnGradeNormal.Entity:ConnectEvent(ButtonClickEvent, function() self:OnGradeOptionClicked(1) end)
+		self._filterMagicHandler = self.btnGradeMagic.Entity:ConnectEvent(ButtonClickEvent, function() self:OnGradeOptionClicked(2) end)
+		self._filterRareHandler = self.btnGradeRare.Entity:ConnectEvent(ButtonClickEvent, function() self:OnGradeOptionClicked(3) end)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnGradeFilterBtnClicked()
+		self.gradeFilterList.Enable = not self.gradeFilterList.Enable
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnGradeOptionClicked(integer grade)
+		self.gradeFilterList.Enable = false
+		self:ApplyGradeFilter(grade)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ApplyGradeFilter(integer grade)
+		-- 0=전체 / 1=일반 / 2=매직 / 3=레어. 슬롯은 ScrollLayoutGroupComponent(Grid)의 자식이라
+		-- Enable=false로 끈 슬롯은 레이아웃에서도 빠져서, 보이는 카드들이 자동으로 앞쪽 칸부터 다시 채워진다
+		self._gradeFilter = grade
+		local list = self.skillScroll.Entity
+		if not isvalid(list) then return end
+		for i = 0, _SkillInventory.skillCount - 1 do
+			local slot = list:GetChildByName("SkillSlot_" .. tostring(i))
+			if isvalid(slot) then
+				local skillGrade = _SkillInventory:GetSkillGrade(i)
+				slot.Enable = (grade == 0) or (skillGrade == grade)
+			end
+		end
+		self.skillScroll:SetScrollNormalizedPosition(UITransformAxis.Horizontal, 0)
+		self:SyncScrollBar(0)
 	end
 
 	@ExecSpace("ClientOnly")
@@ -85,21 +141,12 @@ script SkillUI extends Logic
 
 	@ExecSpace("ClientOnly")
 	method string GetSkillBaseName(integer skillIndex)
-		local baseName = self._skillBaseNames[tostring(skillIndex)]
-		if baseName ~= nil then return baseName end
-		return "스킬"
+		return _SkillInventory:GetSkillName(skillIndex)
 	end
 
 	@ExecSpace("ClientOnly")
 	method string GetSkillIconRuid(integer skillIndex)
-		-- SkillSlot_N/Icon에서 실제 사용 중인 아이콘 RUID를 그대로 읽어온다 (업그레이드 팝업에서 재사용)
-		local list = self.skillScroll.Entity
-		if not isvalid(list) then return "" end
-		local slot = list:GetChildByName("SkillSlot_" .. tostring(skillIndex))
-		if not isvalid(slot) then return "" end
-		local icon = slot:GetChildByName("Icon")
-		if not isvalid(icon) then return "" end
-		return icon.SpriteGUIRendererComponent.ImageRUID.DataId
+		return _SkillInventory:GetSkillIconRuid(skillIndex)
 	end
 
 	@ExecSpace("ClientOnly")
@@ -132,13 +179,6 @@ script SkillUI extends Logic
 						if amount > 1 then amount = 1 end
 						progressFill.SpriteGUIRendererComponent.FillAmount = amount
 					end
-				end
-
-				local nameEntity = slot:GetChildByName("Name")
-				if isvalid(nameEntity) then
-					local baseName = self._skillBaseNames[key]
-					if baseName == nil then baseName = nameEntity.TextComponent.Text end
-					nameEntity.TextComponent.Text = baseName
 				end
 
 				local levelEntity = slot:GetChildByName("Level")
@@ -185,6 +225,11 @@ script SkillUI extends Logic
 				end
 			end
 		end
+		if self._filterBtnHandler then self.gradeFilterBtn.Entity:DisconnectEvent(ButtonClickEvent, self._filterBtnHandler) end
+		if self._filterAllHandler then self.btnGradeAll.Entity:DisconnectEvent(ButtonClickEvent, self._filterAllHandler) end
+		if self._filterNormalHandler then self.btnGradeNormal.Entity:DisconnectEvent(ButtonClickEvent, self._filterNormalHandler) end
+		if self._filterMagicHandler then self.btnGradeMagic.Entity:DisconnectEvent(ButtonClickEvent, self._filterMagicHandler) end
+		if self._filterRareHandler then self.btnGradeRare.Entity:DisconnectEvent(ButtonClickEvent, self._filterRareHandler) end
 	end
 
 end
