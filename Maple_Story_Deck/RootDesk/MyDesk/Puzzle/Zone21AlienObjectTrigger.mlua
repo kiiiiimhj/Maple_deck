@@ -1,0 +1,61 @@
+@Component
+script Zone21AlienObjectTrigger extends Component
+
+	-- 실제로 보이는 오브젝트(object-2737) — 이 트리거 엔티티 자신은 터치 판정용 투명 오버레이라
+	-- 흔들림 연출은 이 프로퍼티가 가리키는 실제 스프라이트 쪽에 적용해야 눈에 보인다
+	property Entity VisualTarget = "618936c8-0400-497a-bf02-3432ef830a9a"
+
+	property any _touchHandler = nil
+	property any _shakeTween = nil
+	property number ShakeDuration = 0.35
+	property number ShakeAngle = 10
+
+	method void OnBeginPlay()
+		if self:IsClient() then
+			self._touchHandler = self.Entity:ConnectEvent(TouchEvent, self.OnTouched)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnTouched(TouchEvent event)
+		-- 게임오버 팝업/타이틀(로비) 화면이 떠 있는 동안은 뒤에 있는 월드 오브젝트가 눌리면 안 된다
+		-- (Zone15FlameSwitch와 동일한 이유 — CanvasGroup.BlocksRaycasts가 월드 TouchReceiveComponent는 안 막음)
+		if _GameManager.GameOver then return end
+		if _TitleUI.titleGroup.Enable then return end
+		self:PlayShake()
+		self:RequestTouch()
+	end
+
+	-- 누를 때마다(이미 발동된 뒤 눌러도) 살짝 좌우로 흔들리는 느낌을 준다 — 감쇠하는 사인파로
+	-- ZRotation을 짧게 왔다갔다 흔들었다가 원위치로 되돌린다(들이받기 연출의 PlayAttackHop과 동일한 패턴)
+	@ExecSpace("ClientOnly")
+	method void PlayShake()
+		if not isvalid(self.VisualTarget) then return end
+		if self._shakeTween ~= nil then
+			self._shakeTween:Stop()
+			self._shakeTween = nil
+		end
+		local transform = self.VisualTarget.TransformComponent
+		self._shakeTween = _TweenLogic:PlayTween(0.0, 1.0, self.ShakeDuration, EaseType.Linear, function(t)
+			if not isvalid(self) or not isvalid(self.VisualTarget) then return end
+			local angle = self.ShakeAngle * math.sin(t * math.pi * 3) * (1.0 - t)
+			transform.ZRotation = angle
+			if t >= 1.0 then
+				transform.ZRotation = 0
+				self._shakeTween = nil
+			end
+		end)
+	end
+
+	@ExecSpace("Server")
+	method void RequestTouch()
+		_Zone21AlienEasterEggLogic:OnObjectTouched()
+	end
+
+	method void OnEndPlay()
+		if self:IsClient() and self._touchHandler ~= nil then
+			self.Entity:DisconnectEvent(TouchEvent, self._touchHandler)
+		end
+	end
+
+end

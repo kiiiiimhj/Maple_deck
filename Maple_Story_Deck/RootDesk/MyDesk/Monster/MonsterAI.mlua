@@ -205,6 +205,8 @@ script MonsterAI extends Component
 			self._dieDuration = _GameManager:GetMapDieDuration(appearanceZone, speciesIdx)
 			self._hitRUID = _GameManager:GetMapHitRUID(appearanceZone, speciesIdx)
 			self._attackRUID = ""
+			-- 존별 시각 크기 배율(그룹G 15% 축소 등) — 보스(×2.5)와 곱연산으로 같이 적용된다
+			self._scaleMultiplier = self._scaleMultiplier * _GameManager:GetMapScaleMultiplier(appearanceZone, speciesIdx)
 			self._isRangedInk = _GameManager:GetMapIsRanged(appearanceZone, speciesIdx)
 			if self._isRangedInk then
 				self._reachedScaleThreshold = self.RangedReachedScale
@@ -278,6 +280,36 @@ script MonsterAI extends Component
 		self:HideDepthOverlay()
 		self:PickNewWanderTarget()
 		log("MonsterAI: bonus boss initialized")
+	end
+
+	-- Zone21AlienEasterEggLogic.SpawnAlienWave()가 스폰 직후 호출: 존 몬스터 풀 시스템(InitializeStats)을
+	-- 거치지 않는 일회성 특수 몬스터(뉴그레이 화이트)를 InitializeBonusBoss와 동일한 방식으로 직접 초기화한다.
+	-- 공격 애니메이션이 있는 종이라 attackRUID를 명시적으로 넘긴다(zone7+ 풀은 항상 ""로 고정되어 있어 재사용 불가).
+	@ExecSpace("ServerOnly")
+	method void InitializeAlienInvader(integer zoneIndex, number hp, number speed, string standRUID, string hitRUID, string dieRUID, number dieDuration, string attackRUID)
+		self._spawnZoneIndex = zoneIndex
+		self.MaxHp = hp
+		self.CurrentHp = hp
+		self.ApproachSpeed = speed
+		self.MonsterSprite = standRUID
+		self._dieRUID = dieRUID
+		self._dieDuration = dieDuration
+		self._hitRUID = hitRUID
+		self._attackRUID = attackRUID
+		self._isFlying = true
+		self._currentScale = 1.0
+		self._flyCenterX = self.Entity.TransformComponent.Position.x
+		self._flyBaseY = (self.FlyingWanderMinY + self.FlyingWanderMaxY) * 0.5
+		self._flyTime = 0
+		self._flyPhaseX = _UtilLogic:RandomDouble() * math.pi * 2
+		self._flyPhaseY = _UtilLogic:RandomDouble() * math.pi * 2
+		self._flySpeedMultX = 0.8 + _UtilLogic:RandomDouble() * 0.4
+		self._flySpeedMultY = 0.8 + _UtilLogic:RandomDouble() * 0.4
+		self._attackTimer = self.FlyAttackInterval
+		self.Entity.TransformComponent.Scale = Vector3(self._currentScale * self._scaleMultiplier, self._currentScale * self._scaleMultiplier, 1.0)
+		self:SyncDepthOverlaySprite()
+		self:HideDepthOverlay()
+		log("MonsterAI: alien invader initialized HP=" .. hp)
 	end
 
 	@ExecSpace("ServerOnly")
@@ -1063,10 +1095,15 @@ script MonsterAI extends Component
 		-- 비행형(박쥐)은 배회 중 스케일이 고정돼 있어 "접근감"이 없고 공격이 잘 안 보인다는 피드백이 있어,
 		-- 공격 순간 2배 크기까지 확 커졌다가 돌아오는 들이받기로 임팩트를 준다(boost=1.0, baseScale 1.0
 		-- 기준 피크 2.0) — 이미 위아래로 날아다니는 중이라 별도 홉을 얹지 않는다.
-		-- attack1 리소스가 있는 웨이브는 스프라이트 교체, 원거리(먹물) 종은 화면 잉크 스플랫, 그 외
-		-- (없는 웨이브)는 기본 들이받기로 대체 — 비행형을 제외한 전 종이 공격 순간 살짝 위로 뛰었다
-		-- 착지하는 홉 모션을 공유한다(원래 존14/15 이블아이/커즈아이 전용이었던 걸 전 몬스터로 확장).
+		-- attack1 리소스가 있는 종(뉴그레이 화이트 등)은 확대(들이받기)와 동시에 스프라이트도 attack1로
+		-- 바꿔서, 커지기만 하고 실제 공격 모션은 안 보이던 기존 비행형(attack1 없는 박쥐 등)과 구분한다.
+		-- attack1 리소스가 있는 웨이브(비행형이 아닌 경우)는 스프라이트 교체, 원거리(먹물) 종은 화면 잉크
+		-- 스플랫, 그 외(없는 웨이브)는 기본 들이받기로 대체 — 비행형을 제외한 전 종이 공격 순간 살짝 위로
+		-- 뛰었다 착지하는 홉 모션을 공유한다(원래 존14/15 이블아이/커즈아이 전용이었던 걸 전 몬스터로 확장).
 		if self._isFlying then
+			if self._attackRUID ~= "" then
+				self:PlayAttackAnimation(self._attackRUID, self.MonsterSprite)
+			end
 			self:PlayLungeAnimation(1.0, 0)
 		elseif self._attackRUID ~= "" then
 			self:PlayAttackAnimation(self._attackRUID, self.MonsterSprite)

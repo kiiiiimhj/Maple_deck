@@ -4,6 +4,8 @@ script ShadowShopUI extends Logic
 	-- UI 바인딩 (클라이언트 전용)
 	property Entity shopGroup = "ef5d731e-f12a-4016-8611-340f354753ac"
 	property ButtonComponent btnClose = "0648b8e6-ec4b-4be0-ad94-10595c7ad586"
+	property ButtonComponent btnCloseBacking = "1897883c-4c9a-4fab-91a7-e7ca0b6c3763"
+	property ButtonComponent btnPurchase = "0feddb8c-2cfe-4813-ac47-c56e0f600b0a"
 	property TextComponent currencyCountText = "1ff93e83-a105-49bb-9e00-142436698cb2"
 
 	-- 상품1: 엘릭서 포션(고정), 상품2: 알 수 없는 티켓(고정), 상품3~5: 보유 스킬 중 랜덤(최대 3개)
@@ -37,6 +39,11 @@ script ShadowShopUI extends Logic
 	property number RewardPopStagger = 0.12
 
 	property any _closeHandler = nil
+	property any _closeBackingHandler = nil
+	property any _purchaseHandler = nil
+	-- 지금 선택된 아이템 슬롯(1~5) — 0이면 선택 없음. 클릭 한 번으로는 선택만 하고, 실제 구매는
+	-- 구매 버튼을 눌러야 실행된다(캐릭터 선택 팝업의 "선택 후 확인" 패턴과 동일)
+	property integer _selectedSlotIndex = 0
 	property any _item1Handler = nil
 	property any _item2Handler = nil
 	property any _item3Handler = nil
@@ -58,11 +65,15 @@ script ShadowShopUI extends Logic
 	method void OnBeginPlay()
 		self.shopGroup.Enable = false
 		self._closeHandler = self.btnClose.Entity:ConnectEvent(ButtonClickEvent, self.OnCloseClicked)
+		-- CloseBtnBacking(닫기 버튼 뒤에 까는 이미지, 유저가 직접 이미지/크기 커스터마이징함)도 눌렀을 때
+		-- 닫기 버튼과 동일하게 팝업이 닫히도록 클릭을 연결한다
+		self._closeBackingHandler = self.btnCloseBacking.Entity:ConnectEvent(ButtonClickEvent, self.OnCloseClicked)
 		self._item1Handler = self.item1Btn.Entity:ConnectEvent(ButtonClickEvent, self.OnBuyPotion)
 		self._item2Handler = self.item2Btn.Entity:ConnectEvent(ButtonClickEvent, self.OnBuyTicket)
 		self._item3Handler = self.item3Btn.Entity:ConnectEvent(ButtonClickEvent, self.OnBuySlot3)
 		self._item4Handler = self.item4Btn.Entity:ConnectEvent(ButtonClickEvent, self.OnBuySlot4)
 		self._item5Handler = self.item5Btn.Entity:ConnectEvent(ButtonClickEvent, self.OnBuySlot5)
+		self._purchaseHandler = self.btnPurchase.Entity:ConnectEvent(ButtonClickEvent, self.OnPurchaseClicked)
 		-- CloseBtnBacking(닫기 버튼 뒤에 까는 흰 스프라이트)이 형제 엔티티라 배치 순서에 따라
 		-- 버튼 위로 그려질 수 있어, 닫기 버튼을 항상 맨 앞으로 확정적으로 올려둔다
 		_UILogic:SetSiblingIndex(self.btnClose.Entity.UITransformComponent, 1000000)
@@ -80,6 +91,9 @@ script ShadowShopUI extends Logic
 		self:RequestRollIfNeeded()
 		self:RefreshSlotDisplay()
 		self.shopGroup.Enable = true
+		self._selectedSlotIndex = 0
+		self:RefreshItemSelection()
+		self:RefreshPurchaseButtonState()
 	end
 
 	@ExecSpace("Server")
@@ -141,6 +155,7 @@ script ShadowShopUI extends Logic
 		self:ApplySlotDisplay(self.LockedSlot3Card, self.Slot3SoldOut, self.item3Btn, self.item3Icon, self.item3Name)
 		self:ApplySlotDisplay(self.LockedSlot4Card, self.Slot4SoldOut, self.item4Btn, self.item4Icon, self.item4Name)
 		self:ApplySlotDisplay(self.LockedSlot5Card, self.Slot5SoldOut, self.item5Btn, self.item5Icon, self.item5Name)
+		self:RefreshPurchaseButtonState()
 	end
 
 	@ExecSpace("ClientOnly")
@@ -204,33 +219,111 @@ script ShadowShopUI extends Logic
 		return ""
 	end
 
+	-- 아이템을 눌러도 바로 구매하지 않고 "선택"만 한다 — 실제 구매는 구매 버튼(OnPurchaseClicked)에서
 	@ExecSpace("ClientOnly")
 	method void OnBuyPotion()
-		if _GameManager.ShadowVoucher < self.PotionPrice then return end
-		self:QueueReward(self.PotionIconRUID, _GameManager.HpBarFlyTargetUI, "potion", 0)
-		self:RequestBuyPotion()
+		self:SelectSlot(1)
 	end
 
 	@ExecSpace("ClientOnly")
 	method void OnBuyTicket()
-		if _GameManager.ShadowVoucher < self.TicketPrice then return end
-		self:QueueReward(self.TicketIconRUID, _GameManager.LootFlyTargetUI, "ticket", 0)
-		self:RequestBuyTicket()
+		self:SelectSlot(2)
 	end
 
 	@ExecSpace("ClientOnly")
 	method void OnBuySlot3()
-		self:OnBuySkillSlot(self.LockedSlot3Card, self.Slot3SoldOut)
+		self:SelectSlot(3)
 	end
 
 	@ExecSpace("ClientOnly")
 	method void OnBuySlot4()
-		self:OnBuySkillSlot(self.LockedSlot4Card, self.Slot4SoldOut)
+		self:SelectSlot(4)
 	end
 
 	@ExecSpace("ClientOnly")
 	method void OnBuySlot5()
-		self:OnBuySkillSlot(self.LockedSlot5Card, self.Slot5SoldOut)
+		self:SelectSlot(5)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SelectSlot(integer slotIndex)
+		self._selectedSlotIndex = slotIndex
+		self:RefreshItemSelection()
+		self:RefreshPurchaseButtonState()
+	end
+
+	@ExecSpace("ClientOnly")
+	method ButtonComponent GetItemBtn(integer slotIndex)
+		if slotIndex == 1 then return self.item1Btn
+		elseif slotIndex == 2 then return self.item2Btn
+		elseif slotIndex == 3 then return self.item3Btn
+		elseif slotIndex == 4 then return self.item4Btn
+		elseif slotIndex == 5 then return self.item5Btn
+		end
+		return self.item1Btn
+	end
+
+	-- 캐릭터 선택 팝업(WorldCharacterSelectUI.RefreshCharSelection)과 동일한 파란 네온 테두리 패턴
+	@ExecSpace("ClientOnly")
+	method void RefreshItemSelection()
+		for i = 1, 5 do
+			local btn = self:GetItemBtn(i)
+			if isvalid(btn) then
+				local sp = btn.Entity.SpriteGUIRendererComponent
+				if i == self._selectedSlotIndex then
+					sp.Outline = true
+					sp.OutlineColor = Color(0.2, 0.6, 1.0, 0.75)
+					sp.OutlineWidth = 4
+				else
+					sp.Outline = false
+				end
+			end
+		end
+	end
+
+	-- 선택된 슬롯이 실제로 구매 가능한 상태인지(재화 충분 + 3~5번은 비어있지 않고 매진도 아님) 확인해서
+	-- 구매 버튼의 Enable/색상을 갱신한다
+	@ExecSpace("ClientOnly")
+	method void RefreshPurchaseButtonState()
+		local canBuy = false
+		if self._selectedSlotIndex == 1 then
+			canBuy = _GameManager.ShadowVoucher >= self.PotionPrice
+		elseif self._selectedSlotIndex == 2 then
+			canBuy = _GameManager.ShadowVoucher >= self.TicketPrice
+		elseif self._selectedSlotIndex == 3 then
+			canBuy = self.LockedSlot3Card ~= 0 and not self.Slot3SoldOut and _GameManager.ShadowVoucher >= self.SkillPrice
+		elseif self._selectedSlotIndex == 4 then
+			canBuy = self.LockedSlot4Card ~= 0 and not self.Slot4SoldOut and _GameManager.ShadowVoucher >= self.SkillPrice
+		elseif self._selectedSlotIndex == 5 then
+			canBuy = self.LockedSlot5Card ~= 0 and not self.Slot5SoldOut and _GameManager.ShadowVoucher >= self.SkillPrice
+		end
+		self.btnPurchase.Enable = canBuy
+		local sprite = self.btnPurchase.Entity.SpriteGUIRendererComponent
+		sprite.Color = canBuy and Color(1, 1, 1, 1) or Color(0.4, 0.4, 0.4, 1)
+	end
+
+	-- 구매 버튼을 눌렀을 때 실제로 결제+지급 예약을 실행한다(예전엔 아이템을 누르는 즉시 여기가 실행됐다)
+	@ExecSpace("ClientOnly")
+	method void OnPurchaseClicked()
+		if self._selectedSlotIndex == 1 then
+			if _GameManager.ShadowVoucher < self.PotionPrice then return end
+			self:QueueReward(self.PotionIconRUID, _GameManager.HpBarFlyTargetUI, "potion", 0)
+			self:RequestBuyPotion()
+		elseif self._selectedSlotIndex == 2 then
+			if _GameManager.ShadowVoucher < self.TicketPrice then return end
+			self:QueueReward(self.TicketIconRUID, _GameManager.LootFlyTargetUI, "ticket", 0)
+			self:RequestBuyTicket()
+		elseif self._selectedSlotIndex == 3 then
+			self:OnBuySkillSlot(self.LockedSlot3Card, self.Slot3SoldOut)
+		elseif self._selectedSlotIndex == 4 then
+			self:OnBuySkillSlot(self.LockedSlot4Card, self.Slot4SoldOut)
+		elseif self._selectedSlotIndex == 5 then
+			self:OnBuySkillSlot(self.LockedSlot5Card, self.Slot5SoldOut)
+		else
+			return
+		end
+		-- 구매 즉시 재선택하지 않으면 3~5번 매진 상태 등이 바로 반영되지 않아 보인다
+		self:RefreshPurchaseButtonState()
 	end
 
 	@ExecSpace("ClientOnly")
@@ -432,6 +525,7 @@ script ShadowShopUI extends Logic
 		if not self:IsClient() then return end
 		self.currencyCountText.Text = tostring(newTotal)
 		_InventoryUI:NotifyInventoryChanged()
+		self:RefreshPurchaseButtonState()
 	end
 
 	@ExecSpace("ClientOnly")
@@ -444,6 +538,8 @@ script ShadowShopUI extends Logic
 	@ExecSpace("ClientOnly")
 	method void OnEndPlay()
 		if self._closeHandler then self.btnClose.Entity:DisconnectEvent(ButtonClickEvent, self._closeHandler) end
+		if self._closeBackingHandler then self.btnCloseBacking.Entity:DisconnectEvent(ButtonClickEvent, self._closeBackingHandler) end
+		if self._purchaseHandler then self.btnPurchase.Entity:DisconnectEvent(ButtonClickEvent, self._purchaseHandler) end
 		if self._item1Handler then self.item1Btn.Entity:DisconnectEvent(ButtonClickEvent, self._item1Handler) end
 		if self._item2Handler then self.item2Btn.Entity:DisconnectEvent(ButtonClickEvent, self._item2Handler) end
 		if self._item3Handler then self.item3Btn.Entity:DisconnectEvent(ButtonClickEvent, self._item3Handler) end
