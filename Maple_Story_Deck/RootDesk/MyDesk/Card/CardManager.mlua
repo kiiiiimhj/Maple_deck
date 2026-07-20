@@ -864,7 +864,11 @@ script CardManager extends Logic
 	property number _timer5 = 0
 	property number _timer6 = 0
 
-	-- 파워 엘릭서 습득 시 GameManager가 호출 — 장착된 모든 슬롯을 즉시 재사용 가능 상태로 만든다
+	-- 파워 엘릭서 습득 시 GameManager가 호출 — 장착된 모든 슬롯을 즉시 재사용 가능 상태로 만든다.
+	-- 서버 타이머(_timer1~6)만 0으로 되돌리면 실제로는 바로 재사용 가능해지지만, 슬롯에 도는 쿨타임
+	-- 원형 게이지(_activeCooldowns)는 클라이언트가 캐스트 시점에 등록해둔 자기만의 startTime/duration으로
+	-- 독립적으로 카운트다운하는 클라 로컬 예측이라 서버 타이머 리셋과 무관하게 계속 돈다 — 그래서
+	-- ResetAllCooldownVisuals()를 같이 브로드캐스트해서 게이지도 즉시 초기화해야 한다.
 	@ExecSpace("ServerOnly")
 	method void ResetAllCooldowns()
 		self._timerBasic = 0
@@ -874,6 +878,28 @@ script CardManager extends Logic
 		self._timer4 = 0
 		self._timer5 = 0
 		self._timer6 = 0
+		self:ResetAllCooldownVisuals()
+	end
+
+	-- ResetAllCooldowns()가 호출 — 슬롯 쿨타임 원형 게이지 7개(기본공격+슬롯1~6)를 즉시 "사용 가능"
+	-- 상태로 되돌린다. _activeCooldowns에서 이 오버레이들만 제거하고(버프 아이콘 항목은 그대로 둠 — 같은
+	-- 리스트를 공유하지만 무관한 연출이라 건드리면 안 됨) TickCooldownVisuals의 자연 완료 분기와 동일하게
+	-- FillAmount=0 + Enable=false로 맞춘다.
+	@ExecSpace("Multicast")
+	method void ResetAllCooldownVisuals()
+		if self:IsServer() then return end
+		local overlays = { self.basicAttackCooldown, self.cooldown1, self.cooldown2, self.cooldown3, self.cooldown4, self.cooldown5, self.cooldown6 }
+		for _, overlay in ipairs(overlays) do
+			if overlay ~= nil then
+				for i = #self._activeCooldowns, 1, -1 do
+					if self._activeCooldowns[i].overlay == overlay then
+						table.remove(self._activeCooldowns, i)
+					end
+				end
+				overlay.Entity:SetEnable(false)
+				overlay.FillAmount = 0
+			end
+		end
 	end
 
 	-- 레벨업 선택지 내부 상태
@@ -4819,6 +4845,29 @@ script CardManager extends Logic
 			return
 		end
 		self:GrantCardUpgradesFromPool(pool, worldPos, fallHeight, groundWorldY, dropScale, self:RollDropCount(), 0)
+	end
+
+	-- ── 상자(TreasureChestEgg) 드롭 ─────────────────────────────────
+
+	-- 상자 전용 드롭 개수 1~2개(1개 70% / 2개 30%) — 엘리트(RollDropCount, 최대 3개)보다 상한을 낮춘 버전
+	method integer RollBoxDropCount()
+		local r = _UtilLogic:RandomDouble()
+		if r < 0.70 then return 1
+		else return 2
+		end
+	end
+
+	-- TreasureChestEgg.RequestOpen()이 호출. 엘리트와 동일한 액티브 카드 강화 풀을 쓰되 최대 2개까지만
+	-- 지급하고, 강화할 카드가 없으면(전부 만렙/미해금) 엘리트의 골드 100 대체 지급 대신 하얀 포션 1개를
+	-- 지급한다(potionType=2 — GameManager.ApplyPotionDrop과 동일한 낙하 연출 재사용)
+	@ExecSpace("ServerOnly")
+	method void OnTreasureBoxOpened(Vector3 worldPos, number fallHeight, number groundWorldY, number dropScale)
+		local pool = self:BuildActiveUpgradePool()
+		if #pool == 0 then
+			_GameManager:ApplyPotionDrop(2, worldPos, fallHeight, groundWorldY, dropScale)
+			return
+		end
+		self:GrantCardUpgradesFromPool(pool, worldPos, fallHeight, groundWorldY, dropScale, self:RollBoxDropCount(), 0)
 	end
 
 	-- 보스 처치 보상 — 엘리트와 동일한 방식(이미 장착/해금된 카드 레벨업)이지만 엘리트처럼 1~3개
