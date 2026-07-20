@@ -131,9 +131,15 @@ script MapManager extends Logic
 			[22] = { file = "map17", container = "Zone22", spawnX = 46.5 },
 			-- 그룹H(존23~26) 병합: map18.map(유저가 map17을 다시 덤프해서 만든 맵) 하나를 host로 존24/25/26을
 			-- Zone24/Zone25/Zone26 자식 컨테이너로 병합. spawnX는 그룹A/B/C/E/F/G와 동일한 15.5/31.0/46.5 재사용.
+			-- 존25(spawnX=31.0)만 예외: 유저가 map17에는 없던 계단식 발판(x=30.66~34.14)을 map18의 이
+			-- 자리에 새로 만들어서, 다른 존들과 같은 공통 지면(y=-1.25)이 이 구간엔 더 이상 없다 — 그 높이로
+			-- 스크롤 이동하면(DoScrollMapChange가 기본적으로 "이전 존의 Y 그대로 재사용"하므로) 발판 사이
+			-- 빈 공간으로 떨어져 맵 밖 세이프티넷에 의해 존23 스폰으로 되돌아가는 버그가 있었다(실측 확인,
+			-- 스크린샷으로 위치 확인 후 유저가 "발판은 의도한 지형"이라고 확정). landY로 이 존만 새 발판
+			-- 표면 높이(y=-0.65, 실측 foothold Id 76/77의 y)에 착지하도록 명시적으로 지정한다.
 			[23] = { file = "map18", container = nil, spawnX = 0 },
 			[24] = { file = "map18", container = "Zone24", spawnX = 15.5 },
-			[25] = { file = "map18", container = "Zone25", spawnX = 31.0 },
+			[25] = { file = "map18", container = "Zone25", spawnX = 31.0, landY = -0.65 },
 			[26] = { file = "map18", container = "Zone26", spawnX = 46.5 },
 		}
 		-- 몬스터 스폰/시작맵 리다이렉트는 GameStarted가 될 때까지 미룬다(BeginGameplay 참고) —
@@ -426,14 +432,18 @@ script MapManager extends Logic
 		-- (§6 카메라 고정 앵글) X만 바꿔도 항상 같은 발판 위다. 예전처럼 spawnPos.y(0.2)로 옮기면 실제
 		-- 지면(-1.xx)보다 한참 위라 중력에 끌려 짧게 낙하하는 게 화면에 그대로 보여 "붕 떴다 가라앉는"
 		-- 것처럼 보이는 버그가 있었다(맵1~3 병합 그룹에서 실측 확인).
+		-- ZoneInfo에 landY가 명시된 존(예: 존25 — 공통 지면과 다른 높이에 새 발판이 있는 경우)은 그 값을
+		-- 착지 Y로 강제한다. "이전 존 Y 재사용" 기본 규칙이 깨지는 지형 예외를 존 단위로 표시하는 용도다.
 		local spawnX = self:GetSpawnPositionForIndex(targetIndex).x
+		local targetZoneInfo = self:GetZoneInfo(targetIndex)
+		local landY = (targetZoneInfo ~= nil and targetZoneInfo.landY ~= nil) and targetZoneInfo.landY or nil
 		for _, userEntity in pairs(_UserService.UserEntities) do
 			local rigidbody = userEntity.RigidbodyComponent
-			local currentY = userEntity.TransformComponent.WorldPosition.y
+			local y = (landY ~= nil) and landY or userEntity.TransformComponent.WorldPosition.y
 			if rigidbody ~= nil then
-				rigidbody:SetPosition(Vector2(spawnX, currentY))
+				rigidbody:SetPosition(Vector2(spawnX, y))
 			else
-				userEntity.TransformComponent.Position = Vector3(spawnX, currentY, 0)
+				userEntity.TransformComponent.Position = Vector3(spawnX, y, 0)
 			end
 		end
 
