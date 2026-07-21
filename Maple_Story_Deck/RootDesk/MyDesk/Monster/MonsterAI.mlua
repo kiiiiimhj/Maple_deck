@@ -68,6 +68,19 @@ script MonsterAI extends Component
 	-- 맵10 보너스 스테이지 전용 보스 여부 — true면 접근/공격 대신 배회하고, 사실상 무적이며
 	-- 맞을 때마다(죽지 않고) 골드/포션/스킬을 지급한다. MonsterSpawner.InitializeBonusBoss()가 설정한다.
 	property boolean _isBonusBoss = false
+	-- 존27 석상 이스터에그 전용("얄미운 미니무르") — 전투 대상이 아니다(타격 완전 무시, 무적/사망 개념
+	-- 자체가 없음). 순수 시간 기반: MiniMooreDropInterval마다 무조건 뭔가 하나 떨어뜨린다 —
+	-- MiniMooreDropChance 확률로 보유 스킬, 그 외엔 잡템(RollMiniMooreDrop 참고) — 하다가
+	-- MiniMooreLifetime이 지나면 스스로 날아올라 사라진다(PlayDespawnJump 재사용).
+	-- NinjaStatuePuzzleLogic.SpawnMiniMoore()가 InitializeMiniMoore()로 설정한다.
+	property boolean _isMiniMoore = false
+	property number MiniMooreDropInterval = 1.0
+	property number MiniMooreDropChance = 0.03
+	-- 스폰 즉시 드랍하면 어색해서 첫 드랍은 MiniMooreDropInterval만큼 지연시킨다(SetTimerRepeat의
+	-- startDelaySeconds) — 그래서 총 유지시간도 12초(드랍 12번)+시작 지연 1초 = 13초로 늘렸다.
+	property number MiniMooreLifetime = 13.0
+	property integer _miniMooreDropTimerId = 0
+	property integer _miniMooreLifeTimerId = 0
 	property number _wanderMinX = -5
 	property number _wanderMaxX = 5
 	property number _wanderY = -1.18
@@ -83,12 +96,44 @@ script MonsterAI extends Component
 	property number _dieDuration = 0.5
 	property string _hitRUID = ""
 	property string _attackRUID = ""  -- 없는 웨이브(3/5/6/8/9/10)는 빈 문자열 → 들이받기 연출로 대체
+	-- attack1 스프라이트를 원래 포즈로 되돌리기까지 대기하는 시간 — 클립 프레임 수가 다 다른데 기존엔
+	-- 0.25초로 고정돼 있어서, 프레임이 많은 종(자이언트 쉐도우 8프레임 등)은 재생 중간에 잘려 보였다.
+	-- die1과 같은 재생 속도(초당 약 10프레임) 가정으로 종별 프레임 수에 맞춰 GetMapAttackDuration이 계산해 준다.
+	property number _attackDuration = 0.25
+	-- 접근(스케일 확대) 중 보여줄 이동 애니메이션. MonsterSprite는 "지금 화면에 보여야 할 정지 포즈"
+	-- 하나만 나타내던 프로퍼티였는데, 이제 접근 중엔 move, 도달(_reachedPlayer)하면 stand로 스스로 갈아끼운다 —
+	-- PlayHitAnimation/PlayAttackAnimation이 전부 self.MonsterSprite를 "복귀할 정지 포즈"로 참조하므로, 이렇게
+	-- MonsterSprite 자체를 단계별로 바꿔주면 히트/공격 연출 복귀 로직을 손댈 필요가 없다(항상 "지금 단계의
+	-- 올바른 포즈"로 자동 복귀됨). 공중형은 스케일 접근이 아니라 자유비행이라 move 연출 자체가 필요 없어
+	-- _moveRUID가 빈 문자열로 유지되고(InitializeStats), 그 경우 MonsterSprite는 항상 _standRUID로 고정된다.
+	property string _standRUID = ""
+	property string _moveRUID = ""
 	-- 맵 전용 몬스터 풀 중 원거리(먹물) 공격 종인지 여부 — true면 도달 시 들이받기 대신 화면 잉크 스플랫 연출
 	property boolean _isRangedInk = false
 	-- 원거리 종이 근접 종보다 "조금 멀리서" 공격하도록, 도달 판정(_reachedPlayer) 스케일 임계값을 낮춰준다.
 	-- 근접은 기존과 동일하게 1.5(최대 크기)까지 다가와야 도달 판정, 원거리는 이보다 작은 값에서 멈춘다
 	property number _reachedScaleThreshold = 1.5
 	property number RangedReachedScale = 1.15
+	-- 맵 전용 몬스터 풀 중 원거리(칼자국) 공격 종인지 여부(자이언트 쉐도우) — _isRangedInk와 마찬가지로
+	-- 도달 임계값을 낮추지만, 대체 연출이 아니라 기존 attackRUID 스프라이트 스왑 공격 위에 발톱자국
+	-- 이펙트(PlaySlashEffect)를 얹는다(OnReachPlayer 참고) — 자이언트 쉐도우는 자체 attack1 애니메이션이
+	-- 이미 있어서 대체할 필요가 없다.
+	property boolean _isRangedSlash = false
+	-- 발톱자국 이펙트 리소스 — 애초에 UI 아이콘 하나를 전 몬스터가 공유하는 방식(_slashMarkActive 가드)
+	-- 이었는데, 여러 마리가 동시에 공격하면 첫 번째 것만 보이고 나머지는 씹히는 버그가 있었다(유저 실측:
+	-- "지금은 공격 이펙트 1개만 뜨는듯"). "skilleffect" 월드 이펙트(개별 Entity라 마리마다 독립적으로
+	-- 동시에 뜰 수 있음)로 바꿔서 해결. RUID는 애니메이션클립 전체(4프레임)를 그대로 써서 발톱이 스치는
+	-- 과정 자체가 재생되게 한다(정적 프레임 하나만 쓰던 것보다 자연스러움).
+	-- 작게 시작해서(StartScale) 크게(EndScale) 자라나며 화면 쪽으로 다가오는 느낌을 준다(유저 요청 —
+	-- "검기 발산하는 것처럼 사이즈가 커지면서 화면에 닿으면 더 좋을듯").
+	property string SlashEffectRUID = "954ea7049e454950b7e44643049de099"
+	property number SlashEffectStartScale = 0.15
+	property number SlashEffectEndScale = 0.6
+	-- 0.5초였을 때 "너무 빨리 끝나서 잘 안 보인다"는 피드백 — 0.65초로 늘리고, 스프라이트 자체 재생
+	-- 속도(PlayRate)도 늦춰서 이 늘어난 지속시간 내내 (마지막 프레임의 흐릿한 잔광이 아니라) 선명한
+	-- 발톱자국 프레임이 계속 보이게 한다.
+	property number SlashEffectDuration = 0.65
+	property number SlashEffectPlayRate = 0.5
 
 	-- 깊이감 연출: 몬스터 위에 같은 스프라이트를 검게 덧씌운 자식 엔티티(.model의 "DepthOverlay")를
 	-- 스폰 시점(뒤쪽, 알파 최대)부터 도달 시점(앞쪽, 알파 0)까지 _currentScale 진행도에 맞춰 점점
@@ -124,6 +169,23 @@ script MonsterAI extends Component
 	property number _flyPhaseY = 0
 	property number _flySpeedMultX = 1.0
 	property number _flySpeedMultY = 1.0
+
+	-- 닌자 컨셉 몬스터(존27~30 지상형) 전용 — 접근 중 좌우로 사인파 지그재그 흔들림을 얹는다(전진 자체는
+	-- 기존과 동일하게 _currentScale로 표현, 좌우 흔들림만 별도 X 오프셋으로 분리해서 서로 간섭하지 않는다).
+	-- 흔들리는 동안 잔상(반투명 스프라이트 복제)을 주기적으로 남겨 "휙" 하는 느낌을 보탠다.
+	property boolean _isZigzag = false
+	property number ZigzagAmplitude = 0.5  -- 좌우 진폭(월드 단위)
+	property number ZigzagFrequency = 3.0  -- 좌우 흔들림 각속도
+	property number _zigzagTime = 0
+	property number _zigzagPhase = 0
+	property number _zigzagBaseX = 0  -- 지그재그 중심(스폰 X)
+	-- 재규어(존32/33, 정글 컨셉)도 접근 중 지그재그를 켜지만, 닌자 전용이던 잔상 연출은 같이 얹지 않는다
+	-- (유저 요청 — "살짝 지그재그"만, 잔상은 그대로 존27~30 전용). _isZigzag는 공유하되 잔상 여부만 분리.
+	property boolean _hasZigzagAfterimage = false
+	property number AfterimageInterval = 0.12
+	property number _afterimageTimer = 0
+	property number AfterimageFadeDuration = 0.2
+	property number AfterimageAlpha = 0.35
 
 	-- 이어하기 밀려나는 중 OnUpdate 스킵 플래그
 	property boolean _isPushingBack = false
@@ -200,15 +262,18 @@ script MonsterAI extends Component
 				speciesIdx = _UtilLogic:RandomIntegerRange(1, _GameManager:GetMapMonsterCount(appearanceZone))
 			end
 			self._speciesIdx = speciesIdx
-			self.MonsterSprite = _GameManager:GetMapStandRUID(appearanceZone, speciesIdx)
+			self._standRUID = _GameManager:GetMapStandRUID(appearanceZone, speciesIdx)
+			self._moveRUID = _GameManager:GetMapMoveRUID(appearanceZone, speciesIdx)
 			self._dieRUID = _GameManager:GetMapDieRUID(appearanceZone, speciesIdx)
 			self._dieDuration = _GameManager:GetMapDieDuration(appearanceZone, speciesIdx)
 			self._hitRUID = _GameManager:GetMapHitRUID(appearanceZone, speciesIdx)
-			self._attackRUID = ""
+			self._attackRUID = _GameManager:GetMapAttackRUID(appearanceZone, speciesIdx)
+			self._attackDuration = _GameManager:GetMapAttackDuration(appearanceZone, speciesIdx)
 			-- 존별 시각 크기 배율(그룹G 15% 축소 등) — 보스(×2.5)와 곱연산으로 같이 적용된다
 			self._scaleMultiplier = self._scaleMultiplier * _GameManager:GetMapScaleMultiplier(appearanceZone, speciesIdx)
 			self._isRangedInk = _GameManager:GetMapIsRanged(appearanceZone, speciesIdx)
-			if self._isRangedInk then
+			self._isRangedSlash = _GameManager:GetMapIsRangedSlash(appearanceZone, speciesIdx)
+			if self._isRangedInk or self._isRangedSlash then
 				self._reachedScaleThreshold = self.RangedReachedScale
 			end
 			self._isFlying = _GameManager:GetMapIsFlying(appearanceZone, speciesIdx)
@@ -229,11 +294,29 @@ script MonsterAI extends Component
 				self._flySpeedMultY = 0.8 + _UtilLogic:RandomDouble() * 0.4
 				self._attackTimer = self.FlyAttackInterval
 			end
+			-- 그룹I(존27~30, 닌자 컨셉) 지상형만 접근 중 좌우 지그재그 흔들림을 켠다 — 비행형(스티지)은
+			-- 이미 자체 리사주 비행 궤적이 있어서 별도로 흔들 필요가 없다. 흔들림 중심은 스폰 시점의
+			-- 로컬 X(발판 위 스폰 위치)로 고정하고, 개체마다 위상을 무작위로 달리해 겹쳐 보이지 않게 한다.
+			-- 재규어(존32/존33 지상형=2번째 종)도 유저 요청으로 같은 지그재그를 얹는다 — 단, 잔상은
+			-- 닌자 전용으로 남겨두고 재규어는 안 켠다(_hasZigzagAfterimage로 분리).
+			local isNinjaZone = zoneIndex >= 27 and zoneIndex <= 30
+			local isJaguarZone = zoneIndex == 32 or zoneIndex == 33
+			if (isNinjaZone or isJaguarZone) and not self._isFlying then
+				self._isZigzag = true
+				self._zigzagBaseX = self.Entity.TransformComponent.Position.x
+				self._zigzagTime = 0
+				self._zigzagPhase = _UtilLogic:RandomDouble() * math.pi * 2
+				if isNinjaZone then
+					self._hasZigzagAfterimage = true
+					self._afterimageTimer = self.AfterimageInterval
+				end
+			end
 		elseif zoneIndex >= 4 then
 			-- 맵4~6 전용 몬스터 풀: 스폰마다 1~4 중 무작위로 외형을 고른다 (보스도 이 풀에서 고름 — 별도 존 보스는 없음)
 			local speciesIdx = _UtilLogic:RandomIntegerRange(1, _GameManager:GetZoneMonsterCount())
 			self._speciesIdx = speciesIdx
-			self.MonsterSprite = _GameManager:GetZoneStandRUID(speciesIdx)
+			self._standRUID = _GameManager:GetZoneStandRUID(speciesIdx)
+			self._moveRUID = _GameManager:GetZoneMoveRUID(speciesIdx)
 			self._dieRUID = _GameManager:GetZoneDieRUID(speciesIdx)
 			self._dieDuration = _GameManager:GetZoneDieDuration(speciesIdx)
 			self._hitRUID = _GameManager:GetZoneHitRUID(speciesIdx)
@@ -246,11 +329,20 @@ script MonsterAI extends Component
 				speciesIdx = _UtilLogic:RandomIntegerRange(1, 9)
 			end
 			self._speciesIdx = speciesIdx
-			self.MonsterSprite = _GameManager:GetWaveStandRUID(speciesIdx)
+			self._standRUID = _GameManager:GetWaveStandRUID(speciesIdx)
+			self._moveRUID = _GameManager:GetWaveMoveRUID(speciesIdx)
 			self._dieRUID = _GameManager:GetWaveDieRUID(speciesIdx)
 			self._dieDuration = _GameManager:GetWaveDieDuration(speciesIdx)
 			self._hitRUID = _GameManager:GetWaveHitRUID(speciesIdx)
 			self._attackRUID = _GameManager:GetWaveAttackRUID(speciesIdx)
+		end
+
+		-- 접근 중엔 move, 이미 도달(_reachedPlayer)했거나 애초에 move 연출이 없는 종(빈 문자열 — 공중형은
+		-- 항상 여기 해당)은 stand로 시작한다. OnUpdate가 도달하는 순간 다시 stand로 갈아끼운다.
+		if not self._isFlying and self._moveRUID ~= "" then
+			self.MonsterSprite = self._moveRUID
+		else
+			self.MonsterSprite = self._standRUID
 		end
 
 		self.Entity.TransformComponent.Scale = Vector3(self._currentScale * self._scaleMultiplier, self._currentScale * self._scaleMultiplier, 1.0)
@@ -310,6 +402,98 @@ script MonsterAI extends Component
 		self:SyncDepthOverlaySprite()
 		self:HideDepthOverlay()
 		log("MonsterAI: alien invader initialized HP=" .. hp)
+	end
+
+	-- NinjaStatuePuzzleLogic.SpawnMiniMoore()가 스폰 직후 호출: 존 몬스터 풀/HP/전투 시스템을 완전히
+	-- 건너뛰는 일회성 특수 몬스터(얄미운 미니무르)를 InitializeAlienInvader와 동일한 방식(비행형)으로
+	-- 초기화한다. 전투 대상이 아니라서(타격 완전 무시) hitRUID/dieRUID/attackRUID가 전혀 필요 없다 —
+	-- MiniMooreDropInterval마다 MiniMooreDropChance 확률로 보유 스킬을 떨어뜨리다가 MiniMooreLifetime
+	-- 후 스스로 날아올라 사라진다(RollMiniMooreDrop/EndMiniMooreLife 참고).
+	@ExecSpace("ServerOnly")
+	method void InitializeMiniMoore(integer zoneIndex, string standRUID, string moveRUID)
+		self._spawnZoneIndex = zoneIndex
+		self._isMiniMoore = true
+		self.MonsterSprite = standRUID
+		self._standRUID = standRUID
+		self._moveRUID = moveRUID
+		self._attackRUID = ""
+		self._isFlying = true
+		self._currentScale = 1.0
+		self._flyCenterX = self.Entity.TransformComponent.Position.x
+		self._flyBaseY = (self.FlyingWanderMinY + self.FlyingWanderMaxY) * 0.5
+		self._flyTime = 0
+		self._flyPhaseX = _UtilLogic:RandomDouble() * math.pi * 2
+		self._flyPhaseY = _UtilLogic:RandomDouble() * math.pi * 2
+		self._flySpeedMultX = 0.8 + _UtilLogic:RandomDouble() * 0.4
+		self._flySpeedMultY = 0.8 + _UtilLogic:RandomDouble() * 0.4
+		self._attackTimer = self.FlyAttackInterval
+		self.Entity.TransformComponent.Scale = Vector3(self._currentScale * self._scaleMultiplier, self._currentScale * self._scaleMultiplier, 1.0)
+		self:SyncDepthOverlaySprite()
+		self:HideDepthOverlay()
+		self._miniMooreDropTimerId = _TimerService:SetTimerRepeat(self.RollMiniMooreDrop, self.MiniMooreDropInterval, self.MiniMooreDropInterval)
+		self._miniMooreLifeTimerId = _TimerService:SetTimerOnce(self.EndMiniMooreLife, self.MiniMooreLifetime)
+		log("MonsterAI: mini moore initialized")
+	end
+
+	-- MiniMooreDropInterval마다 호출 — 매 틱마다 뭔가는 무조건 떨어진다: MiniMooreDropChance(3%) 확률로
+	-- 보유 스킬 카드 하나를 강화/드롭하고(CardManager.OnEliteKilled 재사용 — 엘리트 처치 보상과 동일한
+	-- "이미 장착/해금된 카드 강화" 연출), 그 외(97%)엔 지금까지 구현된 몬스터 잡템 중 아무거나 하나를
+	-- 떨어뜨린다(GameManager.ForceDropLootItem). 스킬이 나온 틱엔 잡템은 같이 안 준다(요청사항).
+	-- 비행형이라 사망 위치가 항상 공중이므로, 드롭 낙하 연출이 실제 발판까지 떨어지도록 Die()의 비행형
+	-- 분기와 동일한 방식으로 fallHeight/groundWorldY를 레이캐스트로 계산해서 두 분기가 공유한다.
+	@ExecSpace("ServerOnly")
+	method void RollMiniMooreDrop()
+		if not isvalid(self) or not isvalid(self.Entity) then return end
+
+		local worldPos = self.Entity.TransformComponent.WorldPosition
+		local fallHeight = 0
+		local groundWorldY = worldPos.y
+		local map = self.Entity.CurrentMap
+		if map ~= nil then
+			---@type FootholdComponent
+			local foothold = map:GetComponent("FootholdComponent")
+			if foothold ~= nil then
+				local hits = foothold:RaycastAll(Vector2(worldPos.x, worldPos.y), Vector2(0, -1), 50)
+				local groundY = nil
+				local bestDist = nil
+				for i = 1, #hits do
+					local h = hits[i]
+					local y = h:GetYByX(worldPos.x)
+					local dist = worldPos.y - y
+					if bestDist == nil or dist < bestDist then
+						bestDist = dist
+						groundY = y
+					end
+				end
+				if groundY ~= nil and worldPos.y > groundY then
+					fallHeight = (worldPos.y - groundY) * 100
+					groundWorldY = groundY
+				end
+			end
+		end
+
+		local dropScale = _CardManager:GetEffectScaleRatio(self)
+		if _UtilLogic:RandomDouble() < self.MiniMooreDropChance then
+			_CardManager:OnEliteKilled(worldPos, fallHeight, groundWorldY, dropScale)
+			log("MonsterAI: mini moore dropped a skill")
+		else
+			_GameManager:ForceDropLootItem(worldPos, fallHeight, groundWorldY, dropScale)
+			log("MonsterAI: mini moore dropped a junk item")
+		end
+	end
+
+	-- MiniMooreLifetime 경과 시 호출 — 드롭 타이머를 멈추고 보너스 보스 퇴장 연출(먼지+붕 뜨며 페이드)로
+	-- 사라진다. 전투로 죽지 않으므로 Die()가 아니라 PlayDespawnJump()를 재사용한다.
+	@ExecSpace("ServerOnly")
+	method void EndMiniMooreLife()
+		if self._miniMooreDropTimerId ~= 0 then
+			_TimerService:ClearTimer(self._miniMooreDropTimerId)
+			self._miniMooreDropTimerId = 0
+		end
+		self._miniMooreLifeTimerId = 0
+		if not isvalid(self) or not isvalid(self.Entity) then return end
+		self:PlayDespawnJump()
+		log("MonsterAI: mini moore lifetime ended, despawning")
 	end
 
 	@ExecSpace("ServerOnly")
@@ -394,6 +578,26 @@ script MonsterAI extends Component
 		-- 스케일 증가 (카메라 접근 연출)
 		self._currentScale = self._currentScale + self.ApproachSpeed * delta
 
+		-- 닌자/재규어 지그재그: 전진(스케일)과 독립적으로 X만 사인파로 좌우 흔들되, 중심(_zigzagBaseX)에서
+		-- 벗어나지 않게 한다. 도달(_reachedPlayer=true) 후에는 이 분기 자체가 실행되지 않으므로
+		-- 자동으로 멈추고 정면에 고정된다. 스턴/속박(ApplyStun) 중에는 흔들림 자체를 멈춰야 하는데(유저
+		-- 지적 — 지그재그 중에도 계속 좌우로 흔들리는 버그, 존27~30 닌자에도 원래 있던 문제) 타이머
+		-- (_zigzagTime)까지 통째로 멈춰서 스턴이 풀리면 멈췄던 위상 그대로 이어서 흔들리게 한다.
+		if self._isZigzag and not self._isStunned then
+			self._zigzagTime = self._zigzagTime + delta
+			local offsetX = math.sin(self._zigzagTime * self.ZigzagFrequency + self._zigzagPhase) * self.ZigzagAmplitude
+			local zpos = self.Entity.TransformComponent.Position
+			self.Entity.TransformComponent.Position = Vector3(self._zigzagBaseX + offsetX, zpos.y, zpos.z)
+
+			if self._hasZigzagAfterimage then
+				self._afterimageTimer = self._afterimageTimer - delta
+				if self._afterimageTimer <= 0 then
+					self:SpawnAfterimage()
+					self._afterimageTimer = self.AfterimageInterval
+				end
+			end
+		end
+
 		if self._currentScale >= self._reachedScaleThreshold then
 			-- 도달 임계값(근접 1.5 / 원거리는 더 낮음)에 도달 → 소멸하지 않고 그 자리에서 계속 공격 시작
 			self._currentScale = self._reachedScaleThreshold
@@ -401,6 +605,9 @@ script MonsterAI extends Component
 			self:UpdateDepth()
 			self._reachedPlayer = true
 			self._attackTimer = self.AttackInterval
+			-- 도달했으니 걷는 포즈(move)에서 정지 포즈(stand)로 되돌린다 — move가 아예 없던 종(moveRUID=="")은
+			-- 이미 MonsterSprite가 stand였으므로 그대로 다시 대입해도 무해하다.
+			self.MonsterSprite = self._standRUID
 			self:OnReachPlayer()
 		else
 			self.Entity.TransformComponent.Scale = Vector3(self._currentScale * self._scaleMultiplier, self._currentScale * self._scaleMultiplier, 1.0)
@@ -452,7 +659,10 @@ script MonsterAI extends Component
 
 		self._attackTimer = self._attackTimer - delta
 		if self._attackTimer <= 0 then
-			self:OnReachPlayer()
+			-- 미니무르는 순수 이스터에그용(플레이어를 공격하지 않음) — 공격 판정 자체를 건너뛴다
+			if not self._isMiniMoore then
+				self:OnReachPlayer()
+			end
 			self._attackTimer = self.FlyAttackInterval
 		end
 	end
@@ -564,6 +774,10 @@ script MonsterAI extends Component
 			self:OnBonusBossHit()
 			return
 		end
+		if self._isMiniMoore then
+			-- 전투 대상이 아니다 — 타격을 완전히 무시한다(반응/보상 없음, RollMiniMooreDrop이 별도로 처리)
+			return
+		end
 		self.CurrentHp = self.CurrentHp - damage
 		log("Monster HP: " .. self.CurrentHp .. "/" .. self.MaxHp)
 		self:PlayDamageSkin(damage, false)
@@ -605,6 +819,10 @@ script MonsterAI extends Component
 		if self._isBonusBoss then
 			self:PlayDamageSkin(damage, true)
 			self:OnBonusBossHit()
+			return
+		end
+		if self._isMiniMoore then
+			-- 전투 대상이 아니다 — 타격을 완전히 무시한다(반응/보상 없음, RollMiniMooreDrop이 별도로 처리)
 			return
 		end
 		self.CurrentHp = self.CurrentHp - damage
@@ -1090,7 +1308,18 @@ script MonsterAI extends Component
 		-- 플레이어 HP 감소 (엘리트는 공격력 15% 추가)
 		log("Monster reached player!")
 		local dmgMultiplier = self._isElite and 1.15 or 1.0
-		_GameManager:OnMonsterReached(dmgMultiplier)
+		if self._isRangedSlash then
+			-- 발톱자국 이펙트가 실제로 최대 스케일(화면에 닿는 시점)에 도달했을 때 대미지가 들어가도록
+			-- PlaySlashEffect와 동일한 지연(공격모션 절반 + 이펙트 성장 시간)만큼 늦춘다(유저 요청 —
+			-- "스케일이 0.6까지 도달했을때 대미지 들어오도록"). 다른 종(근접/비행/먹물)은 기존처럼 즉시.
+			local hitDelay = self._attackDuration * 0.5 + self.SlashEffectDuration
+			_TimerService:SetTimerOnce(function()
+				if not isvalid(self) or self._dead then return end
+				_GameManager:OnMonsterReached(dmgMultiplier)
+			end, hitDelay)
+		else
+			_GameManager:OnMonsterReached(dmgMultiplier)
+		end
 
 		-- 비행형(박쥐)은 배회 중 스케일이 고정돼 있어 "접근감"이 없고 공격이 잘 안 보인다는 피드백이 있어,
 		-- 공격 순간 2배 크기까지 확 커졌다가 돌아오는 들이받기로 임팩트를 준다(boost=1.0, baseScale 1.0
@@ -1102,12 +1331,18 @@ script MonsterAI extends Component
 		-- 뛰었다 착지하는 홉 모션을 공유한다(원래 존14/15 이블아이/커즈아이 전용이었던 걸 전 몬스터로 확장).
 		if self._isFlying then
 			if self._attackRUID ~= "" then
-				self:PlayAttackAnimation(self._attackRUID, self.MonsterSprite)
+				self:PlayAttackAnimation(self._attackRUID, self.MonsterSprite, self._attackDuration)
 			end
 			self:PlayLungeAnimation(1.0, 0)
 		elseif self._attackRUID ~= "" then
-			self:PlayAttackAnimation(self._attackRUID, self.MonsterSprite)
+			self:PlayAttackAnimation(self._attackRUID, self.MonsterSprite, self._attackDuration)
 			self:PlayAttackHop()
+			-- 원거리(칼자국) 종(자이언트 쉐도우)은 자기 자신의 attack1 스프라이트 교체 위에 발톱자국
+			-- 이펙트를 추가로 띄운다 — 원거리(먹물)와 달리 대체 연출이 아니라 "얹는" 방식이라 elseif가
+			-- 아니라 이 분기 안에 같이 넣는다.
+			if self._isRangedSlash then
+				self:PlaySlashEffect()
+			end
 		elseif self._isRangedInk then
 			self:PlayInkAttack()
 			self:PlayAttackHop()
@@ -1128,6 +1363,28 @@ script MonsterAI extends Component
 			local pos = self.Entity.TransformComponent.Position
 			self.Entity.TransformComponent.Position = Vector3(pos.x, baseY + self.AttackHopHeight * math.sin(t * math.pi), pos.z)
 		end)
+	end
+
+	-- 닌자 지그재그 잔상: 현재 스프라이트를 그대로 복제한 반투명 엔티티를 지금 위치에 남기고 빠르게
+	-- 페이드아웃시킨다. AfterimageInterval마다 OnUpdate의 지그재그 분기에서 호출된다.
+	@ExecSpace("ServerOnly")
+	method void SpawnAfterimage()
+		local map = self.Entity.CurrentMap
+		if map == nil then return end
+		local pos = self.Entity.TransformComponent.WorldPosition
+		local scale = self.Entity.TransformComponent.Scale
+		local ghost = _SpawnService:SpawnByModelId("afterimage", "Afterimage", pos, map)
+		if ghost == nil then return end
+		local renderer = ghost.SpriteRendererComponent
+		if renderer ~= nil then
+			renderer.SpriteRUID = self.MonsterSprite
+			renderer.Color = Color(0.6, 0.75, 1.0, self.AfterimageAlpha)
+		end
+		ghost.TransformComponent.Scale = scale
+		_TweenLogic:PlayTween(self.AfterimageAlpha, 0.0, self.AfterimageFadeDuration, EaseType.QuadEaseIn, function(alpha)
+			if isvalid(ghost) and renderer ~= nil then renderer.Color = Color(0.6, 0.75, 1.0, alpha) end
+		end)
+		ghost:Destroy(self.AfterimageFadeDuration + 0.05)
 	end
 
 	-- 원거리(먹물) 공격 연출: 화면 잉크 스플랫(GameManager 담당)에 더해, 몬스터 본인도 "찍 내뿜는"
@@ -1160,8 +1417,55 @@ script MonsterAI extends Component
 		end)
 	end
 
+	-- 원거리(칼자국) 종 전용 — attack1 스프라이트 스왑 애니메이션 재생 중, "칼이 실제로 내려찍히는"
+	-- 시점(전체 길이의 절반쯤)에 맞춰 지연 후 발톱자국 월드 이펙트를 하나 띄운다. 매번 독립된 Entity를
+	-- 스폰하므로(예전 UI 아이콘 공유 방식과 달리) 여러 마리가 동시에 공격해도 각자 자기 이펙트가 뜬다.
+	--
+	-- ⚠ 처음엔 CardManager.SpawnEffect(내부적으로 CardManager.GetCurrentMap() = "플레이어의 현재 존"
+	-- 기준으로 부모 맵을 정함)를 그대로 썼는데, 지연(delay) 타이머가 끝나기 전에 플레이어가 다른 존으로
+	-- 화면을 넘기면 그 사이 CurrentMapIndex가 바뀌어서, 이 몬스터(자이언트 쉐도우)의 존 로컬 좌표를
+	-- 엉뚱한(새) 존 컨테이너 밑에 그대로 스폰해버리는 버그가 있었다(유저 실측: "화면이동할때 이펙트
+	-- 남아있음" — 새 화면의 좌표계에 옛 존의 로컬 좌표가 얹혀서 잘못된 위치에 떠 있게 됨). SpawnAfterimage
+	-- 와 동일하게 self.Entity.CurrentMap(이 몬스터 자신이 실제로 속한 맵)을 직접 써서 이 불일치 자체를
+	-- 없앤다.
+	--
+	-- "검기가 발산되어 화면 쪽으로 다가오는" 느낌을 위해 작게 시작해서 크게 자라나도록 스케일을 트윈한다
+	-- (유저 요청 — 이전엔 고정 크기로 팝만 되고 다가오는 느낌이 없었음). 개별 Destroy로 직접 수명 관리
+	-- (skilleffect 기본 Duration에 의존하지 않음 — 프로젝트 공통 정책).
+	@ExecSpace("ServerOnly")
+	method void PlaySlashEffect()
+		local delay = self._attackDuration * 0.5
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) or not isvalid(self.Entity) or self._dead then return end
+			local map = self.Entity.CurrentMap
+			if map == nil then return end
+			local pos = self.Entity.TransformComponent.WorldPosition
+			local dropScale = _CardManager:GetEffectScaleRatio(self)
+			local offsetX = (_UtilLogic:RandomDouble() * 2 - 1) * 0.3
+			local offsetY = (_UtilLogic:RandomDouble() * 2 - 1) * 0.2
+			local fxPos = Vector3(pos.x + offsetX, pos.y + offsetY, pos.z - 0.2)
+
+			local fx = _SpawnService:SpawnByModelId("skilleffect", "SlashFX", fxPos, map)
+			if fx == nil then return end
+			local renderer = fx.SpriteRendererComponent
+			if renderer ~= nil then
+				renderer.SpriteRUID = self.SlashEffectRUID
+				renderer.PlayRate = self.SlashEffectPlayRate
+			end
+
+			local startScale = self.SlashEffectStartScale * dropScale
+			local endScale = self.SlashEffectEndScale * dropScale
+			fx.TransformComponent.Scale = Vector3(startScale, startScale, 1)
+			_TweenLogic:PlayTween(startScale, endScale, self.SlashEffectDuration, EaseType.QuadEaseIn, function(scale)
+				if isvalid(fx) then fx.TransformComponent.Scale = Vector3(scale, scale, 1) end
+			end)
+
+			fx:Destroy(self.SlashEffectDuration)
+		end, delay)
+	end
+
 	@ExecSpace("Multicast")
-	method void PlayAttackAnimation(string attackRUID, string standRUID)
+	method void PlayAttackAnimation(string attackRUID, string standRUID, number duration)
 		if self:IsServer() then return end
 		if self._dead then return end
 		local renderer = self.Entity.SpriteRendererComponent
@@ -1173,7 +1477,7 @@ script MonsterAI extends Component
 			if renderer.SpriteRUID == attackRUID then
 				renderer.SpriteRUID = standRUID
 			end
-		end, 0.25)
+		end, duration)
 	end
 
 	-- attack1 애니메이션 리소스가 없는 몬스터용 대체 연출. 이 게임은 몬스터 스케일 자체가
@@ -1212,6 +1516,14 @@ script MonsterAI extends Component
 		if self._dotTimerId ~= 0 then
 			_TimerService:ClearTimer(self._dotTimerId)
 			self._dotTimerId = 0
+		end
+		if self._miniMooreDropTimerId ~= 0 then
+			_TimerService:ClearTimer(self._miniMooreDropTimerId)
+			self._miniMooreDropTimerId = 0
+		end
+		if self._miniMooreLifeTimerId ~= 0 then
+			_TimerService:ClearTimer(self._miniMooreLifeTimerId)
+			self._miniMooreLifeTimerId = 0
 		end
 		if isvalid(self._freezeIndicator) then
 			self._freezeIndicator:Destroy()

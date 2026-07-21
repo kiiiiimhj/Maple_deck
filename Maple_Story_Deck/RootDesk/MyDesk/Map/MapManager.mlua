@@ -28,7 +28,16 @@ script MapManager extends Logic
 	-- 이름의 컨테이너가 스폰X 15.5/31.0/46.5로 정확히 박혀있었는데, 이건 map17 그룹G의 옛 이름이 그대로
 	-- 복사된 것이라 새 존 번호(24/25/26)에 맞게 리네임만 했다). 22→23은 물리 파일이 달라(map17≠map18)
 	-- MoveToMap이 자동으로 와이프 전환을 타므로 존15→19 같은 별도 skip 분기가 필요 없다 — 그냥 순차 델타로 연결된다.
-	property integer MaxMapIndex = 26
+	-- 그룹I(존27~30)가 추가되면서 30으로 올린다. 유저가 새로 만든 map19.map을 host로 존28/29/30을
+	-- Zone28/Zone29/Zone30 자식 컨테이너로 병합한다. 존26까지의 순차 연장이 아니라 존19에서 갈라지는
+	-- 별도 곁가지(스퍼)라, 그룹D(존6→11)와 동일하게 MoveByDelta에 전용 분기를 추가했다 — 아래 MoveByDelta 참고.
+	-- 그룹J(존31~34, 정글 컨셉: 루팡/호돌이/바나나갈매기/좀비루팡)가 추가되면서 34로 올린다. 유저가 새로
+	-- 만든 map20.map을 host로 존32/33/34를 Zone32/Zone33/Zone34 자식 컨테이너로 병합한다(덤프 원본엔
+	-- 그룹H의 옛 이름 Zone24/25/26이 그대로 복사돼 있어 새 존 번호에 맞게 리네임만 했다). 그룹I와 달리
+	-- 이번엔 존26의 순차 연장으로 이어진다 — 존26의 기본 ">"가 (존19~30 그룹처럼 스퍼로 갈라지지 않고)
+	-- 그대로 그룹J로 진입하도록 MoveByDelta에 전용 분기를 추가했다(그룹D/I와 동일한 패턴, 아래 참고) —
+	-- 존26+1이 그룹I의 존27로 새는 기본 델타를 덮어써야 하기 때문이다.
+	property integer MaxMapIndex = 34
 
 	-- 맵 이동 시 플레이어를 위치시킬 좌표. Y는 DefaultUserEnterLeaveLogic이 원래 스폰시키는 높이(0.2)와
 	-- 반드시 맞춰야 한다 — 다르면 카메라가 그 차이만큼 밀려서 몬스터가 화면 아래(UI 위)로 잘못 표시된다
@@ -55,6 +64,11 @@ script MapManager extends Logic
 	-- IsAllowZoomInOut=false라 스스로 조절할 수 없으므로, 게임 시작 시점에 기본값을 살짝 더 줌아웃된 값으로
 	-- 고정한다(값이 크면 더 줌아웃 — CameraComponent.d.mlua ZoomRatioMin=30/Max=500/기본=100).
 	property number DefaultZoomRatio = 115
+
+	-- 존 스크롤 전환(DoScrollMapChange) 때 카메라가 옆으로 따라붙는 속도 — 네이티브 기본값(2.5, 5.0)이
+	-- 너무 느리다는 피드백으로 낮췄다(작을수록 더 빠르게 반응 — CameraComponent.d.mlua Damping 설명 참고).
+	-- ResetCameraConfine()이 게임 시작 + 매 스크롤 전환마다 호출되므로 여기 한 곳만 바꾸면 전부 적용된다.
+	property Vector2 ScrollCameraDamping = Vector2(1.2, 2.0)
 
 	-- SilentMoveToMap 전용 Damping 임시 저장값 (0.001로 낮췄다가 짧게 복구)
 	property Vector2 _savedSilentMoveDamping = Vector2(2.5, 5.0)
@@ -141,6 +155,32 @@ script MapManager extends Logic
 			[24] = { file = "map18", container = "Zone24", spawnX = 15.5 },
 			[25] = { file = "map18", container = "Zone25", spawnX = 31.0, landY = -0.65 },
 			[26] = { file = "map18", container = "Zone26", spawnX = 46.5 },
+			-- 그룹I(존27~30) 병합: map19.map(유저가 새로 만든 맵) 하나를 host로 존28/29/30을
+			-- Zone28/Zone29/Zone30 자식 컨테이너로 병합. 그룹A~H와 동일한 spawnX(15.5/31.0/46.5)
+			-- 재사용 — 발판 범위(-7.09~58.47)가 기존 그룹들과 거의 동일해서 그대로 맞아떨어짐(실측 확인).
+			-- 존26까지의 순차 연장이 아니라 존19에서 갈라지는 별도 곁가지(스퍼)다 — 존19의 기본 "<"가
+			-- 더 이상 존18(그림자 상점)로 안 돌아가지 않고 이 그룹으로 진입하도록 MoveByDelta에 전용
+			-- 분기를 추가했다(그룹D의 존6→11과 동일한 패턴). 존18 복귀 경로는 의도적으로 만들지 않았다 —
+			-- 존18은 존15 횟불 퍼즐을 풀어야 열리는 ">" 정공법으로만 들어가야 하고, 존19 이상(그룹G/I)
+			-- 쪽에서 되돌아가는 버튼이 있으면 그 게이트를 우회하게 된다(존18 자체도 ">"가 막혀 있음).
+			-- 그룹I는 그룹A~H와 달리 지면이 존마다 계단식으로 다르다(RaycastAll 실측: 존27=-0.489,
+			-- 존28=-1.089, 존29=-0.489, 존30=-1.089 — 발판 Id 77/16/71/55). DoScrollMapChange는 기본적으로
+			-- "이전 존의 Y 그대로 재사용"하는데, 이 그룹은 그 가정이 깨져서 스크롤 이동마다 발판 높이
+			-- 차이만큼 순간 낙하해 화면이 튀는 버그가 있었다(존25와 동일한 원인, 유저 재현 확인) — landY로
+			-- 존마다 실제 발판 표면 높이를 명시해 강제 착지시킨다. 존27 도착 시(위프 전환, 중력으로 자연
+			-- 착지) 실측 y=-0.489로 정확히 일치함을 확인했다 — 이 값들이 진짜 지면이다.
+			[27] = { file = "map19", container = nil, spawnX = 0, landY = -0.489 },
+			[28] = { file = "map19", container = "Zone28", spawnX = 15.5, landY = -1.089 },
+			[29] = { file = "map19", container = "Zone29", spawnX = 31.0, landY = -0.489 },
+			[30] = { file = "map19", container = "Zone30", spawnX = 46.5, landY = -1.089 },
+			-- 그룹J(존31~34) 병합: map20.map(유저가 새로 만든 맵) 하나를 host로 존32/33/34를
+			-- Zone32/Zone33/Zone34 자식 컨테이너로 병합. 발판 범위(-7.08~58.38, 폭 65.46)가 기존 그룹들과
+			-- 거의 동일해서 A~I와 동일한 spawnX(15.5/31.0/46.5) 재사용. 지면 Y도 4존 전부 -1.35로 동일함을
+			-- 실측 확인(존25/그룹I처럼 존별로 다른 발판 높이가 아니라서 landY 지정이 필요 없다).
+			[31] = { file = "map20", container = nil, spawnX = 0 },
+			[32] = { file = "map20", container = "Zone32", spawnX = 15.5 },
+			[33] = { file = "map20", container = "Zone33", spawnX = 31.0 },
+			[34] = { file = "map20", container = "Zone34", spawnX = 46.5 },
 		}
 		-- 몬스터 스폰/시작맵 리다이렉트는 GameStarted가 될 때까지 미룬다(BeginGameplay 참고) —
 		-- 타이틀 화면을 보는 동안 몬스터가 먼저 쌓이면 안 된다. 여기서는 현재 위치만 계산해둔다.
@@ -301,8 +341,7 @@ script MapManager extends Logic
 
 	-- 클라이언트의 존15 전용 "아래로" 버튼 요청 (존15 → 그룹G/존19 직행 분기). 존19는 인덱스상 존15의
 	-- 순차 다음(16)이 아니라 그룹F(16~18) 전체를 건너뛰는 별도 분기라서, 맵6→7과 동일하게 전용 메서드로
-	-- 분리한다. 일반 우측 이동(">")으로 16→17→18→19 순서로도 여전히 도달 가능하므로 별도 복귀 경로는
-	-- 만들지 않았다 — 존19의 왼쪽(MoveByDelta) 버튼이 자연스럽게 존18로 돌아간다.
+	-- 분리한다.
 	@ExecSpace("Server")
 	method void RequestMoveToZone19()
 		local actualIndex = self.CurrentMapIndex
@@ -310,7 +349,7 @@ script MapManager extends Logic
 		self:MoveToMap(actualIndex, 19)
 	end
 
-	-- 클라이언트의 존19 전용 "위로" 버튼 요청 (존19 → 존15 복귀, RequestMoveToZone19의 역방향 전용 경로)
+	-- 클라이언트의 "위로" 버튼 요청 (존19 → 존15 복귀, RequestMoveToZone19의 역방향 전용 경로)
 	@ExecSpace("Server")
 	method void RequestMoveToZone15()
 		local actualIndex = self.CurrentMapIndex
@@ -336,6 +375,29 @@ script MapManager extends Logic
 			-- MaxMapIndex를 11로 올린 부작용 방지: 맵10 오른쪽은 여전히 막다른 길이어야 한다
 			-- (11은 맵6 전용 분기이지 맵10의 다음 단계가 아님)
 			return
+		elseif actualIndex == 18 and delta == 1 then
+			-- 존18(그림자 상점)은 막다른 길이다 — MapMoveUI가 ">"를 아예 숨기지만(UpdateButtonVisibility),
+			-- 서버 쪽에서도 동일하게 막아 어떤 경로로 호출되든 존19 이상으로 못 넘어가게 한다. 존18은
+			-- 존15에서 횟불 3개를 켜야 풀리는 ">" 정공법(15→16→17→18)으로만 들어갈 수 있어야 하는데,
+			-- 여기서 존19로 계속 진행할 수 있으면 그 퍼즐 게이트를 무의미하게 만든다.
+			return
+		-- 존19↔27 특수 분기: 그룹D(맵6↔11)와 동일한 패턴. 존19의 기본 "<"는 더 이상 존18(그림자
+		-- 상점)로 돌아가지 않고 그룹I(존27~30, map19.map)로 진입한다. 존18 복귀 경로는 의도적으로
+		-- 만들지 않았다 — 그림자 상점(존18)은 존15에서 횟불 3개를 켜야 풀리는 ">" 정공법(순차 진행
+		-- 15→16→17→18)으로만 들어갈 수 있어야 하고, 존19(그룹G, 존15의 "아래로" 직행 분기) 쪽에서
+		-- 되돌아 들어가는 백도어가 있으면 이 퍼즐 게이트를 완전히 우회하게 된다. 존27의 기본 "<"는
+		-- 존19로 되돌아간다.
+		elseif actualIndex == 19 and delta == -1 then
+			targetIndex = 27
+		elseif actualIndex == 27 and delta == -1 then
+			targetIndex = 19
+		-- 존26↔31 특수 분기: 그룹J(존31~34, map20.map)는 그룹I와 달리 존26의 순차 연장으로 이어진다.
+		-- 존26+1의 기본 델타는 그룹I의 존27로 새므로(존19~30 범위가 먼저 차 있음), 여기서 명시적으로
+		-- 덮어써 존26의 ">"가 그룹J로 진입하게 한다. 존31의 "<"는 대칭으로 존26으로 되돌아간다.
+		elseif actualIndex == 26 and delta == 1 then
+			targetIndex = 31
+		elseif actualIndex == 31 and delta == -1 then
+			targetIndex = 26
 		end
 
 		self:MoveToMap(actualIndex, targetIndex)
@@ -358,7 +420,9 @@ script MapManager extends Logic
 	-- 위치 확정이 나중에 처리되면서 이미 화면에 반영된 나중 이동 결과를 몇 초 뒤 조용히 덮어써버리는
 	-- 경합(race condition)이 있었다(존13→14→15를 빠르게 연달아 누르면 마지막 도착 화면이 잠시 후
 	-- 예전 존으로 되돌아가는 버그의 원인 — 2초 간격을 두면 전혀 재현되지 않음을 확인).
-	property number MoveCooldownDuration = 2.0
+	-- 유저 요청으로 1초로 낮춰본다(2초가 너무 길다는 피드백 — 위 레이스 컨디션이 1초에서도
+	-- 재현되는지 확인 필요, 재현되면 되돌릴 예정).
+	property number MoveCooldownDuration = 1.0
 	property boolean _moveLocked = false
 
 	@ExecSpace("ServerOnly")
@@ -486,6 +550,7 @@ script MapManager extends Logic
 		local cam = _CameraService:GetCurrentCameraComponent()
 		if cam == nil then return end
 		cam.UseCustomBound = false
+		cam.Damping = self.ScrollCameraDamping
 	end
 
 	-- 타이틀 화면이 뜨기도 전에(TitleUI 클라이언트 OnBeginPlay에서) 곧바로 호출해서 줌을 맞춘다.

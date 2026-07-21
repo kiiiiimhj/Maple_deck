@@ -1,0 +1,47 @@
+@Component
+script NinjaStatueTouch extends Component
+
+	-- 존27 석상 이스터에그: 1=object-2032_1, 2=object-2032_5, 3=object-2032_6 (NinjaStatuePuzzleLogic의
+	-- Statue1/2/3과 동일한 인덱스). Zone15FlameSwitch와 동일한 패턴 — 터치 판정은 클라이언트에서 받고
+	-- 실제 반전 처리는 서버(Logic)에 요청한다.
+	property integer StatueIndex = 0
+
+	property any _touchHandler = nil
+
+	-- 한 번의 실제 탭이 TouchEvent를 중복 발생시키는 경우(멀티터치 프레임 겹침 등)를 방어하기 위한
+	-- 짧은 디바운스 — 이 시간 안의 재입력은 무시한다. "석상 3개를 다 맞췄는데도 의도치 않게 다시
+	-- 반전되는 것 같다"는 피드백에 대한 방어 조치(정확한 원인이 터치 중복인지는 재현 못 했지만,
+	-- 부작용 없는 안전장치라 기본으로 넣어둔다).
+	property number TouchDebounce = 0.25
+	property number _lastTouchTime = -999
+
+	method void OnBeginPlay()
+		if self:IsClient() then
+			self._touchHandler = self.Entity:ConnectEvent(TouchEvent, self.OnTouched)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnTouched(TouchEvent event)
+		-- 게임오버 팝업/타이틀(로비) 화면이 떠 있는 동안은 뒤에 있는 월드 오브젝트가 눌리면 안 된다
+		-- (Zone15FlameSwitch/Zone21AlienObjectTrigger와 동일한 이유)
+		if _GameManager.GameOver then return end
+		if _TitleUI.titleGroup.Enable then return end
+		local now = _UtilLogic.ElapsedSeconds
+		if now - self._lastTouchTime < self.TouchDebounce then return end
+		self._lastTouchTime = now
+		self:RequestTouch()
+	end
+
+	@ExecSpace("Server")
+	method void RequestTouch()
+		_NinjaStatuePuzzleLogic:OnStatueTouched(self.StatueIndex)
+	end
+
+	method void OnEndPlay()
+		if self:IsClient() and self._touchHandler ~= nil then
+			self.Entity:DisconnectEvent(TouchEvent, self._touchHandler)
+		end
+	end
+
+end

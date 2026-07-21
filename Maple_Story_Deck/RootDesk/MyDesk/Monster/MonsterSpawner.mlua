@@ -43,8 +43,10 @@ script MonsterSpawner extends Logic
 	-- 발판 위치와 계속 어긋나 허공에 뜨는 버그가 반복됐다).
 	property number RangedTileMinX = 9.5
 	property number RangedTileMaxX = 14.8
-	-- 이 메커니즘은 존12 전용(맵7~10에는 추가하지 않기로 확정 — 범위 축소)이라 mapIndex 하드코딩을
-	-- 유지한다. 아래 GetMapIsRangedSpecies가 이 조건을 감싼다.
+	-- 존12 전용으로 범위를 축소해뒀던 메커니즘을, 유저 요청으로 그룹J(존31 루팡/존34 좀비루팡)에도
+	-- 재사용하게 됐다. 다만 RangedTileMinX/MaxX는 map11(zone12) 기준 절대 월드 좌표라 map20에 그대로
+	-- 쓰면 엉뚱한 위치(존31/32 경계 근처)를 가리킨다 — 아래 GetRangedTileRange로 맵별 실제 발판 X구간을
+	-- 분기한다(GetMapIsRangedSpecies가 감싸는 GameManager.GetMapIsRanged 플래그로 대상 여부만 판정).
 
 	-- 비행형 종(맵15 박쥐) 전용 스폰 높이 범위 — 발판 레이캐스트로 바닥에 고정되지 않고 이 Y 범위
 	-- 안에서 공중에 무작위로 스폰된다(이 게임은 몬스터가 실제로 날아다니지 않고 스케일만 커지며
@@ -52,10 +54,12 @@ script MonsterSpawner extends Logic
 	property number FlyingMinY = -0.3
 	property number FlyingMaxY = 2.0
 
-	-- 존13~15 전용 스폰 방식: GetZonePlatformBands처럼 발판 좌표를 코드에 하드코딩하는 대신, 매 스폰마다
+	-- 존8/13~15 전용 스폰 방식: GetZonePlatformBands처럼 발판 좌표를 코드에 하드코딩하는 대신, 매 스폰마다
 	-- FootholdComponent를 직접 레이캐스트해서 실제 발판 위에 스폰한다 — 유저가 Maker에서 발판을 옮기거나
 	-- 지워도 코드를 다시 맞출 필요가 없다(하드코딩 밴드가 발판 편집 때마다 어긋나던 근본 문제 해결).
-	-- 그룹A~C(맵1~10)는 이번엔 손대지 않고 그대로 두고, 이 방식이 안정적으로 검증되면 나중에 전체로 넓힌다.
+	-- 존8은 2026-07-21에 이 방식으로 이전했다(아치형 지형으로 바뀌면서 하드코딩 밴드가 기둥 밑동의
+	-- 바닥 구멍 2곳을 모르고 그 안에도 스폰시키는 버그가 있었음). 나머지 맵1~7/9/10은 아직 안 옮겼고,
+	-- 필요해지면(지형을 자주 바꾸는 맵부터) 그때그때 넓힌다.
 	property number MinFlatRunWidth = 0.5   -- 이보다 좁게 이어진 발판 구간은 스폰 후보에서 제외
 	property number EdgeMarginGround = 0.4  -- 바닥 발판 양끝 제외 여유
 	property number EdgeMarginAerial = 0.15 -- 공중 발판 양끝 제외 여유 (좁은 발판이라 넓게 깎으면 폭 비례
@@ -164,6 +168,8 @@ script MonsterSpawner extends Logic
 	end
 
 	-- 몬스터가 절대 스폰되지 않아야 하는 맵/존 — 지금은 존18(그림자 존 안전지대)만 해당.
+	-- 존27~30(그룹I)은 GameManager에 전용 몬스터 풀(쉐도우 듀어러/자이언트 쉐도우/쉐도우 블레이드/
+	-- 스티지/훈련된 오다군 정찰병)이 채워져서 더 이상 여기서 막을 필요가 없다.
 	@ExecSpace("ServerOnly")
 	method boolean IsNoMonsterZone(integer mapIndex)
 		return mapIndex == 18
@@ -372,10 +378,19 @@ script MonsterSpawner extends Logic
 		return mapIndex
 	end
 
-	-- speciesIdx가 가리키는 종이 이 맵(zoneIndex>=7) 풀에서 원거리(먹물) 종인지 여부
+	-- speciesIdx가 가리키는 종이 이 맵(zoneIndex>=7) 풀에서 원거리 종인지 여부
 	@ExecSpace("ServerOnly")
 	method boolean GetMapIsRangedSpecies(integer mapIndex, integer speciesIdx)
 		return _GameManager:GetMapIsRanged(self:ResolveAppearanceZone(mapIndex), speciesIdx)
+	end
+
+	-- 원거리 종 전용 고정 스폰 구역(타일섬) X범위 — 존12 전용. 존31/34(map20)는 한때 이 방식(원거리 종을
+	-- 발판 하나에 고정)을 재사용했었지만, "발판에는 다 몹이 나와야 한다"는 요구로 GetZonePlatformBands(31)/
+	-- (34)가 바닥+공중 발판 전부를 후보로 삼는 다중 밴드로 대체했다 — bands가 nil이 아니면 이 메서드를
+	-- 거치는 스폰 분기 자체를 안 타므로, 31/34 전용 분기는 여기 남겨두지 않는다(죽은 코드 방지).
+	@ExecSpace("ServerOnly")
+	method table GetRangedTileRange(integer mapIndex)
+		return { minX = self.RangedTileMinX, maxX = self.RangedTileMaxX }
 	end
 
 	-- speciesIdx가 가리키는 종이 이 맵(zoneIndex>=7) 풀에서 비행형 종인지 여부 (지금은 맵15의 박쥐만 해당)
@@ -461,17 +476,6 @@ script MonsterSpawner extends Logic
 				{ y = -1.22, xMin = -7.15, xMax = 7.15 },   -- 바닥
 				{ y = 1.78, xMin = -1.75, xMax = 1.75 },    -- 중앙 공중 발판
 			}
-		elseif mapIndex == 8 then
-			-- 맵8 중앙은 낮은 언덕 구조다 — 바닥(y=-1.18)에서 완만한 경사(슬로프)로 올라가 중앙에
-			-- 평평한 정상부(y=2.42)가 있고, 반대쪽 경사로 다시 내려온다. 이전에 그룹C 병합 데이터가
-			-- 일부 유실돼 "석조 아치"로 잘못 파악했던 적이 있는데(발판 173개 전량 재검증 후 재병합으로
-			-- 수정 완료), 실제 발판 데이터 기준으로 다시 확인한 정확한 형태다. 경사면 자체는 밴드가
-			-- 표현할 수 없는 구간이라 스폰 대상에서 자연히 빠지고(밴드는 고정 Y만 쓰므로), 바닥과
-			-- 언덕 정상 평지 두 곳만 명시한다.
-			return {
-				{ y = -1.18, xMin = -7.07, xMax = 7.07 },   -- 바닥
-				{ y = 2.42, xMin = -3.15, xMax = 1.35 },    -- 언덕 정상 평지
-			}
 		elseif mapIndex == 9 then
 			-- 맵9는 우측에 장식용 절벽 발판(계단식, y≈2.6~4.6)이 따로 있는데 이건 배경 연출 전용이라
 			-- 밴드를 바닥 하나로만 명시해서 몬스터가 그 위로는 절대 스폰되지 않게 한다
@@ -483,8 +487,52 @@ script MonsterSpawner extends Logic
 			return {
 				{ y = -1.18, xMin = -7.07, xMax = 7.07 },   -- 바닥만
 			}
+		elseif mapIndex == 32 then
+			-- 존32(재규어, 지상형)엔 바닥 외에 공중 발판(월드 x15.42~18.78, y1.05)도 있고, 여긴 맵9
+			-- (장식 전용이라 바닥만 남긴 케이스)와 달리 실제로 몹이 올라가도 되는 발판이다 — "발판에는
+			-- 다 몹이 나와야 한다"는 요구사항. 맵4/5/6과 동일한 다중 밴드 패턴으로 바닥+공중 둘 다 후보에
+			-- 넣고 폭 비례 확률로 고른다. xMin/xMax는 로컬(오프셋 전) 좌표라 실측 월드값에서 offsetX(15.5)를
+			-- 뺐다: 15.42-15.5=-0.08, 18.78-15.5=3.28.
+			return {
+				{ y = -1.35, xMin = -7.08, xMax = 7.08 },   -- 바닥
+				{ y = 1.05, xMin = -0.08, xMax = 3.28 },    -- 공중 발판
+			}
+		elseif mapIndex == 33 then
+			-- 존33(재규어, 2번째 종)도 마찬가지 — 공중 발판이 화면 안전범위 대부분을 덮을 만큼 넓다.
+			-- 실측(getFootholds 재조회, groupID 7): 월드 x25.32~38.58, y=1.05 (이전에 y=1.65/x27.12~36.78로
+			-- 잘못 잡았던 값 — 유저 지적으로 재조사해 발견, foothold Id 자체도 리네임 이후 재인덱싱돼
+			-- 바뀌었다). 로컬 좌표 = 월드값 - offsetX(31.0): 25.32-31.0=-5.68, 38.58-31.0=7.58.
+			-- 비행형(바나나갈매기)은 이 밴드 이전에 GetMapIsFlyingSpecies 분기에서 이미 걸러지므로
+			-- 이 밴드는 지상형 2번째 종(재규어)에게만 적용된다.
+			return {
+				{ y = -1.35, xMin = -7.08, xMax = 7.08 },   -- 바닥
+				{ y = 1.05, xMin = -5.68, xMax = 7.58 },    -- 공중 발판
+			}
+		elseif mapIndex == 31 then
+			-- 존31(루팡, 원거리)도 "발판에는 다 몹이 나와야 한다"는 기본 원칙 그대로 적용 — 원거리는
+			-- 공격 연출/이펙트 얘기지 스폰 위치를 특정 발판 하나로 고정하라는 뜻이 아니었다. 바닥 + 존31에
+			-- 있는 공중 발판 2개(둘 다 실측, groupID 3/4) 전부를 후보로 넣는다. 로컬 좌표(offsetX=0이라
+			-- 월드값과 동일): 그룹3 x-5.28~-3.72 y0.45, 그룹4 x-0.78~1.68 y1.05(이전엔 이 발판만 "고정
+			-- 타일섬"으로 단독 사용했었다 — GetRangedTileRange(31)은 이제 이 밴드 경로에 가려져 안 쓰인다).
+			return {
+				{ y = -1.35, xMin = -7.08, xMax = 7.08 },   -- 바닥
+				{ y = 0.45, xMin = -5.28, xMax = -3.72 },   -- 공중 발판1
+				{ y = 1.05, xMin = -0.78, xMax = 1.68 },    -- 공중 발판2
+			}
+		elseif mapIndex == 34 then
+			-- 존34(바나나갈매기[비행형, 이 밴드 이전에 이미 걸러짐]/좀비루팡[원거리])도 동일 원칙.
+			-- 실측 결과 존34 바닥은 전 구간 평평하지 않다 — x47.25~48.15 구간에서 y=-1.35→-0.75로
+			-- 경사가 올라갔다가 x51.75~52.65에서 다시 내려온다(둔덕). 경사 구간 자체는 착지 높이가
+			-- 애매해서 빼고, 평평한 두 구간(낮은 바닥/둔덕 위)을 별개 밴드로 나눴다. 공중 발판(groupID 6,
+			-- x42.42~46.68 y1.05)은 좀비루팡의 기존 "고정 타일섬"과 동일 좌표 — GetRangedTileRange(34)는
+			-- 이제 이 밴드 경로에 가려져 안 쓰인다.
+			return {
+				{ y = -1.35, xMin = -7.08, xMax = 0.75 },   -- 바닥(낮은 구간, 경사 전까지)
+				{ y = -0.75, xMin = 1.65, xMax = 7.08 },    -- 바닥(둔덕 위 평평한 구간)
+				{ y = 1.05, xMin = -4.08, xMax = 0.18 },    -- 공중 발판
+			}
 		end
-		-- 존13~15는 더 이상 하드코딩 밴드를 쓰지 않는다 — GetSpawnPositionFromFootholds가 FootholdComponent를
+		-- 존8/13~15는 더 이상 하드코딩 밴드를 쓰지 않는다 — GetSpawnPositionFromFootholds가 FootholdComponent를
 		-- 직접 레이캐스트해서 실제 발판을 찾는다(위 주석 "존13~15 전용 스폰 방식" 참고).
 		return nil
 	end
@@ -685,18 +733,30 @@ script MonsterSpawner extends Logic
 		return math.abs(seg.EndPoint.y - seg.StartPoint.y) <= self.FlatSlopeTolerance
 	end
 
-	-- 이 맵(mapIndex)에 있는 모든 발판을 한 번 훑어서 최저 Y(=바닥 기준선)를 구하고 캐시한다. 이 값보다
+	-- 이 존(mapIndex)의 X 범위 안에 있는 발판만 훑어서 최저 Y(=바닥 기준선)를 구하고 캐시한다. 이 값보다
 	-- AerialHeightThreshold 이상 높은 발판을 "공중 발판"으로 취급해 edgeMargin을 더 크게 적용한다.
+	-- ⚠ 병합된 물리 파일(예: map07이 존7/8/9/10을 한 FootholdComponent에 다 갖고 있음) 전체를 스캔하면
+	-- 안 된다 — 다른 존의 장식용 깊은 구덩이(예: 존8 아치 밑 수직굴, y≈-4.5)까지 최저Y 계산에 섞여
+	-- 이 존 자신의 실제 바닥(-1.18)보다 훨씬 낮은 값이 잡히는 문제가 있었다(실측 확인). 그러면 진짜
+	-- 바닥이 "공중 발판"으로 오판되고, 후보가 하나도 없을 때의 폴백 좌표(Vector3(offsetX, baselineY, 0))가
+	-- 엉뚱하게 그 구덩이 안에 찍힌다. 그래서 이 존 자신의 X 범위(오프셋 ± 존 폭 여유 8)로 스캔을 한정한다.
 	@ExecSpace("ServerOnly")
 	method number GetBaselineGroundY(integer mapIndex, FootholdComponent footholdComp)
 		if self._baselineGroundYCache == nil then self._baselineGroundYCache = {} end
 		if self._baselineGroundYCache[mapIndex] ~= nil then return self._baselineGroundYCache[mapIndex] end
 
+		local offsetX = self:GetZoneOffsetX(mapIndex)
+		local scanMin = offsetX - 8
+		local scanMax = offsetX + 8
+
 		local all = footholdComp:GetFootholdAll()
 		local minY = 0
 		for i = 1, #all do
-			if all[i].StartPoint.y < minY then minY = all[i].StartPoint.y end
-			if all[i].EndPoint.y < minY then minY = all[i].EndPoint.y end
+			local seg = all[i]
+			if seg.StartPoint.x >= scanMin and seg.StartPoint.x <= scanMax then
+				if seg.StartPoint.y < minY then minY = seg.StartPoint.y end
+				if seg.EndPoint.y < minY then minY = seg.EndPoint.y end
+			end
 		end
 		self._baselineGroundYCache[mapIndex] = minY
 		return minY
@@ -807,7 +867,17 @@ script MonsterSpawner extends Logic
 
 		-- 존13~15는 하드코딩 밴드 대신 실제 FootholdComponent를 레이캐스트하는 방식을 쓴다(§"존13~15 전용
 		-- 스폰 방식" 참고) — 발판을 Maker에서 편집해도 코드가 어긋나지 않는다.
-		if mapIndex >= 13 and mapIndex <= 15 then
+		-- 존8도 같은 방식으로 옮겼다(2026-07-21) — 유저가 지형을 "완만한 언덕"에서 "아치(기둥+지붕,
+		-- 기둥 밑동에 바닥이 끊긴 구덩이 2곳)"로 바꿨는데, 하드코딩 밴드(GetZonePlatformBands)는 여전히
+		-- "바닥 전체가 평평하다"고 가정해서 그 구덩이 안에도 몬스터를 스폰시키는 버그가 있었다(실측 확인,
+		-- 스크린샷으로 위치 확인). 밴드를 수동으로 고치는 대신 이 라이브 레이캐스트 방식으로 옮겨서,
+		-- 앞으로 존8 지형을 또 바꿔도 코드를 다시 맞출 필요가 없게 한다.
+		-- 존28도 같은 이유로 추가(2026-07-21) — 기둥 두 개(x=14.51/15.27) 사이를 잇는 좁은 공중 다리
+		-- 발판(폭 0.76)이 있는데, 기존 방식(무작위 X 하나 뽑고 그 자리 아래로 레이캐스트)은 허공에 빠지는
+		-- 버그는 아니었지만(다리가 항상 걸림) 넓은 랜덤 범위 대비 다리 폭이 좁아 그 위에 스폰될 확률이
+		-- 낮았다 — 몬스터가 "안 뜨는 것처럼" 보이는 원인. GetFlatRuns가 다리 구간도 별도 run으로 인식해
+		-- 폭 비례 확률로 골라주므로 이쪽으로 옮기면 다리 위에도 고르게 스폰된다.
+		if (mapIndex >= 13 and mapIndex <= 15) or mapIndex == 8 or mapIndex == 28 then
 			return self:GetSpawnPositionFromFootholds(mapIndex, isBoss, map)
 		end
 
@@ -817,7 +887,8 @@ script MonsterSpawner extends Logic
 			local offsetX = self:GetZoneOffsetX(mapIndex)
 
 			if not isBoss and mapIndex >= 7 and speciesIdx > 0 and self:GetMapIsRangedSpecies(mapIndex, speciesIdx) then
-				local rrx = self.RangedTileMinX + _UtilLogic:RandomDouble() * (self.RangedTileMaxX - self.RangedTileMinX)
+				local range = self:GetRangedTileRange(mapIndex)
+				local rrx = range.minX + _UtilLogic:RandomDouble() * (range.maxX - range.minX)
 				return Vector3(rrx, self:GetGroundY(rootMap, rrx), 0)
 			end
 

@@ -1,0 +1,125 @@
+@Logic
+script NinjaStatuePuzzleLogic extends Logic
+
+	-- 존27 이스터에그: 석상 3개(object-2032_1/_5/_6, map19 실측 UUID 직접 주입)를 터치할 때마다 좌우로
+	-- 반전(FlipX 토글)된다. 3개 다 오른쪽(>)을 보게 맞추면 object-1602_1/_2 사이(공중 shrine 발판 부근)에
+	-- "얄미운 미니무르"(무한체력 비행 유닛)가 등장한다. 게임당 1번만 — Triggered로 막고, GameManager.
+	-- RestartGame()이 ResetForNewRun()을 호출해야만 다시 도전할 수 있다("이어하기"는 건드리지 않음,
+	-- Zone21AlienEasterEggLogic과 동일한 정책).
+	--
+	-- ⚠ 애초에 별도의 Statue1Right/2Right/3Right @Sync bool로 "지금까지 홀수 번 눌렀는지"를 따로
+	-- 추적했었는데, 실측해보니 이 석상 스프라이트는 FlipX=false(기본/미터치 상태)일 때 이미 오른쪽(>)을
+	-- 보고 있었다(=원본 그림 자체가 오른쪽) — 즉 "누른 횟수 홀짝"과 "지금 실제로 오른쪽을 보는지"가
+	-- 서로 반대로 매핑되어 있었고, 그 결과 "한 석상을 눌러서 도로 <로 만들어도 트리거는 이미 저장된
+	-- 값 그대로 작동하는 것처럼 보인다"는 버그가 났다(유저 실측 확인). 별도 bool을 아예 없애고, 매번
+	-- SpriteRendererComponent.FlipX를 직접 읽어 "지금 이 순간 진짜로 오른쪽을 보고 있는지"만 판정하도록
+	-- 바꿔서 이런 종류의 "캐시된 값이 실제 화면과 어긋나는" 버그 자체가 구조적으로 불가능하게 만든다.
+	@Sync property boolean Triggered = false
+
+	property Entity Statue1 = "60b6f929-3aba-4578-b632-092dca22c5be"  -- object-2032_1
+	property Entity Statue2 = "81a646e0-f5c0-41ea-b2ad-e5f2b1b863cf"  -- object-2032_5
+	property Entity Statue3 = "842b5f46-57f2-4b40-8829-a7f7e9441beb"  -- object-2032_6
+
+	-- object-1602_1(x=0.4777,y=2.6754)/object-1602_2(x=0.4902,y=1.7739) 사이 중간점(map19 로컬 좌표,
+	-- 존27은 container=nil이라 map19 루트 기준 로컬==월드)
+	property number SpawnX = 0.484
+	property number SpawnY = 2.225
+	property integer SpawnZoneIndex = 27
+
+	property string MiniMooreStandRUID = "8726a0aa38c74470a4106ddb93298071"
+	property string MiniMooreMoveRUID = "c71958a19dc446be8c5398e6d5f31858"
+
+	-- NinjaStatueTouch.RequestTouch()가 호출 — statueIndex: 1/2/3. 누를 때마다 FlipX를 직접 토글하고,
+	-- 그 즉시 3개 전부의 "지금 실제 상태"를 다시 읽어 판정한다(캐시된 값에 의존하지 않음).
+	@ExecSpace("ServerOnly")
+	method void OnStatueTouched(integer statueIndex)
+		if self.Triggered then return end
+
+		local statue = self:GetStatueByIndex(statueIndex)
+		if not isvalid(statue) then return end
+		local r = statue.SpriteRendererComponent
+		if r == nil then return end
+		r.FlipX = not r.FlipX
+
+		log("NinjaStatuePuzzle: statue " .. statueIndex .. " toggled, now facingRight=" .. tostring(self:IsFacingRight(statue)))
+
+		if self:IsFacingRight(self.Statue1) and self:IsFacingRight(self.Statue2) and self:IsFacingRight(self.Statue3) then
+			self:TriggerEasterEgg()
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method Entity GetStatueByIndex(integer statueIndex)
+		if statueIndex == 1 then return self.Statue1
+		elseif statueIndex == 2 then return self.Statue2
+		elseif statueIndex == 3 then return self.Statue3
+		else return nil end
+	end
+
+	-- ⚠ 실측해보니 이 3개 석상이 전부 같은 방식으로 원본 방향을 잡고 있는 게 아니었다 — object-2032_6은
+	-- 맵 저작 당시 FlipX가 아니라 TransformComponent.Scale.x를 음수(-0.728)로 줘서 좌우 반전시켜 놨고,
+	-- object-2032_1/_5는 양수 Scale.x(그대로)였다(유저가 스크린샷으로 "초기 상태에서 1개는 >, 2개는 <"
+	-- 라고 실측 확인해줌 — 3개가 전부 같은 원본 방향이라는 이전 가정 자체가 틀렸었다). 그래서 FlipX 값
+	-- 하나만으로는 이 3개를 동일한 기준으로 판정할 수 없고, "Scale.x 부호로 이미 뒤집혀 있는지"와
+	-- "FlipX로 추가로 뒤집었는지"를 XOR로 합쳐야 진짜 화면 방향이 나온다. 원본 그림 자체는 왼쪽을 보고
+	-- 있어서(Scale.x<0 인 하나만 초기 상태에서 오른쪽으로 보였으므로) "한 번 뒤집힌 상태"가 오른쪽이다.
+	@ExecSpace("ServerOnly")
+	method boolean IsFacingRight(Entity statue)
+		if not isvalid(statue) then return false end
+		local r = statue.SpriteRendererComponent
+		if r == nil then return false end
+		local scaleMirrored = statue.TransformComponent.Scale.x < 0
+		local flippedOnce = (scaleMirrored ~= r.FlipX)  -- boolean XOR
+		return flippedOnce
+	end
+
+	@ExecSpace("ServerOnly")
+	method void TriggerEasterEgg()
+		self.Triggered = true
+		_UIToast:ShowMessage("얄미운 미니무르가 등장했다!")
+		self:SpawnMiniMoore()
+		log("NinjaStatuePuzzle: triggered!")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SpawnMiniMoore()
+		local map = _MonsterSpawner:GetZoneEntity(self.SpawnZoneIndex)
+		if map == nil then
+			log_error("NinjaStatuePuzzle: zone entity not found")
+			return
+		end
+		local worldPos = Vector3(self.SpawnX, self.SpawnY, 0)
+		local localPos = _MonsterSpawner:ToLocalSpawnPos(map, worldPos)
+
+		local entity = _SpawnService:SpawnByModelId(_MonsterSpawner.MonsterModelId, "MiniMoore", localPos, map)
+		if entity == nil then
+			log_error("NinjaStatuePuzzle: SpawnByModelId failed")
+			return
+		end
+
+		---@type MonsterAI
+		local ai = entity:GetComponent("script.MonsterAI")
+		if ai ~= nil then
+			ai:InitializeMiniMoore(self.SpawnZoneIndex, self.MiniMooreStandRUID, self.MiniMooreMoveRUID)
+		end
+		log("NinjaStatuePuzzle: mini moore spawned")
+	end
+
+	-- GameManager.RestartGame()이 호출 — 새 런에서는 석상을 다시 맞춰 재도전할 수 있다.
+	-- 물리적 석상 방향도 원래 상태(FlipX=false=원본 오른쪽)로 되돌린다("이어하기"는 건드리지 않음).
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		self.Triggered = false
+		self:SetFlipX(self.Statue1, false)
+		self:SetFlipX(self.Statue2, false)
+		self:SetFlipX(self.Statue3, false)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SetFlipX(Entity statue, boolean flipX)
+		if not isvalid(statue) then return end
+		local r = statue.SpriteRendererComponent
+		if r ~= nil then r.FlipX = flipX end
+	end
+
+end
