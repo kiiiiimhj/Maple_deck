@@ -21,6 +21,9 @@ script GameOverUI extends Logic
 	-- 버튼 이미지와 완전히 분리된 라벨 텍스트(유저가 이미지/텍스트 위치를 독립적으로 조정할 수 있게)
 	property TextComponent restartLabelText = "4f56cf6f-f92d-4b00-bb27-acaf0570b0df"
 	property TextComponent continueLabelText = "60406bc4-8f21-491f-9520-02e43ea5a010"
+	-- 타임어택 20분 오버타임(절망의 칼날) 도중 죽었을 때만 노출되는 전용 "다시하기" — 이어하기/
+	-- 다시하기 버튼 사이(중앙)에 위치. 그 순간엔 원래 두 버튼을 숨기고 이것만 보여준다.
+	property ButtonComponent btnRestartOvertime = "e4d263f1-004c-49b3-b97b-cab030ab1b1c"
 
 	property integer itemSlotCount = 26
 	property number scrollableRangePx = 670
@@ -30,6 +33,7 @@ script GameOverUI extends Logic
 	property any _continueHandler = nil
 	property any _closeHandler = nil
 	property any _restartHandler = nil
+	property any _restartOvertimeHandler = nil
 	property any _dragHandler = nil
 	property any _scrollBarHandler = nil
 	property boolean _syncingScrollBar = false
@@ -41,6 +45,7 @@ script GameOverUI extends Logic
 		self._continueHandler = self.btnContinue.Entity:ConnectEvent(ButtonClickEvent, self.OnContinueClicked)
 		self._closeHandler = self.btnClose.Entity:ConnectEvent(ButtonClickEvent, self.OnCloseClicked)
 		self._restartHandler = self.btnRestart.Entity:ConnectEvent(ButtonClickEvent, self.OnRestartClicked)
+		self._restartOvertimeHandler = self.btnRestartOvertime.Entity:ConnectEvent(ButtonClickEvent, self.OnRestartOvertimeClicked)
 		self._dragHandler = self.itemScrollTouchArea:ConnectEvent(UITouchDragEvent, self.OnScrollDrag)
 		self._scrollBarHandler = self.itemScrollBar.Entity:ConnectEvent(SliderValueChangedEvent, self.OnScrollBarChanged)
 		log("GameOverUI started")
@@ -70,6 +75,7 @@ script GameOverUI extends Logic
 		self.statsText.Text = "Wave " .. _GameManager.Wave .. "  |  Lv." .. _GameManager.Level
 		self:RefreshScore()
 		self:RefreshContinueButton()
+		self:RefreshOvertimeButtons()
 		self.gameOverGroup.Enable = true
 		self.itemList.ScrollLayoutGroupComponent:SetScrollNormalizedPosition(UITransformAxis.Horizontal, 0)
 		self:SyncScrollBar(0)
@@ -151,9 +157,27 @@ script GameOverUI extends Logic
 
 	@ExecSpace("ClientOnly")
 	method void OnRestartClicked()
-		-- 처음부터 다시 시작. 성공하면 GameOver가 false로 바뀌고 OnUpdate 폴링이 패널을 자동으로 닫는다
+		-- 처음부터 다시 시작. 성공하면 GameOver가 false로 바뀌고 OnUpdate 폴링이 패널을 자동으로 닫는다.
+		-- 새로 모드를 고르는 게 아니라 방금 끝난 런과 같은 모드로 그대로 재시작한다.
 		log("GameOverUI: Restart clicked")
-		_GameManager:RequestRestart()
+		_GameManager:RequestRestart(_GameManager.TimeAttackMode)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnRestartOvertimeClicked()
+		-- 이어하기/다시하기 사이에 뜨는 오버타임 전용 다시하기 — 동작은 OnRestartClicked와 동일하다.
+		log("GameOverUI: Restart(overtime) clicked")
+		_GameManager:RequestRestart(_GameManager.TimeAttackMode)
+	end
+
+	-- 타임어택 오버타임(절망의 칼날) 도중 죽었으면 이어하기/다시하기 버튼을 숨기고 중앙의 전용
+	-- 다시하기 버튼만 보여준다. 20분 전에 죽었으면 반대로 기존 두 버튼만 보여준다.
+	@ExecSpace("ClientOnly")
+	method void RefreshOvertimeButtons()
+		local overtime = _GameManager._timeAttackOvertimeDeath
+		self.btnContinue.Entity.Enable = not overtime
+		self.btnRestart.Entity.Enable = not overtime
+		self.btnRestartOvertime.Entity.Enable = overtime
 	end
 
 	@ExecSpace("ClientOnly")
@@ -183,6 +207,7 @@ script GameOverUI extends Logic
 		if self._continueHandler then self.btnContinue.Entity:DisconnectEvent(ButtonClickEvent, self._continueHandler) end
 		if self._closeHandler then self.btnClose.Entity:DisconnectEvent(ButtonClickEvent, self._closeHandler) end
 		if self._restartHandler then self.btnRestart.Entity:DisconnectEvent(ButtonClickEvent, self._restartHandler) end
+		if self._restartOvertimeHandler then self.btnRestartOvertime.Entity:DisconnectEvent(ButtonClickEvent, self._restartOvertimeHandler) end
 		if self._dragHandler then self.itemScrollTouchArea:DisconnectEvent(UITouchDragEvent, self._dragHandler) end
 		if self._scrollBarHandler then self.itemScrollBar.Entity:DisconnectEvent(SliderValueChangedEvent, self._scrollBarHandler) end
 	end
