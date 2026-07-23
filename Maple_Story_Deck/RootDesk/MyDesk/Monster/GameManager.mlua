@@ -105,6 +105,104 @@ script GameManager extends Logic
 	property Vector2 LootFlyTargetUI = Vector2(882, 316)
 	property ButtonComponent btnInventory = "22519eca-9947-4040-bbd4-45afb7d9f95a"
 
+	-- "얼음 파편" — 일반 몬스터 처치 시 2% 확률 드롭. 포션/잡템과 달리 가방에 들어가지 않고, 잡템보다
+	-- 훨씬 높이 튀어올랐다가 떨어진 뒤 아무 획득 연출 없이 그 자리에서 페이드아웃되며 사라진다.
+	-- 사라지는 즉시 전체 맵의 모든 몬스터를 얼려버리는 스킬이 발동한다(빙결스택과는 무관한 별도 효과).
+	property number FreezeItemDropChance = 0.01
+	property string FreezeItemIconRUID = "822e603fb3ed41e2a24560b65f896790"
+	property number GlobalFreezeDuration = 7.0
+	-- 발동 시점에 이미 존재하던 몬스터뿐 아니라, 지속시간 동안 새로 스폰되는 몬스터도 즉시 얼려야 한다
+	-- (유저 지적 — 웨이브가 계속 몬스터를 스폰하는 게임이라 스냅샷 한 번만으로는 부족함). GameManager.OnUpdate에서
+	-- 매 프레임 남은 시간을 깎고, MonsterAI.InitializeStats가 스폰 직후 이 값을 확인해 즉시 자가 적용한다.
+	property boolean _globalFreezeActive = false
+	property number _globalFreezeRemaining = 0
+	property SpriteGUIRendererComponent freezeItemFlyIcon = "d7ea0475-8257-4b7d-8959-2c3f04c66fd2"
+	property boolean _freezeItemFlyActive = false
+	-- 높이 솟았다 떨어지는 단일 홉(잡템의 3단 바운스보다 훨씬 높게) + 짧은 정지 + 페이드아웃 소요 시간
+	property number FreezeItemPopHeight = 170
+	property number FreezeItemPopDuration = 0.55
+	property number FreezeItemFadeDuration = 0.25
+	-- 사라지는 순간 special/0~3(14프레임짜리 4단계, 점점 커지는 확장 링)을 순서대로 재생해
+	-- "깨지면서 사라지는" 연출을 낸다 — 단순 페이드아웃 대신 사용.
+	property SpriteGUIRendererComponent freezeItemBurstIcon = "b2863132-3580-436b-96d1-45ac0803572e"
+	property boolean _freezeItemBurstEventWired = false
+	property integer _freezeItemBurstStage = 0
+	property any _freezeItemBurstRuids = { "5bcf8284c9e14037ba13ace4ab7d099f", "ee76aefb072a43bab7395f25dbdc3c45", "991c6d7a46314a9094f5cffc5cee85e8", "6c8c5d2b7a0c4d76b2d276a09bf5d629" }
+
+	-- 얼음 파편 발동 시 재생하는 전체화면 이펙트(skill/400011121 리소스팩) — 화면을 5조각(좌상/좌하/
+	-- 우상/우하/중앙)으로 나눠 어느 해상도에서도 이어지도록 되어 있다. 평소엔 꺼져 있다가 발동 순간에만
+	-- 잠깐 재생된다.
+	property SpriteGUIRendererComponent freezeScreenLeftUp = "b76de5df-15b3-45de-8384-211cc8e5952d"
+	property SpriteGUIRendererComponent freezeScreenLeftDown = "b0ead1dc-dabe-4788-92a8-a3c19b72d575"
+	property SpriteGUIRendererComponent freezeScreenRightUp = "9aa920d7-033e-432f-9727-ee3fe6a3aa3d"
+	property SpriteGUIRendererComponent freezeScreenRightDown = "bce9b9a6-3f16-4e7e-bb44-6a1b59b488bc"
+	property SpriteGUIRendererComponent freezeScreenMiddle = "2520ba9d-1be0-4db0-ad42-55aa9f20a7c9"
+	-- "back" 레이어(원본 591x456) — 다른 5조각보다 뒤에 깔리는 은은한 배경 글로우. 유저 확인 후 추가.
+	property SpriteGUIRendererComponent freezeScreenBack = "87c14a8c-5d02-4405-a816-056931a66ed2"
+	-- "effect"(세로 빛줄기, 원본 305x273) — 화면을 가득 채우도록 1920x1080으로 늘려서 화면 전체가
+	-- 번쩍이는 빛기둥처럼 보이게 한다(유저 지적 — 원본 크기 그대로면 너무 작다).
+	property SpriteGUIRendererComponent freezeScreenBeam = "d70cff4b-a6e5-47f1-bd87-5ec52effd11b"
+	property boolean _freezeScreenEffectActive = false
+	-- 원본 스킬 연출을 임의 시간에 맞춰 자르지 않고, 각 조각의 애니메이션이 실제로 끝나는 시점
+	-- (SpriteGUIAnimPlayerEndEvent)에 맞춰 그 조각만 숨긴다 — 5조각 모두 끝나야 재생 가드가 풀린다.
+	property integer _freezeScreenPiecesDone = 0
+	property boolean _freezeScreenEventsWired = false
+
+	-- "허수아비" — 일반 몬스터 처치 시 2% 확률 드롭. 얼음 파편과 동일한 "가방에 안 들어가고 그 자리에서
+	-- 높이 솟았다 사라짐" 연출을 쓰되, 사라지는 즉시 화면 가운데(바닥에 붙여서) 커다란 허수아비 1마리를
+	-- 5초간 소환해 그 시간 동안 몬스터의 공격을 플레이어 대신 흡수한다. 이미 소환되어 있는 중에 또
+	-- 드롭되면 재소환하지 않고 지속시간만 5초 연장한다.
+	property number ScarecrowItemDropChance = 0.01
+	property string ScarecrowItemIconRUID = "f34ff4c11b3144ec916d602c472128ce"
+	property SpriteGUIRendererComponent scarecrowItemFlyIcon = "2ecc91e7-fba7-4a52-bb5f-cd9ac37b2f32"
+	property boolean _scarecrowItemFlyActive = false
+
+	property number ScarecrowShieldDuration = 5.0
+	-- 존마다 독립적인 허수아비 — {[zoneIndex] = Entity} / {[zoneIndex] = timerId}. 예전엔 단일
+	-- 프로퍼티라 다른 존에 허수아비가 떠 있는 도중 다른 존에서 또 주우면 그 존 허수아비가 새로
+	-- 생기지 않고 엉뚱하게 저쪽 존 허수아비의 지속시간만 연장되는 버그가 있었다(유저 실측 지적).
+	property any _scarecrowEntities = nil
+	property any _scarecrowTimerIds = nil
+	property number ScarecrowHitFlashDuration = 0.15
+	property string ScarecrowStandRUID = "3a50e24de98c4b21aba7e77bd35c1459"
+	property string ScarecrowHitRUID = "6f0ed0aa357a4e4c966a8a61ac25e992"
+	property string ScarecrowDieRUID = "c99cb660401f462fae5e1ba90901718e"
+	-- 몬스터 Z는 1.5-scale 공식으로 0~0.65 범위(도달한 몬스터는 0) — 플레이어 WorldPosition의 Z를
+	-- 그대로 쓰면 도달한 몬스터와 같거나 뒤로 깔릴 수 있다(허리케인의 HurricaneDepthZ와 동일한 이유).
+	property number ScarecrowDepthZ = -1.0
+
+	-- 세번째 아이템 — "허리케인" 엔티티 1개가 소환되어 등장한 몬스터 사이를 실제로 이동해 다니며
+	-- 닿을 때마다 넉백시킨다(순간이동 아님, 실제로 화면을 가로질러 이동). 적이 하나도 없으면 제자리에서
+	-- 회전 연출만 계속한다. 5초 뒤 사라진다. 얼음 파편/허수아비와 합쳐 총 3%(각 1%)로 드롭 확률을 맞췄다.
+	property number BounceKnockbackItemDropChance = 0.10
+	property string BounceKnockbackItemIconRUID = "f17301cbfff544bfad2747f36d26b246"
+	property SpriteGUIRendererComponent bounceItemFlyIcon = "feda6625-9be2-4d5c-a569-3bbd3fb9f084"
+	property boolean _bounceItemFlyActive = false
+
+	property number BounceKnockbackDuration = 5.0
+	-- 넉백 시 되돌아가는 스케일 — 기존 썬더커터/더블커터 넉백(0.85, "맨 뒤로")과 동일한 값 재사용
+	property number BounceKnockbackScale = 0.85
+	-- 존마다 독립적인 허리케인 — {[zoneIndex] = ...}. 허수아비와 동일한 이유로 테이블화했다(예전엔
+	-- 단일 프로퍼티라 다른 존에 허리케인이 떠 있는 도중 다른 존에서 또 주우면 그 존에 새로 생기지
+	-- 않고 엉뚱하게 저쪽 존 허리케인의 지속시간만 연장되는 버그가 있었다 — 유저 지적).
+	property any _hurricaneEndTimerIds = nil
+
+	-- 허리케인 본체 — 스케일은 고정(깊이에 따라 커지지 않음), 초당 이동 속도(월드 유닛)와 "도달" 판정 거리
+	property any _hurricaneEntities = nil
+	property any _hurricaneTargets = nil
+	property number HurricaneMoveSpeed = 4.0
+	property number HurricaneReachDistance = 0.3
+	-- 이동 경로상에서 스쳐 지나가는 모든 몬스터를 넉백시키기 위한 판정 반경(타겟 도달 판정과 별개로,
+	-- 매 프레임 이 반경 안의 몬스터 전부를 확인한다) 및 몬스터별 재타격 쿨다운(같은 몬스터 옆에 계속
+	-- 머물러도 매 프레임 넉백이 반복되지 않도록)
+	property number HurricaneHitRadius = 0.5
+	property number HurricaneHitCooldown = 0.5
+	property any _hurricaneHitCooldownsByZone = nil
+	-- 허리케인은 항상 몬스터보다 앞에 그려져야 한다(몬스터 뒤에 깔리면 안 됨) — 이 게임은 Z가 작을수록
+	-- 앞이고(UpdateDepth 참고, 몬스터 Z는 1.5-scale 범위라 최소 0 근처) 항상 그보다 확실히 작은
+	-- 고정값을 쓴다.
+	property number HurricaneDepthZ = -1.0
+
 	-- 아이템 드롭 등장 Y 좌표 보정 (죽은 위치를 화면 좌표로 환산한 값에 더해 살짝 위로 띄운다)
 	property number DropYOffset = 60
 	-- 드롭(잡템/포션/카드 공용) 착지 지점 Y 보정 — 몬스터 사망 위치(WorldPosition)를 그대로 착지 좌표로
@@ -164,7 +262,32 @@ script GameManager extends Logic
 	property boolean _potionFlown = false
 
 	@ExecSpace("ServerOnly")
+	method void OnUpdate(number delta)
+		-- 존마다 독립적인 허리케인이 동시에 여러 개 활성화될 수 있으므로 전부 갱신한다.
+		if self._hurricaneEntities ~= nil then
+			local activeZones = {}
+			for zoneIdx, _ in pairs(self._hurricaneEntities) do table.insert(activeZones, zoneIdx) end
+			for i = 1, #activeZones do
+				self:UpdateHurricaneMovement(activeZones[i], delta)
+			end
+		end
+		if self._globalFreezeActive then
+			self._globalFreezeRemaining = self._globalFreezeRemaining - delta
+			if self._globalFreezeRemaining <= 0 then
+				self._globalFreezeActive = false
+				self._globalFreezeRemaining = 0
+			end
+		end
+	end
+
+	@ExecSpace("ServerOnly")
 	method void OnBeginPlay()
+		self._scarecrowEntities = {}
+		self._scarecrowTimerIds = {}
+		self._hurricaneEntities = {}
+		self._hurricaneTargets = {}
+		self._hurricaneEndTimerIds = {}
+		self._hurricaneHitCooldownsByZone = {}
 		self.PlayerHp = self.PlayerMaxHp
 		self.Exp = 0
 		self.ExpNeeded = 100
@@ -845,7 +968,12 @@ script GameManager extends Logic
 			[20] = {0.75, 0.75},  -- 다크 스톤골렘(7프레임)/페어리(7프레임)
 			[21] = {0.75, 0.75},  -- 믹스골렘(7프레임)/아이스 믹스골렘(7프레임)
 			[22] = {0.75, 0.75},  -- 로얄 페어리(7프레임)/아이스 믹스골렘(7프레임)
-			[23] = {0.75, 0.75},  -- 반딧불 슬라임(7프레임)/페어리 슬라임(7프레임)
+			-- 반딧불 슬라임/페어리 슬라임: 7프레임 공식값(0.05+0.1*7=0.75)이 실제 재생시간보다 살짝 길어서,
+			-- 알파 0(루프 방지) 타이머가 발동하기 전에 die1 클립이 한 바퀴 돌아 처음 프레임으로 돌아가
+			-- "죽었다가 다시 나오려는" 것처럼 잠깐 보이는 버그가 있었다(유저 리포트) — 실측 재생속도가
+			-- 가정한 10fps보다 살짝 빠른 클립으로 추정된다. 공식값보다 확실히 낮은 값으로 낮춰 루프가
+			-- 시작되기 전에 항상 알파 0이 걸리게 한다.
+			[23] = {0.6, 0.6},  -- 반딧불 슬라임(7프레임)/페어리 슬라임(7프레임)
 			[24] = {1.15, 1.15},  -- 워터 엘리먼트(11프레임)/트리 엘리먼트(11프레임)
 			[25] = {1.15, 1.25},  -- 미스틱 위습(11프레임)/하급 마법책(12프레임)
 			[26] = {1.15, 0.75, 1.15},  -- 워터 엘리먼트(11프레임)/페어리 슬라임(7프레임)/미스틱 위습(11프레임)
@@ -975,6 +1103,15 @@ script GameManager extends Logic
 	method void OnMonsterReached(number dmgMultiplier)
 		if self.GameOver then return end
 		if self._hitImmune then return end
+
+		-- 허수아비가 소환되어 있는 동안은 몬스터의 공격을 플레이어 대신 허수아비가 맞는다 —
+		-- 플레이어 HP는 전혀 깎이지 않고, 허수아비만 맞는 연출을 재생한다. 존마다 독립적이므로
+		-- 지금 플레이어가 있는 존의 허수아비만 확인한다(다른 몬스터는 도달 자체를 못 함).
+		local zoneScarecrow = self._scarecrowEntities ~= nil and self._scarecrowEntities[_MapManager.CurrentMapIndex] or nil
+		if isvalid(zoneScarecrow) then
+			self:PlayScarecrowHitFlash(zoneScarecrow)
+			return
+		end
 
 		self._hitImmune = true
 		local dmg = math.floor(self:GetWaveAttack(self.Wave) * dmgMultiplier)
@@ -1425,6 +1562,609 @@ script GameManager extends Logic
 			icon.Entity.UITransformComponent.ZRotation = 0
 			if onGrounded ~= nil then onGrounded(groundUI) end
 		end, duration)
+	end
+
+	-- "얼음 파편" 드롭 판정 — 존16~17(야누스의 검 교환권 전용) 포함 전 구간에서 일반 몬스터 처치 시
+	-- 2% 확률로 굴린다. 가방에 들어가지 않으므로 ReserveAcquisitionOrder/AddItem 절차가 필요 없다.
+	@ExecSpace("ServerOnly")
+	method void TryDropFreezeItem(Vector3 worldPos, number fallHeight, number groundWorldY, number dropScale)
+		if self.GameOver then return end
+		if _UtilLogic:RandomDouble() >= self.FreezeItemDropChance then return end
+		log("FreezeItem dropped (2% roll hit)")
+		self:ScheduleFreezeItemDrop(worldPos, fallHeight, groundWorldY, dropScale)
+	end
+
+	-- 낙하 연출이 끝나는 시점에 맞춰 전체 빙결 효과를 발동한다. 포션/잡템과 동일한 "존 이탈 시 조기
+	-- 적용" 안전장치는 필요 없다 — 획득 연출이 아니라 그 자리에서 사라지며 발동하는 효과라 존 이동
+	-- 여부와 무관하게 항상 같은 시점에 적용되면 된다.
+	@ExecSpace("ServerOnly")
+	method void ScheduleFreezeItemDrop(Vector3 worldPos, number fallHeight, number groundWorldY, number dropScale)
+		-- 아이템이 사라지는 시점과 실제 효과 발동 시점이 너무 떨어져 있으면 인지가 안 된다는 지적 —
+		-- 낙하시간/연출시간과 무관하게 고정 0.5초 뒤 발동한다.
+		local arrivalDelay = 0.5
+
+		_TimerService:SetTimerOnce(function()
+			if isvalid(self) then self:TriggerGlobalFreeze() end
+		end, arrivalDelay)
+
+		self:PlayFreezeItemDropVisual(Vector2(worldPos.x, worldPos.y), fallHeight, groundWorldY, dropScale)
+	end
+
+	@ExecSpace("Multicast")
+	method void PlayFreezeItemDropVisual(Vector2 worldPos, number fallHeight, number groundWorldY, number dropScale)
+		-- 사망 위치에서 잡템보다 훨씬 높이 한 번 솟았다가 떨어진 뒤, 아무 곳으로도 날아가지 않고
+		-- 그 자리에서 페이드아웃되며 사라진다(획득 연출 없음). 비행형 몬스터는 다른 드롭과 동일하게
+		-- 바닥 높이까지 먼저 빙그르르 돌며 떨어진 뒤 이어서 높이 솟는 홉을 재생한다.
+		if self:IsServer() then return end
+		if self._freezeItemFlyActive then return end
+		self._freezeItemFlyActive = true
+
+		local rawUI = _UILogic:ScreenToUIPosition(_UILogic:WorldToScreenPosition(worldPos))
+		local startUI = Vector2(rawUI.x, rawUI.y + self.DropYOffset)
+		local icon = self.freezeItemFlyIcon
+		icon.ImageRUID = self.FreezeItemIconRUID
+		icon.Color = Color(1, 1, 1, 1)
+		icon.Entity:SetEnable(true)
+		local tc = icon.Entity.UITransformComponent
+		tc.anchoredPosition = startUI
+		tc.Scale = Vector3(1.25 * dropScale, 1.25 * dropScale, 1)
+
+		local landYCorrection = self:GetDropLandYCorrection(dropScale)
+
+		local doHighPop = function(fromUI)
+			self:PlayHop(icon, fromUI, fromUI, self.FreezeItemPopHeight, self.FreezeItemPopDuration, function()
+				-- 페이드아웃 대신 special/0~3(점점 커지는 확장 링)을 순서대로 재생해 "깨지면서
+				-- 사라지는" 연출을 낸다.
+				if isvalid(icon) then icon.Entity:SetEnable(false) end
+				self._freezeItemFlyActive = false
+				self:PlayFreezeItemBurst(fromUI)
+				self:PlayGlobalFreezeScreenEffect()
+			end)
+		end
+
+		if fallHeight > 0 then
+			local groundUI = _UILogic:ScreenToUIPosition(_UILogic:WorldToScreenPosition(Vector2(worldPos.x, groundWorldY)))
+			groundUI = Vector2(groundUI.x, groundUI.y + landYCorrection)
+			self:PlayFallSpin(icon, startUI, groundUI, fallHeight, doHighPop)
+		else
+			doHighPop(Vector2(rawUI.x, rawUI.y + landYCorrection))
+		end
+	end
+
+	-- special/0~1~2~3을 순서대로 재생한다(각 14프레임, 점점 커지는 확장 링) — 한 엔티티에 RUID만
+	-- 갈아끼우며 재생하고, 매번 껐다 켜서 Onetime을 처음부터 다시 돌린다. 종료 이벤트 연결은 최초 1회만.
+	@ExecSpace("Multicast")
+	method void PlayFreezeItemBurst(Vector2 screenPos)
+		if self:IsServer() then return end
+		local icon = self.freezeItemBurstIcon
+		if not isvalid(icon) then return end
+
+		if not self._freezeItemBurstEventWired then
+			self._freezeItemBurstEventWired = true
+			icon.Entity:ConnectEvent(SpriteGUIAnimPlayerEndEvent, function()
+				self:OnFreezeItemBurstStageEnd()
+			end)
+		end
+
+		icon.Entity.UITransformComponent.anchoredPosition = screenPos
+		self._freezeItemBurstStage = 1
+		icon.ImageRUID = self._freezeItemBurstRuids[1]
+		icon.Entity:SetEnable(false)
+		icon.Entity:SetEnable(true)
+		icon.Color = Color(1, 1, 1, 1)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnFreezeItemBurstStageEnd()
+		local icon = self.freezeItemBurstIcon
+		self._freezeItemBurstStage = self._freezeItemBurstStage + 1
+		if self._freezeItemBurstStage > #self._freezeItemBurstRuids then
+			if isvalid(icon) then icon.Entity:SetEnable(false) end
+			-- 안전장치 — 아래 마지막 조각 진입 시점의 0.57초 타이머가 어떤 이유로든 못 걸렸을
+			-- 경우를 대비해, 여기서도 한 번 더 꺼준다(이미 꺼져있으면 무해).
+			if isvalid(self.freezeScreenMiddle) then self.freezeScreenMiddle.Entity:SetEnable(false) end
+			return
+		end
+		if isvalid(icon) then
+			icon.ImageRUID = self._freezeItemBurstRuids[self._freezeItemBurstStage]
+			icon.Entity:SetEnable(false)
+			icon.Entity:SetEnable(true)
+			icon.Color = Color(1, 1, 1, 1)
+			if self._freezeItemBurstStage == #self._freezeItemBurstRuids then
+				-- 실측: 조각 1개당 재생시간 약 0.87초, 화면 중앙 눈꽃결정(freezeScreenMiddle)은
+				-- 원본 클립이 훨씬 길어서(8초 넘게도 자연 종료 이벤트가 안 옴) 파편이 다 끝나는
+				-- 시점에 맞춰 강제로 꺼도 유저 체감상 0.3초 정도 늦게 사라졌다 — 마지막 조각이
+				-- 시작되고 0.57초(=0.87-0.3) 뒤, 그 조각이 끝나길 기다리지 않고 미리 꺼서
+				-- 파편이 사라지는 타이밍과 맞춘다.
+				_TimerService:SetTimerOnce(function()
+					if isvalid(self.freezeScreenMiddle) then self.freezeScreenMiddle.Entity:SetEnable(false) end
+				end, 0.57)
+			end
+		end
+	end
+
+	-- 전 맵의 모든 몬스터(일반/엘리트/보스/보너스보스)를 GlobalFreezeDuration 동안 완전 빙결시킨다.
+	-- 플레이어가 지금 어느 존에 있는지와 무관하게, 스폰되어 있는 모든 몬스터 엔티티를 대상으로 한다.
+	@ExecSpace("ServerOnly")
+	method void TriggerGlobalFreeze()
+		log("TriggerGlobalFreeze: freezing all monsters for " .. self.GlobalFreezeDuration .. "s")
+		-- 재적용 시에도(이미 얼어있는 도중 또 밟아도) 남은 시간을 그냥 최대치로 갱신한다 — 스폰 감시
+		-- 창(OnUpdate)이 계속 켜져 있어야 그 사이 새로 스폰되는 몬스터도 즉시 얼릴 수 있다.
+		self._globalFreezeActive = true
+		self._globalFreezeRemaining = self.GlobalFreezeDuration
+		-- 실측 확인: _EntityService:GetEntitiesSpawnedByModelId(...)가 런타임에 SpawnByModelId로 스폰된
+		-- 몬스터를 단 한 마리도 찾지 못했다(방금 스폰한 5마리로 직접 재현 — 항상 0개 반환) — "이미
+		-- 있던 몬스터가 안 언다"는 버그의 진짜 원인은 이 함수 전체가 사실상 no-op이었던 것.
+		-- HurricaneSweepHit과 동일하게 존 컨테이너의 자식 트리를 직접 훑는 방식으로 교체한다 —
+		-- 이쪽은 실제로 몬스터를 찾아낸다는 게 이미 확인됐다. 보너스 보스는 이 방식이면 자동으로
+		-- 걸리지 않는다(MonsterAI가 아니라 별도 모델/컴포넌트라서가 아니라, 같은 컴포넌트라도
+		-- _isBonusBoss 체크로 명시적으로 제외해야 하므로 아래에서 따로 건너뛴다).
+		local maxZone = _MapManager:GetMaxZoneIndex()
+		for zoneIdx = 1, maxZone do
+			local map = _MonsterSpawner:GetZoneEntity(zoneIdx)
+			if map ~= nil then
+				local monsters = map:GetChildComponentsByTypeName("script.MonsterAI", false)
+				for i = 1, #monsters do
+					---@type MonsterAI
+					local ai = monsters[i]
+					if not ai._isBonusBoss then ai:ApplyHardFreeze(self.GlobalFreezeDuration) end
+				end
+			end
+		end
+		self:PlayGlobalFreezeScreenEffect()
+	end
+
+	-- skill/400011121의 7조각 화면 이펙트를 원본 그대로 재생한다 — TriggerGlobalFreeze(서버)와 드롭
+	-- 연출 종료(클라이언트) 양쪽에서 부를 수 있다. 이미 재생 중일 때 또 주우면(효과 진행 중에 또
+	-- 밟았을 때) 처음부터 다시 재생하지 않는다 — 유저 정정: 재생 중 재시작 자체가 어색하니, 이미
+	-- 재생 중이면 그냥 첫 번째 재생이 끝까지 이어지게 두고 새로 트리거하지 않는다(빙결 지속시간
+	-- 연장 등 실제 효과는 TriggerGlobalFreeze 쪽에서 이 함수 호출과 무관하게 항상 갱신된다).
+	@ExecSpace("Multicast")
+	method void PlayGlobalFreezeScreenEffect()
+		if self:IsServer() then return end
+		if self._freezeScreenEffectActive then return end
+		self._freezeScreenEffectActive = true
+		self._freezeScreenPiecesDone = 0
+
+		local pieces = { self.freezeScreenLeftUp, self.freezeScreenLeftDown, self.freezeScreenRightUp, self.freezeScreenRightDown, self.freezeScreenMiddle, self.freezeScreenBack, self.freezeScreenBeam }
+		if not self._freezeScreenEventsWired then
+			self._freezeScreenEventsWired = true
+			for i = 1, #pieces do
+				local piece = pieces[i]
+				if isvalid(piece) then
+					piece.Entity:ConnectEvent(SpriteGUIAnimPlayerEndEvent, function()
+						self:OnFreezeScreenPieceEnd(piece)
+					end)
+				end
+			end
+		end
+
+		for i = 1, #pieces do
+			if isvalid(pieces[i]) then
+				-- 껐다 켜는 것만으로는(같은 프레임 안에서 토글) Onetime 애니메이션이 실제로 처음부터
+				-- 재생되지 않는 경우가 있었다 — 재생이 끝난 마지막 프레임(알파가 빠진 것처럼 흐릿하게
+				-- 보이는 프레임)에 멈춘 채로 다시 켜지기만 하고, 종료 이벤트도 다시 안 와서 그 자리에
+				-- 계속 남아있었다(유저 스크린샷으로 확인). ImageRUID를 실제로 재대입해야 애니메이션
+				-- 재생 위치가 확실히 리셋된다.
+				local ruid = pieces[i].ImageRUID.DataId
+				pieces[i].Entity:SetEnable(false)
+				pieces[i].ImageRUID = ruid
+				pieces[i].Entity:SetEnable(true)
+				pieces[i].Color = Color(1, 1, 1, 1)
+			end
+		end
+
+		-- 안전장치 — 어떤 이유로든 종료 이벤트가 하나라도 안 오면(예: AnimClipPlayType 설정 실수로
+		-- Loop가 되어 있으면) 재생 가드가 영원히 true로 남아 다음번부터 연출 자체가 아예 안 나오는
+		-- 사고가 있었다. 원본 재생 길이를 충분히 넘는 여유 시간 뒤 강제로 정리한다.
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) then return end
+			if not self._freezeScreenEffectActive then return end
+			for i = 1, #pieces do
+				if isvalid(pieces[i]) then pieces[i].Entity:SetEnable(false) end
+			end
+			self._freezeScreenEffectActive = false
+			self._freezeScreenPiecesDone = 0
+		end, 3.0)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnFreezeScreenPieceEnd(SpriteGUIRendererComponent piece)
+		if isvalid(piece) then piece.Entity:SetEnable(false) end
+		self._freezeScreenPiecesDone = self._freezeScreenPiecesDone + 1
+		if self._freezeScreenPiecesDone >= 7 then
+			self._freezeScreenEffectActive = false
+			self._freezeScreenPiecesDone = 0
+		end
+	end
+
+	-- "허수아비" 드롭 판정 — 얼음 파편과 동일하게 일반 몬스터 처치 시 2% 확률로 굴린다.
+	@ExecSpace("ServerOnly")
+	method void TryDropScarecrowItem(Vector3 worldPos, number fallHeight, number groundWorldY, number dropScale)
+		if self.GameOver then return end
+		if _UtilLogic:RandomDouble() >= self.ScarecrowItemDropChance then return end
+		log("Scarecrow item dropped (2% roll hit)")
+		self:ScheduleScarecrowItemDrop(worldPos, fallHeight, groundWorldY, dropScale)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ScheduleScarecrowItemDrop(Vector3 worldPos, number fallHeight, number groundWorldY, number dropScale)
+		-- 아이템이 사라지는 시점과 실제 효과 발동 시점이 너무 떨어져 있으면 인지가 안 된다는 지적 —
+		-- 낙하시간/연출시간과 무관하게 고정 0.5초 뒤 발동한다.
+		local arrivalDelay = 0.5
+
+		_TimerService:SetTimerOnce(function()
+			if isvalid(self) then self:TriggerScarecrowShield() end
+		end, arrivalDelay)
+
+		self:PlayScarecrowItemDropVisual(Vector2(worldPos.x, worldPos.y), fallHeight, groundWorldY, dropScale)
+	end
+
+	@ExecSpace("Multicast")
+	method void PlayScarecrowItemDropVisual(Vector2 worldPos, number fallHeight, number groundWorldY, number dropScale)
+		-- 얼음 파편과 동일한 패턴 — 잡템보다 훨씬 높이 솟았다가 떨어진 뒤, 획득 연출 없이 그 자리에서
+		-- 페이드아웃되며 사라진다.
+		if self:IsServer() then return end
+		if self._scarecrowItemFlyActive then return end
+		self._scarecrowItemFlyActive = true
+
+		local rawUI = _UILogic:ScreenToUIPosition(_UILogic:WorldToScreenPosition(worldPos))
+		local startUI = Vector2(rawUI.x, rawUI.y + self.DropYOffset)
+		local icon = self.scarecrowItemFlyIcon
+		icon.ImageRUID = self.ScarecrowItemIconRUID
+		icon.Color = Color(1, 1, 1, 1)
+		icon.Entity:SetEnable(true)
+		local tc = icon.Entity.UITransformComponent
+		tc.anchoredPosition = startUI
+		tc.Scale = Vector3(1.25 * dropScale, 1.25 * dropScale, 1)
+
+		local landYCorrection = self:GetDropLandYCorrection(dropScale)
+
+		local doHighPop = function(fromUI)
+			self:PlayHop(icon, fromUI, fromUI, self.FreezeItemPopHeight, self.FreezeItemPopDuration, function()
+				_TweenLogic:PlayTween(1.0, 0.0, self.FreezeItemFadeDuration, EaseType.QuadEaseIn, function(alpha)
+					if isvalid(icon) then icon.Color = Color(1, 1, 1, alpha) end
+				end)
+				_TimerService:SetTimerOnce(function()
+					if isvalid(icon) then icon.Entity:SetEnable(false) end
+					self._scarecrowItemFlyActive = false
+				end, self.FreezeItemFadeDuration)
+			end)
+		end
+
+		if fallHeight > 0 then
+			local groundUI = _UILogic:ScreenToUIPosition(_UILogic:WorldToScreenPosition(Vector2(worldPos.x, groundWorldY)))
+			groundUI = Vector2(groundUI.x, groundUI.y + landYCorrection)
+			self:PlayFallSpin(icon, startUI, groundUI, fallHeight, doHighPop)
+		else
+			doHighPop(Vector2(rawUI.x, rawUI.y + landYCorrection))
+		end
+	end
+
+	-- 허수아비를 소환(또는 이미 있으면 지속시간만 연장)한다. 화면 가운데 = 현재 플레이어 위치(이 게임은
+	-- 카메라가 항상 플레이어를 따라가므로 플레이어 위치 = 화면 중앙), 바닥에 붙도록 플레이어의 Y를
+	-- 그대로 쓴다(이 게임은 옆스크롤 + 발판 기반이라 플레이어는 항상 바닥 위에 서 있다).
+	-- 존마다 독립적 — 지금 플레이어가 있는 존(zoneIdx) 것만 확인/갱신한다. 다른 존에 떠 있는
+	-- 허수아비는 그 존 자신의 타이머로만 사라진다(유저 지적: 존별 허수아비는 서로 독립이어야 함).
+	@ExecSpace("ServerOnly")
+	method void TriggerScarecrowShield()
+		local zoneIdx = _MapManager.CurrentMapIndex
+		if self._scarecrowEntities == nil then self._scarecrowEntities = {} end
+		if self._scarecrowTimerIds == nil then self._scarecrowTimerIds = {} end
+
+		if isvalid(self._scarecrowEntities[zoneIdx]) then
+			-- 이 존에 이미 소환되어 있으면 재소환하지 않고 지속시간만 연장
+			log("Scarecrow shield extended (zone " .. zoneIdx .. ")")
+			local prevTimerId = self._scarecrowTimerIds[zoneIdx]
+			if prevTimerId ~= nil and prevTimerId ~= 0 then _TimerService:ClearTimer(prevTimerId) end
+			self._scarecrowTimerIds[zoneIdx] = _TimerService:SetTimerOnce(function()
+				if isvalid(self) then self:EndScarecrowShield(zoneIdx) end
+			end, self.ScarecrowShieldDuration)
+			return
+		end
+
+		local mapName = _MapManager:GetMapName(zoneIdx)
+		local users = _UserService:GetUsersByMapName(mapName)
+		if #users == 0 then return end
+		local player = users[1]
+		local map = player.CurrentMap
+		if map == nil then return end
+		local pos = player.TransformComponent.WorldPosition
+		local scarecrow = _SpawnService:SpawnByModelId("scarecrow", "Scarecrow", Vector3(pos.x, pos.y, self.ScarecrowDepthZ), map)
+		if scarecrow == nil then return end
+
+		self._scarecrowEntities[zoneIdx] = scarecrow
+		log("Scarecrow shield summoned for " .. self.ScarecrowShieldDuration .. "s (zone " .. zoneIdx .. ")")
+		self._scarecrowTimerIds[zoneIdx] = _TimerService:SetTimerOnce(function()
+			if isvalid(self) then self:EndScarecrowShield(zoneIdx) end
+		end, self.ScarecrowShieldDuration)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void EndScarecrowShield(integer zoneIdx)
+		if self._scarecrowTimerIds ~= nil then self._scarecrowTimerIds[zoneIdx] = nil end
+		local entity = self._scarecrowEntities ~= nil and self._scarecrowEntities[zoneIdx] or nil
+		if isvalid(entity) then
+			self:PlayScarecrowDeathAnim(entity)
+			entity:Destroy(0.3)
+		end
+		if self._scarecrowEntities ~= nil then self._scarecrowEntities[zoneIdx] = nil end
+	end
+
+	-- 몬스터의 공격이 허수아비로 대신 들어올 때마다 잠깐 hit1로 바뀌었다가 stand로 복귀 —
+	-- MonsterAI.PlayHitAnimation과 동일한 패턴. _scarecrowEntity는 @Sync가 아니라 클라이언트 쪽
+	-- 필드값이 항상 nil이므로, self._scarecrowEntity를 직접 참조하지 않고 파라미터로 받는다
+	-- (PlayScarecrowDeathAnim과 동일한 이유).
+	@ExecSpace("Multicast")
+	method void PlayScarecrowHitFlash(Entity scarecrow)
+		if self:IsServer() then return end
+		if not isvalid(scarecrow) then return end
+		local renderer = scarecrow.SpriteRendererComponent
+		if renderer == nil then return end
+		renderer.SpriteRUID = self.ScarecrowHitRUID
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(scarecrow) then return end
+			local r = scarecrow.SpriteRendererComponent
+			if r ~= nil and r.SpriteRUID == self.ScarecrowHitRUID then
+				r.SpriteRUID = self.ScarecrowStandRUID
+			end
+		end, self.ScarecrowHitFlashDuration)
+	end
+
+	@ExecSpace("Multicast")
+	method void PlayScarecrowDeathAnim(Entity scarecrow)
+		if self:IsServer() then return end
+		if not isvalid(scarecrow) then return end
+		local renderer = scarecrow.SpriteRendererComponent
+		if renderer ~= nil then renderer.SpriteRUID = self.ScarecrowDieRUID end
+	end
+
+	-- 세번째 아이템 드롭 판정 — 얼음 파편/허수아비와 동일한 방식으로 2% 확률 굴린다.
+	@ExecSpace("ServerOnly")
+	method void TryDropBounceKnockbackItem(Vector3 worldPos, number fallHeight, number groundWorldY, number dropScale)
+		if self.GameOver then return end
+		if _UtilLogic:RandomDouble() >= self.BounceKnockbackItemDropChance then return end
+		log("Bounce knockback item dropped (1% roll hit)")
+		self:ScheduleBounceKnockbackItemDrop(worldPos, fallHeight, groundWorldY, dropScale)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ScheduleBounceKnockbackItemDrop(Vector3 worldPos, number fallHeight, number groundWorldY, number dropScale)
+		-- 아이템이 사라지는 시점과 실제 효과 발동 시점이 너무 떨어져 있으면 인지가 안 된다는 지적 —
+		-- 낙하시간/연출시간과 무관하게 고정 0.5초 뒤 발동한다.
+		local arrivalDelay = 0.5
+
+		_TimerService:SetTimerOnce(function()
+			if isvalid(self) then self:TriggerBounceKnockback() end
+		end, arrivalDelay)
+
+		self:PlayBounceKnockbackItemDropVisual(Vector2(worldPos.x, worldPos.y), fallHeight, groundWorldY, dropScale)
+	end
+
+	@ExecSpace("Multicast")
+	method void PlayBounceKnockbackItemDropVisual(Vector2 worldPos, number fallHeight, number groundWorldY, number dropScale)
+		-- 다른 두 아이템과 동일한 "높이 솟았다 사라짐" 연출.
+		if self:IsServer() then return end
+		if self._bounceItemFlyActive then return end
+		self._bounceItemFlyActive = true
+
+		local rawUI = _UILogic:ScreenToUIPosition(_UILogic:WorldToScreenPosition(worldPos))
+		local startUI = Vector2(rawUI.x, rawUI.y + self.DropYOffset)
+		local icon = self.bounceItemFlyIcon
+		icon.ImageRUID = self.BounceKnockbackItemIconRUID
+		icon.Color = Color(1, 1, 1, 1)
+		icon.Entity:SetEnable(true)
+		local tc = icon.Entity.UITransformComponent
+		tc.anchoredPosition = startUI
+		tc.Scale = Vector3(1.25 * dropScale, 1.25 * dropScale, 1)
+
+		local landYCorrection = self:GetDropLandYCorrection(dropScale)
+
+		local doHighPop = function(fromUI)
+			self:PlayHop(icon, fromUI, fromUI, self.FreezeItemPopHeight, self.FreezeItemPopDuration, function()
+				_TweenLogic:PlayTween(1.0, 0.0, self.FreezeItemFadeDuration, EaseType.QuadEaseIn, function(alpha)
+					if isvalid(icon) then icon.Color = Color(1, 1, 1, alpha) end
+				end)
+				_TimerService:SetTimerOnce(function()
+					if isvalid(icon) then icon.Entity:SetEnable(false) end
+					self._bounceItemFlyActive = false
+				end, self.FreezeItemFadeDuration)
+			end)
+		end
+
+		if fallHeight > 0 then
+			local groundUI = _UILogic:ScreenToUIPosition(_UILogic:WorldToScreenPosition(Vector2(worldPos.x, groundWorldY)))
+			groundUI = Vector2(groundUI.x, groundUI.y + landYCorrection)
+			self:PlayFallSpin(icon, startUI, groundUI, fallHeight, doHighPop)
+		else
+			doHighPop(Vector2(rawUI.x, rawUI.y + landYCorrection))
+		end
+	end
+
+	-- 이미 이 존에 진행 중이면 허리케인 엔티티/타겟은 그대로 두고 종료 시점만 5초 뒤로 미룬다
+	-- (재소환 없이 시간만 연장 — 허수아비와 동일한 정책). 존마다 완전히 독립적으로 관리한다.
+	@ExecSpace("ServerOnly")
+	method void TriggerBounceKnockback()
+		local zoneIdx = _MapManager.CurrentMapIndex
+		if self._hurricaneEntities == nil then self._hurricaneEntities = {} end
+		if self._hurricaneEndTimerIds == nil then self._hurricaneEndTimerIds = {} end
+
+		if isvalid(self._hurricaneEntities[zoneIdx]) then
+			log("Bounce knockback extended (zone " .. zoneIdx .. ")")
+			local prevId = self._hurricaneEndTimerIds[zoneIdx]
+			if prevId ~= nil and prevId ~= 0 then _TimerService:ClearTimer(prevId) end
+			self._hurricaneEndTimerIds[zoneIdx] = _TimerService:SetTimerOnce(function()
+				if isvalid(self) then self:EndBounceKnockback(zoneIdx) end
+			end, self.BounceKnockbackDuration)
+			return
+		end
+
+		log("Bounce knockback started for " .. self.BounceKnockbackDuration .. "s (zone " .. zoneIdx .. ")")
+		self._hurricaneEndTimerIds[zoneIdx] = _TimerService:SetTimerOnce(function()
+			if isvalid(self) then self:EndBounceKnockback(zoneIdx) end
+		end, self.BounceKnockbackDuration)
+		self:SpawnHurricane(zoneIdx)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void EndBounceKnockback(integer zoneIdx)
+		if self._hurricaneEndTimerIds ~= nil then self._hurricaneEndTimerIds[zoneIdx] = nil end
+		local entity = self._hurricaneEntities ~= nil and self._hurricaneEntities[zoneIdx] or nil
+		if isvalid(entity) then entity:Destroy() end
+		if self._hurricaneEntities ~= nil then self._hurricaneEntities[zoneIdx] = nil end
+		if self._hurricaneTargets ~= nil then self._hurricaneTargets[zoneIdx] = nil end
+		if self._hurricaneHitCooldownsByZone ~= nil then self._hurricaneHitCooldownsByZone[zoneIdx] = nil end
+	end
+
+	-- 허리케인 엔티티 1개를 해당 존에 소환한다 — 시작 위치는 항상 그 존 플레이어 위치(화면 중앙)로
+	-- 잡고, 첫 타겟까지 실제로 이동하는 모습이 보이게 한다(타겟 위치에 바로 겹쳐서 스폰하면 첫
+	-- 틱에 이동 없이 즉시 명중해버리는 문제가 있었다).
+	@ExecSpace("ServerOnly")
+	method void SpawnHurricane(integer zoneIdx)
+		local map = _MonsterSpawner:GetZoneEntity(zoneIdx)
+		if map == nil then return end
+		local startPos = Vector3(0, 1, 0)
+		local mapName = _MapManager:GetMapName(zoneIdx)
+		local users = _UserService:GetUsersByMapName(mapName)
+		if #users > 0 then
+			-- 플레이어의 Position은 맵 루트 기준이라, 존 컨테이너(map, 오프셋 보유)에 그대로
+			-- 로컬 좌표로 넘기면 존 오프셋만큼 밀려서 옆 존에 스폰된 것처럼 보인다 —
+			-- MonsterSpawner.ToLocalSpawnPos와 동일한 변환이 필요하다.
+			local worldPos = users[1].TransformComponent.WorldPosition
+			startPos = _MonsterSpawner:ToLocalSpawnPos(map, worldPos)
+		end
+		if self._hurricaneEntities == nil then self._hurricaneEntities = {} end
+		if self._hurricaneHitCooldownsByZone == nil then self._hurricaneHitCooldownsByZone = {} end
+		self._hurricaneEntities[zoneIdx] = _SpawnService:SpawnByModelId("hurricane", "Hurricane", Vector3(startPos.x, startPos.y, self.HurricaneDepthZ), map)
+		self._hurricaneHitCooldownsByZone[zoneIdx] = {}
+		self:PickNewHurricaneTarget(zoneIdx, nil)
+	end
+
+	-- 해당 존에 살아있는 몬스터 중 무작위로 하나를 다음 타겟으로 잡는다. excludeEntity(방금 명중시킨
+	-- 대상)는 다른 몬스터가 남아있는 한 다시 뽑지 않는다 — 안 그러면 같은 자리에서 이동 없이 계속
+	-- 즉시 명중하는 것처럼 보인다(유저 지적 — "이동하면서 넉백시키는 것"이어야 함). 남은 몬스터가
+	-- 그 하나뿐이면 그대로 다시 타겟으로 삼는다. 몬스터가 하나도 없으면 타겟을 nil로 두고, 다음 틱까지
+	-- 그 자리에서 회전 연출만 계속한다(엔티티/타이머는 계속 유지 — 유저 확인 요청: 몹이 없어도 사라지지
+	-- 않고 있다가, 나중에 몬스터가 스폰되면 바로 그쪽으로 움직이기 시작해야 함).
+	@ExecSpace("ServerOnly")
+	method void PickNewHurricaneTarget(integer zoneIdx, Entity excludeEntity)
+		if self._hurricaneTargets == nil then self._hurricaneTargets = {} end
+		self._hurricaneTargets[zoneIdx] = nil
+		local map = _MonsterSpawner:GetZoneEntity(zoneIdx)
+		if map == nil then return end
+		local monsters = map:GetChildComponentsByTypeName("script.MonsterAI", false)
+		local alive = {}
+		local aliveExcluding = {}
+		for i = 1, #monsters do
+			---@type MonsterAI
+			local m = monsters[i]
+			if not m._dead then
+				table.insert(alive, m.Entity)
+				if m.Entity ~= excludeEntity then table.insert(aliveExcluding, m.Entity) end
+			end
+		end
+		local pool = alive
+		if #aliveExcluding > 0 then pool = aliveExcluding end
+		if #pool > 0 then
+			self._hurricaneTargets[zoneIdx] = pool[_UtilLogic:RandomIntegerRange(1, #pool)]
+		end
+	end
+
+	-- 매 프레임 해당 존의 허리케인을 현재 타겟 쪽으로 이동시킨다(방향 결정용 — 계속 화면을 가로질러
+	-- 움직이게 하기 위함일 뿐). 실제 넉백 판정은 타겟 여부와 무관하게 HurricaneSweepHit()이 매 프레임
+	-- 반경 안의 모든 몬스터를 대상으로 한다 — 유저 지적: "이동 경로에 있는 몬스터는 다 넉백돼야 한다."
+	@ExecSpace("ServerOnly")
+	method void UpdateHurricaneMovement(integer zoneIdx, number delta)
+		local hurricane = self._hurricaneEntities ~= nil and self._hurricaneEntities[zoneIdx] or nil
+		if not isvalid(hurricane) then return end
+
+		-- 몬스터별 재타격 쿨다운 감소
+		local cooldowns = self._hurricaneHitCooldownsByZone ~= nil and self._hurricaneHitCooldownsByZone[zoneIdx] or nil
+		if cooldowns ~= nil then
+			local expired = {}
+			for e, cd in pairs(cooldowns) do
+				local nv = cd - delta
+				if nv <= 0 then table.insert(expired, e) else cooldowns[e] = nv end
+			end
+			for i = 1, #expired do cooldowns[expired[i]] = nil end
+		end
+
+		local target = self._hurricaneTargets ~= nil and self._hurricaneTargets[zoneIdx] or nil
+		if not isvalid(target) then
+			self:PickNewHurricaneTarget(zoneIdx, nil)
+			target = self._hurricaneTargets ~= nil and self._hurricaneTargets[zoneIdx] or nil
+		end
+
+		if isvalid(target) then
+			---@type MonsterAI
+			local targetAI = target:GetComponent("MonsterAI")
+			if targetAI == nil or targetAI._dead then
+				self._hurricaneTargets[zoneIdx] = nil
+			else
+				local hp = hurricane.TransformComponent.Position
+				local tp = target.TransformComponent.Position
+				local dx = tp.x - hp.x
+				local dy = tp.y - hp.y
+				local dist = math.sqrt(dx * dx + dy * dy)
+				if dist <= self.HurricaneReachDistance then
+					-- 도착 — 다음 목적지를 새로 뽑는다(방금 지나친 대상은 다른 몬스터가 남아있는 한 제외)
+					self:PickNewHurricaneTarget(zoneIdx, target)
+				else
+					local step = math.min(dist, self.HurricaneMoveSpeed * delta)
+					local nx = hp.x + (dx / dist) * step
+					local ny = hp.y + (dy / dist) * step
+					hurricane.TransformComponent.Position = Vector3(nx, ny, self.HurricaneDepthZ)
+				end
+			end
+		end
+
+		self:HurricaneSweepHit(zoneIdx)
+	end
+
+	-- 해당 존 허리케인의 현재 위치 기준 반경(HurricaneHitRadius) 안의 살아있는 몬스터를 전부 넉백시킨다.
+	-- 목표 대상뿐 아니라 이동 경로에 우연히 걸친 다른 몬스터도 넉백된다. 몬스터별 쿨다운으로 같은
+	-- 프레임/짧은 시간 안에 중복 타격되는 것만 막는다.
+	@ExecSpace("ServerOnly")
+	method void HurricaneSweepHit(integer zoneIdx)
+		local hurricane = self._hurricaneEntities ~= nil and self._hurricaneEntities[zoneIdx] or nil
+		if not isvalid(hurricane) then return end
+		local map = _MonsterSpawner:GetZoneEntity(zoneIdx)
+		if map == nil then return end
+		local hp = hurricane.TransformComponent.Position
+		local monsters = map:GetChildComponentsByTypeName("script.MonsterAI", false)
+		if self._hurricaneHitCooldownsByZone == nil then self._hurricaneHitCooldownsByZone = {} end
+		if self._hurricaneHitCooldownsByZone[zoneIdx] == nil then self._hurricaneHitCooldownsByZone[zoneIdx] = {} end
+		local cooldowns = self._hurricaneHitCooldownsByZone[zoneIdx]
+		for i = 1, #monsters do
+			---@type MonsterAI
+			local m = monsters[i]
+			if not m._dead then
+				local mp = m.Entity.TransformComponent.Position
+				local dx = mp.x - hp.x
+				local dy = mp.y - hp.y
+				local dist = math.sqrt(dx * dx + dy * dy)
+				if dist <= self.HurricaneHitRadius then
+					local onCooldown = cooldowns[m.Entity] ~= nil
+					if not onCooldown then
+						self:HurricaneHitTarget(m)
+						cooldowns[m.Entity] = self.HurricaneHitCooldown
+					end
+				end
+			end
+		end
+	end
+
+	-- 보스/엘리트는 다른 넉백 스킬과 동일하게 넉백 효율 50% 감소(현재 스케일과 목표 스케일의 중간값으로 절충).
+	-- 별도 이펙트를 스폰하지 않는다 — 허리케인 본체 1개가 돌아다니는 것 자체가 연출이라, 맞을 때마다
+	-- 추가로 뭔가 생기면 안 된다는 유저 지적 반영(넉백만 적용).
+	@ExecSpace("ServerOnly")
+	method void HurricaneHitTarget(MonsterAI target)
+		if not isvalid(target) or not isvalid(target.Entity) or target._dead then return end
+		local kbScale = self.BounceKnockbackScale
+		if target._isBoss or target._isElite then
+			kbScale = target._currentScale - (target._currentScale - self.BounceKnockbackScale) * 0.5
+		end
+		target:ApplyKnockback(kbScale)
 	end
 
 	-- 서버가 "플레이어가 드랍된 존을 떠났다"고 판단한 시점에 호출 — 현재 비행 중인 잡템 슬롯이 있으면
