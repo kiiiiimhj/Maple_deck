@@ -1,0 +1,72 @@
+@Component
+script UIEquippedGearPanel extends Component
+
+	property CostumeManagerComponent CostumeManager = nil
+
+	property table SlotEntityByGearCategory = {}
+
+	property UIEquipPopup EquipPopup = nil
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		local playerInfo = self.Entity:GetChildByName("PlayerInfo")
+		local avatar = playerInfo:GetChildByName("UIAvatarEntity")
+		self.CostumeManager = avatar.CostumeManagerComponent
+		
+		-- 유저 요청: 슬롯이 너무 많아서 실제로 쓰는 부위(무기/상체/하체/모자/망토/장갑)만 남기고 나머지
+		-- (부무기/어깨/신발/눈/얼굴/펜던트/귀/귀장신구)는 UI에서 제거했다 — 해당 카테고리 아이템을
+		-- 장착해도 UI 슬롯엔 안 보이지만 아바타에는 그대로 반영된다(Update()의 CostumeManager 갱신은
+		-- 카테고리 전체를 계속 순회하므로 영향 없음). 상체/하체는 따로 보여달라는 요청으로 Longcoat(상체
+		-- 슬롯)와 별개로 Pants(하체 슬롯)를 추가했다 — 지금 있는 유일한 옷(Pensalir Battle Mail)은
+		-- Longcoat라 상체 슬롯에만 뜨고, 하체는 Pants 카테고리 아이템이 생기기 전까진 비어 있는다.
+		local equipmentGrid = self.Entity:GetChildByName("EquipInfoGrid")
+		self.SlotEntityByGearCategory = {
+			[_GearCategoryEnum.OneHandedWeapon] = equipmentGrid:GetChildByName("MainWeapon"),
+			[_GearCategoryEnum.Longcoat] = equipmentGrid:GetChildByName("Coat"),
+			[_GearCategoryEnum.Pants] = equipmentGrid:GetChildByName("Pants"),
+			[_GearCategoryEnum.Cap] = equipmentGrid:GetChildByName("Cap"),
+			[_GearCategoryEnum.Glove] = equipmentGrid:GetChildByName("Glove"),
+			[_GearCategoryEnum.Cape] = equipmentGrid:GetChildByName("Cape"),
+		}
+		
+		for i, entity in pairs(self.SlotEntityByGearCategory) do
+			---@type Entity
+			local slotEntity = entity
+			slotEntity.UIEquippedGearGridCell.EquipPopup = self.EquipPopup
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Update(table gearGUIDByCategory)
+		if gearGUIDByCategory == nil then
+			gearGUIDByCategory = {}
+		end
+		
+		local playerInventory = _UserService.LocalPlayer.PkgPlayerInventory
+		
+		for i, gearEnum in ipairs(_GearCategoryEnum:GetEnums()) do
+			if gearEnum == _GearCategoryEnum.TwoHandedWeapon then
+				gearEnum = _GearCategoryEnum.OneHandedWeapon
+			end
+			
+			---@type Entity
+			local slotEntity = self.SlotEntityByGearCategory[gearEnum]
+			
+			---@type MapleAvatarItemCategory
+			local avatarCategoryEnum = _GearCategoryEnum:ToAvatarCategory(gearEnum)
+			local gearGUID = gearGUIDByCategory[gearEnum]
+			if gearGUID then
+				---@type ItemStruct
+				local itemStruct = playerInventory.Items[gearGUID]
+				if slotEntity ~= nil then slotEntity.UIEquippedGearGridCell:Set(itemStruct) end
+
+				local gearData = itemStruct:GetGearData()
+				self.CostumeManager:SetEquip(avatarCategoryEnum, gearData.AvatarRUID)
+			else
+				if slotEntity ~= nil then slotEntity.UIEquippedGearGridCell:Clear() end
+				self.CostumeManager:SetEquip(avatarCategoryEnum, "")
+			end
+		end
+	end
+
+end
