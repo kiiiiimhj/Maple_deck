@@ -1,0 +1,73 @@
+@Component
+script MapTaxiTrigger extends Component
+
+	property any _touchHandler = nil
+
+	-- y좌표를 위로 끌어올렸다가, 실제 발판 경계(TaxiLandY) 위로 내려앉아 그 자리에 영구 고정되는
+	-- 연출에 쓰는 값들. self.Entity(=object-1228_1) 자신을 직접 움직이므로 애니메이션은 여기서
+	-- 재생한다 — 별도 Logic에 Entity 참조를 property로 박아두면(예전 시도) 그 참조를 아직 로드하지
+	-- 않은 클라이언트에서 nil이 되는 문제가 있었다(유저 실측 확인: 맵20에 서 있는 클라이언트에서도
+	-- Logic쪽 property는 nil이었음 — Logic은 월드 시작 시점에 초기화되어 그때 아직 맵20을 아무도
+	-- 안 밟았으면 참조가 영구히 안 풀린다). Component는 이 엔티티가 로드된 클라이언트에서만 존재하므로
+	-- self.Entity는 항상 유효하다.
+	property number HopHeight = 1.0
+	property number RiseDuration = 0.35
+	property number LandDuration = 0.35
+	-- 택시가 최종적으로 내려앉아 고정되는 y (유저 지정값)
+	property number TaxiLandY = 2.381145
+
+	method void OnBeginPlay()
+		if self:IsClient() then
+			self._touchHandler = self.Entity:ConnectEvent(TouchEvent, self.OnTouched)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnTouched(TouchEvent event)
+		-- 게임오버 팝업/타이틀(로비) 화면이 떠 있는 동안은 뒤에 있는 월드 오브젝트가 눌리면 안 된다
+		-- (Zone21AlienObjectTrigger와 동일한 이유 — CanvasGroup.BlocksRaycasts가 월드 TouchReceiveComponent는 안 막음)
+		if _GameManager.GameOver then return end
+		if _TitleUI.titleGroup.Enable then return end
+		-- 아직 소환 전(첫 터치)이면 이 클라이언트에서 바로 연출을 재생한다 — 서버의 Summoned @Sync
+		-- 값을 신뢰하되, 실제 애니메이션 대상(self.Entity)은 로컬에서 직접 잡는다
+		if not _MapTaxiLogic.Summoned then
+			self:PlayTaxiHop()
+		end
+		self:RequestTouch()
+	end
+
+	-- y좌표를 위로 끌어올렸다가(1단계), 실제 발판 경계(TaxiLandY) 위로 내려앉아 영구 고정된다(2단계)
+	@ExecSpace("ClientOnly")
+	method void PlayTaxiHop()
+		local transform = self.Entity.TransformComponent
+		local basePos = transform.Position
+		local peakY = basePos.y + self.HopHeight
+
+		_TweenLogic:PlayTween(basePos.y, peakY, self.RiseDuration, EaseType.QuadEaseOut, function(y)
+			if isvalid(self.Entity) then
+				self.Entity.TransformComponent.Position = Vector3(basePos.x, y, basePos.z)
+			end
+		end)
+
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self.Entity) then return end
+			_TweenLogic:PlayTween(peakY, self.TaxiLandY, self.LandDuration, EaseType.QuadEaseIn, function(y)
+				if isvalid(self.Entity) then
+					self.Entity.TransformComponent.Position = Vector3(basePos.x, y, basePos.z)
+				end
+			end)
+		end, self.RiseDuration)
+	end
+
+	@ExecSpace("Server")
+	method void RequestTouch()
+		_MapTaxiLogic:OnTaxiTouched()
+	end
+
+	method void OnEndPlay()
+		if self:IsClient() and self._touchHandler ~= nil then
+			self.Entity:DisconnectEvent(TouchEvent, self._touchHandler)
+		end
+	end
+
+end
