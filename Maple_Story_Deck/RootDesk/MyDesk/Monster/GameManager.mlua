@@ -48,6 +48,10 @@ script GameManager extends Logic
 	-- 타이틀 화면에서 "게임 시작" 버튼을 눌러야 실제 웨이브/스폰이 시작된다 (그 전까지는 대기)
 	@Sync property boolean GameStarted = false
 
+	-- 캐릭터 선택 팝업(WorldCharacterSelectUI)에서 고른 캐릭터 — 0=아르카나, 1=실피드.
+	-- CardManager.OnUpdate가 이 값을 보고 기본공격(파이어샷 vs 애로우샷) 트랙을 분기한다.
+	@Sync property integer SelectedCharacter = 0
+
 	-- 게임 모드 — 무제한 모드(false, 기존과 동일) / 타임어택 모드(true, 20분 제한). 캐릭터 선택
 	-- 팝업의 체크박스에서 고른 값이 RequestStartGame으로 전달돼 여기 저장된다. "다시하기"는 이
 	-- 값을 건드리지 않는다(같은 모드로 재시작 — 로비로 나가서 다시 고르기 전까지 유지).
@@ -1263,14 +1267,15 @@ script GameManager extends Logic
 	end
 
 	-- 클라이언트의 "게임 시작" 버튼 요청 (타이틀 화면) — 캐릭터 선택 팝업의 "무제한 모드" 체크박스
-	-- 값을 그대로 넘겨받는다(true=무제한/기존과 동일, false=20분 타임어택)
+	-- 값과 선택된 캐릭터 인덱스(0=아르카나, 1=실피드)를 그대로 넘겨받는다
 	@ExecSpace("Server")
-	method void RequestStartGame(boolean timeAttack)
-		self:StartGame(timeAttack)
+	method void RequestStartGame(boolean timeAttack, integer characterIndex)
+		self:StartGame(timeAttack, characterIndex)
 	end
 
 	@ExecSpace("ServerOnly")
-	method void StartGame(boolean timeAttack)
+	method void StartGame(boolean timeAttack, integer characterIndex)
+		self.SelectedCharacter = characterIndex
 		self.TimeAttackMode = timeAttack
 		self.TimeAttackRemaining = timeAttack and self.TimeAttackDuration or 0
 		-- 타이틀 화면에서 처음 한 번만 실제 웨이브 스폰을 활성화한다. 그 전까지 OnBeginPlay에서
@@ -1278,16 +1283,17 @@ script GameManager extends Logic
 		if self.GameStarted then return end
 		self.GameStarted = true
 		_MapManager:BeginGameplay()
-		log("GameManager: game started (TimeAttackMode=" .. tostring(timeAttack) .. ")")
+		log("GameManager: game started (TimeAttackMode=" .. tostring(timeAttack) .. ", SelectedCharacter=" .. characterIndex .. ")")
 	end
 
 	-- 클라이언트의 "다시하기" 버튼 요청 — timeAttack은 항상 명시적으로 받는다(기본값 파라미터는
 	-- mlua에서 스크립트 전체를 조용히 무력화하는 버그가 있어 절대 쓰지 않는다). 로비 팝업에서 새로
 	-- 고른 값이면 그 값을, 게임오버 팝업 안에서 바로 누른 다시하기면 현재 값(_GameManager.TimeAttackMode)을
-	-- 그대로 다시 넘겨 모드를 유지한다.
+	-- 그대로 다시 넘겨 모드를 유지한다. characterIndex도 동일한 원칙(로비면 새로 고른 값, 게임오버
+	-- 팝업이면 현재 값 _GameManager.SelectedCharacter)으로 호출부에서 넘겨준다.
 	@ExecSpace("Server")
-	method void RequestRestart(boolean timeAttack)
-		self:RestartGame(timeAttack)
+	method void RequestRestart(boolean timeAttack, integer characterIndex)
+		self:RestartGame(timeAttack, characterIndex)
 	end
 
 	-- 이번에 "이어하기"를 누르면 얼마가 드는지 — GameOverUI가 표시/가능여부 판정에 쓴다.
@@ -1311,8 +1317,9 @@ script GameManager extends Logic
 	end
 
 	@ExecSpace("ServerOnly")
-	method void RestartGame(boolean timeAttack)
+	method void RestartGame(boolean timeAttack, integer characterIndex)
 		-- 처음부터 다시 시작: 모든 상태를 초기화
+		self.SelectedCharacter = characterIndex
 		self.PlayerMaxHp = 100
 		self.PlayerHp = 100
 		self.Level = 1

@@ -624,6 +624,79 @@ script CardManager extends Logic
 	property number Card14EffectScale = 0.8  -- 몬스터가 맨 앞까지 접근했을 때 연출이 너무 커 보여서 20% 축소
 	property number Card14EffectBaseAlpha = 0.8  -- 기본 알파를 20% 낮춤(페이드아웃은 이 값에서 0까지 진행)
 
+	-- ── 실피드 전용: 애로우샷 (기본공격, 카드 25) — 아르카나의 파이어샷(Card1)과 완전히 별도의 트랙이다.
+	-- 슬롯 배치와 무관하게 항상 발동하는 상시 기본공격이며, GameManager.SelectedCharacter==1(실피드)일
+	-- 때만 틱된다(OnUpdate에서 분기). 수치 공식은 파이어샷과 동일(데미지 강화 ×1.2 최대 5회, 이후
+	-- +20 고정 / 쿨타임 강화 ×0.85 최대 5회)하되 완전히 독립된 값으로 관리한다. 아이콘은 유저 요청으로
+	-- 신규 아이콘 대신 기존 파이어샷 아이콘(칼 모양)을 그대로 재사용한다.
+	@Sync property number ArrowShotDamage = 100
+	@Sync property number ArrowShotCooldown = 0.8
+	@Sync property integer ArrowShotUpgradeCount = 0
+	property integer ArrowShotMultiplierCap = 5
+	property number ArrowShotFlatDamageBonus = 20
+	property string ArrowShotName = "애로우샷"
+	property string ArrowShotIconRUID = "cc55ed79f099cc94fae152e754984ddd"
+	-- 화살 투사체 애니메이션(유저 지정, 182x40 옆보기) — 1인칭 시점에 맞춰 파이어샷과 동일한
+	-- 회전+scale 트릭(FlyArrowShot)으로 우려낸다.
+	property string ArrowShotEffectRUID = "e2a05bd4787543618ffcbbe719288ee8"
+	property number _timerBasicArrow = 0
+	-- 착탄 연출 — 원래 바람의 시가 쓰던 hit/2~5 무작위 세트를 여기로 옮겼다(유저 요청). 화살 자체보다
+	-- 작게 보이도록 스케일을 낮췄다.
+	property string ArrowShotHitRUID2 = "43b0698875a348229caaf9221a8c8b3a"
+	property string ArrowShotHitRUID3 = "f248abbd97704ad88d1e211b808533a4"
+	property string ArrowShotHitRUID4 = "c8967beeb4804ed7adfff261ee7b3d44"
+	property string ArrowShotHitRUID5 = "c3a3cc7a2c624c92aff148b9cb984c2b"
+	property number ArrowShotHitScale = 0.8
+
+	-- ── 실피드 전용: 바람의 시 (카드 101, 슬롯형 정식 스킬 1호) — 상시발동인 애로우샷과 달리 슬롯에
+	-- 배치되는 일반 액티브 스킬이다. Lv1~5 고정 데미지 테이블(90/90/130/130/170), 쿨타임은 레벨
+	-- 무관 3.5초 고정, 타겟 수만 레벨별로 늘어난다(Lv1-2:1명/Lv3-4:2명/Lv5:3명, GetClosestTargets로
+	-- 선정, 각 단일 타격 — 매직클로(Card2)와 동일한 다중타겟 패턴).
+	@Sync property integer WindPoemLevel = 0
+	property string Card101Name = "바람의 시"
+	property string Card101IconRUID = "f527f0a168f34f31bd8b17e1059f3769"
+	property number Card101Cooldown = 3.5  -- 레벨 무관 고정
+	-- 캐스팅 연출 시퀀스(유저 지정 순서): 1) 생성 연출 → 2) 활 쏘는 연출 → 3) 화살 발사와 동시에 제거.
+	-- 둘 다 화면 위쪽 고정 위치에서 아래로 쏘는 각도(-90도)로 재생한다.
+	property string Card101BowGlowRUID = "4423619c1a49476697b459e49bddb575"  -- 1) 생성 연출
+	property number Card101BowGlowDuration = 0.3  -- 1) 재생 시간(추정치 — 라이브에서 실제 애니메이션 길이 보고 조정)
+	property string Card101BowEffectRUID = "b00ac0d7b06d4489b91b15be39f51edc"  -- 2) 활 쏘는 연출
+	property number Card101BowShootDuration = 0.2  -- 2) 재생 시간(추정치) — 이 시간 뒤 화살 발사 + 연출 제거
+	-- y=3.0으로 처음 잡았다가 화면(카메라) 밖으로 나가 안 보이는 걸 실측 확인 — 이후 라이브로 직접
+	-- 보면서 유저가 "경험치바 아래쯤"으로 지정(화면 상단 HUD 바로 아래)해 다시 올렸다.
+	property Vector3 Card101BowPosition = Vector3(0, 2.2, -0.1)
+	-- -90도로 돌렸다가 유저 요청으로 180도 더 돌림(-90+180=90) — 생성 연출/활 쏘는 연출 둘 다 공용.
+	property number Card101BowRotation = 90
+	-- 유저 요청: 기존 대비 1.5배
+	property number Card101BowScale = 1.5
+	-- 유저 제안: 같은 연출을 이 장수만큼 같은 자리에 겹쳐 스폰해서 반투명을 진하게 보이게 한다
+	property integer Card101LayerCount = 3
+	property string Card101ArrowEffectRUID = "bb23a0b49290475d952e0139c392584b"  -- 발사 원점→타겟까지 실제로 날아가는 화살
+	property number Card101ArrowFlightDuration = 0.4  -- 발사 원점→타겟 비행 시간
+	-- 여러 타겟일 때 화살을 동시발사가 아니라 순서대로 줄줄이 발사한다(유저 요청)
+	property number Card101ArrowStaggerDelay = 0.1
+	-- 착탄 연출 — 기존 hit/2~5 무작위 세트는 애로우샷(기본공격) 쪽으로 옮기고, 바람의 시는 전용
+	-- 단일 연출로 교체(유저 요청). 애니메이션클립이 모델(skilleffect) Duration보다 빨리 한 바퀴 돌면
+	-- 다시 처음부터 재생되는 게 보여서(유저 실측: "여러번 재생되는거 같은데"), 1루프만 재생하고
+	-- 정지시킨다(SpriteAnimPlayerEndEvent).
+	property string Card101HitRUID = "35b6faa10c5c4e068dedfd14b355bcf0"
+
+	-- 레벨별 고정 데미지 — Lv1-2:90 / Lv3-4:130 / Lv5:170
+	method number GetWindPoemDamage()
+		if self.WindPoemLevel >= 5 then return 170
+		elseif self.WindPoemLevel >= 3 then return 130
+		end
+		return 90
+	end
+
+	-- 레벨별 타겟 수 — Lv1-2:1명 / Lv3-4:2명 / Lv5:3명
+	method integer GetWindPoemTargetCount()
+		if self.WindPoemLevel >= 5 then return 3
+		elseif self.WindPoemLevel >= 3 then return 2
+		end
+		return 1
+	end
+
 	-- ── 아쿠아 서지 (Card 24) — 아쿠아 트랩(Card14) Lv5 + 메디테이션(Card22, 슬롯 없는 패시브) 보유 시
 	-- 등장하는 조합 스킬. 메디테이션은 슬롯이 없어 아쿠아 트랩의 슬롯만 그대로 넘겨받는다(단일 슬롯
 	-- 조합 패턴). Lv1~3까지만 존재. 속박 자체는 레벨 무관 고정 3초. 속박이 끝나기 0.2초 전에 추가
@@ -973,6 +1046,7 @@ script CardManager extends Logic
 		if cardIdx == 22 then return self.MeditationLevel > 0 end
 		if cardIdx == 23 then return self.HailBurstLevel > 0 end
 		if cardIdx == 24 then return self.AquaSurgeLevel > 0 end
+		if cardIdx == 101 then return self.WindPoemLevel > 0 end
 		return self.Slot1Card == cardIdx or self.Slot2Card == cardIdx or self.Slot3Card == cardIdx
 			or self.Slot4Card == cardIdx or self.Slot5Card == cardIdx or self.Slot6Card == cardIdx
 	end
@@ -1098,6 +1172,7 @@ script CardManager extends Logic
 		-- 개별 스킬마다 따로 적용할 필요가 없게 한다. SkillInventory의 액티브 스킬 대미지 보너스도 동일하게 여기서 일괄 적용.
 		local base = self.Card5Damage
 		if cardIdx == 1 then base = self.Card1Damage
+		elseif cardIdx == 25 then base = self.ArrowShotDamage
 		elseif cardIdx == 2 then base = self.Card2Damage
 		elseif cardIdx == 3 then base = self:GetColdBeamDamage()
 		elseif cardIdx == 4 then base = self:GetThunderBoltDamage()
@@ -1114,6 +1189,7 @@ script CardManager extends Logic
 		elseif cardIdx == 21 then base = self:GetGrandPepeDamage()
 		elseif cardIdx == 23 then base = self:GetHailBurstDamage()
 		elseif cardIdx == 24 then base = self:GetAquaSurgeDamage()
+		elseif cardIdx == 101 then base = self:GetWindPoemDamage()
 		end
 		return base * self:GetMeditationMult() * self:GetSkillInvDamageMult(cardIdx)
 	end
@@ -1252,6 +1328,7 @@ script CardManager extends Logic
 
 	method number GetCardCooldown(integer cardIdx)
 		if cardIdx == 1 then return self.Card1Cooldown
+		elseif cardIdx == 25 then return self.ArrowShotCooldown
 		elseif cardIdx == 2 then return self.Card2Cooldown
 		elseif cardIdx == 3 then return self.Card3Cooldown
 		elseif cardIdx == 4 then return self.Card4Cooldown
@@ -1271,12 +1348,14 @@ script CardManager extends Logic
 		elseif cardIdx == 21 then return self.Card21Cooldown
 		elseif cardIdx == 23 then return self.Card23Cooldown
 		elseif cardIdx == 24 then return self.Card24Cooldown
+		elseif cardIdx == 101 then return self.Card101Cooldown
 		end
 		return 1.0
 	end
 
 	method string GetCardIconRUID(integer cardIdx)
 		if cardIdx == 1 then return self.Card1IconRUID
+		elseif cardIdx == 25 then return self.ArrowShotIconRUID
 		elseif cardIdx == 2 then return self.Card2IconRUID
 		elseif cardIdx == 3 then return self.Card3IconRUID
 		elseif cardIdx == 4 then return self.Card4IconRUID
@@ -1299,6 +1378,7 @@ script CardManager extends Logic
 		elseif cardIdx == 22 then return self.Card22IconRUID
 		elseif cardIdx == 23 then return self.Card23IconRUID
 		elseif cardIdx == 24 then return self.Card24IconRUID
+		elseif cardIdx == 101 then return self.Card101IconRUID
 		end
 		return ""
 	end
@@ -1328,6 +1408,7 @@ script CardManager extends Logic
 		elseif cardIdx == 22 then return self.Card22Name
 		elseif cardIdx == 23 then return self.Card23Name
 		elseif cardIdx == 24 then return self.Card24Name
+		elseif cardIdx == 101 then return self.Card101Name
 		end
 		return ""
 	end
@@ -1366,6 +1447,7 @@ script CardManager extends Logic
 		elseif cardIdx == 13 then return "thundercutter_up"
 		elseif cardIdx == 14 then return "aquatrap_up"
 		elseif cardIdx == 15 then return "hailstone_up"
+		elseif cardIdx == 101 then return "windpoem_up"
 		end
 		return ""
 	end
@@ -1384,6 +1466,7 @@ script CardManager extends Logic
 		elseif cardIdx == 13 then self.ThunderCutterLevel = 1
 		elseif cardIdx == 14 then self.AquaTrapLevel = 1
 		elseif cardIdx == 15 then self.HailStoneLevel = 1
+		elseif cardIdx == 101 then self.WindPoemLevel = 1
 		end
 	end
 
@@ -1411,6 +1494,7 @@ script CardManager extends Logic
 		elseif cardIdx == 22 then return self.MeditationLevel
 		elseif cardIdx == 23 then return self.HailBurstLevel
 		elseif cardIdx == 24 then return self.AquaSurgeLevel
+		elseif cardIdx == 101 then return self.WindPoemLevel
 		end
 		return 0
 	end
@@ -1501,6 +1585,7 @@ script CardManager extends Logic
 	method void OnBeginPlay()
 		if self:IsServer() then
 			self._timerBasic = self.Card1Cooldown
+			self._timerBasicArrow = self.ArrowShotCooldown
 			self._timer1 = 0
 			self._timer2 = 0
 			self._timer3 = 0
@@ -1545,6 +1630,8 @@ script CardManager extends Logic
 						self:DebugLevelUp()
 					elseif e.key == KeyboardKey.P then
 						self:DebugForceTimeAttackNear()
+					elseif e.key == KeyboardKey.O then
+						self:DebugResetSylphUnlock()
 					end
 				end)
 			end
@@ -1969,6 +2056,7 @@ script CardManager extends Logic
 		elseif cardIdx == 22 then name = self.Card22Name .. " Lv." .. self.MeditationLevel
 		elseif cardIdx == 23 then name = self.Card23Name .. " Lv." .. self.HailBurstLevel
 		elseif cardIdx == 24 then name = self.Card24Name .. " Lv." .. self.AquaSurgeLevel
+		elseif cardIdx == 101 then name = self.Card101Name .. " Lv." .. self.WindPoemLevel
 		end
 
 		-- 데미지
@@ -2018,6 +2106,8 @@ script CardManager extends Logic
 		elseif cardIdx == 23 then
 			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
 		elseif cardIdx == 24 then
+			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
+		elseif cardIdx == 101 then
 			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
 		end
 
@@ -2114,6 +2204,8 @@ script CardManager extends Logic
 		elseif cardIdx == 24 then
 			local extraPct = math.floor(self:GetAquaSurgeExtraPercent() * 100)
 			extraStr = "타겟 " .. self:GetAquaSurgeTargetCount() .. "명  |  속박 3초  |  종료 0.5초 전 추가타 " .. extraPct .. "%"
+		elseif cardIdx == 101 then
+			extraStr = "타겟 " .. self:GetWindPoemTargetCount() .. "명"
 		end
 
 		self.tooltipName.Text  = name
@@ -2156,8 +2248,13 @@ script CardManager extends Logic
 
 		local target = self:FindTarget()
 
-		-- 기본공격(파이어샷)은 슬롯 배치와 무관하게 항상 활성
-		self._timerBasic = self:TickCard(1, 0, self._timerBasic, delta, target)
+		-- 기본공격은 슬롯 배치와 무관하게 항상 활성 — 캐릭터별로 완전히 다른 트랙을 탄다
+		-- (0=아르카나: 파이어샷, 1=실피드: 애로우샷)
+		if _GameManager.SelectedCharacter == 1 then
+			self._timerBasicArrow = self:TickCard(25, 0, self._timerBasicArrow, delta, target)
+		else
+			self._timerBasic = self:TickCard(1, 0, self._timerBasic, delta, target)
+		end
 
 		-- 슬롯 1~5: 배치된 카드가 있을 때만 동작 (1번 슬롯부터 채워짐)
 		if self.Slot1Card > 0 then self._timer1 = self:TickCard(self.Slot1Card, 1, self._timer1, delta, target) end
@@ -2235,6 +2332,8 @@ script CardManager extends Logic
 					self:HailBurstAttack(damage, isCrit)
 				elseif cardIndex == 24 then
 					self:AquaSurgeAttack(damage, isCrit)
+				elseif cardIndex == 101 then
+					self:WindPoemAttack(damage, isCrit)
 				else
 					if isCrit then target:TakeDamageCrit(damage * 2)
 					else target:TakeDamage(damage) end
@@ -2246,6 +2345,25 @@ script CardManager extends Logic
 						local startPos = Vector3(hitPos.x, hitPos.y - 0.8, hitPos.z)
 						local fx = self:SpawnEffect(self.Card1EffectRUID, startPos, 90, 1.5, 2.5 * (self:GetEffectScaleRatio(target)), 0.9)
 						self:FlyFireShot(fx, startPos, hitPos)
+					elseif cardIndex == 25 then
+						-- 애로우샷: 원본 화살(폭탄화살) 스프라이트가 옆보기(가로로 긴 형태)라, 파이어샷과
+						-- 동일한 이동 트릭(수직으로만 이동+축소)에 맞춰 회전해서 긴 축을 이동 방향(수직)에
+						-- 맞춘다. 90도 회전은 화살촉이 아래를 향해 유저가 실측 확인 — 180도 더 돌려(270도)
+						-- 화살촉이 위(타겟 쪽)를 향하게 한다.
+						local p1 = target.Entity.TransformComponent.Position
+						local hitPos = Vector3(p1.x, p1.y + 0.3, p1.z)
+						local startPos = Vector3(hitPos.x, hitPos.y - 0.8, hitPos.z)
+						local fx = self:SpawnEffect(self.ArrowShotEffectRUID, startPos, 270, 1.5, 2.5 * (self:GetEffectScaleRatio(target)), 0.9)
+						self:FlyArrowShot(fx, startPos, hitPos)
+
+						-- 착탄 연출(원래 바람의 시가 쓰던 hit/2~5 무작위 세트, 유저 요청으로 이관) —
+						-- FlyArrowShot 내부 비행 duration(0.16초)과 동일하게 맞춰야 착탄 타이밍이 안 어긋난다.
+						_TimerService:SetTimerOnce(function()
+							if not isvalid(self) then return end
+							local scaleRatio = isvalid(target) and self:GetEffectScaleRatio(target) or 1.0
+							local hitRUID = self:GetRandomArrowShotHitRUID()
+							self:SpawnEffect(hitRUID, hitPos, 0, 1.0, self.ArrowShotHitScale * scaleRatio, 1)
+						end, 0.16)
 					end
 				end
 				-- 적을 맞췄을 때만 쿨타임 연출을 새로 재생하고 다시 채운다
@@ -2337,6 +2455,52 @@ script CardManager extends Logic
 		end, duration)
 	end
 
+	-- 애로우샷(실피드) 전용 비행 연출 — 비행 구간은 파이어샷과 동일(크게 시작해 작아지며 날아감)하지만,
+	-- 착탄 후 불꽃처럼 커지며 퍼지는 대신 화살이 "박히는" 느낌으로 한 번 더 작아지며 빠르게 사라진다
+	-- (유저 요청: "몬스터한테 박힐때는 스케일이 작아져야 자연스러울듯").
+	@ExecSpace("ServerOnly")
+	method void FlyArrowShot(Entity fx, Vector3 startPos, Vector3 endPos)
+		if fx == nil then return end
+		local duration = 0.16
+		-- 화면상 세로축(=회전 전 스프라이트의 가로/긴 축, Scale.x)이 폭(Scale.y)보다 더 많이 줄어들며
+		-- 날아가야 화면 속으로 빨려들어가는(원근 단축) 느낌이 난다는 유저 지적 — 세로(길이)는
+		-- 2.5→0.6까지, 폭은 기존처럼 2.5→1.0까지만 줄인다.
+		local startLengthScale = 2.5
+		local endLengthScale = 0.6
+		local startWidthScale = 2.5
+		local endWidthScale = 1.0
+
+		_TweenLogic:PlayTween(0.0, 1.0, duration, EaseType.QuadEaseIn, function(t)
+			if not isvalid(fx) then return end
+			local x = startPos.x + (endPos.x - startPos.x) * t
+			local y = startPos.y + (endPos.y - startPos.y) * t
+			fx.TransformComponent.Position = Vector3(x, y, -0.1)
+			local lengthScale = startLengthScale + (endLengthScale - startLengthScale) * t
+			local widthScale = startWidthScale + (endWidthScale - startWidthScale) * t
+			fx.TransformComponent.Scale = Vector3(lengthScale, widthScale, 1)
+		end)
+
+		-- 착탄 후: 박히듯 한 번 더 작아지며(비행 종료 시점 스케일에서 이어서) 빠르게 알파가 빠진다.
+		-- 비행 종료 시점 스케일(세로 0.6 / 폭 1.0)에서 이어서 줄여야 착탄 순간 스케일이 튀지 않는다.
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(fx) then return end
+			local impactDuration = 0.22
+			_TweenLogic:PlayTween(0.0, 1.0, impactDuration, EaseType.QuadEaseOut, function(t)
+				if not isvalid(fx) then return end
+				local lengthScale = endLengthScale * (1.0 - t * 0.4)
+				local widthScale = endWidthScale * (1.0 - t * 0.4)
+				fx.TransformComponent.Scale = Vector3(lengthScale, widthScale, 1)
+				local renderer = fx.SpriteRendererComponent
+				if renderer ~= nil then
+					renderer.Color = Color(1, 1, 1, 0.9 * (1.0 - t))
+				end
+			end)
+			_TimerService:SetTimerOnce(function()
+				if isvalid(fx) then fx:Destroy() end
+			end, impactDuration)
+		end, duration)
+	end
+
 	-- 의사(pseudo) 3D 깊이 판정용 경계값 — _currentScale(스폰 0.3 ~ 도달 1.5)을 이 값 기준으로
 	-- "뒤 구간"/"앞 구간" 2개로만 나눈다(요청: "스폰부터 중간, 중간부터 맨앞 이렇게 2구간만").
 	-- 범위형 스킬이 조준한 타겟과 다른 구간에 있는 몬스터는 같은 화면 좌표에 없다고 보고 광역 판정에서 제외한다.
@@ -2414,6 +2578,151 @@ script CardManager extends Logic
 			local p2 = target.Entity.TransformComponent.Position
 			self:SpawnEffect(self.Card2EffectRUID, Vector3(p2.x, p2.y + 0.3, p2.z), 0, 1.5, 1.3 * (self:GetEffectScaleRatio(target)), 1)
 		end
+	end
+
+	-- 바람의 시(Card101, 실피드) — 캐스팅 연출 시퀀스를 시작한다(순서는 PlayWindPoemBow 참고).
+	@ExecSpace("ServerOnly")
+	method void WindPoemAttack(number damage, boolean isCrit)
+		local targets = self:GetClosestTargets(self:GetWindPoemTargetCount())
+		if #targets == 0 then return end
+		self:PlayWindPoemBow(targets, damage, isCrit)
+	end
+
+	-- 유저 지정 순서: 1) 생성 연출(Card101BowGlowRUID) 재생 → 2) 활 쏘는 연출(Card101BowEffectRUID)
+	-- 재생 → 3) 화살 발사와 동시에 연출 제거. 둘 다 화면 위쪽 고정 위치(Card101BowPosition)에서 아래로
+	-- 쏘는 각도(-90도)로 배치한다. 리소스 자체의 반투명이 Color 알파(이미 1.0)로는 안 없어져서,
+	-- 머티리얼/셰이더 대신 유저 제안대로 같은 연출을 Card101LayerCount(3)장 같은 자리에 겹쳐 스폰해서
+	-- 알파 블렌딩이 누적되어 더 진하게 보이도록 한다.
+	@ExecSpace("ServerOnly")
+	method void PlayWindPoemBow(any targets, number damage, boolean isCrit)
+		local fxGlowLayers = self:SpawnWindPoemLayers(self.Card101BowGlowRUID)
+
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) then return end
+			self:HideWindPoemLayers(fxGlowLayers)
+
+			local fxBowLayers = self:SpawnWindPoemLayers(self.Card101BowEffectRUID)
+
+			_TimerService:SetTimerOnce(function()
+				if not isvalid(self) then return end
+				self:HideWindPoemLayers(fxBowLayers)
+				-- 유저 요청: 여러 타겟이어도 동시발사가 아니라 순서대로 줄줄이 발사한다
+				for i, target in ipairs(targets) do
+					local staggerDelay = (i - 1) * self.Card101ArrowStaggerDelay
+					_TimerService:SetTimerOnce(function()
+						if not isvalid(self) then return end
+						-- 토네이도 등 즉시 제거 효과로 타겟이 그 사이 파괴될 수 있다 — isvalid 없이
+						-- target._dead만 보면 이미 파괴된 컴포넌트를 읽다가 LEA-2011(TakeDamage가 nil)로
+						-- 죽는다(유저 실측 확인). 다른 다중타겟 스킬(콜드빔 등)과 동일하게 체크.
+						if isvalid(target) and isvalid(target.Entity) and not target._dead then
+							self:FireWindPoemArrow(target, damage, isCrit)
+						end
+					end, staggerDelay)
+				end
+			end, self.Card101BowShootDuration)
+		end, self.Card101BowGlowDuration)
+	end
+
+	-- 같은 연출을 같은 위치/각도/스케일로 Card101LayerCount장 겹쳐 스폰한다(유저 제안: "같은 연출을
+	-- 3개 겹치면 찐해지지 않을까").
+	@ExecSpace("ServerOnly")
+	method table SpawnWindPoemLayers(string ruid)
+		local layers = {}
+		for i = 1, self.Card101LayerCount do
+			-- 유저 요청으로 틴트 제거 — 리소스 원본 색 그대로 스폰한다
+			local fx = self:SpawnEffectWithModel(ruid, self.Card101BowPosition, self.Card101BowRotation, 1.0, self.Card101BowScale, 1.0, "skilleffectlong")
+			if fx ~= nil then
+				table.insert(layers, fx)
+			end
+		end
+		return layers
+	end
+
+	-- 알파 페이드 없이(유저 요청: "알파값 없어도 될듯") 바로 Enable=false로 끈다
+	-- (Map21RelicEasterEgg.HideRelicObject와 동일한, 클라이언트에서 안전한 엔티티 숨김 패턴).
+	@ExecSpace("ServerOnly")
+	method void HideWindPoemLayers(table layers)
+		for _, fx in ipairs(layers) do
+			self:HideWindPoemEffect(fx)
+		end
+	end
+
+	@ExecSpace("Multicast")
+	method void HideWindPoemEffect(Entity fx)
+		if not self:IsClient() then return end
+		if isvalid(fx) then fx.Enable = false end
+	end
+
+	-- 화살 한 발 발사 — 타겟마다 개별 호출(동시에 여러 명 맞출 수 있음). 발사 원점(Card101BowPosition)
+	-- 에서 그 타겟의 실제 좌표까지 방향을 계산해 회전시키고 직선으로 날아간다(유저 요청: "진짜로 그
+	-- 화살이 적을 타겟팅해서"). 착탄 순간(비행시간과 동일하게 맞춘 지연) 몬스터 위치에 hit/2~5 중
+	-- 무작위 하나를 추가로 재생한다(유저 요청: "매번 다르면 더 좋겠네").
+	@ExecSpace("ServerOnly")
+	method void FireWindPoemArrow(MonsterAI target, number damage, boolean isCrit)
+		if isCrit then target:TakeDamageCrit(damage * 2)
+		else target:TakeDamage(damage) end
+
+		local p1 = target.Entity.TransformComponent.Position
+		local hitPos = Vector3(p1.x, p1.y + 0.3, p1.z)
+		local startPos = self.Card101BowPosition
+
+		local dx = hitPos.x - startPos.x
+		local dy = hitPos.y - startPos.y
+		local angle = math.deg(math.atan(dy, dx))
+
+		-- 유저 요청으로 틴트 제거 — 리소스 원본 색 그대로 스폰한다
+		local fx = self:SpawnEffect(self.Card101ArrowEffectRUID, startPos, angle, 1.5, 1.5 * (self:GetEffectScaleRatio(target)), 1)
+		self:FlyWindPoemArrow(fx, startPos, hitPos)
+
+		-- 착탄 연출은 고정 좌표(hitPos)에 재생하는 순수 시각 효과라 그 사이 타겟이 죽어도(이미 위에서
+		-- 데미지는 적용됨) 재생을 건너뛰지 않는다 — 죽음 체크로 스킵하면 저체력 몹 대상으로는 애로우샷과
+		-- 동시에 즉사시키는 경우가 잦아 hit 연출이 거의 안 뜨는 문제가 있었다(실측 확인, FireArrowShot과 동일 이슈).
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) then return end
+			local scaleRatio = isvalid(target) and self:GetEffectScaleRatio(target) or 1.0
+			local hitFx = self:SpawnEffect(self.Card101HitRUID, hitPos, 0, 1.0, 1.3 * scaleRatio, 1)
+			self:StopEffectAfterFirstLoop(hitFx)
+		end, self.Card101ArrowFlightDuration)
+	end
+
+	-- 발사 원점→타겟 실제 좌표까지 직선으로 날아가는 화살 — 파이어샷/애로우샷 계열의 "타겟 바로 밑에서
+	-- 짧게 튀어 화면 속으로 빨려들어가는" 트릭과 달리, 실제 두 지점을 잇는 긴 궤적이라 회전은 발사
+	-- 시점에 이미 방향대로 고정해두고(FireWindPoemArrow) 위치만 선형 보간한다.
+	@ExecSpace("ServerOnly")
+	method void FlyWindPoemArrow(Entity fx, Vector3 startPos, Vector3 endPos)
+		if fx == nil then return end
+		local duration = self.Card101ArrowFlightDuration
+		_TweenLogic:PlayTween(0.0, 1.0, duration, EaseType.Linear, function(t)
+			if not isvalid(fx) then return end
+			local x = startPos.x + (endPos.x - startPos.x) * t
+			local y = startPos.y + (endPos.y - startPos.y) * t
+			fx.TransformComponent.Position = Vector3(x, y, -0.1)
+		end)
+		_TimerService:SetTimerOnce(function()
+			if isvalid(fx) then fx:Destroy() end
+		end, duration)
+	end
+
+	-- 원래 바람의 시가 쓰던 hit/2~5 무작위 세트 — 유저 요청으로 애로우샷(기본공격)의 착탄 연출로 옮겼다
+	method string GetRandomArrowShotHitRUID()
+		local roll = _UtilLogic:RandomIntegerRange(2, 5)
+		if roll == 2 then return self.ArrowShotHitRUID2
+		elseif roll == 3 then return self.ArrowShotHitRUID3
+		elseif roll == 4 then return self.ArrowShotHitRUID4
+		end
+		return self.ArrowShotHitRUID5
+	end
+
+	-- 애니메이션클립이 모델(skilleffect) Duration보다 빨리 한 바퀴 돌면 처음부터 다시 재생되는 게
+	-- 보인다(유저 실측: "여러번 재생되는거 같은데") — 1루프가 끝나는 시점(SpriteAnimPlayerEndEvent)에
+	-- 숨겨서 딱 한 번만 보이게 한다.
+	@ExecSpace("Multicast")
+	method void StopEffectAfterFirstLoop(Entity fx)
+		if not self:IsClient() then return end
+		if not isvalid(fx) then return end
+		fx:ConnectEvent(SpriteAnimPlayerEndEvent, function()
+			if isvalid(fx) then fx.Enable = false end
+		end)
 	end
 
 	@ExecSpace("ServerOnly")
@@ -3732,6 +4041,18 @@ script CardManager extends Logic
 		-- 슬롯엔 영영 배치되지 못한 채 사실상 사라졌었다(선택지 낭비 버그)
 		local hasEmptySlot = self:GetNextEmptySlot() > 0
 
+		-- 캐릭터별 스킬 분리 — 아래 카드 1~24는 전부 아르카나 전용이다. 실피드(SelectedCharacter==1)는
+		-- 이 블록 전체를 건너뛰고, 공용 카드(포션)만 공유한다. 실피드 전용 카드가 생기면 이 아래에
+		-- "if isSylph then ... end" 블록을 새로 추가한다(카드 번호는 100번대로 구분).
+		local isSylph = (_GameManager.SelectedCharacter == 1)
+
+		-- 포션 — 유일한 공용(캐릭터 무관) 카드
+		if self.PotionLevel < 5 then
+			table.insert(pool, { card = 6, type = "potion" })
+		end
+
+		if not isSylph then
+
 		-- 에너지볼트: 미해금이면 해금(슬롯 여유 있을 때만), 해금 후 레벨 < 5이면 강화
 		-- 단, 체인 라이트닝으로 이미 조합된 뒤(ChainLightningLevel>0)에는 에너지볼트 자체의 강화
 		-- 선택지를 더 안 준다(에너지볼트가 그 슬롯을 이미 떠났으므로).
@@ -3834,10 +4155,7 @@ script CardManager extends Logic
 		-- 게 남아있지 않을 때만(아래 "풀이 3개 미만이면 패딩" 로직) 등장한다. 유일하게 상한이 없어서
 		-- 항상 채워줄 수 있는 카드이기 때문.
 
-		-- 포션
-		if self.PotionLevel < 5 then
-			table.insert(pool, { card = 6, type = "potion" })
-		end
+		-- 포션은 함수 최상단(공용 카드 섹션)에서 이미 넣었다 — 여기서 다시 넣지 않는다(중복 방지).
 
 		-- 패시브 카드 (미해금이면 unlock, 해금 후 레벨 < 5이면 강화)
 		if not self:IsCardUnlocked(7) then
@@ -3912,6 +4230,18 @@ script CardManager extends Logic
 			table.insert(pool, { card = 22, type = "meditation_up" })
 		end
 
+		end -- if not isSylph
+
+		-- 실피드 전용 카드 — 바람의 시(Card101, 슬롯형 정식 스킬 1호): 미해금이면 해금(슬롯 여유 있을
+		-- 때만), 해금 후 레벨 < 5이면 강화
+		if isSylph then
+			if self.WindPoemLevel == 0 then
+				if hasEmptySlot then table.insert(pool, { card = 101, type = "unlock" }) end
+			elseif self.WindPoemLevel < 5 then
+				table.insert(pool, { card = 101, type = "windpoem_up" })
+			end
+		end
+
 		-- Fisher-Yates 셔플
 		for i = #pool, 2, -1 do
 			local j = _UtilLogic:RandomIntegerRange(1, i)
@@ -3929,14 +4259,19 @@ script CardManager extends Logic
 			end
 		end
 
-		-- 풀이 3개 미만이면 Card1(파이어샷) 강화로 패딩 — 다른 모든 카드가 업그레이드할 게 없을 때
-		-- 진입하는 유일한 경로. 5회 이후로는 쿨타임 선택지가 없으므로(영구 고정) 데미지만 나온다.
+		-- 풀이 3개 미만이면 상시 기본공격(파이어샷/애로우샷) 강화로 패딩 — 다른 모든 카드가 업그레이드할
+		-- 게 없을 때 진입하는 유일한 경로. 5회 이후로는 쿨타임 선택지가 없으므로(영구 고정) 데미지만
+		-- 나온다. 실피드(SelectedCharacter==1)는 파이어샷이 아예 안 틱되므로 애로우샷(카드25)으로 패딩해야
+		-- 한다 — 안 그러면 실피드가 다른 카드를 다 채운 뒤엔 아무 효과 없는 선택지만 계속 뜨게 된다.
+		local basicCard = (_GameManager.SelectedCharacter == 1) and 25 or 1
+		local basicUpgradeCount = (basicCard == 25) and self.ArrowShotUpgradeCount or self.Card1UpgradeCount
+		local basicMultiplierCap = (basicCard == 25) and self.ArrowShotMultiplierCap or self.Card1MultiplierCap
 		while #chosen < 3 do
-			local card1Type = "dmg"
-			if self.Card1UpgradeCount < self.Card1MultiplierCap and _UtilLogic:RandomDouble() < 0.5 then
-				card1Type = "cd"
+			local basicType = "dmg"
+			if basicUpgradeCount < basicMultiplierCap and _UtilLogic:RandomDouble() < 0.5 then
+				basicType = "cd"
 			end
-			table.insert(chosen, { card = 1, type = card1Type })
+			table.insert(chosen, { card = basicCard, type = basicType })
 		end
 
 		self._choiceCard1 = chosen[1].card ; self._choiceType1 = chosen[1].type
@@ -3953,6 +4288,7 @@ script CardManager extends Logic
 	method string GetChoiceEffectTag(integer cardIdx)
 		if cardIdx == 6 then return "지속회복"
 		elseif cardIdx == 1 then return "기본공격"
+		elseif cardIdx == 25 then return "기본공격"
 		elseif cardIdx == 2 then return "다단타격"
 		elseif cardIdx == 3 then return "관통,둔화"
 		elseif cardIdx == 4 then return "관통,스턴"
@@ -3975,6 +4311,7 @@ script CardManager extends Logic
 		elseif cardIdx == 22 then return "패시브,피해증가"
 		elseif cardIdx == 23 then return "다중,빙결,범위"
 		elseif cardIdx == 24 then return "다중,속박,추가타"
+		elseif cardIdx == 101 then return "다중,관통"
 		end
 		return ""
 	end
@@ -4162,6 +4499,21 @@ script CardManager extends Logic
 			return
 		end
 
+		if cardIdx == 25 then
+			icon.ImageRUID = self.ArrowShotIconRUID
+			title.Text = "Lv1"
+			name.Text  = self.ArrowShotName
+			return
+		end
+
+		if cardIdx == 101 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.WindPoemLevel + 1)
+			icon.ImageRUID = self.Card101IconRUID
+			title.Text = "Lv" .. nextLevel
+			name.Text  = self.Card101Name
+			return
+		end
+
 		-- 카드 2/5(매직 클로/메테오)
 		local skillNames = {self.Card1Name, self.Card2Name, self.Card3Name, self.Card4Name, self.Card5Name}
 		local skillName = (cardIdx >= 1 and cardIdx <= 5) and skillNames[cardIdx] or ("카드 " .. cardIdx)
@@ -4260,6 +4612,23 @@ script CardManager extends Logic
 				end
 			end
 			log("EnergyBolt L" .. self.EnergyBoltLevel)
+			return
+		end
+
+		-- 바람의 시 (실피드 전용, 슬롯 해금 또는 레벨 강화)
+		if cardIdx == 101 then
+			if upgradeType == "unlock" then
+				self.WindPoemLevel = 1
+				local slotIdx = self:GetNextEmptySlot()
+				if slotIdx > 0 then
+					self:AssignCardToSlot(slotIdx, 101)
+					self:ResetSlotTimer(slotIdx)
+					log("Card101(WindPoem) -> Slot" .. slotIdx)
+				end
+			elseif upgradeType == "windpoem_up" and self.WindPoemLevel < 5 then
+				self.WindPoemLevel = self.WindPoemLevel + 1
+			end
+			log("WindPoem L" .. self.WindPoemLevel)
 			return
 		end
 
@@ -4590,6 +4959,26 @@ script CardManager extends Logic
 			return
 		end
 
+		-- 애로우샷(Card25, 실피드 전용)도 파이어샷과 동일한 공식(5회까지 배율, 이후 데미지 +20 고정
+		-- 무한증가)을 완전히 독립된 프로퍼티로 따른다.
+		if cardIdx == 25 and (upgradeType == "dmg" or upgradeType == "cd") then
+			if upgradeType == "dmg" then
+				if self.ArrowShotUpgradeCount < self.ArrowShotMultiplierCap then
+					self.ArrowShotDamage = self.ArrowShotDamage * 1.2
+				else
+					self.ArrowShotDamage = self.ArrowShotDamage + self.ArrowShotFlatDamageBonus
+				end
+				self.ArrowShotUpgradeCount = self.ArrowShotUpgradeCount + 1
+			elseif upgradeType == "cd" then
+				if self.ArrowShotUpgradeCount < self.ArrowShotMultiplierCap then
+					self.ArrowShotCooldown = self.ArrowShotCooldown * 0.85
+					self.ArrowShotUpgradeCount = self.ArrowShotUpgradeCount + 1
+				end
+			end
+			log("Card25(애로우샷) upgrade: count=" .. self.ArrowShotUpgradeCount .. " dmg=" .. math.floor(self.ArrowShotDamage) .. " cd=" .. string.format("%.2f", self.ArrowShotCooldown))
+			return
+		end
+
 		-- 데미지 강화
 		if upgradeType == "dmg" or upgradeType == "unlock_dmg" then
 			if cardIdx == 2 then self.Card2Damage = self.Card2Damage * 1.2
@@ -4643,10 +5032,15 @@ script CardManager extends Logic
 		self.ThunderBoltLevel = 0
 		self.ColdBeamLevel = 0
 
+		self.ArrowShotDamage = 100
+		self.ArrowShotCooldown = 0.8
+		self.ArrowShotUpgradeCount = 0
+
 		self.Slot1Card = 0 ; self.Slot2Card = 0 ; self.Slot3Card = 0
 		self.Slot4Card = 0 ; self.Slot5Card = 0 ; self.Slot6Card = 0
 
 		self._timerBasic = self.Card1Cooldown
+		self._timerBasicArrow = self.ArrowShotCooldown
 		self._timer1 = 0 ; self._timer2 = 0 ; self._timer3 = 0 ; self._timer4 = 0 ; self._timer5 = 0 ; self._timer6 = 0
 
 		self.PotionLevel = 0
@@ -4676,6 +5070,7 @@ script CardManager extends Logic
 		self.MeditationLevel = 0
 		self.HailBurstLevel = 0
 		self.AquaSurgeLevel = 0
+		self.WindPoemLevel = 0
 
 		self._choiceCard1 = 0 ; self._choiceCard2 = 0 ; self._choiceCard3 = 0
 		self._choiceType1 = "" ; self._choiceType2 = "" ; self._choiceType3 = ""
@@ -4772,6 +5167,11 @@ script CardManager extends Logic
 	-- Lv1~5 고정 트랙이라 상한(<5) 체크가 있어야 무제한으로 중복 추가되지 않는다
 	method table BuildActiveUpgradePool()
 		local pool = {}
+		-- 실피드는 아르카나 카드가 아예 안 틱되므로(캐릭터별 스킬 분리) 별도 풀을 쓴다
+		if _GameManager.SelectedCharacter == 1 then
+			if self:IsCardUnlocked(101) and self.WindPoemLevel < 5 then table.insert(pool, 101) end
+			return pool
+		end
 		if self:IsCardUnlocked(2) then table.insert(pool, 2) end
 		if self:IsCardUnlocked(5) then table.insert(pool, 5) end
 		if self:IsCardUnlocked(3) and self.ColdBeamLevel < 5 then table.insert(pool, 3) end
@@ -4800,6 +5200,7 @@ script CardManager extends Logic
 		elseif cardIdx == 8 then return "critical_up"
 		elseif cardIdx == 18 then return "armor_up"
 		elseif cardIdx == 22 then return "meditation_up"
+		elseif cardIdx == 101 then return "windpoem_up"
 		end
 		return (_UtilLogic:RandomDouble() < 0.5) and "dmg" or "cd"
 	end
@@ -5087,6 +5488,14 @@ script CardManager extends Logic
 		if not self.DebugMode then return end
 		_GameManager:CheatSetTimeAttackRemaining(10)
 		log("[DEBUG] TimeAttackRemaining forced to 10s")
+	end
+
+	-- [DEBUG] O키 → 실피드(캐릭터 슬롯) 해금 상태를 미해금으로 되돌려 재테스트할 수 있게 한다.
+	-- DebugMode가 꺼져 있으면(배포 빌드 기준) 아무 동작도 하지 않는다.
+	@ExecSpace("Server")
+	method void DebugResetSylphUnlock()
+		if not self.DebugMode then return end
+		_CharacterUnlockLogic:DebugResetSylphUnlock()
 	end
 
 	method void OnEndPlay()

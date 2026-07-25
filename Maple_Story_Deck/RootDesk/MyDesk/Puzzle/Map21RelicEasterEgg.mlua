@@ -1,0 +1,103 @@
+@Logic
+script Map21RelicEasterEgg extends Logic
+
+	-- object-236_2를 터치하면 1회성으로 발동 — 재입장해도 다시 뜨지 않는다
+	@Sync property boolean Triggered = false
+
+	property string BurstEffectRUID = "c8bb228c773348dba37de0119cb93f33"
+	-- 236 오브젝트(스케일 0.3078595)를 완전히 덮을 만큼 크게
+	property number BurstScale = 2.5
+	-- 236 오브젝트 위치보다 위쪽으로 띄워서 재생한다(유저가 두 번에 걸쳐 1.2씩 더 올려달라고 요청 — 1.2 → 2.4)
+	property number BurstYOffset = 2.4
+	-- 살짝 반투명하게(유저 요청: "알파는 살짝 빼줘 15%정도")
+	property number BurstAlpha = 0.85
+	-- 이펙트가 236을 완전히 가린 뒤 실제로 숨긴다(그 전에 숨기면 사라지는 게 그대로 보임)
+	property number HideDelay = 0.35
+	-- 이펙트가 다 재생될 시간(skilleffectlong 기준 2.5초)까지 기다렸다가 팝업을 띄운다
+	property number PopupDelay = 2.0
+
+	property string ArrowHintPath = "/maps/map21/RelicArrowHint"
+
+	@ExecSpace("ServerOnly")
+	method void OnObjectTouched(Entity relicObject)
+		-- 나무 퍼즐(Map21TreePuzzleLogic — 우측 4조각을 좌측 짝과 대칭으로 옮기는 퍼즐)을 풀어야만
+		-- 발동한다. 아직 안 풀렸으면(화살표 힌트도 안 떠 있는 상태) 조용히 무시한다.
+		if not _Map21TreePuzzleLogic.Solved then return end
+		if self.Triggered then return end
+		self.Triggered = true
+		log("Map21RelicEasterEgg: triggered")
+
+		local map = relicObject.CurrentMap
+		if map ~= nil then
+			local pos = relicObject.TransformComponent.WorldPosition
+			local fxPos = Vector3(pos.x, pos.y + self.BurstYOffset, pos.z - 0.2)
+			local fx = _SpawnService:SpawnByModelId("skilleffectlong", "RelicRevealFX", fxPos, map)
+			if fx ~= nil then
+				local renderer = fx.SpriteRendererComponent
+				if renderer ~= nil then
+					renderer.SpriteRUID = self.BurstEffectRUID
+					renderer.Color = Color(1, 1, 1, self.BurstAlpha)
+				end
+				fx.TransformComponent.Scale = Vector3(self.BurstScale, self.BurstScale, 1)
+				self:StopEffectOnFirstEnd(fx)
+			end
+		end
+
+		local arrow = _EntityService:GetEntityByPath(self.ArrowHintPath)
+		self:HideRelicObject(relicObject)
+		if arrow ~= nil then self:HideRelicObject(arrow) end
+
+		_TimerService:SetTimerOnce(function()
+			if isvalid(self) then _CharacterUnlockUI:Open() end
+		end, self.PopupDelay)
+	end
+
+	-- 원본 리소스가 반복 재생(Loop)으로 되어 있어도 딱 1번만 재생되고 멈추게 한다(유저 요청: "1번만
+	-- 반복시키고") — 애니메이션 1주기가 끝나는 시점(SpriteAnimPlayerEndEvent)에 알파를 0으로 낮춰
+	-- 그 뒤로 반복돼도 안 보이게 한다. skilleffectlong 자체는 2.5초 뒤 스스로 파괴되므로 별도 정리는 불필요.
+	@ExecSpace("Multicast")
+	method void StopEffectOnFirstEnd(Entity fx)
+		if not self:IsClient() then return end
+		if not isvalid(fx) then return end
+		fx:ConnectEvent(SpriteAnimPlayerEndEvent, function()
+			if isvalid(fx) and fx.SpriteRendererComponent ~= nil then
+				fx.SpriteRendererComponent.Color = Color(1, 1, 1, 0)
+			end
+		end)
+	end
+
+	-- 이펙트가 236(과 화살표 힌트)을 가린 뒤 실제로 사라지게 한다. Logic에 대상 UUID를 미리 박아두지
+	-- 않고 호출자가 넘겨준 Entity를 그대로 쓴다(위 트리거의 nil 문제 회피와 동일한 이유).
+	@ExecSpace("Multicast")
+	method void HideRelicObject(Entity target)
+		if not self:IsClient() then return end
+		if not isvalid(target) then return end
+		_TimerService:SetTimerOnce(function()
+			if isvalid(target) then target.Enable = false end
+		end, self.HideDelay)
+	end
+
+	-- CharacterUnlockUI(팝업)의 확인 버튼이 호출 — 실피드를 영구 해금하고 맵20 마지막 존으로 이동시킨다
+	@ExecSpace("ServerOnly")
+	method void AcquireAndTravel()
+		_CharacterUnlockLogic:UnlockSylph()
+
+		local targetIndex = 34
+		local mapName = _MapManager:GetMapName(targetIndex)
+		local spawnPos = _MapManager:GetSpawnPositionForIndex(targetIndex)
+
+		_MapTransitionLogic:PlayCover("right")
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) then return end
+			for _, userEntity in pairs(_UserService.UserEntities) do
+				_TeleportService:TeleportToMapPosition(userEntity, spawnPos, mapName)
+			end
+			_MapManager.CurrentMapIndex = targetIndex
+			_MonsterSpawner:ActivateMap(targetIndex)
+			_TimerService:SetTimerOnce(function()
+				if isvalid(self) then _MapTransitionLogic:PlayReveal("right") end
+			end, _MapTransitionLogic.CameraSettleDelay)
+		end, _MapTransitionLogic.CoverDuration)
+	end
+
+end

@@ -1,0 +1,88 @@
+@Logic
+script Map21TreePuzzleLogic extends Logic
+
+	-- 우측 4개 조각(object-1177_3/4/5/7)을 전부 좌측 짝과 대칭 좌표(오차범위 이내)로 직접 끌어다
+	-- 놓으면 true — 그 순간 화살표 힌트(RelicArrowHint)가 등장한다. Map21RelicEasterEgg가 이 값을
+	-- 보고 object-236_2 터치를 허용할지 결정한다.
+	@Sync property boolean Solved = false
+	property integer _movedCount = 0
+
+	-- 짝 매칭은 스케일/색상이 완전히 동일한 것끼리다(유저 실측 확인 — 우연이 아니라 의도된 짝짓기):
+	-- object-1177_3 ↔ object-1177_2, object-1177_4 ↔ object-1177_1,
+	-- object-1177_5 ↔ object-1177_6, object-1177_7 ↔ object-1177(기본).
+	-- 각 조각(PieceIndex)을 놓아야 할 목표 좌표 = 좌측 짝의 정확한 대칭(부호 반전) 좌표.
+	property any _targets = nil
+	property any _movedFlags = nil
+
+	-- 유저가 손으로 직접 끌어다 놓으므로 픽셀 단위로 정확히 맞추긴 어렵다 — 목표 좌표에서 이만큼
+	-- (월드 유닛) 이내면 정답으로 인정한다(유저 요청: "오차범위는 허용해줘야해").
+	property number PlacementTolerance = 0.5
+
+	property string ArrowHintPath = "/maps/map21/RelicArrowHint"
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		self._targets = {
+			[1] = Vector3(2.90193, -3.50983047, 999.998047),
+			[2] = Vector3(3.78655386, -1.49546754, 999.998047),
+			[3] = Vector3(4.82245827, -1.93677855, 999.998047),
+			[4] = Vector3(4.812218, -0.4071024, 999.998047),
+		}
+		self._movedFlags = { [1] = false, [2] = false, [3] = false, [4] = false }
+	end
+
+	-- 조각을 놓을 때마다(정답이었다가 다시 딴 데로 옮겨도) 매번 다시 판정한다 — "정답 위치에 놨다가
+	-- 다른 데로 옮기면 다시 오답 처리돼야 한다"는 유저 지적. 정답 인정은 그 순간의 스냅샷이 아니라
+	-- "지금 이 순간 정답 좌표에 실제로 있는가"를 매번 재확인해서 판정한다. 4개 전부 동시에 정답
+	-- 좌표에 있어야만 Solved가 된다(_movedCount는 "현재 정답 위치에 있는 조각 수").
+	@ExecSpace("ServerOnly")
+	method void CheckPiecePlacement(integer pieceIndex, Entity piece, number x, number y)
+		if self.Solved then return end
+
+		local target = self._targets[pieceIndex]
+		local dx = x - target.x
+		local dy = y - target.y
+		local dist = math.sqrt(dx * dx + dy * dy)
+		local wasPlaced = self._movedFlags[pieceIndex]
+		local nowPlaced = dist <= self.PlacementTolerance
+
+		if nowPlaced and not wasPlaced then
+			self._movedFlags[pieceIndex] = true
+			self._movedCount = self._movedCount + 1
+			self:SnapToTarget(piece, target)
+			log("Map21TreePuzzleLogic: piece " .. pieceIndex .. " placed (" .. self._movedCount .. "/4)")
+		elseif nowPlaced and wasPlaced then
+			-- 이미 정답 위치인데 또 그 자리에 놓음 — 픽셀 오차 보정 차원에서 다시 스냅만 한다
+			self:SnapToTarget(piece, target)
+		elseif not nowPlaced and wasPlaced then
+			self._movedFlags[pieceIndex] = false
+			self._movedCount = self._movedCount - 1
+			log("Map21TreePuzzleLogic: piece " .. pieceIndex .. " moved away from target (" .. self._movedCount .. "/4)")
+		else
+			log("Map21TreePuzzleLogic: piece " .. pieceIndex .. " placement missed (dist=" .. dist .. ")")
+		end
+
+		if self._movedCount >= 4 then
+			self.Solved = true
+			log("Map21TreePuzzleLogic: puzzle solved, revealing arrow")
+			local arrow = _EntityService:GetEntityByPath(self.ArrowHintPath)
+			if arrow ~= nil then self:ShowArrow(arrow) end
+		end
+	end
+
+	-- 오차범위 안에 들어오면 픽셀 단위로 딱 맞도록 정확한 목표 좌표로 스냅시킨다
+	@ExecSpace("Multicast")
+	method void SnapToTarget(Entity piece, Vector3 target)
+		if not self:IsClient() then return end
+		if not isvalid(piece) then return end
+		piece.TransformComponent.Position = target
+	end
+
+	@ExecSpace("Multicast")
+	method void ShowArrow(Entity arrow)
+		if not self:IsClient() then return end
+		if not isvalid(arrow) then return end
+		arrow.Enable = true
+	end
+
+end
