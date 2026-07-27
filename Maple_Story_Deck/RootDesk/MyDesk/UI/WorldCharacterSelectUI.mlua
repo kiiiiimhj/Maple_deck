@@ -51,6 +51,11 @@ script WorldCharacterSelectUI extends Logic
 
 	@ExecSpace("ClientOnly")
 	method void OnBeginPlay()
+		-- 월드 시작 시점엔 무조건 숨겨둔다 — CharacterUnlockUI/GachaUI 등과 동일한 이유로, 이걸
+		-- 빠뜨리면 .ui에 저장된 기본값(Enable=true)이 그대로 남아 로비 화면 위에 팝업이 떠 있는 채로
+		-- 시작해버린다(유저 지적: "팝업같은 UI가 떴다 로비화면으로 변경되는 경우가있어" —
+		-- WorldCharacterSelectGroup의 displayOrder(12)가 TitleGroup(5)보다 높아서 실제로 덮어 그려짐).
+		self.popupGroup.Enable = false
 		self._worlds = {
 			{ name = "태초의 마을", imageRuid = "95ce798ac8fd4b1ab8177405c18c9949", enterable = true },
 			{ name = "다음 월드 (준비중)", imageRuid = "4fea64a3307cda641809ad8be0d4890b", enterable = false },
@@ -167,16 +172,34 @@ script WorldCharacterSelectUI extends Logic
 		}
 	end
 
+	-- 슬롯 이름(Name)이 게임 시작 시 갱신되지 않던 버그 수정 — 기존엔 아이콘만 갱신하고 슬롯 자체의
+	-- Name 텍스트는 한 번도 안 건드려서 .ui에 저장된 예전 값이 그대로 남아있었다. 잠긴 캐릭터(실피드
+	-- 미해금 등)는 이미지가 있으면 검은색으로 틴트해서 실루엣처럼 보이게 한다(유저 요청: "캐릭터 이미지
+	-- 넣을걸 검은색으로... 보여줘야해").
 	@ExecSpace("ClientOnly")
 	method void RefreshCharList()
 		for i = 0, #self._characters - 1 do
 			local charData = self._characters[i + 1]
 			local slot = self.charList:GetChildByName("CharSlot_" .. tostring(i))
 			if isvalid(slot) then
+				local nameLabel = slot:GetChildByName("Name")
+				if isvalid(nameLabel) then
+					-- 잠긴 캐릭터는 이름 대신 "???"로 가려서 보여준다(유저 요청). 해금된 캐릭터는
+					-- 아르카나와 동일하게 흰색으로 표시한다.
+					if charData.locked then
+						nameLabel.TextComponent.Text = "???"
+						nameLabel.TextComponent.FontColor = Color(0.6, 0.6, 0.6, 1)
+					else
+						nameLabel.TextComponent.Text = charData.name
+						nameLabel.TextComponent.FontColor = Color(1, 1, 1, 1)
+					end
+				end
 				local icon = slot:GetChildByName("Icon")
-				if isvalid(icon) then
-					if not charData.locked then
-						icon.SpriteGUIRendererComponent.ImageRUID = DataRef(charData.iconRuid)
+				if isvalid(icon) and charData.iconRuid ~= "" then
+					icon.SpriteGUIRendererComponent.ImageRUID = DataRef(charData.iconRuid)
+					if charData.locked then
+						icon.SpriteGUIRendererComponent.Color = Color(0, 0, 0, 1)
+					else
 						icon.SpriteGUIRendererComponent.Color = Color(1, 1, 1, 1)
 					end
 				end

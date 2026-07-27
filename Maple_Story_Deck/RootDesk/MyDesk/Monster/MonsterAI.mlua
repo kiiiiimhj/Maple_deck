@@ -837,6 +837,8 @@ script MonsterAI extends Component
 	@ExecSpace("ServerOnly")
 	method void TakeDamageCrit(number damage)
 		if self._dead then return end
+		-- 크리티컬 샷(카드111, 실피드 전용 패시브) 보너스 — 모든 크리티컬 대미지에 추가 배율 적용
+		damage = damage * (1.0 + _CardManager:GetCriticalShotBonus())
 		if self._isBonusBoss then
 			self:PlayDamageSkin(damage, true)
 			self:OnBonusBossHit()
@@ -853,6 +855,35 @@ script MonsterAI extends Component
 		self:FlashHideDepthOverlay()
 		if self.CurrentHp <= 0 then
 			self:Die()
+		end
+	end
+
+	-- 플레시 미라주(카드108) 전용 — TakeDamage/TakeDamageCrit와 동일하지만, HP가 0 이하가 돼도
+	-- 즉시 Die()하지 않고 deathDelay(=넉백 이동 시간) 뒤로 미룬다(유저 요청: "대미지가 들어가도
+	-- 즉시 죽지말고 넉백은하고 죽기"). damage는 다른 TakeDamage 계열과 동일하게 크리티컬이면
+	-- 호출부에서 이미 2배로 넘어온 값이고, isCrit은 데미지 스킨(연출) 표시용일 뿐이다.
+	@ExecSpace("ServerOnly")
+	method void TakeDamageDelayedDeath(number damage, boolean isCrit, number deathDelay)
+		if self._dead then return end
+		-- 크리티컬 샷(카드111, 실피드 전용 패시브) 보너스 — 크리티컬 경로에서만 추가 배율 적용
+		if isCrit then damage = damage * (1.0 + _CardManager:GetCriticalShotBonus()) end
+		if self._isBonusBoss then
+			self:PlayDamageSkin(damage, isCrit)
+			self:OnBonusBossHit()
+			return
+		end
+		if self._isMiniMoore then
+			return
+		end
+		self.CurrentHp = self.CurrentHp - damage
+		log("Monster HP (delayed-death): " .. self.CurrentHp .. "/" .. self.MaxHp)
+		self:PlayDamageSkin(damage, isCrit)
+		self:PlayHitAnimation(self._hitRUID, self.MonsterSprite)
+		self:FlashHideDepthOverlay()
+		if self.CurrentHp <= 0 then
+			_TimerService:SetTimerOnce(function()
+				if isvalid(self) and not self._dead then self:Die() end
+			end, deathDelay)
 		end
 	end
 
@@ -1113,6 +1144,27 @@ script MonsterAI extends Component
 			if not isvalid(self) then return end
 			self._isPushingBack = false
 		end, 0.35)
+	end
+
+	-- 플레시 미라주(카드108) 전용 — ApplyKnockback(스케일/접근진행도 기준)과 달리 실제 화면 X좌표를
+	-- 가장자리(edgeX)까지 밀어붙이는 넉백. _isPushingBack을 그대로 재사용해 OnUpdate의 통상
+	-- 이동·애니메이션 갱신을 잠가서(OnUpdate 최상단에서 이미 이 플래그를 체크해 즉시 리턴한다)
+	-- 트윈과 충돌하지 않게 한다.
+	@ExecSpace("ServerOnly")
+	method void ApplyLateralShove(number edgeX, number duration)
+		if self._dead then return end
+		self._isPushingBack = true
+		local fromX = self.Entity.TransformComponent.Position.x
+		_TweenLogic:PlayTween(0.0, 1.0, duration, EaseType.QuadEaseOut, function(t)
+			if not isvalid(self) or not isvalid(self.Entity) then return end
+			local p = self.Entity.TransformComponent.Position
+			local x = fromX + (edgeX - fromX) * t
+			self.Entity.TransformComponent.Position = Vector3(x, p.y, p.z)
+		end)
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) then return end
+			self._isPushingBack = false
+		end, duration)
 	end
 
 	-- 속박류 CC(예: 아쿠아 트랩)에 맞았을 때 공중으로 살짝 떠오르는 연출 — duration 동안 떠 있다가
