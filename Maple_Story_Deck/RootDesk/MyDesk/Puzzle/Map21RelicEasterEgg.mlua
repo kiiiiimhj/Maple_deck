@@ -17,6 +17,68 @@ script Map21RelicEasterEgg extends Logic
 	property number PopupDelay = 2.0
 
 	property string ArrowHintPath = "/maps/map21/RelicArrowHint"
+	property string RelicObjectPath = "/maps/map21/object-236_2"
+
+	-- 맵21에 실피드를 이미 획득한 상태로 재입장했을 때만 노출되는 "<" 복귀 버튼(ui/DefaultGroup.ui)
+	property ButtonComponent btnReturn = "5c99574e-2a7c-405a-bd55-fed32b22abde"
+	property any _returnHandler = nil
+	property boolean _returnButtonVisible = false
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		-- 복귀 버튼은 기본적으로 숨겨두고, 클릭 이벤트만 미리 연결해둔다. 실제 노출 여부는 OnUpdate가
+		-- 매 프레임 조건(맵21 + 실피드 해금)을 확인해서 토글한다.
+		if isvalid(self.btnReturn) then
+			self._returnHandler = self.btnReturn.Entity:ConnectEvent(ButtonClickEvent, self.OnReturnClicked)
+			self.btnReturn.Entity.Enable = false
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUpdate(number delta)
+		-- CurrentMapIndex(MapManager)와 SylphUnlocked(CharacterUnlockLogic)는 둘 다 다른 스크립트의
+		-- @Sync라 OnSyncProperty로는 감지할 수 없다(자기 자신의 @Sync 변경에만 반응) — 매 프레임 값만
+		-- 비교한다. DataStorage 호출이 아니라 단순 값 비교라 비용 문제는 없다.
+		local shouldShow = (_MapManager.CurrentMapIndex == 35) and _CharacterUnlockLogic.SylphUnlocked
+		if shouldShow == self._returnButtonVisible then return end
+		self._returnButtonVisible = shouldShow
+		if isvalid(self.btnReturn) then self.btnReturn.Entity.Enable = shouldShow end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnReturnClicked()
+		-- 클라이언트 버튼 클릭 → 서버에 이동 요청
+		self:RequestReturn()
+	end
+
+	@ExecSpace("Server")
+	method void RequestReturn()
+		-- 조건을 서버에서도 다시 검증한다(맵21에 실제로 있고 실피드가 실제로 해금된 상태일 때만 이동)
+		if _MapManager.CurrentMapIndex ~= 35 then return end
+		if not _CharacterUnlockLogic.SylphUnlocked then return end
+		self:ReturnToMap20()
+	end
+
+	method void OnEndPlay()
+		-- 클라이언트에서 연결한 버튼 클릭 핸들러를 해제한다
+		if self:IsClient() and self._returnHandler ~= nil and isvalid(self.btnReturn) then
+			self.btnReturn.Entity:DisconnectEvent(ButtonClickEvent, self._returnHandler)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ApplyAlreadyUnlockedState()
+		-- CharacterUnlockLogic이 저장소에서 SylphUnlocked=true를 읽었을 때 호출된다(예전 세션에서 이미
+		-- 획득한 뒤 새 세션으로 재입장) — 오브젝트/화살표 힌트를 다시 보여줄 필요 없이 처음부터 숨겨두고,
+		-- 터치해도 반응하지 않도록 Triggered도 같이 켜둔다.
+		if self.Triggered then return end
+		self.Triggered = true
+		local relic = _EntityService:GetEntityByPath(self.RelicObjectPath)
+		if relic ~= nil then self:HideRelicObject(relic) end
+		local arrow = _EntityService:GetEntityByPath(self.ArrowHintPath)
+		if arrow ~= nil then self:HideRelicObject(arrow) end
+		log("Map21RelicEasterEgg: already-unlocked state applied (relic hidden, no re-trigger)")
+	end
 
 	@ExecSpace("ServerOnly")
 	method void OnObjectTouched(Entity relicObject)
@@ -67,10 +129,14 @@ script Map21RelicEasterEgg extends Logic
 	end
 
 	-- 이펙트가 236(과 화살표 힌트)을 가린 뒤 실제로 사라지게 한다. Logic에 대상 UUID를 미리 박아두지
-	-- 않고 호출자가 넘겨준 Entity를 그대로 쓴다(위 트리거의 nil 문제 회피와 동일한 이유).
-	@ExecSpace("Multicast")
+	-- 않고 호출자가 넘겨준 Entity를 그대로 쓴다(위 트리거의 nil 문제 회피와 동일한 이유). 서버에서 직접
+	-- Enable을 끈다(클라이언트 전용 Multicast가 아님) — map21은 플레이어가 실제로 들어가기 전까지
+	-- 클라이언트에 복제되지 않는 맵이라, 터치 시점에 접속해 있던 클라이언트에게만 쏘는 Multicast로는
+	-- 나중에(다른 세션/재입장으로) 그 맵에 들어오는 클라이언트가 이 변경을 영영 받지 못한다(실측 확인 —
+	-- 서버는 항상 엔티티를 갖고 있지만 클라이언트는 그 맵에 실제로 들어가기 전엔 nil). 서버측 값을
+	-- 바꿔두면 어떤 클라이언트든 이 맵에 들어오는 시점에 현재 상태 그대로 복제받는다.
+	@ExecSpace("ServerOnly")
 	method void HideRelicObject(Entity target)
-		if not self:IsClient() then return end
 		if not isvalid(target) then return end
 		_TimerService:SetTimerOnce(function()
 			if isvalid(target) then target.Enable = false end
@@ -80,8 +146,15 @@ script Map21RelicEasterEgg extends Logic
 	-- CharacterUnlockUI(팝업)의 확인 버튼이 호출 — 실피드를 영구 해금하고 맵20 마지막 존으로 이동시킨다
 	@ExecSpace("ServerOnly")
 	method void AcquireAndTravel()
+		-- 해금 처리 후, 실제 이동은 ReturnToMap20()과 공유한다(이미 해금된 상태에서 "<" 버튼으로
+		-- 다시 나가는 경우 — RequestReturn 참고 — 와 동일한 목적지/연출을 쓴다)
 		_CharacterUnlockLogic:UnlockSylph()
+		self:ReturnToMap20()
+	end
 
+	@ExecSpace("ServerOnly")
+	method void ReturnToMap20()
+		-- 맵21(택시 이스터에그 비밀 구역)에서 맵20의 마지막 존(존34)으로 돌아간다
 		local targetIndex = 34
 		local mapName = _MapManager:GetMapName(targetIndex)
 		local spawnPos = _MapManager:GetSpawnPositionForIndex(targetIndex)
@@ -100,6 +173,10 @@ script Map21RelicEasterEgg extends Logic
 			-- 새로 스폰된 몬스터는 SpawnBatchOnMap에서 기본적으로 Pause()된 채로 태어나므로, 도착
 			-- 즉시 풀어줘야 한다.
 			_MapManager:SetMonstersPaused(_MonsterSpawner:GetZoneEntity(targetIndex), false)
+			-- 맵21에 있는 동안 MapMoveUI가 숨겨뒀던 좌/우 이동 버튼을 되돌려 놓는다(존34로 정상
+			-- 복귀했다는 걸 명시적으로 알려줘야 한다 — MapMoveUI.OnSyncProperty는 자기 자신의 @Sync만
+			-- 감지하므로 CurrentMapIndex 변경을 자동으로 못 본다)
+			_MapMoveUI:NotifyMapChanged(targetIndex)
 			_TimerService:SetTimerOnce(function()
 				if isvalid(self) then _MapTransitionLogic:PlayReveal("right") end
 			end, _MapTransitionLogic.CameraSettleDelay)

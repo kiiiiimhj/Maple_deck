@@ -723,6 +723,219 @@ script CardManager extends Logic
 		return 0
 	end
 
+	-- ── 실피드 전용 조합 스킬: 폭풍의 시 (카드 116) — 바람의 시(101) Lv5 + 파이널 어택: 활(112, 패시브)
+	-- 보유 시 등장(슬롯이 꽉 차 있어도 뽑기 풀에 노출). 바람의 시 슬롯을 그대로 넘겨받는다(패시브라
+	-- 비울 슬롯 없음). Lv1~3. 바람의 시와 동일한 "활 한 번 당기고 화살 연사" 구조를 그대로 재사용한다
+	-- (유저 확인: "한번만 당기고 빠르게 연사 바람의시랑 유사"). 다만 화살은 서로 다른 타겟이 아니라
+	-- 매 캐스트 최근접 적 1명에게 5/6/7발 전부 집중된다(표의 "단일" + DPS 역산: dmg×횟수/쿨타임이
+	-- 주어진 DPS와 정확히 일치). 활 당기는 연출 중간에 바람의 시엔 없던 keydown/6~10(정지 프레임 5장,
+	-- 원본 프레임 이어붙이기) 시퀀스를 새로 끼워넣는다(유저 지정: "바람의 시 활대 연출을 6~10 이걸로
+	-- 바꾸면되고" — 리소스팩 실측 확인 결과 prepare/keydownend가 바람의 시 Card101BowGlowRUID/
+	-- Card101BowEffectRUID와 동일 RUID라 같은 자산 계열임을 확인). 화살마다(=5/6/7발 각각) 추가 타격
+	-- 확률을 독립적으로 판정한다(유저 확인: "독립적"). 크리티컬은 바람의 시와 동일하게 캐스트 1회
+	-- 판정한 값을 전체 화살에 공용으로 적용한다(바람의 시 FireWindPoemArrow와 동일 패턴).
+	@Sync property integer StormPoemLevel = 0
+	property string Card116Name = "폭풍의 시"
+	property string Card116IconRUID = "d476a239a9b146598670c692e27c2717"
+	property string Card116HitRUID = "9b958d5cd4454585b3580ccd959428af"  -- 전용 착탄 연출(8프레임, 유저 재지정)
+	property string Card116ArrowRUID = "574a2f0fbe124b81aa24c534726d6956"  -- 전용 화살(6프레임, 유저 지정)
+	property string Card116ShootRUID = "3d659525e3b3485e9b808d73229d39cc"  -- 쏘는 연출(16프레임, 유저 지정)
+	property number Card116ShootScale = 1.05  -- 유저 요청으로 쏘는 연출 30% 축소(Card101BowScale 1.5 → 1.05)
+	property number Card116Cooldown = 3.5  -- 레벨 무관 고정(바람의 시와 동일)
+	property number Card116FrameDuration = 0.05  -- 활 당기는 연출/쏘는 연출/착탄 연출 프레임 이어붙이기 간격
+	property number Card116ArrowStaggerDelay = 0.1  -- 바람의 시와 동일(화살 순차 발사 간격)
+	property number Card116ArrowStartDelay = 0.05  -- 유저 요청: 화살은 즉발("연출 시작하고 0.05초"), 쏘는 연출(0.8초)이 다 끝나길 기다리지 않는다
+	-- 유저 요청: "화살 나올때 쏘는연출 중앙에서 나오면 좋겠네" — 쏘는 연출(be93d810..., 480x444,
+	-- pivot nx=0.6583/ny=0.3851, msw_resource_api get으로 확인)은 스폰 좌표(Card101BowPosition)를
+	-- pivot으로 삼기 때문에 그림의 실제 시각적 중앙은 pivot에서 벗어나 있다. 로컬 중앙 오프셋
+	-- ((0.5-nx)*width, (0.5-ny)*height)*Card116ShootScale/100(px→월드 단위)을 Card101BowRotation(90도,
+	-- 반시계) 만큼 회전 변환(wx=-ly, wy=lx)한 값 — 화살 스폰점만 이 오프셋만큼 이동시키고 연출 자체의
+	-- 스폰 좌표는 건드리지 않는다.
+	property number Card116ArrowSpawnXOffset = -0.42
+	property number Card116ArrowSpawnYOffset = -0.80
+
+	-- 전용 착탄 연출(9b958d5cd4454585b3580ccd959428af) 8프레임
+	method table GetStormPoemHitFrames()
+		return {
+			"047394a5f6844b3faddb0b28372825c2",
+			"a407a98e8d4447e1b9593484b77392fd",
+			"5fe68d0fa7c64643bf0591eda6feea1a",
+			"6b9a34982e344a448c0a7b568919a892",
+			"451f6585b01e45038e0a8a1d40ffa0f9",
+			"978cbef4e37c4b1e9b857c8efa34afda",
+			"3014b1dec1464106b1b32c735f5fcd2c",
+			"c63f3754e12f4ca5898aa1e63de3d32e",
+		}
+	end
+
+	-- 쏘는 연출(3d659525e3b3485e9b808d73229d39cc) 16프레임
+	method table GetStormPoemShootFrames()
+		return {
+			"be93d810715746d69b0b71284da42108",
+			"8eec076ecbb44875bbc9f676a580e323",
+			"a45d9f0f2da6412da98db2431d65eb79",
+			"f1f37f3e7f204926b4ff150d3fb0531b",
+			"f6bdb349bc8e4cf08cfedd1902220141",
+			"caed309b736945b3b24e1287a771e227",
+			"c6df717968af456f964e429bfa37f49b",
+			"0aabfca82d6c44ec90eadefbaf7fc473",
+			"0e630c9f0a3f4fc69eba312a164d1bb8",
+			"60ba6c08d98341abbb498f586b338d6e",
+			"fb93b4b84611455a80e9d442b7883a20",
+			"654f2217559644bf88bd2cb880eb1868",
+			"bbaf93425e9e479abb956e4cc1f11fec",
+			"3930b237cf4645ebb578c980dcaf33f2",
+			"9c54a6942fba40a6879a46c2c4483134",
+			"32efa653329444cdb70272866bfe393f",
+		}
+	end
+
+	method number GetStormPoemDamage(integer level)
+		if level >= 3 then return 140
+		elseif level >= 2 then return 120
+		end
+		return 100
+	end
+
+	-- 화살 발사 수(=바람의 시처럼 타겟 수만큼 순환 분산) — Lv1:5 / Lv2:6 / Lv3:7
+	method integer GetStormPoemHitCount(integer level)
+		if level >= 3 then return 7
+		elseif level >= 2 then return 6
+		end
+		return 5
+	end
+
+	-- 추가 타격 확률(화살마다 독립 판정) — Lv1:15% / Lv2:15% / Lv3:20%
+	method number GetStormPoemExtraChance(integer level)
+		if level >= 3 then return 0.20 end
+		return 0.15
+	end
+
+	-- 추가 타격 대미지 비율 — Lv1:90% / Lv2:120% / Lv3:150%
+	method number GetStormPoemExtraPercent(integer level)
+		if level >= 3 then return 1.50
+		elseif level >= 2 then return 1.20
+		end
+		return 0.90
+	end
+
+	-- 유저 확인: "단일 타겟인가? 바람의시처럼 타겟팅하면 좋겠는데" → 바람의 시(WindPoemAttack)와
+	-- 동일하게 히트 수만큼 GetClosestTargets로 뽑아 순환 배분한다(몬스터가 히트 수보다 적으면 wraparound).
+	-- 기존의 "한 타겟에 전부 집중" 설계는 폐기.
+	@ExecSpace("ServerOnly")
+	method void StormPoemAttack(number damage, boolean isCrit)
+		local level = self.StormPoemLevel
+		local hitCount = self:GetStormPoemHitCount(level)
+		local aliveTargets = self:GetClosestTargets(hitCount)
+		if #aliveTargets == 0 then return end
+		local arrowTargets = {}
+		for i = 1, hitCount do
+			local idx = ((i - 1) % #aliveTargets) + 1
+			table.insert(arrowTargets, aliveTargets[idx])
+		end
+		self:PlayStormPoemBow(arrowTargets, damage, isCrit, level)
+	end
+
+	-- 유저 지적: "폭풍의시 연출 나오는데 왜 바람의 시연출도 뜨는거야" / "폭풍의 시연출만 나오고 그때
+	-- 화살이 나가야지" — 바람의 시의 생성연출(prepare)·활쏘는연출(keydownend) 플래시를 재사용하지
+	-- 않는다. 이후 유저 정정: "3d659525... 이 연출로 바꾸라는거지 원본을 유지하라는게 아님" — 처음에
+	-- 끼워넣었던 keydown/6~10 활 당기는 연출은 완전히 제거하고, 쏘는 연출(3d659525...) 하나만 단독
+	-- 재생한 뒤 그게 다 끝나면 화살을 쏜다.
+	@ExecSpace("ServerOnly")
+	method void PlayStormPoemBow(any targets, number damage, boolean isCrit, integer level)
+		self:PlayStormPoemShoot(self.Card101BowPosition, self.Card101BowRotation)
+
+		-- 유저 요청: 화살은 즉발 — 쏘는 연출(0.8초)이 끝나길 기다리지 않고 시작 직후(0.05초)에 쏜다
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) then return end
+			for i = 1, #targets do
+				local staggerDelay = (i - 1) * self.Card116ArrowStaggerDelay
+				local target = targets[i]
+				_TimerService:SetTimerOnce(function()
+					if not isvalid(self) then return end
+					if isvalid(target) and isvalid(target.Entity) and not target._dead then
+						self:FireStormPoemArrow(target, damage, isCrit, level)
+					end
+				end, staggerDelay)
+			end
+		end, self.Card116ArrowStartDelay)
+	end
+
+	-- "쏘는 연출" — 활 당기는 연출(keydown/6~10)을 대체하는 단독 연출이다(유저 정정: "이 연출로
+	-- 바꾸라는거지 원본을 유지하라는게 아님"). 원본 리소스가 커서(최대 636x444) 30% 축소해서 재생한다
+	@ExecSpace("ServerOnly")
+	method void PlayStormPoemShoot(Vector3 pos, number rotation)
+		local frames = self:GetStormPoemShootFrames()
+		local dur = self.Card116FrameDuration
+		local fx = self:SpawnEffectWithModel(frames[1], pos, rotation, 1.0, self.Card116ShootScale, 1.0, "skilleffectlong")
+		if fx == nil then return end
+		local renderer = fx.SpriteRendererComponent
+		for i = 2, #frames do
+			local frameRUID = frames[i]
+			_TimerService:SetTimerOnce(function()
+				if isvalid(fx) and isvalid(renderer) then renderer.SpriteRUID = frameRUID end
+			end, dur * (i - 1))
+		end
+		fx:Destroy(dur * #frames)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void PlayStormPoemHitEffect(Vector3 pos, number scale)
+		local frames = self:GetStormPoemHitFrames()
+		local dur = self.Card116FrameDuration
+		local fx = self:SpawnEffectWithModel(frames[1], pos, 0, 1.0, scale, 1.0, "skilleffectlong")
+		if fx == nil then return end
+		local renderer = fx.SpriteRendererComponent
+		for i = 2, #frames do
+			local frameRUID = frames[i]
+			_TimerService:SetTimerOnce(function()
+				if isvalid(fx) and isvalid(renderer) then renderer.SpriteRUID = frameRUID end
+			end, dur * (i - 1))
+		end
+		fx:Destroy(dur * #frames)
+	end
+
+	-- 화살 한 발 발사 — 바람의 시 FireWindPoemArrow와 동일한 발사/비행/착탄 구조를 재사용하되, 착탄
+	-- 연출은 전용 리소스(Card116HitRUID)로 교체하고, 착탄 후 화살마다 독립적으로 추가 타격을 판정한다.
+	@ExecSpace("ServerOnly")
+	method void FireStormPoemArrow(MonsterAI target, number damage, boolean isCrit, integer level)
+		local p1 = target.Entity.TransformComponent.Position
+		local hitPos = Vector3(p1.x, p1.y + 0.3, p1.z)
+		local bowPos = self.Card101BowPosition
+		local startPos = Vector3(bowPos.x + self.Card116ArrowSpawnXOffset, bowPos.y + self.Card116ArrowSpawnYOffset, bowPos.z)
+
+		local dx = hitPos.x - startPos.x
+		local dy = hitPos.y - startPos.y
+		local angle = math.deg(math.atan(dy, dx))
+
+		local fx = self:SpawnEffect(self.Card116ArrowRUID, startPos, angle, 1.5, 1.5 * (self:GetEffectScaleRatio(target)), 1)
+		self:FlyWindPoemArrow(fx, startPos, hitPos)
+
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) then return end
+			if isvalid(target) and isvalid(target.Entity) and not target._dead then
+				if isCrit then target:TakeDamageCrit(damage * 2)
+				else target:TakeDamage(damage) end
+			end
+			local scaleRatio = isvalid(target) and self:GetEffectScaleRatio(target) or 1.0
+			self:PlayStormPoemHitEffect(hitPos, 1.3 * scaleRatio)
+
+			-- 추가 타격 — 화살마다(=이 호출마다) 독립적으로 판정(유저 확인: "독립적")
+			local extraChance = self:GetStormPoemExtraChance(level)
+			if _UtilLogic:RandomDouble() < extraChance then
+				local extraPercent = self:GetStormPoemExtraPercent(level)
+				_TimerService:SetTimerOnce(function()
+					if not isvalid(self) then return end
+					if isvalid(target) and isvalid(target.Entity) and not target._dead then
+						local extraDamage = damage * extraPercent
+						if isCrit then target:TakeDamageCrit(extraDamage * 2)
+						else target:TakeDamage(extraDamage) end
+					end
+				end, self.HitEffectLifetime)
+			end
+		end, self.Card101ArrowFlightDuration)
+	end
+
 	-- ── 실피드 전용: 애로우 블로우 (카드 102, 슬롯형 정식 스킬 2호) — 항상 단일 타겟, 쿨타임 2.5초
 	-- 고정. Lv2+에서 20% 확률로 "강화 화살"(레벨별 150/160/180/200% 대미지, 전용 화살 리소스)이
 	-- 나간다 — 강화든 아니든 타격 연출은 동일하게 재사용한다(유저 요청: "강화화살 타격연출도 그냥
@@ -855,6 +1068,216 @@ script CardManager extends Logic
 			local hitFx = self:SpawnEffect(self.Card102HitRUID, hitPos, 0, 1.0, 1.3 * scaleRatio, 1)
 			if hitFx ~= nil then hitFx:Destroy(self.HitEffectLifetime) end
 		end, self.Card101ArrowFlightDuration)
+	end
+
+	-- ── 실피드 전용: 강화 애로우 블로우 (카드 117, 조합 스킬) — 애로우 블로우(Card102) Lv5 + 연속
+	-- 사격(Card113, 슬롯 없는 패시브) 보유 시 등장. 새 슬롯이 필요없고 애로우 블로우의 슬롯을 그대로
+	-- 넘겨받는다(아쿠아 서지/헤일 버스트와 동일한 "슬롯 카드 + 슬롯 없는 패시브" 단일 슬롯 조합
+	-- 패턴). 항상 단일 타겟, 쿨타임 2.5초 고정(애로우 블로우와 동일). 캐스트당 화살 발사 수는
+	-- 레벨별 2/2/3발(GetEnhancedArrowBlowArrowCount, 유저 요청: "화살 1개 쏘는걸 늘리라는건데" —
+	-- 처음에 "3연타 히트 횟수"를 레벨별로 바꿨다가 유저에게 강하게 정정받음: 3연타는 고정 유지하고
+	-- 늘려야 하는 건 화살 발사 수였다), 화살마다 Card117ArrowStaggerDelay(0.15초) 간격으로 같은
+	-- 타겟에 연사한다. 화살 한 발 한 발이 독립적으로 레벨별 확률(20%/25%/30%, 유저 확인)로 "강화
+	-- 화살"인지 판정하는데, 강화 화살은 착탄 시 0.3초 간격으로 동일 대미지가 고정 3회(Card117EnhancedHitCount,
+	-- 레벨 무관) 들어간다(히트 간격은 최초 0.15초 → "0.3s정도로 해야할듯" 요청으로 조정). 대미지
+	-- 숫자가 겹쳐 보이는 문제(유저 지적: "계속 겹쳐서 나오냐")는 히트마다
+	-- TakeDamageWithOffset/TakeDamageCritWithOffset(MonsterAI.mlua 신규 추가)으로 수평 오프셋을 줘서
+	-- 해결했다. 크리티컬 여부는 화살당 1회 판정을 그대로 그 화살의 3히트에 공유 — 애로우 블로우
+	-- 원본과 동일하게 별도 재판정하지 않는다. 확률에 못 걸리면 "기본화살"(64f77582..., 기존 애로우
+	-- 블로우의 강화화살 리소스를 재활용)이 나가고 타격 연출도 애로우 블로우의 기존 타격 연출
+	-- (Card102HitRUID)을 그대로 재사용한다(유저 요청: "기본화살 타격은 애로우 블로우의 강화화살
+	-- 타격쓰면됨"). 활대 연출(쏘는 연출, 17프레임)은 전용 신규 리소스 — 연출 시작 0.5초 후 첫 화살을
+	-- 발사한다(최초엔 폭풍의 시와 동일하게 0.05초 즉발이었으나 "쏘는연출 시작하고 0.5s 있다
+	-- 화살발사해야할듯" 요청으로 조정).
+	@Sync property integer EnhancedArrowBlowLevel = 0
+	property string Card117Name = "강화 애로우 블로우"
+	property string Card117IconRUID = "48eed9553f37476aa234798e5fecc709"
+	property number Card117Cooldown = 2.5  -- 레벨 무관 고정(애로우 블로우와 동일)
+	property string Card117ShootRUID = "32eff4d4e0fe4abb92415cbafac88463"  -- 쏘는 연출(17프레임)
+	property number Card117ShootScale = 1.2
+	property number Card117FrameDuration = 0.05
+	property number Card117ArrowStartDelay = 0.5  -- 유저 요청: 쏘는 연출 시작 0.5초 후 화살 발사
+	property string Card117BasicArrowRUID = "64f775829e234918bd65e9d22214bb06"  -- 기본화살(애로우 블로우의 강화화살 리소스 재활용)
+	property string Card117EnhancedArrowRUID = "21360dd335dc4c3abb83c3de41001978"  -- 강화 화살
+	property string Card117EnhancedHitRUID = "ac818eba02d946458e45a778e41cbaf6"  -- 강화화살 전용 타격 연출(8프레임)
+	property number Card117EnhancedHitInterval = 0.3  -- 유저 요청: 강화 화살 히트 간격(0.15초 → 0.3초)
+	property integer Card117EnhancedHitCount = 3  -- 강화 화살 히트 횟수(레벨 무관 고정 — "그건 유지해야지" 유저 확인)
+	property number Card117DamageNumberSpacing = 0.4  -- 유저 요청: 겹쳐 보이는 대미지 숫자를 히트마다 수평으로 떨어뜨림
+	property number Card117ArrowStaggerDelay = 0.15  -- 유저 요청: 화살 1개 발사를 레벨별 연사로 늘림(발사 간격)
+
+	method number GetEnhancedArrowBlowDamage(integer level)
+		if level >= 3 then return 300
+		elseif level >= 2 then return 250
+		end
+		return 230
+	end
+
+	method number GetEnhancedArrowBlowEnhanceChance(integer level)
+		if level >= 3 then return 0.30
+		elseif level >= 2 then return 0.25
+		end
+		return 0.20
+	end
+
+	-- 캐스트당 발사하는 화살 수 — 유저 요청: "화살 1개 쏘는걸 늘리라는건데" — 레벨별 2/2/3발
+	-- 연사(각 화살은 독립적으로 강화 여부를 판정하고, 강화면 고정 3연타가 들어간다)
+	method integer GetEnhancedArrowBlowArrowCount(integer level)
+		if level >= 3 then return 3 end
+		return 2
+	end
+
+	-- 쏘는 연출(32eff4d4e0fe4abb92415cbafac88463) 17프레임
+	method table GetCard117ShootFrames()
+		return {
+			"34f8a74d75664fe2a257fb9c0ba5c5e2",
+			"bdf5f77c571d4d1eb598a8473a0e98da",
+			"39ed930c9523413ab80daa73ee11f055",
+			"54c60752e1564294a9165bc0a055a786",
+			"b5cb8fe27c6c45949068773006e34680",
+			"757bb80fb2dc4ae8a4033d4916b0c038",
+			"af38cf375c084000ad16354791d967b9",
+			"b915df0285e645c68ee49a5bb87530b3",
+			"c066be4820ad468480257c52ddf330fa",
+			"78b3b30243604d8691b356948dccc997",
+			"ae7ed92288674386be7fe2ec9aee356f",
+			"26787b33297e4f3a9f9e36159123bd10",
+			"ce4c0576eb4647c39175b507e802008a",
+			"b3516ef9d33240698db3f424d95e0d87",
+			"563d15ac5d6246b883ffb87c850b1fae",
+			"84d96471b5af4d6d83da674710d142c3",
+			"6be899f15caf40bf847bf8aa44dd3989",
+		}
+	end
+
+	-- 강화화살 타격연출(ac818eba02d946458e45a778e41cbaf6) 8프레임
+	method table GetCard117EnhancedHitFrames()
+		return {
+			"dae990a328f3455ea0ba1342351d3dd9",
+			"32351781e99c4261860e4610cd1cc31b",
+			"b62ab7cd95de42e6a7670d390f7e2570",
+			"df306371720a43a7a5c2ff1a94ac217b",
+			"8992ae53d15047669f60ffbf880ea158",
+			"ba54ef9c561e4252aa06cee8341d4e09",
+			"3c718e7149f04daba97ce7089c0d7b08",
+			"c7f408d00ec040debc239b1f7636debf",
+		}
+	end
+
+	-- 캐스팅 시점에 착탄 위치를 미리 고정해둔다 — 애로우 블로우와 동일한 정책(활 쏘는 동안 타겟이
+	-- 죽어도 연출은 항상 끝까지 재생되고 데미지 적용만 생존 여부로 갈린다). 단일 타겟 유지하되,
+	-- 레벨별 화살 수(2/2/3발, GetEnhancedArrowBlowArrowCount)만큼 같은 타겟에 연사한다 — 화살마다
+	-- 독립적으로 강화 여부를 판정한다(FireEnhancedArrowBlowArrow 내부).
+	@ExecSpace("ServerOnly")
+	method void EnhancedArrowBlowAttack(number damage, boolean isCrit, MonsterAI target)
+		self:PlayEnhancedArrowBlowShoot()
+		if not isvalid(target) or not isvalid(target.Entity) then return end
+		local p1 = target.Entity.TransformComponent.Position
+		local hitPos = Vector3(p1.x, p1.y + 0.3, p1.z)
+		local arrowCount = self:GetEnhancedArrowBlowArrowCount(self.EnhancedArrowBlowLevel)
+		for i = 1, arrowCount do
+			local delay = self.Card117ArrowStartDelay + (i - 1) * self.Card117ArrowStaggerDelay
+			_TimerService:SetTimerOnce(function()
+				if not isvalid(self) then return end
+				if isvalid(target) and isvalid(target.Entity) and not target._dead then
+					self:FireEnhancedArrowBlowArrow(target, hitPos, damage, isCrit)
+				end
+			end, delay)
+		end
+	end
+
+	-- 쏘는 연출 — 애로우 블로우의 기존 활대(당기는) 연출을 대체하는 전용 신규 리소스(17프레임)
+	@ExecSpace("ServerOnly")
+	method void PlayEnhancedArrowBlowShoot()
+		local frames = self:GetCard117ShootFrames()
+		local dur = self.Card117FrameDuration
+		local fx = self:SpawnEffectWithModel(frames[1], self.Card101BowPosition, self.Card101BowRotation, 1.0, self.Card117ShootScale, 1.0, "skilleffectlong")
+		if fx == nil then return end
+		local renderer = fx.SpriteRendererComponent
+		for i = 2, #frames do
+			local frameRUID = frames[i]
+			_TimerService:SetTimerOnce(function()
+				if isvalid(fx) and isvalid(renderer) then renderer.SpriteRUID = frameRUID end
+			end, dur * (i - 1))
+		end
+		fx:Destroy(dur * #frames)
+	end
+
+	-- 화살 발사(연사 중 1발) — 레벨별 확률로 강화 화살(고정 3연타)이냐 기본화살(단발, 애로우 블로우 타격 연출 재사용)이냐가 화살마다 독립적으로 갈린다
+	@ExecSpace("ServerOnly")
+	method void FireEnhancedArrowBlowArrow(MonsterAI target, Vector3 hitPos, number damage, boolean isCrit)
+		local startPos = self.Card101BowPosition
+		local dx = hitPos.x - startPos.x
+		local dy = hitPos.y - startPos.y
+		-- 기본화살(애로우 블로우 강화화살 리소스 재활용)과 동일한 180도 보정
+		local angle = math.deg(math.atan(dy, dx)) + 180
+
+		local level = self.EnhancedArrowBlowLevel
+		local enhanceChance = self:GetEnhancedArrowBlowEnhanceChance(level)
+		local isEnhanced = _UtilLogic:RandomDouble() < enhanceChance
+
+		local aliveTarget = isvalid(target) and not target._dead
+		local castScaleRatio = aliveTarget and self:GetEffectScaleRatio(target) or 1.0
+
+		if isEnhanced then
+			local fx = self:SpawnEffect(self.Card117EnhancedArrowRUID, startPos, angle, 1.5, 1.2 * castScaleRatio, 1)
+			self:FlyWindPoemArrow(fx, startPos, hitPos)
+			_TimerService:SetTimerOnce(function()
+				if not isvalid(self) then return end
+				self:ResolveEnhancedArrowBlowHits(target, hitPos, damage, isCrit)
+			end, self.Card101ArrowFlightDuration)
+		else
+			local fx = self:SpawnEffect(self.Card117BasicArrowRUID, startPos, angle, 1.5, 1.2 * castScaleRatio, 1)
+			self:FlyWindPoemArrow(fx, startPos, hitPos)
+			_TimerService:SetTimerOnce(function()
+				if not isvalid(self) then return end
+				if isvalid(target) and isvalid(target.Entity) and not target._dead then
+					if isCrit then target:TakeDamageCrit(damage * 2)
+					else target:TakeDamage(damage) end
+				end
+				local hitAliveTarget = isvalid(target) and not target._dead
+				local scaleRatio = hitAliveTarget and self:GetEffectScaleRatio(target) or 1.0
+				local hitFx = self:SpawnEffect(self.Card102HitRUID, hitPos, 0, 1.0, 1.3 * scaleRatio, 1)
+				if hitFx ~= nil then hitFx:Destroy(self.HitEffectLifetime) end
+			end, self.Card101ArrowFlightDuration)
+		end
+	end
+
+	-- 강화 화살 착탄 — 0.3초 간격으로 동일 대미지가 고정 3회 들어간다(레벨 무관 — "그건 유지해야지"
+	-- 유저 확인). 매 히트마다 전용 타격 연출(Card117EnhancedHitRUID)을 재생하고, 대미지 숫자가
+	-- 서로 겹쳐 보이지 않도록(유저 지적: "계속 겹쳐서 나오냐") 히트마다 수평 오프셋을 줘서 떨어뜨린다.
+	@ExecSpace("ServerOnly")
+	method void ResolveEnhancedArrowBlowHits(MonsterAI target, Vector3 hitPos, number damage, boolean isCrit)
+		local hitCount = self.Card117EnhancedHitCount
+		for i = 1, hitCount do
+			local delay = (i - 1) * self.Card117EnhancedHitInterval
+			local offsetX = (i - (hitCount + 1) / 2.0) * self.Card117DamageNumberSpacing
+			_TimerService:SetTimerOnce(function()
+				if not isvalid(self) then return end
+				if isvalid(target) and isvalid(target.Entity) and not target._dead then
+					if isCrit then target:TakeDamageCritWithOffset(damage * 2, Vector2(offsetX, 0))
+					else target:TakeDamageWithOffset(damage, Vector2(offsetX, 0)) end
+				end
+				local hitAliveTarget = isvalid(target) and not target._dead
+				local scaleRatio = hitAliveTarget and self:GetEffectScaleRatio(target) or 1.0
+				self:PlayEnhancedArrowBlowHitEffect(hitPos, 1.3 * scaleRatio)
+			end, delay)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void PlayEnhancedArrowBlowHitEffect(Vector3 pos, number scale)
+		local frames = self:GetCard117EnhancedHitFrames()
+		local dur = self.Card117FrameDuration
+		local fx = self:SpawnEffectWithModel(frames[1], pos, 0, 1.0, scale, 1.0, "skilleffectlong")
+		if fx == nil then return end
+		local renderer = fx.SpriteRendererComponent
+		for i = 2, #frames do
+			local frameRUID = frames[i]
+			_TimerService:SetTimerOnce(function()
+				if isvalid(fx) and isvalid(renderer) then renderer.SpriteRUID = frameRUID end
+			end, dur * (i - 1))
+		end
+		fx:Destroy(dur * #frames)
 	end
 
 	-- ── 실피드 전용: 아이스 퀴버 (카드 103, 슬롯형 정식 스킬 3호) — 광역(이펙트 자체 반경) 다중
@@ -1095,6 +1518,219 @@ script CardManager extends Logic
 		end
 		fx:Destroy(dur * #frames)
 	end
+
+	-- ── 실피드 전용 조합 스킬: 애로우 일루전 (카드 114) — 아이스 퀴버(103) Lv5 + 파이어 퀴버(104) Lv5
+	-- 보유 시 등장(슬롯이 꽉 차 있어도 뽑기 풀에 노출). 두 원본 카드 모두 사라지고, 애로우 일루전이
+	-- 아이스 퀴버 슬롯을 그대로 넘겨받는다(파이어 퀴버 슬롯은 완전히 비워짐). Lv1~3까지만 존재.
+	-- 아이스/파이어 퀴버와 동일한 "지상 우선 anchor 선택 + 고정 반경" 광역 다중히트 구조를 재사용한다
+	-- (유저 확인: "바닥에 화살을 쏴서 필드에 [효과가] 일어나는 범위 공격, 일반적인 마법 스킬같은 느낌,
+	-- 투사체가 날아가는건 없음" — IceQuiverAttack/FireQuiverAttack과 동일한 GetGroundPriorityTargets
+	-- 방식이지 개별 발사체가 아님). 매 캐스트 anchor 2곳 고정(레벨 무관). 각 anchor 반경 안의 몬스터를
+	-- 전부 타격 — 슬로우 상태가 아니면 슬로우+스턴을 100% 동시에 걸고, 이미 슬로우 상태면(유저 확인:
+	-- "슬로우가 아닌애들은 슬로우걸리고 슬로우 걸린애들은 추가대미지 들어간다는거야") 대신 0.2초 뒤
+	-- 추가 대미지(기본 대미지의 120%/140%/160% — 파이어 퀴버 슬로우 추가딜과 동일한 지연 표시 기법)를
+	-- 별도로 띄운다.
+	-- 연출 4종(발사/공격연출/타격이미지/스턴이미지)은 REST 리소스 API 실측 확인 결과 전부 여러 프레임짜리
+	-- animationclip이다 — 네이티브 재생에 맡기면 공용 skilleffect 모델의 Duration 캡에 걸려 중간에 잘릴
+	-- 수 있다(유저 강한 피드백: "온전하게 실행되게끔 항상 만들랬지"). 그래서 4종 전부 원본 프레임을 직접
+	-- 추출해 수동으로 이어붙인다(아이스/파이어 퀴버의 PlayXxxBurst와 동일 기법, PlayArrowIllusionFrames
+	-- 공용 헬퍼로 통합). "발사"가 총 프레임 수만큼 온전히 다 재생된 시점에 "공격연출"을 그 자리에 띄우고,
+	-- 그 공격연출 위치를 기준으로 범위 대미지를 적용한다(유저 지정: "연출 끝날때쯤 82f4a186... 실행해서
+	-- 82f4a186... 기준으로 범위대미지를 입혀라").
+	@Sync property integer ArrowIllusionLevel = 0
+	property string Card114Name = "애로우 일루전"
+	property string Card114IconRUID = "333f9c5876124f14aa9a1ad80265a3f3"
+	property number Card114Cooldown = 4.0  -- 레벨 무관 고정
+	property integer Card114TargetCount = 2  -- 레벨 무관 고정 anchor 수
+	-- 기준값(30% 축소 적용된 값) — 실제 사용값은 레벨별 배율(GetArrowIllusionRadius/EffectScale)이
+	-- 곱해진 값이다. 유저 요청: "크기 한 15%만 키우자 ~ 3레벨일때는 20%(대미지 범위도 변경되야함)"
+	property number Card114BaseRadius = 0.63
+	property number Card114EffectYOffset = 0.0  -- 유저 요청으로 위로 1만큼 이동(-1.0 → 0.0)
+	property number Card114BaseEffectScale = 0.63
+
+	-- 레벨별 연출/판정 배율 — Lv1~2: +15% / Lv3: +20%
+	method number GetArrowIllusionSizeMult(integer level)
+		if level >= 3 then return 1.20
+		end
+		return 1.15
+	end
+
+	method number GetArrowIllusionRadius(integer level)
+		return self.Card114BaseRadius * self:GetArrowIllusionSizeMult(level)
+	end
+
+	method number GetArrowIllusionEffectScale(integer level)
+		return self.Card114BaseEffectScale * self:GetArrowIllusionSizeMult(level)
+	end
+	property number Card114FrameDuration = 0.05  -- 프레임당 재생시간(파이어 퀴버 Card104FrameDuration과 동일값)
+	property number Card114SlowedBonusDelay = 0.2  -- 슬로우 대상 추가 대미지 표시 지연(파이어 퀴버와 동일)
+
+	-- 발사(5a2a151e...) 16프레임 — GET /v3/resources/{ruid} 실측으로 얻은 payload.frames[].spriteRuid 순서 그대로
+	method table GetArrowIllusionCastFrames()
+		return {
+			"4749947990ac43a8aee956dd19e92d2f",
+			"de131f0ba7f349789293f32bbe64f3d7",
+			"f655b6c4053d4efcbf8021c04f120432",
+			"d2e2e413219048bb9bfc82a853fcf179",
+			"783de070e0f341babfcea3c90c481f2a",
+			"eb3ec2eed5ed48c1a300dec59dbdbfeb",
+			"9b182b4761ae4a60922d43d3592c84ad",
+			"e937e63015e848ae8eb80acd852a01a5",
+			"2c65ca913045444881abb361b273bf22",
+			"b91470fe8436467da91515038799463b",
+			"1ff0609481ea4910b805cf9f44914480",
+			"1a8e888091e84d7b92eeec1fd8f04567",
+			"e3edd9216caa41e68704bc9951bbe277",
+			"6f44a471ce8044879e12e41f46cfefea",
+			"ec93ebff8e4a451582fb736cc558bf88",
+			"842fa10b6b734f5cb3735d1664c5582c",
+		}
+	end
+
+	-- 공격연출(82f4a186...) 6프레임 — 이 프레임이 뜨는 시점에 실제 범위 대미지가 들어간다
+	method table GetArrowIllusionImpactFrames()
+		return {
+			"14da087fccfb41e2bedb170d652abc58",
+			"7fd098b2619142e4a23f7b7fe0c62ffc",
+			"d64af77abbd74a7b8d4b6b075f423f24",
+			"0d89975ccac2467f933398dfb575efa7",
+			"d1ec6847870a48b89e91589282092325",
+			"d0233cb670c14a119be4684f8b805512",
+		}
+	end
+
+	-- 타격 이미지(c6a582fa...) 6프레임 — 개별 피격 대상 표시
+	method table GetArrowIllusionHitFrames()
+		return {
+			"ae80d50129ef4f76af8c8de09356942a",
+			"2e3661a113f545e28c5daa1e582ead8b",
+			"d2ddbec104544bb1971e8642edf4c051",
+			"b4780f1ec00b4f8b8004a0c16cf0fc17",
+			"133cccca8f1e4f1b8962e88281059e1c",
+			"3c3343702e724562b346f726c9754f13",
+		}
+	end
+
+	method number GetArrowIllusionDamage(integer level)
+		if level >= 3 then return 260
+		elseif level >= 2 then return 240
+		end
+		return 200
+	end
+
+	-- 슬로우+스턴 동시 적용 지속시간(초) — Lv1:2 / Lv2:3 / Lv3:4
+	method number GetArrowIllusionStatusDuration(integer level)
+		if level >= 3 then return 4
+		elseif level >= 2 then return 3
+		end
+		return 2
+	end
+
+	-- 이미 슬로우 상태인 대상에게 추가로 들어가는 대미지 비율(기본 대미지 대비) — Lv1:120% / Lv2:140% / Lv3:160%
+	method number GetArrowIllusionSlowedBonusRatio(integer level)
+		if level >= 3 then return 1.60
+		elseif level >= 2 then return 1.40
+		end
+		return 1.20
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ArrowIllusionAttack(number damage, boolean isCrit)
+		local map = self:GetCurrentMap()
+		if map == nil then return end
+		local level = self.ArrowIllusionLevel
+		local statusDuration = self:GetArrowIllusionStatusDuration(level)
+		local bonusRatio = self:GetArrowIllusionSlowedBonusRatio(level)
+		local anchors = self:GetGroundPriorityTargets(self.Card114TargetCount)
+		local radius = self:GetArrowIllusionRadius(level)
+		-- "발사"가 온전히 다 재생된 뒤(=총 프레임 수만큼)에야 "공격연출"이 뜨고 대미지가 들어간다
+		local castDuration = self.Card114FrameDuration * #self:GetArrowIllusionCastFrames()
+		local monsters = map:GetChildComponentsByTypeName("script.MonsterAI", false)
+		local hitCount = 0
+		for _, anchor in ipairs(anchors) do
+			if isvalid(anchor) and isvalid(anchor.Entity) and not anchor._dead then
+				local centerPos = anchor.Entity.TransformComponent.Position
+				local fxPos = Vector3(centerPos.x, centerPos.y + self.Card114EffectYOffset, centerPos.z)
+				self:PlayArrowIllusionCast(fxPos, self:GetEffectScaleRatio(anchor) * self:GetArrowIllusionEffectScale(level))
+
+				_TimerService:SetTimerOnce(function()
+					if not isvalid(self) then return end
+					if not isvalid(anchor) or not isvalid(anchor.Entity) or anchor._dead then return end
+					self:PlayArrowIllusionImpact(fxPos)
+					for _, mob in ipairs(monsters) do
+						---@type MonsterAI
+						local m = mob
+						if isvalid(m) and not m._dead then
+							local mp = m.Entity.TransformComponent.Position
+							local dx = mp.x - centerPos.x
+							local dy = mp.y - centerPos.y
+							if (dx * dx + dy * dy) <= (radius * radius) and self:IsSameDepthBand(anchor, m) then
+								if isCrit then m:TakeDamageCrit(damage * 2)
+								else m:TakeDamage(damage) end
+								self:PlayArrowIllusionHitImage(m)
+
+								if m._isSlowed then
+									local bonusDamage = damage * bonusRatio
+									_TimerService:SetTimerOnce(function()
+										if not isvalid(self) then return end
+										if isvalid(m) and isvalid(m.Entity) and not m._dead then
+											if isCrit then m:TakeDamageCrit(bonusDamage * 2)
+											else m:TakeDamage(bonusDamage) end
+										end
+									end, self.Card114SlowedBonusDelay)
+								else
+									m:ApplySlow(statusDuration)
+									-- 커스텀 스턴 이미지(b84f2bc1...)가 안 보이는 문제(유저 지적) — 자체
+									-- 연출 대신 썬더볼트/썬더스톰과 동일하게 네이티브 스턴 인디케이터를
+									-- 쓴다(유저 요청: "다른 스킬 스턴이랑 크기 연출 통일하면 된다")
+									m:ApplyStun(statusDuration, true)
+								end
+								hitCount = hitCount + 1
+							end
+						end
+					end
+				end, castDuration)
+			end
+		end
+		log("ArrowIllusionAttack: anchors=" .. #anchors .. " radius=" .. radius .. " dmg=" .. math.floor(damage) .. " castDuration=" .. castDuration .. " statusDuration=" .. statusDuration .. " bonusRatio=" .. bonusRatio)
+	end
+
+	-- 원본 애니메이션클립을 네이티브 재생에 맡기지 않고 프레임을 직접 추출해 수동으로 이어붙인다(유저
+	-- 요청: "온전하게 실행되게끔 항상 만들랬지" — 공용 skilleffect 모델의 Duration 캡에 걸려 도중에
+	-- 잘리는 문제를 원천 차단하는 프로젝트 기본 기법, 아이스/파이어 퀴버의 PlayXxxBurst와 동일 패턴).
+	-- 애로우 일루전 연출 4종(발사/공격연출/타격이미지/스턴이미지)이 전부 이 구조를 공유해서 헬퍼로 뺐다.
+	@ExecSpace("ServerOnly")
+	method void PlayArrowIllusionFrames(table frames, Vector3 pos, number scale)
+		local dur = self.Card114FrameDuration
+		local fx = self:SpawnEffectWithModel(frames[1], pos, 0, 1.0, scale, 1.0, "skilleffectlong")
+		if fx == nil then return end
+		local renderer = fx.SpriteRendererComponent
+		for i = 2, #frames do
+			local frameRUID = frames[i]
+			_TimerService:SetTimerOnce(function()
+				if isvalid(fx) and isvalid(renderer) then renderer.SpriteRUID = frameRUID end
+			end, dur * (i - 1))
+		end
+		fx:Destroy(dur * #frames)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void PlayArrowIllusionCast(Vector3 pos, number scale)
+		self:PlayArrowIllusionFrames(self:GetArrowIllusionCastFrames(), pos, scale)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void PlayArrowIllusionImpact(Vector3 pos)
+		self:PlayArrowIllusionFrames(self:GetArrowIllusionImpactFrames(), pos, 1.0)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void PlayArrowIllusionHitImage(MonsterAI target)
+		if not isvalid(target) or not isvalid(target.Entity) then return end
+		local pos = target.Entity.TransformComponent.Position
+		self:PlayArrowIllusionFrames(self:GetArrowIllusionHitFrames(), pos, 1.0)
+	end
+
 
 	-- ── 실피드 전용: 피닉스 (카드 105, 슬롯형 정식 스킬 5호) — 지금까지와 완전히 다른 "소환수" 패턴.
 	-- 시전 시 화면 위에서 피닉스 한 마리가 나타나(summon/summoned) 매 공격마다 그 시점 최근접 적
@@ -1441,6 +2077,381 @@ script CardManager extends Logic
 		log("PhoenixHit: hit=" .. hitCount .. " radius=" .. radius .. " dmg=" .. math.floor(damage))
 	end
 
+	-- ── 실피드 전용 조합 스킬: 이볼브 (카드 115) — 꿰뚫는 의지(110, 슬롯 없는 패시브) + 피닉스(105)
+	-- Lv5 보유 시 등장(슬롯이 꽉 차 있어도 뽑기 풀에 노출). 피닉스는 사라지고, 이볼브가 피닉스 슬롯을
+	-- 그대로 넘겨받는다(꿰뚫는 의지는 패시브라 비울 슬롯이 없음). Lv1~3까지만 존재. 유저 확인: "피닉스
+	-- 업글 스킬임... 피닉스의 기능이 동일하다고 보면되겠지" — 소환/추적/광역판정 구조는 피닉스와
+	-- 동일하게 재사용하되 반경은 손대지 않는다(유저 요청: "범위는 건들이지말자" — 피닉스 Lv5 반경
+	-- 그대로 고정). 레벨업은 대신 자체 크리티컬 확률(10/15/20%)로 간다.
+	-- 공격 연출(Card115AttackRUID, 25프레임 전방 찌르기)이 재생되는 동안 대미지가 2단계로 들어간다
+	-- (유저 지정):
+	-- 1) "어택1" — 애니메이션 초반, 반경 안 전체 대상에게 동시에 기본 대미지의 50%/60%/70%(레벨별)
+	-- 2) "히트연출" — 그 뒤 반경 안 각 대상에게 히트 이펙트(Card115HitEffectRUID, 90도 회전 적용)를
+	--    찌르기에 먼저 닿은 순서(중심에서 가까운 순)로 순차적으로 띄우면서 기본 대미지의 100%를
+	--    개별 적용한다. 슬로우 상태 추가딜(파이어 퀴버와 동일한 지연 표시 기법)은 이 히트(100%)에만 적용.
+	-- 공격이 끝나면(피닉스처럼 대기 포즈로 전환하는 대신) 소환 연출(Card115SummonRUID)을 다시 재생해서
+	-- "계속 그 자리에 떠 있는" 것처럼 보이게 한다(유저 요청: "어택 하고 끝에... 사라지는데 이걸 바로
+	-- 소환하는 연출을 붙여서 유지되게 하는게 핵심" — 실제 스킬 시전(소환)/유지시간 만료(소환해제)는
+	-- 이 재생과 별개의 1회성 이벤트). 이동 중에는 Card115MoveRUID를 쓴다(유저 지정: "2d212050...는
+	-- 이동할때 쓰면되고"). 히트 이펙트만 아이스/파이어 퀴버와 동일한 방식(원본 프레임 직접 이어붙이기)
+	-- 으로 재생한다 — 소환/이동/공격/소환해제는 피닉스와 동일하게 네이티브 재생 + 타이밍 간격으로 처리.
+	@Sync property integer EvolveLevel = 0
+	property string Card115Name = "이볼브"
+	property string Card115IconRUID = "088e8e269661493f8794073429bae296"
+	property string Card115SummonRUID = "09e28796b1c241f5aa46b959c176ac7e"  -- 소환 연출(9프레임) — 시전 시 1회 + 매 공격 뒤 대기 루프로 재사용
+	property string Card115MoveRUID = "2d212050f9754a28a773b543382a339a"  -- 이동 연출(10프레임)
+	property string Card115DieRUID = "21a94e8121b746b5b1ea112ec6a09e67"  -- 소환 해제 연출(8프레임) — 유지시간 만료 시 1회만
+	property string Card115AttackRUID = "5daa28bdc87b4de3844acb2de3b8a163"  -- 공격(전방 찌르기) 연출(25프레임)
+	property string Card115HitEffectRUID = "65c8505b497d4e60b98540c95282f83c"  -- 히트 이펙트(8프레임, 90도 회전 적용)
+
+	property number Card115BaseRadius = 1.32  -- 피닉스와 동일 기준값(유저 요청으로 레벨별 추가 확장 없음)
+	property number Card115HitRadius = 3.5  -- 실제 판정 반경(유저 스크린샷 지적으로 불길 연출 전체를 덮게 확대 — 1.584→3.5, 라이브 확인 후 재조정 가능)
+	property number Card115Scale = 0.884  -- 유저 요청으로 연출 크기 15% 축소(피닉스 기준값 1.04 → 0.884)
+	property Vector3 Card115SpawnPosition = Vector3(0, 3.0, -0.1)
+	property number Card115HoverYOffset = -0.1
+	property number Card115DepthZ = -2.0
+	property number Card115SummonAppearDuration = 0.8
+	property number Card115RepositionDuration = 0.3
+	property number Card115Attack1Delay = 0.3  -- 공격 포즈 시작 후 "어택1"(부분 대미지) 타이밍 — 라이브 확인 후 조정
+	property number Card115HitEffectStartDelay = 0.55  -- "어택1" 이후 "히트연출"(전체 대미지) 시작 타이밍
+	property number Card115HitEffectStagger = 0.08  -- 히트연출 순차 표시 간격(대상 간)
+	property number Card115LoopBackDelay = 1.0  -- 공격 포즈 시작 후 다시 소환 연출로 되돌리는 시점(다음 공격 전 대기)
+	property number Card115DieDuration = 0.65
+	property number Card115AttackInterval = 1.5  -- 피닉스와 동일 고정
+	property number Card115SlowedBonusDelay = 0.2
+	property number Card115FrameDuration = 0.05  -- 히트 이펙트 프레임 이어붙이기 간격
+	property Entity _evolveEntity = nil
+	property Entity _evolveMap = nil
+	property Vector3 _evolveAnchorPos = Vector3(0, 0, 0)
+	property boolean _evolveFacingRight = false
+	property boolean _evolveAttackInProgress = false
+
+	-- 히트 이펙트(65c8505b...) 8프레임 — GET /v3/resources/{ruid} 실측으로 얻은 payload.frames[].spriteRuid
+	method table GetEvolveHitFrames()
+		return {
+			"9c37c539991c45dd8d769256d7e756c6",
+			"d599031beb194bfbb5fed3e8b0bc672d",
+			"406883035a24493db70d7d7d3f8078ed",
+			"df89ec232eb14e6c963ddf5218300569",
+			"ea38c9ad2c1544bd83ef1e4e7762e4d0",
+			"894f84be40934f259acfc9f3e5d6f8ff",
+			"45d99bc64b954d59b69f25eeed0f64f7",
+			"a2a5a2c4bb354acda7768351c9cf9cb6",
+		}
+	end
+
+	method number GetEvolveDamage(integer level)
+		if level >= 3 then return 340
+		elseif level >= 2 then return 320
+		end
+		return 300
+	end
+
+	-- 유지시간 — Lv1:5 / Lv2:6 / Lv3:7초(피닉스 Lv5의 7초에서 이어짐)
+	method number GetEvolveDuration(integer level)
+		if level >= 3 then return 7
+		elseif level >= 2 then return 6
+		end
+		return 5
+	end
+
+	-- 쿨타임 — Lv1:10 / Lv2:9 / Lv3:8초
+	method number GetEvolveCooldown(integer level)
+		if level >= 3 then return 8
+		elseif level >= 2 then return 9
+		end
+		return 10
+	end
+
+	-- "어택1" 부분 대미지 비율 — 유저 요청으로 레벨 무관 50% 고정("대미지를 50%,50%로 바꿔줄래?")
+	method number GetEvolveAttack1Ratio(integer level)
+		return 0.50
+	end
+
+	-- 자체 크리티컬 확률(유저 요청 — 범위 대신 이 수치로 레벨업) — Lv1:10% / Lv2:15% / Lv3:20%
+	method number GetEvolveCritChance(integer level)
+		if level >= 3 then return 0.20
+		elseif level >= 2 then return 0.15
+		end
+		return 0.10
+	end
+
+	-- 판정 반경 — 유저 스크린샷 지적: "지금 대미지범위가 빨간색인데 초록색 테두리만큼(불길 연출 전체
+	-- 범위) 나와야해". 예전 피닉스 Lv5 반경(1.584, 화염 착탄점만 겨우 덮는 크기)은 어택 연출이 새가
+	-- 날아가 불길이 되는 넓은 궤적 전체를 표현하기엔 너무 작았다 — Card115HitRadius로 분리해서 훨씬
+	-- 크게 키운다(레벨별로는 여전히 안 건드림 — "범위는 건들이지말자"는 레벨 스케일링 얘기였고 이건
+	-- 기준값 자체의 시각 불일치 수정). 라이브에서 다시 눈으로 맞춰볼 값이라 조정 가능성 있음.
+	method number GetEvolveRadius()
+		return self.Card115HitRadius
+	end
+
+	-- 슬로우 상태 대상 추가 데미지 비율 — Lv1:120% / Lv2:140% / Lv3:160%(파이어 퀴버와 동일 진행)
+	method number GetEvolveSlowedBonusRatio(integer level)
+		if level >= 3 then return 1.60
+		elseif level >= 2 then return 1.40
+		end
+		return 1.20
+	end
+
+	@ExecSpace("ServerOnly")
+	method void EvolveAttack(number damage, boolean isCrit)
+		local map = self:GetCurrentMap()
+		if map == nil then return end
+
+		-- 이미 소환된 이볼브가 남아있으면 정리 후 재소환(쿨타임이 항상 유지시간보다 길어서 정상
+		-- 플레이에선 거의 발생하지 않지만 방어적으로 처리 — 피닉스와 동일한 이유)
+		if isvalid(self._evolveEntity) then
+			self._evolveEntity:Destroy()
+			self._evolveEntity = nil
+		end
+		self._evolveAttackInProgress = false
+
+		local level = self.EvolveLevel
+		local duration = self:GetEvolveDuration(level)
+		local leadTime = self.Card115SummonAppearDuration
+		local interval = self.Card115AttackInterval
+
+		local firstTarget = self:FindClosestInMap(map)
+		local spawnPos = self.Card115SpawnPosition
+		if firstTarget ~= nil and isvalid(firstTarget) and isvalid(firstTarget.Entity) then
+			local tp = firstTarget.Entity.TransformComponent.Position
+			spawnPos = Vector3(tp.x, tp.y + self.Card115HoverYOffset, self.Card115DepthZ)
+		end
+
+		local evolve = self:SpawnEffectWithModel(self.Card115SummonRUID, spawnPos, 0, 1.0, self.Card115Scale, 1.0, "persistenteffect")
+		if evolve == nil then return end
+		self._evolveEntity = evolve
+		self._evolveMap = map
+		self._evolveAnchorPos = spawnPos
+
+		-- 공격 틱은 evolve/map을 직접 캡처하지 않고 매번 self._evolveEntity / self._evolveMap을
+		-- 그때그때 다시 읽는다(피닉스와 동일한 존 이동 대응 이유)
+		local attackCount = math.floor(duration / interval)
+		for i = 0, attackCount - 1 do
+			local delay = leadTime + i * interval
+			_TimerService:SetTimerOnce(function()
+				self:EvolveAttackTick(damage, isCrit, level)
+			end, delay)
+		end
+
+		_TimerService:SetTimerOnce(function()
+			self:TryEndEvolveLife()
+		end, leadTime + duration)
+
+		log("EvolveAttack: duration=" .. duration .. " attacks=" .. attackCount .. " radius=" .. self:GetEvolveRadius() .. " dmg=" .. math.floor(damage))
+	end
+
+	-- 유지시간이 다 됐을 때 호출된다. 공격이 진행 중이면 끝날 때까지 미뤘다가 사라진다(피닉스와 동일)
+	@ExecSpace("ServerOnly")
+	method void TryEndEvolveLife()
+		if not isvalid(self) then return end
+		if self._evolveAttackInProgress then
+			_TimerService:SetTimerOnce(function()
+				self:TryEndEvolveLife()
+			end, 0.1)
+			return
+		end
+		local fx = self._evolveEntity
+		if isvalid(fx) then
+			local r = fx.SpriteRendererComponent
+			if r ~= nil then r.SpriteRUID = self.Card115DieRUID end
+			fx:Destroy(self.Card115DieDuration)
+		end
+		self._evolveEntity = nil
+		self._evolveMap = nil
+	end
+
+	-- 존 이동 감지 시 이볼브를 플레이어의 새 맵으로 다시 소환한다(피닉스의 RelocatePhoenixToNewMap과 동일)
+	@ExecSpace("ServerOnly")
+	method void RelocateEvolveToNewMap(Entity newMap)
+		local oldEvolve = self._evolveEntity
+		local anchor = self:FindClosestInMap(newMap)
+		local pos = self.Card115SpawnPosition
+		if anchor ~= nil and isvalid(anchor) and isvalid(anchor.Entity) then
+			local ap = anchor.Entity.TransformComponent.Position
+			pos = Vector3(ap.x, ap.y + self.Card115HoverYOffset, self.Card115DepthZ)
+		end
+		local fresh = self:SpawnEffectWithModel(self.Card115SummonRUID, pos, 0, 1.0, self.Card115Scale, 1.0, "persistenteffect")
+		if fresh == nil then return end
+		if isvalid(oldEvolve) then oldEvolve:Destroy() end
+		self._evolveEntity = fresh
+		self._evolveMap = newMap
+		self._evolveAnchorPos = pos
+	end
+
+	-- 공격 1회 — self._evolveEntity/_evolveMap을 그때그때 다시 읽어서 존 이동을 감지하고, 그 시점
+	-- 실거리 최근접 적 위로 이동한 뒤 찌르기(어택1 + 히트연출)를 실행한다(피닉스와 동일 구조).
+	@ExecSpace("ServerOnly")
+	method void EvolveAttackTick(number damage, boolean isCrit, integer level)
+		if not isvalid(self) then return end
+		local evolve = self._evolveEntity
+		if not isvalid(evolve) then return end
+
+		local liveMap = self:GetCurrentMap()
+		if liveMap ~= nil and liveMap ~= self._evolveMap then
+			self:RelocateEvolveToNewMap(liveMap)
+			evolve = self._evolveEntity
+			if not isvalid(evolve) then return end
+		end
+		local map = self._evolveMap
+
+		local startPos = evolve.TransformComponent.Position
+		local target = self:FindClosestByPosition(map, self._evolveAnchorPos)
+		if target == nil or not isvalid(target) or not isvalid(target.Entity) or target._dead then return end
+
+		self._evolveAttackInProgress = true
+
+		local renderer = evolve.SpriteRendererComponent
+		local targetPos = target.Entity.TransformComponent.Position
+
+		local facingRight = self._evolveFacingRight
+		if targetPos.x > startPos.x then facingRight = true
+		elseif targetPos.x < startPos.x then facingRight = false end
+		self._evolveFacingRight = facingRight
+		if renderer ~= nil then renderer.FlipX = facingRight end
+
+		local facingSign = facingRight and 1 or -1
+		local strikePos = Vector3(targetPos.x, targetPos.y + self.Card115HoverYOffset, targetPos.z)
+		local hoverPos = Vector3(strikePos.x - facingSign * 1.2, strikePos.y, self.Card115DepthZ)
+		-- 판정 중심은 착탄 지점(strikePos)이 아니라 새→불길 궤적 전체(몸통 hoverPos~착탄 지점)를
+		-- 아우르도록 몸통 쪽(hoverPos)으로 당긴다(유저 스크린샷: 초록 테두리가 착탄 지점보다 훨씬
+		-- 왼쪽/넓게까지 덮여 있었음)
+		local flameCenterPos = hoverPos
+
+		if renderer ~= nil then renderer.SpriteRUID = self.Card115MoveRUID end
+		_TweenLogic:PlayTween(0.0, 1.0, self.Card115RepositionDuration, EaseType.Linear, function(t)
+			if not isvalid(evolve) then return end
+			local x = startPos.x + (hoverPos.x - startPos.x) * t
+			local y = startPos.y + (hoverPos.y - startPos.y) * t
+			evolve.TransformComponent.Position = Vector3(x, y, hoverPos.z)
+		end)
+
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) or not isvalid(evolve) then return end
+			if renderer ~= nil then renderer.SpriteRUID = self.Card115AttackRUID end
+
+			-- 1) 어택1 — 반경 안 전체 대상에게 즉시 부분 대미지(크리티컬은 어택1/히트연출 각각 따로
+			-- 판정한다 — 유저 요청: "크리 확률은 각각 적용되고")
+			_TimerService:SetTimerOnce(function()
+				if not isvalid(self) then return end
+				self:ResolveEvolveAttack1(map, target, flameCenterPos, damage, level)
+			end, self.Card115Attack1Delay)
+
+			-- 2) 히트연출 — 그 뒤 반경 안 각 대상에게 순차적으로 부분 대미지
+			_TimerService:SetTimerOnce(function()
+				if not isvalid(self) then return end
+				self:ResolveEvolveHitSequence(map, target, flameCenterPos, damage, level)
+				self._evolveAttackInProgress = false
+			end, self.Card115HitEffectStartDelay)
+
+			-- 공격이 끝나면(사라져 보이지 않게) 소환 연출을 다시 재생해서 대기 상태로 유지한다(유저 요청)
+			_TimerService:SetTimerOnce(function()
+				if isvalid(evolve) and renderer ~= nil then renderer.SpriteRUID = self.Card115SummonRUID end
+			end, self.Card115LoopBackDelay)
+		end, self.Card115RepositionDuration)
+	end
+
+	-- 어택1: 찌르기 초반 판정 — 반경 안 전체 대상에게 동시에 기본 대미지의 50%. 크리티컬은 이 히트만의
+	-- 독립 판정(유저 요청: "크리 확률은 각각 적용되고")
+	@ExecSpace("ServerOnly")
+	method void ResolveEvolveAttack1(Entity map, MonsterAI anchor, Vector3 centerPos, number damage, integer level)
+		if map == nil then return end
+		local isCrit = self:RollCrit(115)
+		local radius = self:GetEvolveRadius()
+		local ratio = self:GetEvolveAttack1Ratio(level)
+		local partialDamage = damage * ratio
+		local monsters = map:GetChildComponentsByTypeName("script.MonsterAI", false)
+		local hitCount = 0
+		for _, mob in ipairs(monsters) do
+			---@type MonsterAI
+			local m = mob
+			if isvalid(m) and not m._dead then
+				local mp = m.Entity.TransformComponent.Position
+				local dx = mp.x - centerPos.x
+				local dy = mp.y - centerPos.y
+				if (dx * dx + dy * dy) <= (radius * radius) and self:IsSameDepthBand(anchor, m) then
+					if isCrit then m:TakeDamageCrit(partialDamage * 2)
+					else m:TakeDamage(partialDamage) end
+					hitCount = hitCount + 1
+				end
+			end
+		end
+		log("ResolveEvolveAttack1: hit=" .. hitCount .. " ratio=" .. ratio .. " isCrit=" .. tostring(isCrit) .. " dmg=" .. math.floor(partialDamage))
+	end
+
+	-- 히트연출: 반경 안 각 대상에게 중심에서 가까운 순서대로 히트 이펙트(90도 회전) + 대미지를
+	-- 순차 적용한다(유저 지정: "먼저 히트모션에 닿은 순서대로"). 대미지 비율은 어택1과 동일하게 50%로
+	-- 맞춘다(유저 요청: "대미지를 50%,50%로 바꿔줄래?" — 어택1 50% + 히트연출 50% = 총 100%).
+	-- 크리티컬은 대상마다 독립적으로 판정한다(유저 요청: "크리 확률은 각각 적용되고"). 슬로우 상태
+	-- 대상 추가딜은 이 히트에만 적용한다.
+	@ExecSpace("ServerOnly")
+	method void ResolveEvolveHitSequence(Entity map, MonsterAI anchor, Vector3 centerPos, number damage, integer level)
+		if map == nil then return end
+		local radius = self:GetEvolveRadius()
+		local hitDamage = damage * 0.50
+		local bonusRatio = self:GetEvolveSlowedBonusRatio(level)
+		local monsters = map:GetChildComponentsByTypeName("script.MonsterAI", false)
+
+		local hits = {}
+		for _, mob in ipairs(monsters) do
+			---@type MonsterAI
+			local m = mob
+			if isvalid(m) and not m._dead then
+				local mp = m.Entity.TransformComponent.Position
+				local dx = mp.x - centerPos.x
+				local dy = mp.y - centerPos.y
+				local distSq = dx * dx + dy * dy
+				if distSq <= (radius * radius) and self:IsSameDepthBand(anchor, m) then
+					table.insert(hits, { monster = m, dist = distSq })
+				end
+			end
+		end
+		table.sort(hits, function(a, b) return a.dist < b.dist end)
+
+		for i, entry in ipairs(hits) do
+			local m = entry.monster
+			local stagger = (i - 1) * self.Card115HitEffectStagger
+			_TimerService:SetTimerOnce(function()
+				if not isvalid(self) then return end
+				if not isvalid(m) or not isvalid(m.Entity) or m._dead then return end
+				local isCrit = self:RollCrit(115)
+				local pos = m.Entity.TransformComponent.Position
+				self:PlayEvolveHitEffect(pos)
+				if isCrit then m:TakeDamageCrit(hitDamage * 2)
+				else m:TakeDamage(hitDamage) end
+				if m._isSlowed then
+					local bonusDamage = hitDamage * bonusRatio
+					_TimerService:SetTimerOnce(function()
+						if not isvalid(self) then return end
+						if isvalid(m) and isvalid(m.Entity) and not m._dead then
+							if isCrit then m:TakeDamageCrit(bonusDamage * 2)
+							else m:TakeDamage(bonusDamage) end
+						end
+					end, self.Card115SlowedBonusDelay)
+				end
+			end, stagger)
+		end
+		log("ResolveEvolveHitSequence: targets=" .. #hits .. " radius=" .. radius)
+	end
+
+	-- 히트 이펙트 — 원본 프레임을 직접 이어붙여 온전히 재생하고(아이스/파이어 퀴버·애로우 일루전과
+	-- 동일 기법), -90도 회전을 적용한다(유저 정정: "90도회전이아니라 -90이였던거같네")
+	@ExecSpace("ServerOnly")
+	method void PlayEvolveHitEffect(Vector3 pos)
+		local frames = self:GetEvolveHitFrames()
+		local dur = self.Card115FrameDuration
+		local fx = self:SpawnEffectWithModel(frames[1], pos, -90, 1.0, 1.0, 1.0, "skilleffectlong")
+		if fx == nil then return end
+		local renderer = fx.SpriteRendererComponent
+		for i = 2, #frames do
+			local frameRUID = frames[i]
+			_TimerService:SetTimerOnce(function()
+				if isvalid(fx) and isvalid(renderer) then renderer.SpriteRUID = frameRUID end
+			end, dur * (i - 1))
+		end
+		fx:Destroy(dur * #frames)
+	end
+
 	-- ── 실피드 전용: 리트리트 샷 (카드 106, 슬롯형 정식 스킬 6호) — 횡(가로) 관통 스킬. 매 시전마다
 	-- 몬스터가 더 많은 쪽의 반대편(화면 좌/우 고정 위치)에서 등장해 반대쪽을 향해 화살을 N발(레벨별
 	-- 2~4발) 쏜다(유저 요청: "적이 많은쪽을 우선해서 반대에 나오면 좋겠고"). 화살마다 발사 위치에서
@@ -1740,6 +2751,301 @@ script CardManager extends Logic
 		end
 	end
 
+	-- ── 실피드 전용: 에로우 플레터 (카드 118, 조합 스킬) — 리트리트 샷(Card106) Lv5 + 보우
+	-- 액셀레이션(Card109) + 꿰뚫는 의지(Card110, 둘 다 슬롯 없는 패시브) 보유 시 등장 — 새 슬롯이
+	-- 필요없고 리트리트 샷의 슬롯을 그대로 넘겨받는다(헤일 버스트와 동일한 "슬롯 카드 + 슬롯 없는
+	-- 패시브 2개" 조합 패턴). 리트리트 샷과 거의 동일한 구조(횡 관통, 몬스터 많은 쪽 반대편에서
+	-- 화살 연사, 각 화살은 발사 위치에서 가장 가까운 미사용 몬스터를 줄로 삼아 그 줄 위 몬스터를
+	-- 관통) — FireRetreatShotArrow와 동일한 레인/관통 로직을 그대로 재사용하되, 관통 횟수는 레벨
+	-- 무관 고정 4회(관통 대미지 60/70/80/90%, 유저 지정)이고 이 스킬 전용 크리티컬 확률 보너스
+	-- (10%/15%/20%, RollCrit에 cardIdx==118 분기로 추가)가 있다. 캐스트(활대) 연출은 신규 리소스
+	-- (f59e94b2..., 9프레임)로 교체하되, 리소스 자체가 정면을 보고 있지 않아 리트리트 샷과 동일한
+	-- 각도 보정값(-31도)을 그대로 가져다 쓴다(유저 지시: "이걸로 각도보정값을 그대로 가져다써라").
+	@Sync property integer ArrowFletterLevel = 0
+	property string Card118Name = "에로우 플레터"
+	property string Card118IconRUID = "028b253be9894fd28e2b9f8a3af0ff28"
+	property string Card118CastFrame0RUID = "caa7d4bdbc1c4deb9edd6622bcc9cc89"
+	property string Card118CastFrame1RUID = "9cf5e85f7c424d10a559bcd5f5de4df8"
+	property string Card118CastFrame2RUID = "8dc205c696ab4661a8fc96367dedcbd3"
+	property string Card118CastFrame3RUID = "392618b81c804ce99e54b7d1c9f39f7d"
+	property string Card118CastFrame4RUID = "65af9662bffd42829e68ceb6f5b3edfb"
+	property string Card118CastFrame5RUID = "721fb833c1534307adddeaaa7c30cb43"
+	property string Card118CastFrame6RUID = "cc49324d439f43aab04fc8738a3e9fea"
+	property string Card118CastFrame7RUID = "e33ffebbb2b847a987071dd0ebb63e08"
+	property string Card118CastFrame8RUID = "695f3248182b407092a74bcf90fc14c2"
+	-- 유저 요청: "화살 쏘는속도 지금보다 약 1.5배 빠르게... 쏘는 연출은 그에맞게 변경" — 프레임
+	-- 재생 속도/전체 재생시간/겹침 시간을 전부 1.5로 나눠서 화살 발사 간격 자체가 1.5배 빨라지게
+	-- 한다(발사 간격은 CastDuration-Overlap로 계산되므로, 세 값을 같은 비율로 줄이면 간격도 정확히
+	-- 1.5배 줄어든다 — 0.48초 → 0.32초).
+	property number Card118CastFrameDuration = 0.0467  -- 9프레임 × 0.0467 ≈ 0.42초(1바퀴) — 기존 0.07의 1/1.5
+	property number Card118CastDuration = 0.42
+	property number Card118CastOverlap = 0.1  -- 기존 0.15의 1/1.5
+	-- 유저 요청으로 30 설정.
+	property number Card118CastRotationCorrection = 30
+	property number Card118CastScale = 0.7  -- 유저 요청으로 30% 축소
+	property string Card118ArrowRUID = "3aa8859ff9a44b969c96ef722d1c24f0"
+	property string Card118HitRUID = "fb0500173c6f494fb71f963bc9fd6b7e"
+	property number Card118ArrowScale = 0.85  -- 유저 요청으로 15% 축소
+	-- 유저 지적: "각도가 한개도 안바뀌는데" — 화살 스폰을 rotationZ=0으로 하드코딩해놔서 애초에
+	-- 보정이 반영될 수가 없었다(진짜 원인). 리트리트 샷과 동일하게 조정 가능한 보정값으로 분리.
+	-- 유저 요청으로 0으로 설정(보정 없음).
+	property number Card118ArrowRotationCorrection = 0
+	property integer Card118PierceCount = 4  -- 레벨 무관 고정(유저 지정)
+	-- 유저 요청: "N발 다쏘면 쏘는 연출 끄는 느낌" — 마지막 화살의 캐스트는 화살이 실제로 발사되는
+	-- 시점(Card106ArrowLaunchDelay) 직후 바로 끈다(끝까지 다 재생하지 않음)
+	property number Card118LastCastCutoff = 0.15
+	-- 유저 요청: "화면 밖에서 연출이 너무 보이는거 같은데 살짝씩 화면쪽으로... 좌우 둘다 중앙방향으로
+	-- 쪼금씩만" — 리트리트 샷과 공유하던 Card106SidePositionX(5.5, 화면 좌/우 고정 발사 위치)를
+	-- 그대로 줄이면 리트리트 샷 본인 연출까지 같이 움직이므로, 이 스킬 전용 값으로 분리해서 살짝만
+	-- (5.5 → 5.0) 중앙 쪽으로 당긴다.
+	property number Card118SidePositionX = 5.0
+
+	method number GetArrowFletterDamage(integer level)
+		if level >= 3 then return 220
+		elseif level >= 2 then return 200
+		end
+		return 180
+	end
+
+	method number GetArrowFletterCooldown(integer level)
+		if level >= 2 then return 6.5 end
+		return 7.0
+	end
+
+	-- 화살 수(="타겟 수") — Lv1~2:5 / Lv3:6
+	method integer GetArrowFletterArrowCount(integer level)
+		if level >= 3 then return 6 end
+		return 5
+	end
+
+	-- 이 스킬 전용 크리티컬 확률 보너스 — RollCrit(cardIdx==118)에서 합산된다
+	method number GetArrowFletterCritChance(integer level)
+		if level >= 3 then return 0.20
+		elseif level >= 2 then return 0.15
+		end
+		return 0.10
+	end
+
+	-- 관통 대미지 비율 — 레벨 무관 고정: 1번째 관통 60%, 2번째 70%, 3번째 80%, 4번째 90%
+	-- (관통 예산을 다 못 채우면 실제로는 그만큼만 적용됨)
+	method number GetArrowFletterPiercePercent(integer pierceIndex)
+		if pierceIndex == 1 then return 0.60
+		elseif pierceIndex == 2 then return 0.70
+		elseif pierceIndex == 3 then return 0.80
+		elseif pierceIndex == 4 then return 0.90
+		end
+		return 0
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ArrowFletterAttack(number damage, boolean isCrit)
+		local map = self:GetCurrentMap()
+		if map == nil then return end
+
+		local monsters = map:GetChildComponentsByTypeName("script.MonsterAI", false)
+		local leftCount, rightCount = 0, 0
+		for _, mob in ipairs(monsters) do
+			---@type MonsterAI
+			local m = mob
+			if isvalid(m) and not m._dead and isvalid(m.Entity) then
+				local x = m.Entity.TransformComponent.Position.x
+				if x < 0 then leftCount = leftCount + 1
+				elseif x > 0 then rightCount = rightCount + 1 end
+			end
+		end
+
+		-- 리트리트 샷과 동일한 좌표계 보정(+X가 화면상 왼쪽으로 보임)
+		local spawnOnRight = leftCount >= rightCount
+		local launchX = spawnOnRight and -self.Card118SidePositionX or self.Card118SidePositionX
+		local flyDirRight = not spawnOnRight
+
+		local level = self.ArrowFletterLevel
+		local arrowCount = self:GetArrowFletterArrowCount(level)
+		local usedTargets = {}
+		for i = 1, arrowCount do
+			-- 유저 지적: "지금 연출이 끊기거든(깜빡깜빡) 끝나기 전에 우리가 다시 연출 겹쳐서 안끊기게" —
+			-- 화살마다 매번 새 캐스트 연출을 스폰하는데, 이전 간격(CastDuration+StaggerDelay)은 연출이
+			-- 끝나고 나서야 다음 연출이 스폰돼 그 사이 빈 프레임(깜빡임)이 생겼다. 다음 연출을 이전
+			-- 연출이 끝나기 Card118CastOverlap초 전에 미리 겹쳐서 스폰해 끊김 없이 이어지게 한다.
+			local delay = (i - 1) * math.max(0.05, self.Card118CastDuration - self.Card118CastOverlap)
+			local isLast = (i == arrowCount)
+			_TimerService:SetTimerOnce(function()
+				if not isvalid(self) then return end
+				self:FireArrowFletterSequence(map, launchX, flyDirRight, usedTargets, damage, isCrit, isLast)
+			end, delay)
+		end
+
+		log("ArrowFletterAttack: arrows=" .. arrowCount .. " pierce=" .. self.Card118PierceCount .. " spawnOnRight=" .. tostring(spawnOnRight) .. " dmg=" .. math.floor(damage))
+	end
+
+	-- 화살 한 발의 준비 단계 — 리트리트 샷의 FireRetreatShotSequence와 동일한 타겟팅(발사 위치에서
+	-- 가장 가까운 미사용 몬스터를 줄로 삼음).
+	@ExecSpace("ServerOnly")
+	method void FireArrowFletterSequence(Entity map, number launchX, boolean flyDirRight, table usedTargets, number damage, boolean isCrit, boolean isLast)
+		local monsters = map:GetChildComponentsByTypeName("script.MonsterAI", false)
+		local primary = nil
+		local bestDist = -1
+		for _, mob in ipairs(monsters) do
+			---@type MonsterAI
+			local m = mob
+			if isvalid(m) and not m._dead and isvalid(m.Entity) and not usedTargets[m] then
+				local mx = m.Entity.TransformComponent.Position.x
+				local d = math.abs(mx - launchX)
+				if bestDist < 0 or d < bestDist then
+					bestDist = d
+					primary = m
+				end
+			end
+		end
+		if primary == nil then return end
+		usedTargets[primary] = true
+
+		local arrowY = primary.Entity.TransformComponent.Position.y
+		local launchPos = Vector3(launchX, arrowY, -0.1)
+
+		self:PlayArrowFletterCast(launchPos, flyDirRight, isLast)
+
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) then return end
+			self:FireArrowFletterArrow(map, launchPos, flyDirRight, primary, damage, isCrit)
+		end, self.Card106ArrowLaunchDelay)
+	end
+
+	-- 활대(캐스트) 연출 — 9프레임을 직접 이어붙여 재생. 리소스 자체가 정면을 보지 않아 리트리트 샷과
+	-- 동일한 각도 보정(Card118CastRotationCorrection)을 적용한다. 유저 요청: "5발쏘면 5발 다쏘면
+	-- 쏘는연출 끄고" — 마지막 화살의 캐스트는 자기 연출을 끝까지 다 재생하지 않고, 화살이 실제로
+	-- 발사되는 시점(Card118LastCastCutoff) 직후 바로 끈다(그 전 화살들은 다음 캐스트가 겹쳐서
+	-- 스폰되므로 끝까지 재생해도 자연스럽게 이어짐).
+	@ExecSpace("ServerOnly")
+	method void PlayArrowFletterCast(Vector3 pos, boolean flyDirRight, boolean isLast)
+		local flip = not flyDirRight
+		local rot = flip and -self.Card118CastRotationCorrection or self.Card118CastRotationCorrection
+		local frames = {
+			self.Card118CastFrame0RUID, self.Card118CastFrame1RUID, self.Card118CastFrame2RUID,
+			self.Card118CastFrame3RUID, self.Card118CastFrame4RUID, self.Card118CastFrame5RUID,
+			self.Card118CastFrame6RUID, self.Card118CastFrame7RUID, self.Card118CastFrame8RUID,
+		}
+		local dur = self.Card118CastFrameDuration
+		local fx = self:SpawnEffectWithModel(frames[1], pos, rot, 1.0, self.Card118CastScale, 1.0, "skilleffectlong")
+		if fx == nil then return end
+		local r = fx.SpriteRendererComponent
+		if r ~= nil then r.FlipX = flip end
+		if isLast then
+			fx:Destroy(self.Card118LastCastCutoff)
+			return
+		end
+		for step = 2, #frames do
+			local frameRUID = frames[step]
+			_TimerService:SetTimerOnce(function()
+				if isvalid(fx) and isvalid(r) then r.SpriteRUID = frameRUID end
+			end, dur * (step - 1))
+		end
+		fx:Destroy(dur * #frames)
+	end
+
+	-- 화살 한 발 — 리트리트 샷의 FireRetreatShotArrow와 동일한 레인/관통 로직이지만 관통 횟수가
+	-- 레벨 무관 고정(Card118PierceCount=4)이고 이 스킬 전용 관통 대미지 비율을 쓴다.
+	@ExecSpace("ServerOnly")
+	method void FireArrowFletterArrow(Entity map, Vector3 launchPos, boolean flyDirRight, MonsterAI primary, number damage, boolean isCrit)
+		local monsters = map:GetChildComponentsByTypeName("script.MonsterAI", false)
+		local arrowY = launchPos.y
+
+		local lane = {}
+		for _, mob in ipairs(monsters) do
+			---@type MonsterAI
+			local m = mob
+			if isvalid(m) and not m._dead and isvalid(m.Entity) then
+				local mp = m.Entity.TransformComponent.Position
+				local ahead = flyDirRight and (mp.x > launchPos.x) or ((not flyDirRight) and (mp.x < launchPos.x))
+				if ahead and math.abs(mp.y - arrowY) <= self.Card106YBandTolerance then
+					table.insert(lane, m)
+				end
+			end
+		end
+		table.sort(lane, function(a, b)
+			local ax = a.Entity.TransformComponent.Position.x
+			local bx = b.Entity.TransformComponent.Position.x
+			if flyDirRight then return ax < bx end
+			return ax > bx
+		end)
+
+		local pierceCount = self.Card118PierceCount
+		local hitList = {}
+		for _, m in ipairs(lane) do
+			table.insert(hitList, m)
+			if #hitList >= pierceCount + 1 then break end
+		end
+		if #hitList == 0 and isvalid(primary) and isvalid(primary.Entity) and not primary._dead then
+			table.insert(hitList, primary)
+		end
+
+		local waypoints = { launchPos }
+		for _, m in ipairs(hitList) do
+			local hp = m.Entity.TransformComponent.Position
+			table.insert(waypoints, Vector3(hp.x, hp.y, launchPos.z))
+		end
+		if #hitList < pierceCount + 1 then
+			local edgeX = flyDirRight and -self.Card118SidePositionX or self.Card118SidePositionX
+			local lastY = waypoints[#waypoints].y
+			table.insert(waypoints, Vector3(edgeX, lastY, launchPos.z))
+		end
+
+		-- 유저 정정: "각도 반대로해야하고... y축이라고... 좌우" — 방향 판정 부호가 반대였다(리트리트
+		-- 샷과 달리 이 화살 리소스는 기본 방향이 반대인 듯). flipArrow를 뒤집어서 좌우(FlipX) 및
+		-- 각도 보정 부호를 모두 반전한다.
+		local flipArrow = flyDirRight
+		local arrowRotationZ = flipArrow and -self.Card118ArrowRotationCorrection or self.Card118ArrowRotationCorrection
+		local visualY = self.Card106ArrowVisualYOffset
+		local spawnVisualPos = Vector3(launchPos.x, launchPos.y + visualY, launchPos.z)
+		local fx = self:SpawnEffect(self.Card118ArrowRUID, spawnVisualPos, arrowRotationZ, 1.0, self.Card118ArrowScale, 1)
+		if fx == nil then return end
+		local arrowRenderer = fx.SpriteRendererComponent
+		-- 유저 정정: "y축이라고... 좌우" — 이 프로젝트에서 "Y축 반전"은 실제 엔진 FlipY(상하)가
+		-- 아니라 좌우 반전(FlipX)을 뜻한다(리트리트 샷 작업 때도 동일한 용어 혼동이 있었음). FlipY는
+		-- 쓰지 않는다.
+		if arrowRenderer ~= nil then arrowRenderer.FlipX = flipArrow end
+
+		local hitDelays = {}
+		local elapsed = 0
+		for i = 1, #waypoints - 1 do
+			local from = waypoints[i]
+			local to = waypoints[i + 1]
+			local dx = to.x - from.x
+			local dy = to.y - from.y
+			local segDist = math.sqrt(dx * dx + dy * dy)
+			local segDuration = math.max(0.05, segDist / self.Card106ArrowSpeed)
+			local segStart = elapsed
+			_TimerService:SetTimerOnce(function()
+				if not isvalid(fx) then return end
+				_TweenLogic:PlayTween(0.0, 1.0, segDuration, EaseType.Linear, function(t)
+					if not isvalid(fx) then return end
+					local x = from.x + (to.x - from.x) * t
+					local y = from.y + (to.y - from.y) * t
+					fx.TransformComponent.Position = Vector3(x, y + visualY, from.z)
+				end)
+			end, segStart)
+			elapsed = elapsed + segDuration
+			if i <= #hitList then hitDelays[i] = elapsed end
+		end
+		fx:Destroy(elapsed)
+
+		for idx, m in ipairs(hitList) do
+			local pierceIdx = idx - 1
+			local hitPos = waypoints[idx + 1]
+			_TimerService:SetTimerOnce(function()
+				if not isvalid(self) then return end
+				if isvalid(m) and isvalid(m.Entity) and not m._dead then
+					local finalDamage = damage
+					if pierceIdx > 0 then finalDamage = damage * self:GetArrowFletterPiercePercent(pierceIdx) end
+					if isCrit then m:TakeDamageCrit(finalDamage * 2)
+					else m:TakeDamage(finalDamage) end
+				end
+				local hitFx = self:SpawnEffect(self.Card118HitRUID, hitPos, 0, 1.0, 1.0, 1)
+				if hitFx ~= nil then hitFx:Destroy(self.HitEffectLifetime) end
+			end, hitDelays[idx])
+		end
+	end
+
 	-- ── 실피드 전용: 언카운터 에로우 (카드 107, 슬롯형 정식 스킬 7호) — 종(세로) 범위기. 헤일 스톤과
 	-- 동일한 매커니즘(GetGroundPriorityTargets로 지상 우선 anchor를 고른 뒤 그 위치에 판정 범위를
 	-- 형성)을 90도 돌려 세로로 만든 버전이다(유저 요청: "유사한건 헤일스톤 가로형 광역이라고 보면됨").
@@ -1892,6 +3198,146 @@ script CardManager extends Logic
 		log("UncounterArrowHit: hit=" .. hitCount)
 	end
 
+	-- ── 실피드 전용: 언카운트에로우V (카드 119, 조합 스킬) — 언카운터 에로우(Card107) Lv5 + 보우
+	-- 액셀레이션(Card109) + 크리티컬 샷(Card111, 둘 다 슬롯 없는 패시브) 보유 시 등장 — 새 슬롯이
+	-- 필요없고 언카운터 에로우의 슬롯을 그대로 넘겨받는다. 위치/각도는 언카운터 에로우와 동일(캐스트
+	-- 회전 90도, CastYOffset=3.5 — 유저 지정: "위치 각도 그런거는 언카운트 에로우랑 같음")하되,
+	-- 캐스트 연출이 신규 리소스(e1c03582..., 15프레임, 최대 840×596px)로 커져서 판정 범위
+	-- (BandWidth/ColumnHeight)도 그 크기에 맞춰 다시 계산했다(유저 지정: "연출을 만큼 타격 범위를
+	-- 수정해야함") — 언카운터 에로우 원본이 썼던 공식(90도 회전 후 원본 세로폭→ColumnHeight, 원본
+	-- 가로폭 절반→BandWidth)을 그대로 적용: ColumnHeight≈8.4→8.5, BandWidth≈2.98→3.0. 이 스킬
+	-- 전용 크리티컬 확률 보너스(10%/15%/20%, RollCrit에 cardIdx==119 분기 추가)가 있다. 아이콘/캐스트/
+	-- 타격 연출 RUID는 유저가 처음 준 두 개가 실제로는 32×32 아이콘이 아니라 큰 이펙트였음을
+	-- 썸네일로 직접 확인하고 재요청해서 확정했다(유저 확인: "준 RUID 둘 다 실제로는 큰 이펙트").
+	@Sync property integer UncounterArrowVLevel = 0
+	property string Card119Name = "언카운트에로우V"
+	property string Card119IconRUID = "158c055faa384b36b5e4e273bf7da441"
+	property string Card119CastFrame0RUID = "057f6eb181544ab7b10718d08058c4cc"
+	property string Card119CastFrame1RUID = "d902e08cd8a64618bf48a29b5e4c47dc"
+	property string Card119CastFrame2RUID = "9a5c7c332d534189a5771fb6c19c9173"
+	property string Card119CastFrame3RUID = "260d0b65e8cc406fa039c4b93117eadd"
+	property string Card119CastFrame4RUID = "c5dedb20d14748fc970cf4d1b150d90d"
+	property string Card119CastFrame5RUID = "c734cac3933046a6906b0432692342bc"
+	property string Card119CastFrame6RUID = "fa2e352b758845f8bc20b14193a9bf6d"
+	property string Card119CastFrame7RUID = "767d7b84be13405a8ab987d5f268ba6d"
+	property string Card119CastFrame8RUID = "9ce6c95b1e194c259f459bc69fa5a76d"
+	property string Card119CastFrame9RUID = "100c6f3c1b324159b4e6db6c3736e546"
+	property string Card119CastFrame10RUID = "15043f86442e45b3af102f9444f24c09"
+	property string Card119CastFrame11RUID = "e34b3768def14aee9e5f413a065c2627"
+	property string Card119CastFrame12RUID = "b465588492db45da9f844a8f1a990b7b"
+	property string Card119CastFrame13RUID = "40615956bcae472791382f176dc1ff53"
+	property string Card119CastFrame14RUID = "39a3b496c5dd4f1ea931ffba710ec03b"
+	property number Card119CastFrameDuration = 0.07  -- 15프레임 × 0.07 = 1.05초
+	property number Card119CastRotation = 90  -- 언카운터 에로우와 동일
+	property string Card119HitRUID = "3cdf7b122eca48e5bb0b406adabf4ea9"
+	property number Card119CastScale = 0.7  -- 유저 요청으로 30% 축소
+	property number Card119HitScale = 1.0
+	property number Card119HitLifetime = 0.4
+	property number Card119CastYOffset = 3.5  -- 언카운터 에로우와 동일
+	property number Card119ImpactLeadTime = 0.6  -- 유저 요청으로 대미지 타이밍 0.3초 빠르게(0.3→0.6)
+	property number Card119Cooldown = 5.0  -- 레벨 무관 고정(유저 지정)
+	-- 유저 요청: "크기 줄어들면 데미지 판정 범위도 그거에 맞게 변경되어야함" — CastScale 축소(30%)와
+	-- 동일 비율로 판정 범위도 같이 줄인다.
+	property number Card119BandWidth = 2.1  -- 3.0 × 0.7
+	property number Card119ColumnHeight = 5.95  -- 8.5 × 0.7
+
+	method number GetUncounterArrowVDamage(integer level)
+		if level >= 3 then return 350
+		elseif level >= 2 then return 300
+		end
+		return 250
+	end
+
+	-- 착탄 지점(=anchor) 수 — Lv1~2:3 / Lv3:4
+	method integer GetUncounterArrowVTargetCount(integer level)
+		if level >= 3 then return 4 end
+		return 3
+	end
+
+	-- 이 스킬 전용 크리티컬 확률 보너스 — RollCrit(cardIdx==119)에서 합산된다
+	method number GetUncounterArrowVCritChance(integer level)
+		if level >= 3 then return 0.20
+		elseif level >= 2 then return 0.15
+		end
+		return 0.10
+	end
+
+	@ExecSpace("ServerOnly")
+	method void UncounterArrowVAttack(number damage, boolean isCrit)
+		local map = self:GetCurrentMap()
+		if map == nil then return end
+		local level = self.UncounterArrowVLevel
+		local targetCount = self:GetUncounterArrowVTargetCount(level)
+		local anchors = self:GetGroundPriorityTargets(targetCount)
+		local hitCount = 0
+		for _, anchor in ipairs(anchors) do
+			local p = anchor.Entity.TransformComponent.Position
+			local castPos = Vector3(p.x, p.y + self.Card119CastYOffset, p.z)
+			local castDuration = self:PlayUncounterArrowVCast(castPos, self:GetEffectScaleRatio(anchor))
+			hitCount = hitCount + 1
+
+			local impactDelay = math.max(0, castDuration - self.Card119ImpactLeadTime)
+			_TimerService:SetTimerOnce(function()
+				if not isvalid(self) then return end
+				self:ResolveUncounterArrowVHit(map, anchor, p, damage, isCrit)
+			end, impactDelay)
+		end
+		log("UncounterArrowVAttack: anchors=" .. hitCount .. "/" .. targetCount)
+	end
+
+	-- 캐스트 연출 — 15장의 정지 프레임을 직접 이어붙여 정확히 1바퀴만(래핑 없이) 재생한다(언카운터
+	-- 에로우와 동일한 기법). 총 재생 시간(=착탄 시점)을 반환한다.
+	@ExecSpace("ServerOnly")
+	method number PlayUncounterArrowVCast(Vector3 pos, number scaleRatio)
+		local frames = {
+			self.Card119CastFrame0RUID, self.Card119CastFrame1RUID, self.Card119CastFrame2RUID,
+			self.Card119CastFrame3RUID, self.Card119CastFrame4RUID, self.Card119CastFrame5RUID,
+			self.Card119CastFrame6RUID, self.Card119CastFrame7RUID, self.Card119CastFrame8RUID,
+			self.Card119CastFrame9RUID, self.Card119CastFrame10RUID, self.Card119CastFrame11RUID,
+			self.Card119CastFrame12RUID, self.Card119CastFrame13RUID, self.Card119CastFrame14RUID,
+		}
+		local perFrame = self.Card119CastFrameDuration
+		local totalDuration = perFrame * #frames
+		local fx = self:SpawnEffectWithModel(frames[1], pos, self.Card119CastRotation, 1.0, self.Card119CastScale * scaleRatio, 1, "skilleffectlong")
+		if fx == nil then return totalDuration end
+		local r = fx.SpriteRendererComponent
+		for step = 2, #frames do
+			local frameRUID = frames[step]
+			_TimerService:SetTimerOnce(function()
+				if isvalid(fx) and isvalid(r) then r.SpriteRUID = frameRUID end
+			end, perFrame * (step - 1))
+		end
+		fx:Destroy(totalDuration)
+		return totalDuration
+	end
+
+	-- 타격 연출은 anchor가 그 사이 죽어도 항상 그 좌표에 재생하고, 대미지는 판정 시점에 생존해 있는
+	-- 몬스터에게만 세로 판정대(BandWidth×ColumnHeight, anchor 기준 위쪽) 안에 있으면 적용한다.
+	@ExecSpace("ServerOnly")
+	method void ResolveUncounterArrowVHit(Entity map, MonsterAI anchor, Vector3 anchorPos, number damage, boolean isCrit)
+		local fxHit = self:SpawnEffectWithModel(self.Card119HitRUID, anchorPos, 0, 1.0, self.Card119HitScale, 1, "skilleffectlong")
+		if fxHit ~= nil then fxHit:Destroy(self.Card119HitLifetime) end
+
+		local monsters = map:GetChildComponentsByTypeName("script.MonsterAI", false)
+		local hitCount = 0
+		for _, mob in ipairs(monsters) do
+			---@type MonsterAI
+			local m = mob
+			if isvalid(m) and not m._dead and isvalid(m.Entity) then
+				local mp = m.Entity.TransformComponent.Position
+				local dx = math.abs(mp.x - anchorPos.x)
+				local dy = mp.y - anchorPos.y
+				local inBand = dx <= self.Card119BandWidth and dy >= 0 and dy <= self.Card119ColumnHeight
+				if inBand and self:IsSameDepthBand(anchor, m) then
+					if isCrit then m:TakeDamageCrit(damage * 2)
+					else m:TakeDamage(damage) end
+					hitCount = hitCount + 1
+				end
+			end
+		end
+		log("UncounterArrowVHit: hit=" .. hitCount)
+	end
+
 	-- ── 실피드 전용: 플레시 미라주 (카드 108, 슬롯형 정식 스킬 8호) — 넉백 스킬. 화면 양끝(좌/우)
 	-- 중 더 바깥쪽에 서 있는 몬스터를 타겟으로 잡아(유저 요청: "유닛이 양끝에 있는 애가 타겟으로
 	-- 잡혀야하고") 대미지를 넣고, 그 몬스터를 화면 가장자리까지 실제로 밀어붙인다(유저 요청: "유닛이
@@ -1940,7 +3386,7 @@ script CardManager extends Logic
 	-- 바꾸랬잖아... 연출 시간이 맞냐고"). 리트리트 샷/언카운터 에로우와 동일하게 프레임당 재생시간을
 	-- 독립적으로(0.07초/프레임, 20프레임=1.4초) 고정하고, 넉백 이동(물리)과는 완전히 분리한다.
 	property number Card108EffectFrameDuration = 0.07
-	property number Card108KnockbackStartDelay = 0.2  -- 연출 시작 후 실제 대미지+넉백이 들어가기까지의 지연(유저 요청)
+	property number Card108KnockbackStartDelay = 0.7  -- 연출 시작 후 실제 대미지+넉백이 들어가기까지의 지연(유저 요청, 최초 0.2초 → 0.7초로 조정)
 	property number Card108EffectFrameCount = 20
 	property number Card108CollisionHitScale = 1.0
 
@@ -2099,8 +3545,8 @@ script CardManager extends Logic
 		local pp = primary.Entity.TransformComponent.Position
 		self:PlayFleshMirageEffect(Vector3(pp.x, pp.y + self.Card108EffectYOffset, pp.z), dirRight, self:GetEffectScaleRatio(primary))
 
-		-- 연출이 시작되고 Card108KnockbackStartDelay(0.2초) 뒤에야 실제 대미지+넉백이 들어간다(유저
-		-- 요청: "연출 시작되고 0.2s 있다가 넉백되야됨").
+		-- 연출이 시작되고 Card108KnockbackStartDelay(0.7초) 뒤에야 실제 대미지+넉백이 들어간다(최초
+		-- 유저 요청은 0.2초였으나 "연출 시작하고 약 0.7s 있다가 넉백되게 변경해" 요청으로 조정).
 		_TimerService:SetTimerOnce(function()
 			if not isvalid(self) or not isvalid(primary) or not isvalid(primary.Entity) or primary._dead then return end
 
@@ -2157,6 +3603,213 @@ script CardManager extends Logic
 		}
 		local perFrame = self.Card108EffectFrameDuration
 		local fx = self:SpawnEffectWithModel(frames[1], pos, 0, 0, self.Card108EffectScale * scaleRatio, 1, "skilleffectlong")
+		if fx == nil then return end
+		local r = fx.SpriteRendererComponent
+		if r ~= nil then r.FlipX = dirRight end
+		for step = 2, #frames do
+			local frameRUID = frames[step]
+			_TimerService:SetTimerOnce(function()
+				if isvalid(fx) and isvalid(r) then r.SpriteRUID = frameRUID end
+			end, perFrame * (step - 1))
+		end
+		fx:Destroy(perFrame * #frames)
+	end
+
+	-- ── 실피드 전용: 플레시 봄버 (카드 120, 조합 스킬) — 플레시 미라주(Card108) Lv5 + 파이널
+	-- 어택: 활(Card112) + 연속 사격(Card113, 둘 다 슬롯 없는 패시브) 보유 시 등장 — 새 슬롯이
+	-- 필요없고 플레시 미라주의 슬롯을 그대로 넘겨받는다. 넉백/충돌 구조는 플레시 미라주와 동일하되
+	-- (유저 지정: "나머지연출은 플래시 미라주랑 동일하게") 항상 좌우 양쪽(타겟 2명, 레벨 무관 고정 —
+	-- 플레시 미라주의 Lv1 단일타겟 분기는 없음)이 동시에 발동하고, 연출 크기는 플레시 미라주(1.15)
+	-- 대비 15% 더 확대(1.15×1.15≈1.32, 유저 지정: "크기만 15% 정도 키워줘"). 신규 메커니즘: 넉백
+	-- 이동(Card108KnockbackDuration)이 끝나 멈춘 자리에서 새 폭발 연출(543e54a4..., 6프레임)이
+	-- 재생되고 그 범위 안의 모든 몬스터에게 추가 대미지가 들어간다(유저 지정: "넉백된 유닛이 멈추면
+	-- 이 타격 연출이 나오고 이 연출 범위에 있는적은 대미지가 들어감 — 타격 이펙트 범위 만큼"). 표의
+	-- 두 퍼센트는 유저 확인으로 확정: 주타겟 자신은 기본 대미지 100% 그대로, "타격 유닛 X%"는 기존
+	-- 충돌 대상 대미지 비율(이름만 바뀜), "넉백 유닛 주변 Y%"는 신규 폭발 대미지 비율 — 셋 다 독립.
+	@Sync property integer FlashBomberLevel = 0
+	property string Card120Name = "플레시 봄버"
+	property string Card120IconRUID = "431246ee45104325abb416f08db32924"
+	property number Card120Cooldown = 6.0  -- 레벨 무관 고정(유저 지정)
+	property number Card120EffectScale = 1.32  -- 플레시 미라주(1.15) 대비 15% 추가 확대
+	property string Card120ExplosionRUID = "543e54a49cfc4373981b01786a442d46"  -- 넉백 정지 시 재생할 신규 폭발 연출(6프레임)
+	-- 리소스 실측(최대 프레임 약 220×216px) 기준 원형 판정 반경 추정치(Lv1~2 기준) — 필요시 유저 확인 후 조정
+	property number Card120ExplosionRadius = 1.1
+	property number Card120ExplosionLifetime = 0.4
+	property number Card120ExplosionYOffset = 0.3  -- 유저 요청으로 위로 살짝 띄움(순수 시각 오프셋, 판정엔 영향 없음)
+
+	method number GetFlashBomberDamage(integer level)
+		if level >= 3 then return 220
+		elseif level >= 2 then return 200
+		end
+		return 180
+	end
+
+	-- "타격 유닛" 대미지 비율(=플레시 미라주의 충돌 대상 대미지 비율과 동일한 메커니즘, 이름만 변경)
+	method number GetFlashBomberCollisionPercent(integer level)
+		if level >= 3 then return 1.20
+		elseif level >= 2 then return 1.00
+		end
+		return 0.80
+	end
+
+	-- "넉백 유닛 주변" 폭발 대미지 비율(신규 메커니즘)
+	method number GetFlashBomberExplosionPercent(integer level)
+		if level >= 3 then return 1.00
+		elseif level >= 2 then return 0.60
+		end
+		return 0.50
+	end
+
+	-- 유저 요청: "레벨 3때는 한 15% 더 키워주고 범위도 그만큼" — Lv3만 폭발 연출 크기/판정 반경을
+	-- 15% 확대(범위는 크기와 동일 비율로 늘려야 시각과 판정이 어긋나지 않는다).
+	method number GetFlashBomberExplosionScale(integer level)
+		if level >= 3 then return 1.15 end
+		return 1.0
+	end
+
+	method number GetFlashBomberExplosionRadius(integer level)
+		if level >= 3 then return self.Card120ExplosionRadius * 1.15 end
+		return self.Card120ExplosionRadius
+	end
+
+	-- 플레시 미라주와 동일한 좌/우 극단 탐색이지만, 레벨 무관 항상 양쪽 동시 발동(유저 지정 표 —
+	-- 모든 레벨에서 타겟 수 2).
+	@ExecSpace("ServerOnly")
+	method void FlashBomberAttack(number damage, boolean isCrit)
+		local map = self:GetCurrentMap()
+		if map == nil then return end
+		local monsters = map:GetChildComponentsByTypeName("script.MonsterAI", false)
+
+		local leftExtreme, rightExtreme = nil, nil
+		for _, mob in ipairs(monsters) do
+			---@type MonsterAI
+			local m = mob
+			if isvalid(m) and not m._dead and isvalid(m.Entity) then
+				local x = m.Entity.TransformComponent.Position.x
+				if x < 0 and (leftExtreme == nil or x < leftExtreme.Entity.TransformComponent.Position.x) then
+					leftExtreme = m
+				elseif x > 0 and (rightExtreme == nil or x > rightExtreme.Entity.TransformComponent.Position.x) then
+					rightExtreme = m
+				end
+			end
+		end
+		if leftExtreme == nil and rightExtreme == nil then return end
+
+		local level = self.FlashBomberLevel
+		local collisionPct = self:GetFlashBomberCollisionPercent(level)
+		local explosionPct = self:GetFlashBomberExplosionPercent(level)
+
+		if leftExtreme ~= nil then self:FireFlashBomberShove(map, monsters, leftExtreme, 0, damage, isCrit, collisionPct, explosionPct, level) end
+		if rightExtreme ~= nil then self:FireFlashBomberShove(map, monsters, rightExtreme, 0, damage, isCrit, collisionPct, explosionPct, level) end
+	end
+
+	-- 플레시 미라주의 FireFleshMirageShove와 동일한 넉백/충돌 로직 + 넉백이 끝나는 시점(멈춘 자리)의
+	-- 신규 폭발 대미지 예약.
+	@ExecSpace("ServerOnly")
+	method void FireFlashBomberShove(Entity map, table monsters, MonsterAI primary, number destX, number damage, boolean isCrit, number collisionPct, number explosionPct, integer level)
+		destX = self:ClampKnockbackDestX(primary, destX)
+		local primaryX = primary.Entity.TransformComponent.Position.x
+		local dirRight = destX > primaryX
+		local totalDist = math.abs(destX - primaryX)
+
+		local pp = primary.Entity.TransformComponent.Position
+		self:PlayFlashBomberEffect(Vector3(pp.x, pp.y + self.Card108EffectYOffset, pp.z), dirRight, self:GetEffectScaleRatio(primary))
+		-- 폭발 연출은 넉백이 멈추는 자리(destX)에서 재생한다 — 넉백 도중 타겟이 죽어 파괴돼도(지연
+		-- 사망) 항상 재생되도록 캐스트 시작 시점에 좌표를 미리 고정해둔다(다른 스킬과 동일한 정책).
+		local stopPos = Vector3(destX, pp.y, pp.z)
+
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) or not isvalid(primary) or not isvalid(primary.Entity) or primary._dead then return end
+
+			if isCrit then primary:TakeDamageDelayedDeath(damage * 2, true, self.Card108KnockbackDuration)
+			else primary:TakeDamageDelayedDeath(damage, false, self.Card108KnockbackDuration) end
+
+			primary:ApplyLateralShove(destX, self.Card108KnockbackDuration)
+
+			local collideCount = 0
+			if totalDist > 0 then
+				for _, mob in ipairs(monsters) do
+					---@type MonsterAI
+					local m = mob
+					if isvalid(m) and m ~= primary and not m._dead and isvalid(m.Entity) and self:IsSameDepthBand(primary, m) then
+						local mx = m.Entity.TransformComponent.Position.x
+						local inPath = (dirRight and mx >= primaryX and mx <= destX)
+							or ((not dirRight) and mx <= primaryX and mx >= destX)
+						if inPath then
+							collideCount = collideCount + 1
+							local hitDelay = self.Card108KnockbackDuration * (math.abs(mx - primaryX) / totalDist)
+							local collideDamage = damage * collisionPct
+							_TimerService:SetTimerOnce(function()
+								if not isvalid(m) or m._dead or not isvalid(m.Entity) then return end
+								local hitPos = m.Entity.TransformComponent.Position
+								local hitFx = self:SpawnEffect(self.Card108CollisionHitRUID, hitPos, 0, 1.0, self.Card108CollisionHitScale, 1)
+								if hitFx ~= nil then hitFx:Destroy(self.HitEffectLifetime) end
+								if isCrit then m:TakeDamageCrit(collideDamage * 2)
+								else m:TakeDamage(collideDamage) end
+							end, hitDelay)
+						end
+					end
+				end
+			end
+
+			-- 유저 지정: 넉백 이동이 끝나 멈춘 자리에서 신규 폭발 연출 + 범위 대미지
+			_TimerService:SetTimerOnce(function()
+				if not isvalid(self) then return end
+				self:ResolveFlashBomberExplosion(map, primary, stopPos, damage, isCrit, explosionPct, level)
+			end, self.Card108KnockbackDuration)
+
+			log("FlashBomberShove: dmg=" .. math.floor(isCrit and damage * 2 or damage) .. " collide=" .. collideCount .. " dirRight=" .. tostring(dirRight))
+		end, self.Card108KnockbackStartDelay)
+	end
+
+	-- 넉백된 유닛이 멈춘 자리(stopPos)에서 재생하는 신규 폭발 연출 + 범위 대미지(신규 메커니즘).
+	-- 연출은 항상 재생하고(다른 스킬과 동일 정책), 판정도 stopPos 고정 좌표 기준(주타겟이 그 사이
+	-- 죽어도 안전).
+	@ExecSpace("ServerOnly")
+	method void ResolveFlashBomberExplosion(Entity map, MonsterAI primary, Vector3 stopPos, number damage, boolean isCrit, number explosionPct, integer level)
+		-- 유저 요청: "새 폭발 연출 위로 살짝만 더 올려줄래" — 판정 좌표(stopPos)에는 영향 없는
+		-- 순수 시각 오프셋만 스폰 위치에 더한다.
+		local fxPos = Vector3(stopPos.x, stopPos.y + self.Card120ExplosionYOffset, stopPos.z)
+		-- 유저 요청: "레벨 3때는 한 15% 더 키워주고 범위도 그만큼" — 크기와 판정 반경을 동일 비율로 확대
+		local explosionScale = self:GetFlashBomberExplosionScale(level)
+		local explosionRadius = self:GetFlashBomberExplosionRadius(level)
+		local fx = self:SpawnEffectWithModel(self.Card120ExplosionRUID, fxPos, 0, 1.0, explosionScale, 1, "skilleffectlong")
+		if fx ~= nil then fx:Destroy(self.Card120ExplosionLifetime) end
+
+		local monsters = map:GetChildComponentsByTypeName("script.MonsterAI", false)
+		local explosionDamage = damage * explosionPct
+		local hitCount = 0
+		for _, mob in ipairs(monsters) do
+			---@type MonsterAI
+			local m = mob
+			if isvalid(m) and not m._dead and isvalid(m.Entity) then
+				local mp = m.Entity.TransformComponent.Position
+				local dx = mp.x - stopPos.x
+				local dy = mp.y - stopPos.y
+				if (dx * dx + dy * dy) <= (explosionRadius * explosionRadius) and self:IsSameDepthBand(primary, m) then
+					if isCrit then m:TakeDamageCrit(explosionDamage * 2)
+					else m:TakeDamage(explosionDamage) end
+					hitCount = hitCount + 1
+				end
+			end
+		end
+		log("FlashBomberExplosion: hit=" .. hitCount .. " dmg=" .. math.floor(isCrit and explosionDamage * 2 or explosionDamage))
+	end
+
+	-- 플레시 미라주의 PlayFleshMirageEffect와 동일 기법(20프레임 직접 이어붙이기), 크기만 Card120EffectScale
+	@ExecSpace("ServerOnly")
+	method void PlayFlashBomberEffect(Vector3 pos, boolean dirRight, number scaleRatio)
+		local frames = {
+			self.Card108EffectFrame0RUID, self.Card108EffectFrame1RUID, self.Card108EffectFrame2RUID,
+			self.Card108EffectFrame3RUID, self.Card108EffectFrame4RUID, self.Card108EffectFrame5RUID,
+			self.Card108EffectFrame6RUID, self.Card108EffectFrame7RUID, self.Card108EffectFrame8RUID,
+			self.Card108EffectFrame9RUID, self.Card108EffectFrame10RUID, self.Card108EffectFrame11RUID,
+			self.Card108EffectFrame12RUID, self.Card108EffectFrame13RUID, self.Card108EffectFrame14RUID,
+			self.Card108EffectFrame15RUID, self.Card108EffectFrame16RUID, self.Card108EffectFrame17RUID,
+			self.Card108EffectFrame18RUID, self.Card108EffectFrame19RUID,
+		}
+		local perFrame = self.Card108EffectFrameDuration
+		local fx = self:SpawnEffectWithModel(frames[1], pos, 0, 0, self.Card120EffectScale * scaleRatio, 1, "skilleffectlong")
 		if fx == nil then return end
 		local r = fx.SpriteRendererComponent
 		if r ~= nil then r.FlipX = dirRight end
@@ -2658,7 +4311,14 @@ script CardManager extends Logic
 		if cardIdx == 105 then return self.PhoenixLevel > 0 end
 		if cardIdx == 106 then return self.RetreatShotLevel > 0 end
 		if cardIdx == 107 then return self.UncounterArrowLevel > 0 end
+		if cardIdx == 118 then return self.ArrowFletterLevel > 0 end
+		if cardIdx == 119 then return self.UncounterArrowVLevel > 0 end
+		if cardIdx == 120 then return self.FlashBomberLevel > 0 end
 		if cardIdx == 108 then return self.FleshMirageLevel > 0 end
+		if cardIdx == 114 then return self.ArrowIllusionLevel > 0 end
+		if cardIdx == 115 then return self.EvolveLevel > 0 end
+		if cardIdx == 116 then return self.StormPoemLevel > 0 end
+		if cardIdx == 117 then return self.EnhancedArrowBlowLevel > 0 end
 		if cardIdx == 109 then return self.BowAccelerationLevel > 0 end
 		if cardIdx == 110 then return self.PiercingWillLevel > 0 end
 		if cardIdx == 111 then return self.CriticalShotLevel > 0 end
@@ -2812,8 +4472,15 @@ script CardManager extends Logic
 		elseif cardIdx == 104 then base = self:GetFireQuiverDamage()
 		elseif cardIdx == 105 then base = self:GetPhoenixDamage()
 		elseif cardIdx == 106 then base = self:GetRetreatShotDamage()
+		elseif cardIdx == 118 then base = self:GetArrowFletterDamage(self.ArrowFletterLevel)
+		elseif cardIdx == 119 then base = self:GetUncounterArrowVDamage(self.UncounterArrowVLevel)
+		elseif cardIdx == 120 then base = self:GetFlashBomberDamage(self.FlashBomberLevel)
 		elseif cardIdx == 107 then base = self:GetUncounterArrowDamage()
 		elseif cardIdx == 108 then base = self:GetFleshMirageDamage()
+		elseif cardIdx == 114 then base = self:GetArrowIllusionDamage(self.ArrowIllusionLevel)
+		elseif cardIdx == 115 then base = self:GetEvolveDamage(self.EvolveLevel)
+		elseif cardIdx == 116 then base = self:GetStormPoemDamage(self.StormPoemLevel)
+		elseif cardIdx == 117 then base = self:GetEnhancedArrowBlowDamage(self.EnhancedArrowBlowLevel)
 		end
 		return base * self:GetMeditationMult() * self:GetSkillInvDamageMult(cardIdx) * self:GetRapidFireMult()
 	end
@@ -2979,7 +4646,14 @@ script CardManager extends Logic
 		elseif cardIdx == 105 then return self.Card105Cooldown
 		elseif cardIdx == 106 then return self.Card106Cooldown
 		elseif cardIdx == 107 then return self:GetUncounterArrowCooldown()
+		elseif cardIdx == 118 then return self:GetArrowFletterCooldown(self.ArrowFletterLevel)
+		elseif cardIdx == 119 then return self.Card119Cooldown
+		elseif cardIdx == 120 then return self.Card120Cooldown
 		elseif cardIdx == 108 then return self.Card108Cooldown
+		elseif cardIdx == 114 then return self.Card114Cooldown
+		elseif cardIdx == 115 then return self:GetEvolveCooldown(self.EvolveLevel)
+		elseif cardIdx == 116 then return self.Card116Cooldown
+		elseif cardIdx == 117 then return self.Card117Cooldown
 		end
 		return 1.0
 	end
@@ -3016,7 +4690,14 @@ script CardManager extends Logic
 		elseif cardIdx == 105 then return self.Card105IconRUID
 		elseif cardIdx == 106 then return self.Card106IconRUID
 		elseif cardIdx == 107 then return self.Card107IconRUID
+		elseif cardIdx == 118 then return self.Card118IconRUID
+		elseif cardIdx == 119 then return self.Card119IconRUID
+		elseif cardIdx == 120 then return self.Card120IconRUID
 		elseif cardIdx == 108 then return self.Card108IconRUID
+		elseif cardIdx == 114 then return self.Card114IconRUID
+		elseif cardIdx == 115 then return self.Card115IconRUID
+		elseif cardIdx == 116 then return self.Card116IconRUID
+		elseif cardIdx == 117 then return self.Card117IconRUID
 		elseif cardIdx == 109 then return self.Card109IconRUID
 		elseif cardIdx == 110 then return self.Card110IconRUID
 		elseif cardIdx == 111 then return self.Card111IconRUID
@@ -3058,7 +4739,14 @@ script CardManager extends Logic
 		elseif cardIdx == 105 then return self.Card105Name
 		elseif cardIdx == 106 then return self.Card106Name
 		elseif cardIdx == 107 then return self.Card107Name
+		elseif cardIdx == 118 then return self.Card118Name
+		elseif cardIdx == 119 then return self.Card119Name
+		elseif cardIdx == 120 then return self.Card120Name
 		elseif cardIdx == 108 then return self.Card108Name
+		elseif cardIdx == 114 then return self.Card114Name
+		elseif cardIdx == 115 then return self.Card115Name
+		elseif cardIdx == 116 then return self.Card116Name
+		elseif cardIdx == 117 then return self.Card117Name
 		elseif cardIdx == 109 then return self.Card109Name
 		elseif cardIdx == 110 then return self.Card110Name
 		elseif cardIdx == 111 then return self.Card111Name
@@ -3171,6 +4859,13 @@ script CardManager extends Logic
 		elseif cardIdx == 106 then return self.RetreatShotLevel
 		elseif cardIdx == 107 then return self.UncounterArrowLevel
 		elseif cardIdx == 108 then return self.FleshMirageLevel
+		elseif cardIdx == 114 then return self.ArrowIllusionLevel
+		elseif cardIdx == 115 then return self.EvolveLevel
+		elseif cardIdx == 116 then return self.StormPoemLevel
+		elseif cardIdx == 117 then return self.EnhancedArrowBlowLevel
+		elseif cardIdx == 118 then return self.ArrowFletterLevel
+		elseif cardIdx == 119 then return self.UncounterArrowVLevel
+		elseif cardIdx == 120 then return self.FlashBomberLevel
 		elseif cardIdx == 109 then return self.BowAccelerationLevel
 		elseif cardIdx == 110 then return self.PiercingWillLevel
 		elseif cardIdx == 111 then return self.CriticalShotLevel
@@ -3262,6 +4957,12 @@ script CardManager extends Logic
 	@ExecSpace("ServerOnly")
 	method boolean RollCrit(integer cardIdx)
 		local chance = self:GetMagicCriticalChance() + self:GetSkillInvCardCritBonus(cardIdx) + self:GetPiercingWillChance()
+		-- 이볼브(카드115) 전용 자체 크리티컬 확률(유저 요청 — 레벨업이 범위 대신 이걸로 감)
+		if cardIdx == 115 then chance = chance + self:GetEvolveCritChance(self.EvolveLevel) end
+		-- 에로우 플레터(카드118) 전용 자체 크리티컬 확률 보너스(유저 지정: 10%/15%/20%)
+		if cardIdx == 118 then chance = chance + self:GetArrowFletterCritChance(self.ArrowFletterLevel) end
+		-- 언카운트에로우V(카드119) 전용 자체 크리티컬 확률 보너스(유저 지정: 10%/15%/20%)
+		if cardIdx == 119 then chance = chance + self:GetUncounterArrowVCritChance(self.UncounterArrowVLevel) end
 		if chance <= 0 then return false end
 		return _UtilLogic:RandomDouble() < chance
 	end
@@ -3389,7 +5090,14 @@ script CardManager extends Logic
 		elseif name == "PhoenixLevel" then self:RefreshSlotIfHoldsCard(105)
 		elseif name == "RetreatShotLevel" then self:RefreshSlotIfHoldsCard(106)
 		elseif name == "UncounterArrowLevel" then self:RefreshSlotIfHoldsCard(107)
+		elseif name == "ArrowFletterLevel" then self:RefreshSlotIfHoldsCard(118)
+		elseif name == "UncounterArrowVLevel" then self:RefreshSlotIfHoldsCard(119)
+		elseif name == "FlashBomberLevel" then self:RefreshSlotIfHoldsCard(120)
 		elseif name == "FleshMirageLevel" then self:RefreshSlotIfHoldsCard(108)
+		elseif name == "ArrowIllusionLevel" then self:RefreshSlotIfHoldsCard(114)
+		elseif name == "EvolveLevel" then self:RefreshSlotIfHoldsCard(115)
+		elseif name == "StormPoemLevel" then self:RefreshSlotIfHoldsCard(116)
+		elseif name == "EnhancedArrowBlowLevel" then self:RefreshSlotIfHoldsCard(117)
 		elseif name == "BowAccelerationLevel" then
 			if self.BowAccelerationLevel > 0 then self:NotifyBowAccelOnPermanent() end
 		elseif name == "PiercingWillLevel" then
@@ -3817,7 +5525,14 @@ script CardManager extends Logic
 		elseif cardIdx == 105 then name = self.Card105Name .. " Lv." .. self.PhoenixLevel
 		elseif cardIdx == 106 then name = self.Card106Name .. " Lv." .. self.RetreatShotLevel
 		elseif cardIdx == 107 then name = self.Card107Name .. " Lv." .. self.UncounterArrowLevel
+		elseif cardIdx == 118 then name = self.Card118Name .. " Lv." .. self.ArrowFletterLevel
+		elseif cardIdx == 119 then name = self.Card119Name .. " Lv." .. self.UncounterArrowVLevel
+		elseif cardIdx == 120 then name = self.Card120Name .. " Lv." .. self.FlashBomberLevel
 		elseif cardIdx == 108 then name = self.Card108Name .. " Lv." .. self.FleshMirageLevel
+		elseif cardIdx == 114 then name = self.Card114Name .. " Lv." .. self.ArrowIllusionLevel
+		elseif cardIdx == 115 then name = self.Card115Name .. " Lv." .. self.EvolveLevel
+		elseif cardIdx == 116 then name = self.Card116Name .. " Lv." .. self.StormPoemLevel
+		elseif cardIdx == 117 then name = self.Card117Name .. " Lv." .. self.EnhancedArrowBlowLevel
 		elseif cardIdx == 109 then name = self.Card109Name .. " Lv." .. self.BowAccelerationLevel
 		elseif cardIdx == 110 then name = self.Card110Name .. " Lv." .. self.PiercingWillLevel
 		elseif cardIdx == 111 then name = self.Card111Name .. " Lv." .. self.CriticalShotLevel
@@ -3887,8 +5602,22 @@ script CardManager extends Logic
 			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
 		elseif cardIdx == 107 then
 			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
+		elseif cardIdx == 118 then
+			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
+		elseif cardIdx == 119 then
+			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
+		elseif cardIdx == 120 then
+			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
 		elseif cardIdx == 108 then
 			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
+		elseif cardIdx == 114 then
+			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
+		elseif cardIdx == 115 then
+			dmg = "어택1 : " .. math.floor(self:GetCardDamage(cardIdx) * self:GetEvolveAttack1Ratio(self.EvolveLevel)) .. "  |  히트연출 : " .. math.floor(self:GetCardDamage(cardIdx) * 0.50)
+		elseif cardIdx == 116 then
+			dmg = "1타당 : " .. math.floor(self:GetCardDamage(cardIdx))
+		elseif cardIdx == 117 then
+			dmg = "1타당 : " .. math.floor(self:GetCardDamage(cardIdx)) .. "  |  연사 " .. self:GetEnhancedArrowBlowArrowCount(self.EnhancedArrowBlowLevel) .. "발  |  강화 시 " .. self.Card117EnhancedHitCount .. "연타"
 		elseif cardIdx == 109 then
 			dmg = "쿨타임 -" .. math.floor(self:GetBowAccelerationReduction() * 100) .. "%  (영구)"
 		elseif cardIdx == 110 then
@@ -4016,8 +5745,40 @@ script CardManager extends Logic
 			extraStr = "화살 " .. self:GetRetreatShotArrowCount() .. "발  |  관통 " .. self:GetRetreatShotPierceCount() .. "회"
 		elseif cardIdx == 107 then
 			extraStr = "착탄 " .. self:GetUncounterArrowTargetCount() .. "곳  |  세로 범위기"
+		elseif cardIdx == 118 then
+			local afLv = self.ArrowFletterLevel
+			local critPct = math.floor(self:GetArrowFletterCritChance(afLv) * 100)
+			extraStr = "화살 " .. self:GetArrowFletterArrowCount(afLv) .. "발  |  관통 " .. self.Card118PierceCount .. "회  |  자체 크리티컬 +" .. critPct .. "%"
+		elseif cardIdx == 119 then
+			local uavLv = self.UncounterArrowVLevel
+			local critPct = math.floor(self:GetUncounterArrowVCritChance(uavLv) * 100)
+			extraStr = "착탄 " .. self:GetUncounterArrowVTargetCount(uavLv) .. "곳  |  세로 범위기  |  자체 크리티컬 +" .. critPct .. "%"
+		elseif cardIdx == 120 then
+			local fbLv = self.FlashBomberLevel
+			local collidePct = math.floor(self:GetFlashBomberCollisionPercent(fbLv) * 100)
+			local explosionPct = math.floor(self:GetFlashBomberExplosionPercent(fbLv) * 100)
+			extraStr = "타겟 2명  |  중앙으로 넉백  |  타격 유닛 " .. collidePct .. "%  |  넉백 정지 시 주변 " .. explosionPct .. "% 대미지"
 		elseif cardIdx == 108 then
 			extraStr = "타겟 " .. self:GetFleshMirageTargetCount() .. "명  |  중앙으로 넉백  |  충돌 대상 " .. math.floor(self:GetFleshMirageCollisionPercent() * 100) .. "% 대미지"
+		elseif cardIdx == 114 then
+			local statusDur = self:GetArrowIllusionStatusDuration(self.ArrowIllusionLevel)
+			local bonusPct = math.floor((self:GetArrowIllusionSlowedBonusRatio(self.ArrowIllusionLevel)) * 100)
+			extraStr = "착탄 " .. self.Card114TargetCount .. "곳  |  반경 " .. string.format("%.2f", self:GetArrowIllusionRadius(self.ArrowIllusionLevel)) .. "  |  슬로우+스턴 " .. string.format("%.0f", statusDur) .. "초  |  슬로우 대상 +" .. bonusPct .. "% 대미지"
+		elseif cardIdx == 115 then
+			local evoLv = self.EvolveLevel
+			local critPct = math.floor(self:GetEvolveCritChance(evoLv) * 100)
+			local evoBonusPct = math.floor((self:GetEvolveSlowedBonusRatio(evoLv)) * 100)
+			extraStr = "유지 " .. string.format("%.0f", self:GetEvolveDuration(evoLv)) .. "초  |  반경 " .. string.format("%.2f", self:GetEvolveRadius()) .. "  |  자체 크리티컬 " .. critPct .. "%  |  슬로우 대상 +" .. evoBonusPct .. "% 대미지"
+		elseif cardIdx == 116 then
+			local spLv = self.StormPoemLevel
+			local hitCount = self:GetStormPoemHitCount(spLv)
+			local extraPct = math.floor(self:GetStormPoemExtraChance(spLv) * 100)
+			local extraDmgPct = math.floor(self:GetStormPoemExtraPercent(spLv) * 100)
+			extraStr = "최대 " .. hitCount .. "명 연사  |  추가 타격 " .. extraPct .. "% (" .. extraDmgPct .. "% 대미지)"
+		elseif cardIdx == 117 then
+			local eabLv = self.EnhancedArrowBlowLevel
+			local enhancePct = math.floor(self:GetEnhancedArrowBlowEnhanceChance(eabLv) * 100)
+			extraStr = "강화 확률(화살마다) " .. enhancePct .. "%  |  강화 시 " .. self.Card117EnhancedHitCount .. "연타(" .. string.format("%.2f", self.Card117EnhancedHitInterval) .. "초 간격)"
 		elseif cardIdx == 112 then
 			extraStr = "추가 공격 대미지 " .. math.floor(self:GetFinalAttackBowMultiplier() * 100) .. "%"
 		end
@@ -4162,6 +5923,20 @@ script CardManager extends Logic
 					self:UncounterArrowAttack(damage, isCrit)
 				elseif cardIndex == 108 then
 					self:FleshMirageAttack(damage, isCrit)
+				elseif cardIndex == 114 then
+					self:ArrowIllusionAttack(damage, isCrit)
+				elseif cardIndex == 115 then
+					self:EvolveAttack(damage, isCrit)
+				elseif cardIndex == 116 then
+					self:StormPoemAttack(damage, isCrit)
+				elseif cardIndex == 117 then
+					self:EnhancedArrowBlowAttack(damage, isCrit, target)
+				elseif cardIndex == 118 then
+					self:ArrowFletterAttack(damage, isCrit)
+				elseif cardIndex == 119 then
+					self:UncounterArrowVAttack(damage, isCrit)
+				elseif cardIndex == 120 then
+					self:FlashBomberAttack(damage, isCrit)
 				else
 					if isCrit then target:TakeDamageCrit(damage * 2)
 					else target:TakeDamage(damage) end
@@ -6092,45 +7867,132 @@ script CardManager extends Logic
 		-- 실피드 전용 카드 — 바람의 시(Card101, 슬롯형 정식 스킬 1호): 미해금이면 해금(슬롯 여유 있을
 		-- 때만), 해금 후 레벨 < 5이면 강화
 		if isSylph then
-			if self.WindPoemLevel == 0 then
-				if hasEmptySlot then table.insert(pool, { card = 101, type = "unlock" }) end
-			elseif self.WindPoemLevel < 5 then
-				table.insert(pool, { card = 101, type = "windpoem_up" })
+			-- 바람의 시: 폭풍의 시로 이미 조합된 뒤에는 더 이상 등장하지 않는다(그 슬롯을 이미 떠났으므로)
+			if self.StormPoemLevel == 0 then
+				if self.WindPoemLevel == 0 then
+					if hasEmptySlot then table.insert(pool, { card = 101, type = "unlock" }) end
+				elseif self.WindPoemLevel < 5 then
+					table.insert(pool, { card = 101, type = "windpoem_up" })
+				end
 			end
-			if self.ArrowBlowLevel == 0 then
-				if hasEmptySlot then table.insert(pool, { card = 102, type = "unlock" }) end
-			elseif self.ArrowBlowLevel < 5 then
-				table.insert(pool, { card = 102, type = "arrowblow_up" })
+
+			-- 폭풍의 시(Card 116, 조합 스킬): 바람의 시 Lv5 + 파이널 어택: 활 보유 시 등장 — 새 슬롯이
+			-- 필요없고 바람의 시가 있던 슬롯을 그대로 넘겨받으므로 hasEmptySlot 체크를 건너뛴다.
+			if self.WindPoemLevel >= 5 and self:IsCardUnlocked(112) and self.StormPoemLevel == 0 then
+				table.insert(pool, { card = 116, type = "unlock" })
+			elseif self.StormPoemLevel > 0 and self.StormPoemLevel < 3 then
+				table.insert(pool, { card = 116, type = "stormpoem_up" })
 			end
-			if self.IceQuiverLevel == 0 then
-				if hasEmptySlot then table.insert(pool, { card = 103, type = "unlock" }) end
-			elseif self.IceQuiverLevel < 5 then
-				table.insert(pool, { card = 103, type = "icequiver_up" })
+
+			-- 애로우 블로우: 강화 애로우 블로우로 이미 조합된 뒤에는 더 이상 등장하지 않는다
+			-- (그 슬롯을 이미 떠났으므로 — 더블 커터의 아이스커터/썬더커터와 동일한 패턴)
+			if self.EnhancedArrowBlowLevel == 0 then
+				if self.ArrowBlowLevel == 0 then
+					if hasEmptySlot then table.insert(pool, { card = 102, type = "unlock" }) end
+				elseif self.ArrowBlowLevel < 5 then
+					table.insert(pool, { card = 102, type = "arrowblow_up" })
+				end
 			end
-			if self.FireQuiverLevel == 0 then
-				if hasEmptySlot then table.insert(pool, { card = 104, type = "unlock" }) end
-			elseif self.FireQuiverLevel < 5 then
-				table.insert(pool, { card = 104, type = "firequiver_up" })
+
+			-- 강화 애로우 블로우(Card 117, 조합 스킬): 애로우 블로우 Lv5 + 연속 사격(슬롯 없는 패시브)
+			-- 보유 시 등장 — 새 슬롯이 필요없고 애로우 블로우의 슬롯을 그대로 넘겨받는다.
+			if self.ArrowBlowLevel >= 5 and self:IsCardUnlocked(113) and self.EnhancedArrowBlowLevel == 0 then
+				table.insert(pool, { card = 117, type = "unlock" })
+			elseif self.EnhancedArrowBlowLevel > 0 and self.EnhancedArrowBlowLevel < 3 then
+				table.insert(pool, { card = 117, type = "enhancedarrowblow_up" })
 			end
-			if self.PhoenixLevel == 0 then
-				if hasEmptySlot then table.insert(pool, { card = 105, type = "unlock" }) end
-			elseif self.PhoenixLevel < 5 then
-				table.insert(pool, { card = 105, type = "phoenix_up" })
+			-- 아이스/파이어 퀴버: 애로우 일루전으로 이미 조합된 뒤에는 더 이상 등장하지 않는다
+			-- (그 슬롯을 이미 떠났으므로 — 더블 커터의 아이스커터/썬더커터와 동일한 패턴)
+			if self.ArrowIllusionLevel == 0 then
+				if self.IceQuiverLevel == 0 then
+					if hasEmptySlot then table.insert(pool, { card = 103, type = "unlock" }) end
+				elseif self.IceQuiverLevel < 5 then
+					table.insert(pool, { card = 103, type = "icequiver_up" })
+				end
+				if self.FireQuiverLevel == 0 then
+					if hasEmptySlot then table.insert(pool, { card = 104, type = "unlock" }) end
+				elseif self.FireQuiverLevel < 5 then
+					table.insert(pool, { card = 104, type = "firequiver_up" })
+				end
 			end
-			if self.RetreatShotLevel == 0 then
-				if hasEmptySlot then table.insert(pool, { card = 106, type = "unlock" }) end
-			elseif self.RetreatShotLevel < 5 then
-				table.insert(pool, { card = 106, type = "retreatshot_up" })
+			-- 피닉스: 이볼브로 이미 조합된 뒤에는 더 이상 등장하지 않는다(그 슬롯을 이미 떠났으므로)
+			if self.EvolveLevel == 0 then
+				if self.PhoenixLevel == 0 then
+					if hasEmptySlot then table.insert(pool, { card = 105, type = "unlock" }) end
+				elseif self.PhoenixLevel < 5 then
+					table.insert(pool, { card = 105, type = "phoenix_up" })
+				end
 			end
-			if self.UncounterArrowLevel == 0 then
-				if hasEmptySlot then table.insert(pool, { card = 107, type = "unlock" }) end
-			elseif self.UncounterArrowLevel < 5 then
-				table.insert(pool, { card = 107, type = "uncounterarrow_up" })
+
+			-- 이볼브(Card 115, 조합 스킬): 꿰뚫는 의지 + 피닉스 Lv5 보유 시 등장 — 새 슬롯이 필요없고
+			-- 피닉스의 슬롯을 그대로 넘겨받으므로 hasEmptySlot 체크를 건너뛴다.
+			if self.PhoenixLevel >= 5 and self:IsCardUnlocked(110) and self.EvolveLevel == 0 then
+				table.insert(pool, { card = 115, type = "unlock" })
+			elseif self.EvolveLevel > 0 and self.EvolveLevel < 3 then
+				table.insert(pool, { card = 115, type = "evolve_up" })
 			end
-			if self.FleshMirageLevel == 0 then
-				if hasEmptySlot then table.insert(pool, { card = 108, type = "unlock" }) end
-			elseif self.FleshMirageLevel < 5 then
-				table.insert(pool, { card = 108, type = "fleshmirage_up" })
+
+			-- 리트리트 샷: 에로우 플레터로 이미 조합된 뒤에는 더 이상 등장하지 않는다(그 슬롯을 이미
+			-- 떠났으므로 — 더블 커터의 아이스커터/썬더커터와 동일한 패턴)
+			if self.ArrowFletterLevel == 0 then
+				if self.RetreatShotLevel == 0 then
+					if hasEmptySlot then table.insert(pool, { card = 106, type = "unlock" }) end
+				elseif self.RetreatShotLevel < 5 then
+					table.insert(pool, { card = 106, type = "retreatshot_up" })
+				end
+			end
+
+			-- 에로우 플레터(Card 118, 조합 스킬): 리트리트 샷 Lv5 + 보우 액셀레이션 + 꿰뚫는 의지
+			-- (둘 다 슬롯 없는 패시브) 보유 시 등장 — 새 슬롯이 필요없고 리트리트 샷의 슬롯을 그대로
+			-- 넘겨받는다.
+			if self.RetreatShotLevel >= 5 and self:IsCardUnlocked(109) and self:IsCardUnlocked(110) and self.ArrowFletterLevel == 0 then
+				table.insert(pool, { card = 118, type = "unlock" })
+			elseif self.ArrowFletterLevel > 0 and self.ArrowFletterLevel < 3 then
+				table.insert(pool, { card = 118, type = "arrowfletter_up" })
+			end
+			-- 언카운터 에로우: 언카운트에로우V로 이미 조합된 뒤에는 더 이상 등장하지 않는다(그 슬롯을
+			-- 이미 떠났으므로 — 더블 커터의 아이스커터/썬더커터와 동일한 패턴)
+			if self.UncounterArrowVLevel == 0 then
+				if self.UncounterArrowLevel == 0 then
+					if hasEmptySlot then table.insert(pool, { card = 107, type = "unlock" }) end
+				elseif self.UncounterArrowLevel < 5 then
+					table.insert(pool, { card = 107, type = "uncounterarrow_up" })
+				end
+			end
+
+			-- 언카운트에로우V(Card 119, 조합 스킬): 언카운터 에로우 Lv5 + 보우 액셀레이션 + 크리티컬
+			-- 샷(둘 다 슬롯 없는 패시브) 보유 시 등장 — 새 슬롯이 필요없고 언카운터 에로우의 슬롯을
+			-- 그대로 넘겨받는다.
+			if self.UncounterArrowLevel >= 5 and self:IsCardUnlocked(109) and self:IsCardUnlocked(111) and self.UncounterArrowVLevel == 0 then
+				table.insert(pool, { card = 119, type = "unlock" })
+			elseif self.UncounterArrowVLevel > 0 and self.UncounterArrowVLevel < 3 then
+				table.insert(pool, { card = 119, type = "uncounterarrowv_up" })
+			end
+			-- 플레시 미라주: 플레시 봄버로 이미 조합된 뒤에는 더 이상 등장하지 않는다(그 슬롯을 이미
+			-- 떠났으므로 — 더블 커터의 아이스커터/썬더커터와 동일한 패턴)
+			if self.FlashBomberLevel == 0 then
+				if self.FleshMirageLevel == 0 then
+					if hasEmptySlot then table.insert(pool, { card = 108, type = "unlock" }) end
+				elseif self.FleshMirageLevel < 5 then
+					table.insert(pool, { card = 108, type = "fleshmirage_up" })
+				end
+			end
+
+			-- 플레시 봄버(Card 120, 조합 스킬): 플레시 미라주 Lv5 + 파이널 어택:활 + 연속 사격
+			-- (둘 다 슬롯 없는 패시브) 보유 시 등장 — 새 슬롯이 필요없고 플레시 미라주의 슬롯을 그대로
+			-- 넘겨받는다.
+			if self.FleshMirageLevel >= 5 and self:IsCardUnlocked(112) and self:IsCardUnlocked(113) and self.FlashBomberLevel == 0 then
+				table.insert(pool, { card = 120, type = "unlock" })
+			elseif self.FlashBomberLevel > 0 and self.FlashBomberLevel < 3 then
+				table.insert(pool, { card = 120, type = "flashbomber_up" })
+			end
+
+			-- 애로우 일루전(Card 114, 조합 스킬): 아이스 퀴버 Lv5 + 파이어 퀴버 Lv5 보유 시 등장 —
+			-- 새 슬롯이 필요없고 아이스 퀴버가 있던 슬롯을 그대로 넘겨받으므로 hasEmptySlot 체크를 건너뛴다.
+			if self.IceQuiverLevel >= 5 and self.FireQuiverLevel >= 5 and self.ArrowIllusionLevel == 0 then
+				table.insert(pool, { card = 114, type = "unlock" })
+			elseif self.ArrowIllusionLevel > 0 and self.ArrowIllusionLevel < 3 then
+				table.insert(pool, { card = 114, type = "arrowillusion_up" })
 			end
 
 			-- 실피드 전용 패시브 5종 (카드 109~113) — 슬롯 없이 레벨만 증가하므로 hasEmptySlot 체크 없이
@@ -6238,7 +8100,14 @@ script CardManager extends Logic
 		elseif cardIdx == 105 then return "소환,광역,지속딜,슬로우대상추가딜"
 		elseif cardIdx == 106 then return "횡,관통,다중"
 		elseif cardIdx == 107 then return "종,범위,다중"
+		elseif cardIdx == 118 then return "횡,관통,크리티컬"
+		elseif cardIdx == 119 then return "종,범위,크리티컬"
+		elseif cardIdx == 120 then return "넉백,충돌,폭발"
 		elseif cardIdx == 108 then return "단일,넉백"
+		elseif cardIdx == 114 then return "광역,다중,슬로우,스턴,추가딜"
+		elseif cardIdx == 115 then return "소환,광역,2단히트,크리티컬"
+		elseif cardIdx == 116 then return "다중,연타,확률추가타"
+		elseif cardIdx == 117 then return "단일,연사,확률강화,3연타"
 		elseif cardIdx == 109 then return "패시브,쿨감"
 		elseif cardIdx == 110 then return "패시브,크리티컬"
 		elseif cardIdx == 111 then return "패시브,크리티컬대미지"
@@ -6494,11 +8363,67 @@ script CardManager extends Logic
 			return
 		end
 
+		if cardIdx == 118 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.ArrowFletterLevel + 1)
+			icon.ImageRUID = self.Card118IconRUID
+			title.Text = "Lv" .. nextLevel
+			name.Text  = self.Card118Name
+			return
+		end
+
+		if cardIdx == 119 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.UncounterArrowVLevel + 1)
+			icon.ImageRUID = self.Card119IconRUID
+			title.Text = "Lv" .. nextLevel
+			name.Text  = self.Card119Name
+			return
+		end
+
+		if cardIdx == 120 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.FlashBomberLevel + 1)
+			icon.ImageRUID = self.Card120IconRUID
+			title.Text = "Lv" .. nextLevel
+			name.Text  = self.Card120Name
+			return
+		end
+
 		if cardIdx == 108 then
 			local nextLevel = (upgradeType == "unlock") and 1 or (self.FleshMirageLevel + 1)
 			icon.ImageRUID = self.Card108IconRUID
 			title.Text = "Lv" .. nextLevel
 			name.Text  = self.Card108Name
+			return
+		end
+
+		if cardIdx == 114 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.ArrowIllusionLevel + 1)
+			icon.ImageRUID = self.Card114IconRUID
+			title.Text = "Lv" .. nextLevel
+			name.Text  = self.Card114Name
+			return
+		end
+
+		if cardIdx == 115 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.EvolveLevel + 1)
+			icon.ImageRUID = self.Card115IconRUID
+			title.Text = "Lv" .. nextLevel
+			name.Text  = self.Card115Name
+			return
+		end
+
+		if cardIdx == 116 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.StormPoemLevel + 1)
+			icon.ImageRUID = self.Card116IconRUID
+			title.Text = "Lv" .. nextLevel
+			name.Text  = self.Card116Name
+			return
+		end
+
+		if cardIdx == 117 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.EnhancedArrowBlowLevel + 1)
+			icon.ImageRUID = self.Card117IconRUID
+			title.Text = "Lv" .. nextLevel
+			name.Text  = self.Card117Name
 			return
 		end
 
@@ -6677,6 +8602,27 @@ script CardManager extends Logic
 			return
 		end
 
+		-- 강화 애로우 블로우 (조합 스킬 — 애로우 블로우(Card102) 슬롯을 그대로 넘겨받는다. 연속
+		-- 사격은 슬롯 없는 패시브라 비울 슬롯이 없음)
+		if cardIdx == 117 then
+			if upgradeType == "unlock" then
+				self.EnhancedArrowBlowLevel = 1
+				local arrowBlowSlot = self:GetSlotForCard(102)
+				if arrowBlowSlot > 0 then
+					self:AssignCardToSlot(arrowBlowSlot, 117)
+					self:ResetSlotTimer(arrowBlowSlot)
+					self:PlayThunderStormFusionEffect(arrowBlowSlot)
+					log("Card117(EnhancedArrowBlow) fused into Slot" .. arrowBlowSlot .. " (was ArrowBlow)")
+				else
+					log_warning("EnhancedArrowBlow: ArrowBlow not found in any slot — fusion could not place the card")
+				end
+			elseif upgradeType == "enhancedarrowblow_up" and self.EnhancedArrowBlowLevel < 3 then
+				self.EnhancedArrowBlowLevel = self.EnhancedArrowBlowLevel + 1
+			end
+			log("EnhancedArrowBlow L" .. self.EnhancedArrowBlowLevel)
+			return
+		end
+
 		-- 아이스 퀴버 (실피드 전용, 슬롯 해금 또는 레벨 강화)
 		if cardIdx == 103 then
 			if upgradeType == "unlock" then
@@ -6711,6 +8657,73 @@ script CardManager extends Logic
 			return
 		end
 
+		-- 애로우 일루전 (조합 스킬 — 아이스 퀴버 슬롯을 그대로 넘겨받고, 파이어 퀴버 슬롯은 완전히 비운다)
+		if cardIdx == 114 then
+			if upgradeType == "unlock" then
+				self.ArrowIllusionLevel = 1
+				local iceSlot = self:GetSlotForCard(103)
+				local fireSlot = self:GetSlotForCard(104)
+				if iceSlot > 0 then
+					self:AssignCardToSlot(iceSlot, 114)
+					self:ResetSlotTimer(iceSlot)
+					self:PlayThunderStormFusionEffect(iceSlot)
+					log("Card114(ArrowIllusion) fused into Slot" .. iceSlot .. " (was IceQuiver)")
+				else
+					log_warning("ArrowIllusion: IceQuiver not found in any slot — fusion could not place the card")
+				end
+				if fireSlot > 0 then
+					self:AssignCardToSlot(fireSlot, 0)
+					log("ArrowIllusion: FireQuiver's Slot" .. fireSlot .. " emptied")
+				end
+			elseif upgradeType == "arrowillusion_up" and self.ArrowIllusionLevel < 3 then
+				self.ArrowIllusionLevel = self.ArrowIllusionLevel + 1
+			end
+			log("ArrowIllusion L" .. self.ArrowIllusionLevel)
+			return
+		end
+
+		-- 이볼브 (조합 스킬 — 피닉스 슬롯을 그대로 넘겨받는다. 꿰뚫는 의지는 슬롯 없는 패시브라
+		-- 비울 슬롯이 없음)
+		if cardIdx == 115 then
+			if upgradeType == "unlock" then
+				self.EvolveLevel = 1
+				local phoenixSlot = self:GetSlotForCard(105)
+				if phoenixSlot > 0 then
+					self:AssignCardToSlot(phoenixSlot, 115)
+					self:ResetSlotTimer(phoenixSlot)
+					self:PlayThunderStormFusionEffect(phoenixSlot)
+					log("Card115(Evolve) fused into Slot" .. phoenixSlot .. " (was Phoenix)")
+				else
+					log_warning("Evolve: Phoenix not found in any slot — fusion could not place the card")
+				end
+			elseif upgradeType == "evolve_up" and self.EvolveLevel < 3 then
+				self.EvolveLevel = self.EvolveLevel + 1
+			end
+			log("Evolve L" .. self.EvolveLevel)
+			return
+		end
+
+		-- 폭풍의 시 (조합 스킬 — 바람의 시 슬롯을 그대로 넘겨받는다. 파이널 어택: 활은 슬롯 없는
+		-- 패시브라 비울 슬롯이 없음)
+		if cardIdx == 116 then
+			if upgradeType == "unlock" then
+				self.StormPoemLevel = 1
+				local windPoemSlot = self:GetSlotForCard(101)
+				if windPoemSlot > 0 then
+					self:AssignCardToSlot(windPoemSlot, 116)
+					self:ResetSlotTimer(windPoemSlot)
+					self:PlayThunderStormFusionEffect(windPoemSlot)
+					log("Card116(StormPoem) fused into Slot" .. windPoemSlot .. " (was WindPoem)")
+				else
+					log_warning("StormPoem: WindPoem not found in any slot — fusion could not place the card")
+				end
+			elseif upgradeType == "stormpoem_up" and self.StormPoemLevel < 3 then
+				self.StormPoemLevel = self.StormPoemLevel + 1
+			end
+			log("StormPoem L" .. self.StormPoemLevel)
+			return
+		end
+
 		-- 피닉스 (실피드 전용, 슬롯 해금 또는 레벨 강화)
 		if cardIdx == 105 then
 			if upgradeType == "unlock" then
@@ -6742,6 +8755,69 @@ script CardManager extends Logic
 				self.RetreatShotLevel = self.RetreatShotLevel + 1
 			end
 			log("RetreatShot L" .. self.RetreatShotLevel)
+			return
+		end
+
+		-- 에로우 플레터 (조합 스킬 — 리트리트 샷(Card106) 슬롯을 그대로 넘겨받는다. 보우 액셀레이션/
+		-- 꿰뚫는 의지는 슬롯 없는 패시브라 비울 슬롯이 없음)
+		if cardIdx == 118 then
+			if upgradeType == "unlock" then
+				self.ArrowFletterLevel = 1
+				local retreatSlot = self:GetSlotForCard(106)
+				if retreatSlot > 0 then
+					self:AssignCardToSlot(retreatSlot, 118)
+					self:ResetSlotTimer(retreatSlot)
+					self:PlayThunderStormFusionEffect(retreatSlot)
+					log("Card118(ArrowFletter) fused into Slot" .. retreatSlot .. " (was RetreatShot)")
+				else
+					log_warning("ArrowFletter: RetreatShot not found in any slot — fusion could not place the card")
+				end
+			elseif upgradeType == "arrowfletter_up" and self.ArrowFletterLevel < 3 then
+				self.ArrowFletterLevel = self.ArrowFletterLevel + 1
+			end
+			log("ArrowFletter L" .. self.ArrowFletterLevel)
+			return
+		end
+
+		-- 언카운트에로우V (조합 스킬 — 언카운터 에로우(Card107) 슬롯을 그대로 넘겨받는다. 보우
+		-- 액셀레이션/크리티컬 샷은 슬롯 없는 패시브라 비울 슬롯이 없음)
+		if cardIdx == 119 then
+			if upgradeType == "unlock" then
+				self.UncounterArrowVLevel = 1
+				local uaSlot = self:GetSlotForCard(107)
+				if uaSlot > 0 then
+					self:AssignCardToSlot(uaSlot, 119)
+					self:ResetSlotTimer(uaSlot)
+					self:PlayThunderStormFusionEffect(uaSlot)
+					log("Card119(UncounterArrowV) fused into Slot" .. uaSlot .. " (was UncounterArrow)")
+				else
+					log_warning("UncounterArrowV: UncounterArrow not found in any slot — fusion could not place the card")
+				end
+			elseif upgradeType == "uncounterarrowv_up" and self.UncounterArrowVLevel < 3 then
+				self.UncounterArrowVLevel = self.UncounterArrowVLevel + 1
+			end
+			log("UncounterArrowV L" .. self.UncounterArrowVLevel)
+			return
+		end
+
+		-- 플레시 봄버 (조합 스킬 — 플레시 미라주(Card108) 슬롯을 그대로 넘겨받는다. 파이널 어택:활/
+		-- 연속 사격은 슬롯 없는 패시브라 비울 슬롯이 없음)
+		if cardIdx == 120 then
+			if upgradeType == "unlock" then
+				self.FlashBomberLevel = 1
+				local fmSlot = self:GetSlotForCard(108)
+				if fmSlot > 0 then
+					self:AssignCardToSlot(fmSlot, 120)
+					self:ResetSlotTimer(fmSlot)
+					self:PlayThunderStormFusionEffect(fmSlot)
+					log("Card120(FlashBomber) fused into Slot" .. fmSlot .. " (was FleshMirage)")
+				else
+					log_warning("FlashBomber: FleshMirage not found in any slot — fusion could not place the card")
+				end
+			elseif upgradeType == "flashbomber_up" and self.FlashBomberLevel < 3 then
+				self.FlashBomberLevel = self.FlashBomberLevel + 1
+			end
+			log("FlashBomber L" .. self.FlashBomberLevel)
 			return
 		end
 
@@ -7285,6 +9361,13 @@ script CardManager extends Logic
 		self.RetreatShotLevel = 0
 		self.UncounterArrowLevel = 0
 		self.FleshMirageLevel = 0
+		self.ArrowIllusionLevel = 0
+		self.EvolveLevel = 0
+		self.StormPoemLevel = 0
+		self.EnhancedArrowBlowLevel = 0
+		self.ArrowFletterLevel = 0
+		self.UncounterArrowVLevel = 0
+		self.FlashBomberLevel = 0
 		self.BowAccelerationLevel = 0
 		self.PiercingWillLevel = 0
 		self.CriticalShotLevel = 0

@@ -834,6 +834,60 @@ script MonsterAI extends Component
 		_DamageSkinService:Play(self.Entity, self._damageSkinId, 0.05, { math.floor(damage) }, DamageSkinTweenType.Default, isCritical)
 	end
 
+	-- PlayDamageSkin과 동일하지만 화면 오프셋을 지정할 수 있다 — 강화 애로우 블로우(카드117)처럼
+	-- 짧은 간격으로 같은 좌표에 여러 번 맞을 때 대미지 숫자가 겹쳐 보이지 않도록 호출부에서 수평
+	-- 오프셋을 줄 때 사용한다.
+	@ExecSpace("Multicast")
+	method void PlayDamageSkinWithOffset(number damage, boolean isCritical, Vector2 offset)
+		if self:IsServer() then return end
+		_DamageSkinService:Play(self.Entity, self._damageSkinId, 0.05, { math.floor(damage) }, DamageSkinTweenType.Default, isCritical, offset)
+	end
+
+	-- TakeDamage와 동일하지만 대미지 숫자 표시에 오프셋을 줄 수 있다(용도: 위 PlayDamageSkinWithOffset 참고)
+	@ExecSpace("ServerOnly")
+	method void TakeDamageWithOffset(number damage, Vector2 offset)
+		if self._dead then return end
+		if self._isBonusBoss then
+			self:PlayDamageSkinWithOffset(damage, false, offset)
+			self:OnBonusBossHit()
+			return
+		end
+		if self._isMiniMoore then
+			return
+		end
+		self.CurrentHp = self.CurrentHp - damage
+		log("Monster HP: " .. self.CurrentHp .. "/" .. self.MaxHp)
+		self:PlayDamageSkinWithOffset(damage, false, offset)
+		self:PlayHitAnimation(self._hitRUID, self.MonsterSprite)
+		self:FlashHideDepthOverlay()
+		if self.CurrentHp <= 0 then
+			self:Die()
+		end
+	end
+
+	-- TakeDamageCrit와 동일하지만 대미지 숫자 표시에 오프셋을 줄 수 있다(용도: 위 PlayDamageSkinWithOffset 참고)
+	@ExecSpace("ServerOnly")
+	method void TakeDamageCritWithOffset(number damage, Vector2 offset)
+		if self._dead then return end
+		damage = damage * (1.0 + _CardManager:GetCriticalShotBonus())
+		if self._isBonusBoss then
+			self:PlayDamageSkinWithOffset(damage, true, offset)
+			self:OnBonusBossHit()
+			return
+		end
+		if self._isMiniMoore then
+			return
+		end
+		self.CurrentHp = self.CurrentHp - damage
+		log("Monster HP (CRIT): " .. self.CurrentHp .. "/" .. self.MaxHp)
+		self:PlayDamageSkinWithOffset(damage, true, offset)
+		self:PlayHitAnimation(self._hitRUID, self.MonsterSprite)
+		self:FlashHideDepthOverlay()
+		if self.CurrentHp <= 0 then
+			self:Die()
+		end
+	end
+
 	@ExecSpace("ServerOnly")
 	method void TakeDamageCrit(number damage)
 		if self._dead then return end
