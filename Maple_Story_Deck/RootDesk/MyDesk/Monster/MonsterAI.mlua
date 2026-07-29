@@ -629,6 +629,7 @@ script MonsterAI extends Component
 			-- 도달했으니 걷는 포즈(move)에서 정지 포즈(stand)로 되돌린다 — move가 아예 없던 종(moveRUID=="")은
 			-- 이미 MonsterSprite가 stand였으므로 그대로 다시 대입해도 무해하다.
 			self.MonsterSprite = self._standRUID
+			self:SyncDepthOverlaySprite()
 			self:OnReachPlayer()
 		else
 			self.Entity.TransformComponent.Scale = Vector3(self._currentScale * self._scaleMultiplier, self._currentScale * self._scaleMultiplier, 1.0)
@@ -775,15 +776,17 @@ script MonsterAI extends Component
 		if overlay ~= nil then overlay.Color = Color(0, 0, 0, 0) end
 	end
 
-	-- 피격 시 몬스터 본체가 잠깐 hitRUID로 바뀌는 동안(PlayHitAnimation, HitFlashDuration) 오버레이가
-	-- 여전히 서 있는 포즈 실루엣을 보여주면 서로 어긋나 보인다 — 그 구간만 꺼뒀다가, 본체가 원래
-	-- 포즈로 돌아오는 시점에 맞춰 UpdateDepth()로 알파를 다시 정확히 계산해 복원한다.
+	-- 몬스터 본체가 잠깐 다른 스프라이트(hitRUID/attackRUID)로 바뀌는 동안(PlayHitAnimation/
+	-- PlayAttackAnimation) 오버레이가 여전히 이전 포즈 실루엣을 보여주면 서로 어긋나 보인다 — 그
+	-- 구간만 꺼뒀다가, 본체가 원래 포즈로 돌아오는 시점에 맞춰 UpdateDepth()로 알파를 다시 정확히
+	-- 계산해 복원한다. duration은 호출부의 실제 스프라이트 교체 지속시간과 반드시 같아야 한다
+	-- (히트=HitFlashDuration, 공격=_attackDuration — mlua는 기본값 파라미터를 지원하지 않아 호출부마다 명시).
 	@ExecSpace("ServerOnly")
-	method void FlashHideDepthOverlay()
+	method void FlashHideDepthOverlay(number duration)
 		self:HideDepthOverlay()
 		_TimerService:SetTimerOnce(function()
 			if isvalid(self) and not self._dead then self:UpdateDepth() end
-		end, self.HitFlashDuration)
+		end, duration)
 	end
 
 	@ExecSpace("ServerOnly")
@@ -803,7 +806,7 @@ script MonsterAI extends Component
 		log("Monster HP: " .. self.CurrentHp .. "/" .. self.MaxHp)
 		self:PlayDamageSkin(damage, false)
 		self:PlayHitAnimation(self._hitRUID, self.MonsterSprite)
-		self:FlashHideDepthOverlay()
+		self:FlashHideDepthOverlay(self.HitFlashDuration)
 		if self.CurrentHp <= 0 then
 			self:Die()
 		end
@@ -859,7 +862,7 @@ script MonsterAI extends Component
 		log("Monster HP: " .. self.CurrentHp .. "/" .. self.MaxHp)
 		self:PlayDamageSkinWithOffset(damage, false, offset)
 		self:PlayHitAnimation(self._hitRUID, self.MonsterSprite)
-		self:FlashHideDepthOverlay()
+		self:FlashHideDepthOverlay(self.HitFlashDuration)
 		if self.CurrentHp <= 0 then
 			self:Die()
 		end
@@ -882,7 +885,7 @@ script MonsterAI extends Component
 		log("Monster HP (CRIT): " .. self.CurrentHp .. "/" .. self.MaxHp)
 		self:PlayDamageSkinWithOffset(damage, true, offset)
 		self:PlayHitAnimation(self._hitRUID, self.MonsterSprite)
-		self:FlashHideDepthOverlay()
+		self:FlashHideDepthOverlay(self.HitFlashDuration)
 		if self.CurrentHp <= 0 then
 			self:Die()
 		end
@@ -906,7 +909,7 @@ script MonsterAI extends Component
 		log("Monster HP (CRIT): " .. self.CurrentHp .. "/" .. self.MaxHp)
 		self:PlayDamageSkin(damage, true)
 		self:PlayHitAnimation(self._hitRUID, self.MonsterSprite)
-		self:FlashHideDepthOverlay()
+		self:FlashHideDepthOverlay(self.HitFlashDuration)
 		if self.CurrentHp <= 0 then
 			self:Die()
 		end
@@ -933,7 +936,7 @@ script MonsterAI extends Component
 		log("Monster HP (delayed-death): " .. self.CurrentHp .. "/" .. self.MaxHp)
 		self:PlayDamageSkin(damage, isCrit)
 		self:PlayHitAnimation(self._hitRUID, self.MonsterSprite)
-		self:FlashHideDepthOverlay()
+		self:FlashHideDepthOverlay(self.HitFlashDuration)
 		if self.CurrentHp <= 0 then
 			_TimerService:SetTimerOnce(function()
 				if isvalid(self) and not self._dead then self:Die() end
@@ -1521,6 +1524,7 @@ script MonsterAI extends Component
 			self:PlayLungeAnimation(1.0, 0)
 		elseif self._attackRUID ~= "" then
 			self:PlayAttackAnimation(self._attackRUID, self.MonsterSprite, self._attackDuration)
+			self:FlashHideDepthOverlay(self._attackDuration)
 			self:PlayAttackHop()
 			-- 원거리(칼자국) 종(자이언트 쉐도우)은 자기 자신의 attack1 스프라이트 교체 위에 발톱자국
 			-- 이펙트를 추가로 띄운다 — 원거리(먹물)와 달리 대체 연출이 아니라 "얹는" 방식이라 elseif가

@@ -37,7 +37,24 @@ script MapManager extends Logic
 	-- 이번엔 존26의 순차 연장으로 이어진다 — 존26의 기본 ">"가 (존19~30 그룹처럼 스퍼로 갈라지지 않고)
 	-- 그대로 그룹J로 진입하도록 MoveByDelta에 전용 분기를 추가했다(그룹D/I와 동일한 패턴, 아래 참고) —
 	-- 존26+1이 그룹I의 존27로 새는 기본 델타를 덮어써야 하기 때문이다.
-	property integer MaxMapIndex = 34
+	-- 그룹K(존36~39, 정글 컨셉 연장: 주니어네키/리게이터/크로코/스티지/늪진흙괴물/새싹진흙괴물/멜러디)가
+	-- 추가되면서 39로 올린다. 유저가 map20.map을 다시 덤프해서 만든 map22.map을 host로 존37/38/39를
+	-- Zone37/Zone38/Zone39 자식 컨테이너로 병합한다(덤프 원본엔 그룹J의 옛 이름 Zone32/33/34가 그대로
+	-- 복사돼 있어 새 존 번호에 맞게 리네임만 했다). 35(맵21 택시 이스터에그 전용 조회 항목)를 건너뛰고
+	-- 36부터 시작한다 — 35는 진짜 존이 아니라서 그대로 34+1에 두면 겹친다. 존34의 기본 ">"가 35가 아니라
+	-- 36으로 이어지도록 MoveByDelta에 전용 분기를 추가했다(그룹D/I/J와 동일한 패턴, 아래 참고). MaxMapIndex를
+	-- 39로 올리면 35가 더 이상 "범위 밖"이 아니게 되므로(예전엔 34가 상한이라 35가 자동으로 순회 밖이었음),
+	-- MonsterSpawner.IsNoMonsterZone에 35를 추가로 등록해 SpawnWave 순회에서 여전히 제외되게 한다.
+	-- 그룹L(존40~43, 언데드 컨셉: 주니어레이스/레이스/스켈독/머미독)이 추가되면서 43으로 올린다. 유저가
+	-- map22.map을 다시 덤프해서 만든 map23.map을 host로 존41/42/43을 Zone41/Zone42/Zone43 자식
+	-- 컨테이너로 병합한다(덤프 원본엔 그룹K의 옛 이름 Zone37/38/39가 그대로 복사돼 있어 새 존 번호에
+	-- 맞게 리네임만 했다). 그룹I(존27~30)와 동일하게 순차 연장이 아니라 곁가지(스퍼)다 — 존39의
+	-- 순차 연장이 아니라 존29(그룹I 안, "아래로" 버튼)에서 갈라진다(유저 지정). 그래서 MoveByDelta에
+	-- 존39+1을 막다른 길로 유지하는 명시적 차단을 추가해야 한다 — MaxMapIndex가 43으로 오르면서
+	-- 존39+1(=40)이 더 이상 상한 밖이 아니게 돼 우연히 뚫릴 수 있기 때문이다(존10과 동일한 차단 패턴).
+	-- 존29↔40 연결은 델타 이동이 아니라 존15↔19와 동일한 전용 Up/Down 버튼 경로(RequestMoveToZone40/29,
+	-- MapMoveUI.OnDownClicked/OnUpClicked)로 처리한다.
+	property integer MaxMapIndex = 43
 
 	-- 맵 이동 시 플레이어를 위치시킬 좌표. Y는 DefaultUserEnterLeaveLogic이 원래 스폰시키는 높이(0.2)와
 	-- 반드시 맞춰야 한다 — 다르면 카메라가 그 차이만큼 밀려서 몬스터가 화면 아래(UI 위)로 잘못 표시된다
@@ -188,13 +205,43 @@ script MapManager extends Logic
 			[32] = { file = "map20", container = "Zone32", spawnX = 15.5 },
 			[33] = { file = "map20", container = "Zone33", spawnX = 31.0 },
 			[34] = { file = "map20", container = "Zone34", spawnX = 46.5 },
-			-- 35 = 존 시스템 밖의 "조회 전용" 항목(진짜 존 아님, MaxMapIndex 밖이라 MoveByDelta/SpawnWave의
-			-- 순회 범위·이동 버튼에 절대 안 걸림). 맵21(택시 이스터에그 비밀 구역) 방문 중에만
-			-- MapTaxiLogic이 CurrentMapIndex를 여기로 돌려놓는다 — MonsterSpawner.GetCurrentMap()이
+			-- 35 = 존 시스템 밖의 "조회 전용" 항목(진짜 존 아님). 맵21(택시 이스터에그 비밀 구역) 방문
+			-- 중에만 MapTaxiLogic이 CurrentMapIndex를 여기로 돌려놓는다 — MonsterSpawner.GetCurrentMap()이
 			-- 실제로 존재하는 맵21 엔티티를 가리키게 해서, "지금 있는 맵을 못 찾으면 전부 활성 취급"하는
 			-- 안전장치(currentMap==nil 폴백)가 오작동해 모든 존이 활성으로 오판되는 걸 막는다
 			-- (0처럼 존재하지 않는 파일명으로 떨어지는 값을 썼다가 정확히 이 문제가 실측 재현됐다).
+			-- 그룹K(36~39) 추가로 MaxMapIndex가 39로 올라가면서 더 이상 "MaxMapIndex 밖이라 자동으로
+			-- 순회 밖"이 아니게 됐다 — MoveByDelta는 34→36 전용 분기로 35를 건너뛰어 이동 경로에서는
+			-- 여전히 걸리지 않지만, SpawnWave 순회(MinMapIndex~MaxMapIndex)는 숫자 범위만 보므로 별도로
+			-- MonsterSpawner.IsNoMonsterZone(35)=true를 등록해 몬스터가 여기서 스폰되지 않게 막았다.
 			[35] = { file = "map21", container = nil, spawnX = 0 },
+			-- 그룹K(존36~39) 병합: map20.map을 다시 덤프해서 만든 map22.map을 host로 존37/38/39를
+			-- Zone37/Zone38/Zone39 자식 컨테이너로 병합한다. 발판 범위(-7.08~58.38)가 그룹J(map20)와
+			-- 동일해서 A~J와 동일한 spawnX(15.5/31.0/46.5)를 그대로 재사용. 존36~38은 spawnX 지점에 공통
+			-- 지면(y=-1.35) 발판이 그대로 있어 landY 불필요.
+			[36] = { file = "map22", container = nil, spawnX = 0 },
+			[37] = { file = "map22", container = "Zone37", spawnX = 15.5 },
+			[38] = { file = "map22", container = "Zone38", spawnX = 31.0 },
+			-- 존39(spawnX=46.5)만 예외: 유저가 발판을 수정하면서 이 자리(x=43.32~48.48)에 공통 지면
+			-- (y=-1.35) 대신 둔덕(y=-0.75, foothold Id 91~95)이 새로 생겼다 — 그 밑에는 -1.35 발판이
+			-- 이어지지 않고 완전히 비어있다(실측 확인: x=46.5에서 walk=1 발판은 y=-0.75 하나뿐).
+			-- DoScrollMapChange가 기본적으로 "이전 존의 Y 그대로 재사용"(존38 y=-1.35)하는데, 그 높이엔
+			-- 발판이 없어 허공에서 낙하 → 맵 밖 세이프티넷에 걸려 이전 존으로 되돌아가는 버그가 있었다
+			-- (존25/그룹I와 동일한 원인 — 유저 리포트: "예전에 있던 버그처럼 다시 이전맵으로 튕김").
+			-- landY로 둔덕 표면 높이를 강제 지정한다.
+			[39] = { file = "map22", container = "Zone39", spawnX = 46.5, landY = -0.75 },
+			-- 그룹L(존40~43) 병합: map22.map을 다시 덤프해서 만든 map23.map을 host로 존41/42/43을
+			-- Zone41/Zone42/Zone43 자식 컨테이너로 병합한다. 발판 범위(-7.15~58.45)가 기존 그룹들과
+			-- 거의 동일해서 동일한 spawnX(15.5/31.0/46.5) 재사용. 존40~42는 spawnX 지점에 공통 지면
+			-- (y=-1.22) 발판이 그대로 있어 landY 불필요.
+			[40] = { file = "map23", container = nil, spawnX = 0 },
+			[41] = { file = "map23", container = "Zone41", spawnX = 15.5 },
+			[42] = { file = "map23", container = "Zone42", spawnX = 31.0 },
+			-- 존43(spawnX=46.5)도 그룹K의 존39와 동일한 문제 — 이 자리(x=43.25~48.55)에 공통 지면
+			-- (y=-1.22) 대신 둔덕(y=-0.62, foothold Id 82~86)이 있고 그 밑엔 -1.22 발판이 없다(실측
+			-- 확인: x=46.5에서 walk=1 발판은 y=-0.62 하나뿐). 이번엔 맵을 만들 때 미리 조사해서 처음부터
+			-- landY를 지정한다(존39 때는 나중에 "이전 맵으로 튕긴다"는 유저 리포트를 받고서야 발견/수정했었다).
+			[43] = { file = "map23", container = "Zone43", spawnX = 46.5, landY = -0.62 },
 		}
 		-- 몬스터 스폰/시작맵 리다이렉트는 GameStarted가 될 때까지 미룬다(BeginGameplay 참고) —
 		-- 타이틀 화면을 보는 동안 몬스터가 먼저 쌓이면 안 된다. 여기서는 현재 위치만 계산해둔다.
@@ -371,6 +418,24 @@ script MapManager extends Logic
 		self:MoveToMap(actualIndex, 15)
 	end
 
+	-- 클라이언트의 존29 전용 "아래로" 버튼 요청 (존29 → 그룹L/존40 직행 분기, 유저 지정). 존19↔15와
+	-- 동일한 패턴 — 존40은 존29의 순차 다음이 아니라(존29는 그룹I 안, 순차 다음은 존30) 별도로 갈라지는
+	-- 분기라서 전용 메서드로 분리한다.
+	@ExecSpace("Server")
+	method void RequestMoveToZone40()
+		local actualIndex = self.CurrentMapIndex
+		if actualIndex ~= 29 then return end
+		self:MoveToMap(actualIndex, 40)
+	end
+
+	-- 클라이언트의 "위로" 버튼 요청 (존40 → 존29 복귀, RequestMoveToZone40의 역방향 전용 경로)
+	@ExecSpace("Server")
+	method void RequestMoveToZone29()
+		local actualIndex = self.CurrentMapIndex
+		if actualIndex ~= 40 then return end
+		self:MoveToMap(actualIndex, 29)
+	end
+
 	-- self.CurrentMapIndex를 그대로 신뢰한다 — 그룹D(맵11/12) 병합 이후 ResolveCurrentMapIndex()는
 	-- CurrentMapName("map11")만으로 11/12를 구분하지 못해 항상 11로 오판하는데(실측 확인됨), 이동이
 	-- 전부 버튼 트리거라 CurrentMapIndex는 매 이동마다 확정적으로 갱신되므로 여기서는 이게 더 정확하다.
@@ -412,6 +477,19 @@ script MapManager extends Logic
 			targetIndex = 31
 		elseif actualIndex == 31 and delta == -1 then
 			targetIndex = 26
+		-- 존34↔36 특수 분기: 그룹K(존36~39, map22.map)도 그룹J와 동일하게 존34의 순차 연장으로 이어진다.
+		-- 존34+1의 기본 델타는 35(맵21 택시 이스터에그 전용 조회 항목, 진짜 존이 아님)로 새므로, 여기서
+		-- 명시적으로 덮어써 존34의 ">"가 그룹K로 진입하게 한다. 존36의 "<"는 대칭으로 존34로 되돌아간다.
+		elseif actualIndex == 34 and delta == 1 then
+			targetIndex = 36
+		elseif actualIndex == 36 and delta == -1 then
+			targetIndex = 34
+		elseif actualIndex == 39 and delta == 1 then
+			-- 그룹L(존40~43, map23.map)은 그룹I와 동일하게 순차 연장이 아니라 곁가지다 — 존40 진입은
+			-- 존29의 "아래로" 버튼(RequestMoveToZone40) 전용 경로로만 가능해야 한다. MaxMapIndex를
+			-- 43으로 올린 부작용으로 존39+1(=40)이 더 이상 상한 밖이 아니게 됐으므로(맵10과 동일한
+			-- 이유로) 여기서 명시적으로 막아 존39가 계속 막다른 길로 남게 한다.
+			return
 		end
 
 		self:MoveToMap(actualIndex, targetIndex)

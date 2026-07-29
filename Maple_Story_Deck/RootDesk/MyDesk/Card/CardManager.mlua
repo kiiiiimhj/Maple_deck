@@ -667,7 +667,9 @@ script CardManager extends Logic
 	property string Card101BowGlowRUID = "4423619c1a49476697b459e49bddb575"  -- 1) 생성 연출
 	property number Card101BowGlowDuration = 0.3  -- 1) 재생 시간(추정치 — 라이브에서 실제 애니메이션 길이 보고 조정)
 	property string Card101BowEffectRUID = "b00ac0d7b06d4489b91b15be39f51edc"  -- 2) 활 쏘는 연출
-	property number Card101BowShootDuration = 0.2  -- 2) 재생 시간(추정치) — 이 시간 뒤 화살 발사 + 연출 제거
+	property number Card101BowShootDuration = 0.2  -- 2) 재생 시간(추정치) — 이 시간 뒤 화살 발사 시작
+	property number Card101BowEffectModelDuration = 2.5  -- 활 쏘는 연출이 쓰는 "skilleffectlong" 모델의 고정 Duration
+	property number Card101BowEffectOverlapMargin = 0.3  -- 모델 Duration에서 이 여유만큼 남았을 때 다음 레이어를 겹쳐 스폰
 	-- y=3.0으로 처음 잡았다가 화면(카메라) 밖으로 나가 안 보이는 걸 실측 확인 — 이후 라이브로 직접
 	-- 보면서 유저가 "경험치바 아래쯤"으로 지정(화면 상단 HUD 바로 아래)해 다시 올렸다.
 	property Vector3 Card101BowPosition = Vector3(0, 2.2, -0.1)
@@ -843,7 +845,7 @@ script CardManager extends Logic
 	-- 재생한 뒤 그게 다 끝나면 화살을 쏜다.
 	@ExecSpace("ServerOnly")
 	method void PlayStormPoemBow(any targets, number damage, boolean isCrit, integer level)
-		self:PlayStormPoemShoot(self.Card101BowPosition, self.Card101BowRotation)
+		self:PlayStormPoemShoot(self:GetBowSpawnPosition(), self.Card101BowRotation)
 
 		-- 유저 요청: 화살은 즉발 — 쏘는 연출(0.8초)이 끝나길 기다리지 않고 시작 직후(0.05초)에 쏜다
 		_TimerService:SetTimerOnce(function()
@@ -901,7 +903,7 @@ script CardManager extends Logic
 	method void FireStormPoemArrow(MonsterAI target, number damage, boolean isCrit, integer level)
 		local p1 = target.Entity.TransformComponent.Position
 		local hitPos = Vector3(p1.x, p1.y + 0.3, p1.z)
-		local bowPos = self.Card101BowPosition
+		local bowPos = self:GetBowSpawnPosition()
 		local startPos = Vector3(bowPos.x + self.Card116ArrowSpawnXOffset, bowPos.y + self.Card116ArrowSpawnYOffset, bowPos.z)
 
 		local dx = hitPos.x - startPos.x
@@ -957,9 +959,11 @@ script CardManager extends Logic
 	property string Card102BowFrame13RUID = "f4df14d37cae4617aadf3e91044f02ef"
 	property string Card102BowFrame14RUID = "0395d4fc5be245fcb399771083cec579"
 	property string Card102BowFrame15RUID = "7fbcf16702a148b78b3fa4f52dc4bb1e"
-	property number Card102BowFrameDuration = 0.07  -- 프레임당 재생 시간(7프레임 * 0.07 ≈ 기존 0.5초 예산과 유사)
+	property number Card102BowFrameDuration = 0.1286  -- 프레임당 재생 시간(7프레임 * 0.1286 ≈ 0.9초 예산 — 유저 요청으로 기존 0.5초 대비 0.4초 연장)
 	property string Card102BowReleaseClipRUID = "2ed6be9152eb4bf0b22f4ca6e6fff9fe"  -- 11번째 프레임에 겹쳐 재생
-	property number Card102BowDuration = 0.5  -- 바람의 시(생성0.3+활쏘기0.2)와 동일한 예산, 프레임 시퀀스 총 재생시간과도 맞춤
+	property number Card102BowDuration = 0.9  -- 프레임 시퀀스 총 재생시간과 맞춤(유저 요청: "연출시간 약 0.4s만 더길면" — 0.5→0.9)
+	property number Card102FireOffset = 0.3  -- 화살이 활대 연출 끝까지 안 기다리고 이만큼 일찍 발사(유저 요청: "발사되는시간 0.3s 떙겨줘") — 연출 자체 길이(Card102BowDuration)는 그대로 유지
+	property number Card102ArrowXOffset = 0.2  -- 화살 스폰 X를 활대 중앙에 맞게 미세 보정 — 이 좌표계는 +X가 화면상 왼쪽으로 보임(유저 요청: "화살대 중앙이랑 안맞아서 <이쪽으로 아주 약간만" → 0.08에서 0.2로 조정)
 	property string Card102ArrowEffectRUID = "64142d933e854590a67af044f3d091fb"  -- 일반 화살
 	property string Card102EnhancedArrowEffectRUID = "64f775829e234918bd65e9d22214bb06"  -- 강화 화살
 	property string Card102HitRUID = "84a473e004a34fdea67aa74a87dc75c6"  -- 일반/강화 공용 타격 연출
@@ -998,7 +1002,7 @@ script CardManager extends Logic
 		_TimerService:SetTimerOnce(function()
 			if not isvalid(self) then return end
 			self:FireArrowBlowArrow(target, hitPos, damage, isCrit)
-		end, self.Card102BowDuration)
+		end, math.max(0, self.Card102BowDuration - self.Card102FireOffset))
 	end
 
 	-- 활대(시위 당기는) 연출 — effect/9~15 정지 스프라이트 7장을 순서대로 갈아 끼우고, 11번째
@@ -1012,7 +1016,7 @@ script CardManager extends Logic
 			self.Card102BowFrame15RUID,
 		}
 		local dur = self.Card102BowFrameDuration
-		local fx = self:SpawnEffectWithModel(frames[1], self.Card101BowPosition, self.Card101BowRotation, 1.0, self.Card101BowScale, 1.0, "skilleffectlong")
+		local fx = self:SpawnEffectWithModel(frames[1], self:GetBowSpawnPosition(), self.Card101BowRotation, 1.0, self.Card101BowScale, 1.0, "skilleffectlong")
 		if fx == nil then return end
 		local renderer = fx.SpriteRendererComponent
 		for i = 2, #frames do
@@ -1025,7 +1029,7 @@ script CardManager extends Logic
 
 		_TimerService:SetTimerOnce(function()
 			if not isvalid(self) then return end
-			local release = self:SpawnEffectWithModel(self.Card102BowReleaseClipRUID, self.Card101BowPosition, self.Card101BowRotation, 1.0, self.Card101BowScale, 1.0, "skilleffectlong")
+			local release = self:SpawnEffectWithModel(self.Card102BowReleaseClipRUID, self:GetBowSpawnPosition(), self.Card101BowRotation, 1.0, self.Card101BowScale, 1.0, "skilleffectlong")
 			if release ~= nil then release:Destroy(dur * (#frames - 2)) end
 		end, dur * 2)
 	end
@@ -1036,7 +1040,8 @@ script CardManager extends Logic
 	-- 그 시점 생존 여부로 건너뛴다.
 	@ExecSpace("ServerOnly")
 	method void FireArrowBlowArrow(MonsterAI target, Vector3 hitPos, number damage, boolean isCrit)
-		local startPos = self.Card101BowPosition
+		local bowPos = self:GetBowSpawnPosition()
+		local startPos = Vector3(bowPos.x + self.Card102ArrowXOffset, bowPos.y, bowPos.z)
 
 		local dx = hitPos.x - startPos.x
 		local dy = hitPos.y - startPos.y
@@ -1190,7 +1195,7 @@ script CardManager extends Logic
 	method void PlayEnhancedArrowBlowShoot()
 		local frames = self:GetCard117ShootFrames()
 		local dur = self.Card117FrameDuration
-		local fx = self:SpawnEffectWithModel(frames[1], self.Card101BowPosition, self.Card101BowRotation, 1.0, self.Card117ShootScale, 1.0, "skilleffectlong")
+		local fx = self:SpawnEffectWithModel(frames[1], self:GetBowSpawnPosition(), self.Card101BowRotation, 1.0, self.Card117ShootScale, 1.0, "skilleffectlong")
 		if fx == nil then return end
 		local renderer = fx.SpriteRendererComponent
 		for i = 2, #frames do
@@ -1205,7 +1210,7 @@ script CardManager extends Logic
 	-- 화살 발사(연사 중 1발) — 레벨별 확률로 강화 화살(고정 3연타)이냐 기본화살(단발, 애로우 블로우 타격 연출 재사용)이냐가 화살마다 독립적으로 갈린다
 	@ExecSpace("ServerOnly")
 	method void FireEnhancedArrowBlowArrow(MonsterAI target, Vector3 hitPos, number damage, boolean isCrit)
-		local startPos = self.Card101BowPosition
+		local startPos = self:GetBowSpawnPosition()
 		local dx = hitPos.x - startPos.x
 		local dy = hitPos.y - startPos.y
 		-- 기본화살(애로우 블로우 강화화살 리소스 재활용)과 동일한 180도 보정
@@ -1752,7 +1757,7 @@ script CardManager extends Logic
 	property number Card105SummonAppearDuration = 0.8  -- 소환 연출(10프레임) 재생 시간
 	property number Card105RepositionDuration = 0.3  -- 매 공격 시 타겟 위치로 이동하는 시간 — 소환 위치 고정 기준 탐색으로 이동 거리 자체가 짧아져서 0.7 유지 시 공격 간격(1.5초) 안에서 공격 연출이 보일 시간이 부족했음(유저 확인: "마지막 공격만 재대로 연출나오고 그전 공격은 연출이 다 짤린다"), 0.3으로 되돌려 공격 포즈 표시 시간을 확보
 	property number Card105FlameAppearDelay = 0.6  -- 공격 포즈 시작 후 앞쪽에 화염이 실제로 생기는 시점(데미지는 이때 적용) — 유저 요청으로 0.4→0.6(+0.2초 더 늦게)
-	property number Card105FlameForwardOffset = 1.2  -- 피닉스 몸통을 공격 지점(=타겟 위치)에서 이만큼 뒤로 물려서 세우는 거리(유저 요청으로 0.2→1.2)
+	property number Card105FlameForwardOffset = 1.5  -- 피닉스 몸통을 공격 지점(=타겟 위치)에서 이만큼 뒤로 물려서 세우는 거리(유저 요청으로 0.2→1.2→1.5)
 	property number Card105DieDuration = 0.65  -- 소환 해제 연출(8프레임) 재생 시간 — 1.2초는 루프가 한 번 더 돌아서 보였음(유저 확인), 프레임 수에 맞춰 축소
 	property number Card105AttackInterval = 1.5  -- 레벨 무관 고정(유저 확인)
 	property number Card105SlowedBonusDelay = 0.2
@@ -1761,6 +1766,10 @@ script CardManager extends Logic
 	property string Card105StandRUID = "58b437598f4a4206a0dfeb19c044b2aa"  -- 대기(공격 사이) 연출
 	property string Card105AttackRUID = "64658cc8a2b54c3bb023593d90a08c7c"  -- 공격(불기둥) 연출
 	property string Card105DieRUID = "f5a1e8e491904f24b13a6381ca860b2a"  -- 소환 해제 연출
+	property string Card105HitRUID = "3a436ae129ae4aab8ca9533d8864afc7"  -- 대미지 착탄 시 재생하는 폭발 히트 연출(유저 지정)
+	property number Card105HitScale = 1.0
+	property number Card105HitLifetime = 0.4
+	property number Card105HitYOffset = 0.6  -- 히트 연출을 착탄 좌표보다 위로 띄움(유저 요청)
 	property Entity _phoenixEntity = nil
 	property Entity _phoenixMap = nil  -- 피닉스가 현재 있는 맵(존 이동 감지용) — self._phoenixEntity와 항상 짝으로 갱신
 	property Vector3 _phoenixAnchorPos = Vector3(0, 0, 0)  -- 소환된(또는 존 이동 후 재소환된) 고정 위치 — 타겟 탐색 기준점(유저 요청: "소환된 위치로부터 가장 가까운적 공격")
@@ -2046,6 +2055,14 @@ script CardManager extends Logic
 	@ExecSpace("ServerOnly")
 	method void ResolvePhoenixHit(Entity map, MonsterAI anchor, Vector3 centerPos, number damage, boolean isCrit)
 		if map == nil then return end
+		-- 착탄 지점에 폭발 히트 연출 재생 — 다른 광역 스킬(아이스/파이어 퀴버, 언카운터 에로우)과
+		-- 동일하게 대미지 판정과 무관하게(맞은 대상이 0명이어도) 항상 재생한다.
+		local hitScaleRatio = 1.0
+		if isvalid(anchor) then hitScaleRatio = self:GetEffectScaleRatio(anchor) end
+		local hitPos = Vector3(centerPos.x, centerPos.y + self.Card105HitYOffset, centerPos.z)
+		local fxHit = self:SpawnEffectWithModel(self.Card105HitRUID, hitPos, 0, 1.0, self.Card105HitScale * hitScaleRatio, 1, "skilleffectlong")
+		if fxHit ~= nil then fxHit:Destroy(self.Card105HitLifetime) end
+
 		local radius = self:GetPhoenixRadius()
 		local slowedBonusMult = self:GetPhoenixSlowedBonusMult()
 		local monsters = map:GetChildComponentsByTypeName("script.MonsterAI", false)
@@ -2454,12 +2471,16 @@ script CardManager extends Logic
 
 	-- ── 실피드 전용: 리트리트 샷 (카드 106, 슬롯형 정식 스킬 6호) — 횡(가로) 관통 스킬. 매 시전마다
 	-- 몬스터가 더 많은 쪽의 반대편(화면 좌/우 고정 위치)에서 등장해 반대쪽을 향해 화살을 N발(레벨별
-	-- 2~4발) 쏜다(유저 요청: "적이 많은쪽을 우선해서 반대에 나오면 좋겠고"). 화살마다 발사 위치에서
-	-- 가장 가까운, 아직 다른 화살이 안 쓴 몬스터를 기준 타겟으로 잡고(유저 확인: "발사위치에서 가장
-	-- 가까운애로"), 그 몬스터의 높이(Y)를 화살의 "줄"로 삼아 그 줄 위에서 발사 방향 쪽에 있는
-	-- 몬스터들을 가까운 순으로 실제 관통한다(유저 확인: "화면 전체 폭을 관통"). 관통 예산(1+관통
-	-- 횟수)을 다 쓰면 그 마지막 타격 지점에서 화살이 사라지고(유저 확인: "관통 횟수가 끝나면 마지막
-	-- 관통때 화살은 사라져야해"), 몬스터가 부족하면 화면 반대쪽 끝까지 날아간다.
+	-- 2~4발) 연사한다(유저 요청: "적이 많은쪽을 우선해서 반대에 나오면 좋겠고"). 화살마다 발사 위치에서
+	-- 가장 가까운, 아직 다른 화살이 안 쓴 몬스터를 타겟으로 잡고(유저 재확인: "y축에 적이있는곳에서
+	-- 발사가 되야하고(타겟팅)") 그 몬스터의 높이(Y)에서 발사해, 그 줄(±Y밴드) 위에서 발사 방향 쪽에
+	-- 있는 몬스터를 가까운 순으로 최대(1+관통횟수)명 관통한다("그 경로에 있는 적들을 공격하고"). 관통
+	-- 예산을 다 쓰면 그 마지막 타격 지점에서 화살이 사라지고, 그 줄에 몬스터가 부족해 예산을 못 채우면
+	-- (유저 재확인: "관통 횟수가 남았는데 왜 화살이 사라져 끝까지 쭉 날아가야지") 화면 반대쪽 끝까지
+	-- 날아간다. 활 당기는 연출은
+	-- 화살마다 새로 스폰하지 않고, 이전 연출이 끝나기 전에 다음 연출을 겹쳐서 스폰해 끊김(깜빡임) 없이
+	-- 이어진다(에로우 플레터/Card118와 동일한 기법, 유저 지적: "연출이 깜빡거리는데 연출 겹치게해서
+	-- 깜빡거리는거 없애야해").
 	@Sync property integer RetreatShotLevel = 0
 	property string Card106Name = "리트리트 샷"
 	property string Card106IconRUID = "1a05fec36730489dba992b06d9e89176"
@@ -2481,6 +2502,12 @@ script CardManager extends Logic
 	property number Card106CastFrameDuration = 0.06  -- 프레임 1장당 재생 시간
 	property number Card106CastDuration = 0.6  -- 전체 재생 시간(프레임을 여러 바퀴 이어붙여서 채움) — 유저 요청으로 다시 0.6초
 	property number Card106CastScale = 1.15  -- 유저 요청으로 15% 확대
+	-- 다음 화살의 캐스트를 이전 캐스트가 끝나기 이 시간 전에 미리 겹쳐서 스폰한다(에로우 플레터의
+	-- Card118CastOverlap과 동일한 기법) — 화살 발사 간격 자체도 이 값만큼 줄어들어 더 빠르게 연사된다.
+	property number Card106CastOverlap = 0.1
+	-- 마지막 화살의 캐스트는 끝까지 다 재생하지 않고, 화살이 실제로 발사되는 시점 직후 바로 끈다
+	-- (그 전 화살들은 다음 캐스트가 겹쳐서 스폰되므로 끝까지 재생해도 자연스럽게 이어짐).
+	property number Card106LastCastCutoff = 0.15
 	property string Card106ArrowRUID = "f4773d451d344bc7818d3da0ddfa4c41"
 	property string Card106HitRUID = "34d1273d29b2435aa0b97036f4e7416c"
 	property number Card106ArrowScale = 1.05  -- 유저 요청으로 5% 확대
@@ -2493,7 +2520,8 @@ script CardManager extends Logic
 	property number Card106ArrowVisualYOffset = 0.4  -- 화살 연출을 판정 좌표보다 살짝 위로 띄움(유저 요청, 순수 시각용) — 0.5→0.4
 	property number Card106SidePositionX = 5.5  -- 화면 좌/우 고정 발사 위치(X, 반대쪽은 음수) — Y는 매번 그 화살의 타겟 높이로 고정(유저 요청)
 	property number Card106YBandTolerance = 0.6  -- 화살이 지나가는 "줄" 판정 폭(±)
-	property number Card106ArrowStaggerDelay = 0.1  -- 화살끼리 순차 발사 간격
+	property number Card106HitRadius = 0.5  -- 실시간 충돌 판정 반경 — 화살의 현재 X와 몬스터 X가 이 안이면 그 순간 맞은 것으로 처리
+	property number Card106HitYOffset = 0.35  -- 타격 연출을 착탄 좌표보다 위로 띄움(유저 요청: "살짝만 위로 올려 살짝더")
 
 	method number GetRetreatShotDamage()
 		if self.RetreatShotLevel >= 5 then return 160
@@ -2557,10 +2585,11 @@ script CardManager extends Logic
 		local pierceCount = self:GetRetreatShotPierceCount()
 		local usedTargets = {}
 		for i = 1, arrowCount do
-			local delay = (i - 1) * (self.Card106CastDuration + self.Card106ArrowStaggerDelay)
+			local delay = (i - 1) * math.max(0.05, self.Card106CastDuration - self.Card106CastOverlap)
+			local isLast = (i == arrowCount)
 			_TimerService:SetTimerOnce(function()
 				if not isvalid(self) then return end
-				self:FireRetreatShotSequence(map, launchX, flyDirRight, usedTargets, pierceCount, damage, isCrit)
+				self:FireRetreatShotSequence(map, launchX, flyDirRight, usedTargets, pierceCount, damage, isCrit, isLast)
 			end, delay)
 		end
 
@@ -2568,11 +2597,10 @@ script CardManager extends Logic
 	end
 
 	-- 화살 한 발의 준비 단계 — 발사 위치(launchX)에서 가장 가까운(아직 다른 화살이 안 쓴) 몬스터를
-	-- 기준 타겟으로 잡고, 활대 자체를 그 몬스터의 높이(열)로 이동시켜 등장한 뒤(유저 요청: "적이있으면
-	-- 해당 열에 활이 생성되고 쏴야지 지금은 계속 고정된 위치에서 쏘고") 캐스트가 끝나면 그 자리에서
-	-- 화살을 발사한다.
+	-- 기준 타겟으로 잡고, 활대 자체를 그 몬스터의 높이(열)로 이동시켜 등장한 뒤(유저 요청: "y축에
+	-- 적이있는곳에서 발사가 되야하고(타겟팅)") 캐스트가 끝나길 기다리지 않고 화살을 발사한다.
 	@ExecSpace("ServerOnly")
-	method void FireRetreatShotSequence(Entity map, number launchX, boolean flyDirRight, table usedTargets, integer pierceCount, number damage, boolean isCrit)
+	method void FireRetreatShotSequence(Entity map, number launchX, boolean flyDirRight, table usedTargets, integer pierceCount, number damage, boolean isCrit, boolean isLast)
 		local monsters = map:GetChildComponentsByTypeName("script.MonsterAI", false)
 		local primary = nil
 		local bestDist = -1
@@ -2594,38 +2622,41 @@ script CardManager extends Logic
 		local arrowY = primary.Entity.TransformComponent.Position.y
 		local launchPos = Vector3(launchX, arrowY, -0.1)
 
-		self:PlayRetreatShotCast(launchPos, flyDirRight)
+		self:PlayRetreatShotCast(launchPos, flyDirRight, isLast)
 
 		-- 화살은 캐스트 연출이 다 끝나길 기다리지 않고 거의 즉시 나간다(유저 요청: "이 쏘는연출 할떄
-		-- 활이 바로 나가야하고" — 예전엔 Card106CastDuration 전체를 기다린 뒤에야 발사됐음).
+		-- 활이 바로 나가야하고").
 		_TimerService:SetTimerOnce(function()
 			if not isvalid(self) then return end
 			self:FireRetreatShotArrow(map, launchPos, flyDirRight, primary, pierceCount, damage, isCrit)
 		end, self.Card106ArrowLaunchDelay)
 	end
 
+	-- 활대(캐스트) 연출 — 4장을 이어붙여 재생. 마지막 화살의 캐스트는 화살이 실제로 발사되는 시점
+	-- 직후 바로 끈다(에로우 플레터 Card118LastCastCutoff와 동일한 기법 — 그 전 화살들은 다음 캐스트가
+	-- 겹쳐서 스폰되므로 끝까지 재생해도 자연스럽게 이어진다).
 	@ExecSpace("ServerOnly")
-	method void PlayRetreatShotCast(Vector3 pos, boolean flyDirRight)
+	method void PlayRetreatShotCast(Vector3 pos, boolean flyDirRight, boolean isLast)
 		-- 활대는 쏘는 방향을 바라봐야 한다(유저 지적: "활을 쏘는데 뒤로나가... 활대를 돌려야지 나가는
 		-- 방향으로"). 좌우는 FlipX로 뒤집고, 대각선으로 기울어진 원본 이미지는
 		-- Card106CastRotationCorrection으로 수평 보정한다.
 		local flip = not flyDirRight
 		local rot = flip and -self.Card106CastRotationCorrection or self.Card106CastRotationCorrection
 
-		-- 애니메이션플레이어의 자체 루프에 맡기지 않고, 4장의 정지 프레임을 직접 이어붙여 재생한다
-		-- (유저 제안: "이어붙여", "연결해서", "3프레임일때 애니 1개더 실행 이런식으로" — 마지막
-		-- 프레임까지 가면 다시 0번 프레임으로 이어서 지속시간을 채운다). 수동으로 SpriteRUID만
-		-- 갈아끼우므로 엔진 애니메이션 재시작이 없어 깜빡임도 없다.
 		local frames = {
 			self.Card106CastFrame0RUID, self.Card106CastFrame1RUID,
 			self.Card106CastFrame2RUID, self.Card106CastFrame3RUID,
 		}
 		local perFrame = self.Card106CastFrameDuration
-		local totalSteps = math.max(1, math.floor(self.Card106CastDuration / perFrame))
 		local fx = self:SpawnEffectWithModel(frames[1], pos, rot, 1.0, self.Card106CastScale, 1.0, "skilleffectlong")
 		if fx == nil then return end
 		local r = fx.SpriteRendererComponent
 		if r ~= nil then r.FlipX = flip end
+		if isLast then
+			fx:Destroy(self.Card106LastCastCutoff)
+			return
+		end
+		local totalSteps = math.max(1, math.floor(self.Card106CastDuration / perFrame))
 		for step = 2, totalSteps do
 			local frameRUID = frames[((step - 1) % #frames) + 1]
 			_TimerService:SetTimerOnce(function()
@@ -2635,132 +2666,113 @@ script CardManager extends Logic
 		fx:Destroy(self.Card106CastDuration)
 	end
 
-	-- 화살 한 발 — 이미 정해진 기준 타겟(primary)의 높이(Y)를 줄 삼아 발사 방향 쪽에 있는 몬스터를
-	-- 가까운 순으로 최대(1+관통횟수)명 실제로 관통한다. 화살은 관통 예산을 다 쓴 마지막 타격 지점
-	-- (또는 대상이 부족하면 반대쪽 화면 끝)까지 실제 거리만큼 시간을 들여 날아간다.
+	-- 화살 한 발 — 이미 정해진 기준 타겟(primary)의 높이(Y)를 줄 삼아 발사 방향으로 실제로 이동하며,
+	-- 매 틱마다 그 순간 그 줄에 실제로 겹치는 몬스터를 그때그때 맞힌다(유저 지적: "쏠때 타겟을(관통
+	-- 되는 적) 미리 계산하는거냐" — 예전엔 발사 시점에 맞을 대상을 미리 확정해서, 몬스터가 계속
+	-- 이동하는 이 게임 특성상 화살이 도착했을 땐 이미 자리를 벗어나 있어 대미지가 안 들어가거나
+	-- 순서가 꼬이는 문제가 있었다. 실시간 충돌로 바꿔서 화살이 실제로 스쳐 지나가는 몬스터만 맞는다).
+	-- 관통 예산(1+관통횟수)을 다 채우면 그 자리에서 사라지고, 다 못 채우면 화면 반대쪽 끝까지 날아간다.
 	@ExecSpace("ServerOnly")
 	method void FireRetreatShotArrow(Entity map, Vector3 launchPos, boolean flyDirRight, MonsterAI primary, integer pierceCount, number damage, boolean isCrit)
-		-- primary가 캐스트 연출 재생 중(ArrowLaunchDelay 사이)에 죽어도 여기서 통째로 중단하지
-		-- 않는다(유저 지적: "타겟 없어지면 일단 쏘고 다른 타겟 찾는거 필요... 연출이 바로 끝나는
-		-- 경우가 있을듯" — 예전엔 여기서 return해서 캐스트 연출만 재생되고 화살이 아예 안 나갔다).
-		-- 아래 lane은 매번 새로 살아있는 몬스터를 다시 스캔하므로 primary 생사와 무관하게 정상 동작한다.
-		local monsters = map:GetChildComponentsByTypeName("script.MonsterAI", false)
-		local arrowY = launchPos.y
-
-		local lane = {}
-		for _, mob in ipairs(monsters) do
-			---@type MonsterAI
-			local m = mob
-			if isvalid(m) and not m._dead and isvalid(m.Entity) then
-				local mp = m.Entity.TransformComponent.Position
-				local ahead = flyDirRight and (mp.x > launchPos.x) or ((not flyDirRight) and (mp.x < launchPos.x))
-				if ahead and math.abs(mp.y - arrowY) <= self.Card106YBandTolerance then
-					table.insert(lane, m)
-				end
-			end
-		end
-		table.sort(lane, function(a, b)
-			local ax = a.Entity.TransformComponent.Position.x
-			local bx = b.Entity.TransformComponent.Position.x
-			if flyDirRight then return ax < bx end
-			return ax > bx
-		end)
-
-		local hitList = {}
-		for _, m in ipairs(lane) do
-			table.insert(hitList, m)
-			if #hitList >= pierceCount + 1 then break end
-		end
-		-- primary가 아직 살아있을 때만 최후의 보루로 쓴다 — 죽었으면(=Entity가 이미 파괴됐을 수 있음)
-		-- hitList를 그냥 비워두고, 화살은 아래에서 화면 끝까지 관통 없이 날아간다.
-		if #hitList == 0 and isvalid(primary) and isvalid(primary.Entity) and not primary._dead then
-			table.insert(hitList, primary)
-		end
-
-		-- 경유지(웨이포인트) 목록 — 발사 위치 → 각 관통 대상의 실제 좌표(유저 요청: "화살연출에서
-		-- 화살이 나가야해서 걔네는 y축은 이동할수있어" — 줄 판정 폭 안에서도 몬스터마다 Y가 조금씩
-		-- 다를 수 있으니, 화살이 그 각각의 실제 좌표를 따라 Y도 같이 움직이며 지나가게 한다). 관통
-		-- 예산을 다 못 썼으면 마지막 경유지의 Y를 유지한 채 화면 반대쪽 끝까지 더 날아간다.
-		local waypoints = { launchPos }
-		for _, m in ipairs(hitList) do
-			local hp = m.Entity.TransformComponent.Position
-			table.insert(waypoints, Vector3(hp.x, hp.y, launchPos.z))
-		end
-		if #hitList < pierceCount + 1 then
-			local edgeX = flyDirRight and -self.Card106SidePositionX or self.Card106SidePositionX
-			local lastY = waypoints[#waypoints].y
-			table.insert(waypoints, Vector3(edgeX, lastY, launchPos.z))
-		end
-
 		-- 실제 원인을 찾았다: "Y축 반전"은 엔진 FlipY가 아니라 "Y축을 기준으로 반사" = 좌우 반전
 		-- = 엔진의 FlipX를 뜻하는 표현이었다(용어 혼동, 죄송합니다). FlipY는 상하 대칭인 이 화살
 		-- 스프라이트에는 아무 시각적 차이가 없어서 계속 안 맞았던 것. 유저가 준 참고 이미지(> 로
 		-- 갈 때/< 로 갈 때 각각의 정확한 모양) 기준으로 다시 맞춘다.
 		local flipArrow = not flyDirRight
 		local rotationZ = flipArrow and -self.Card106ArrowRotationCorrection or self.Card106ArrowRotationCorrection
-		-- 화살 연출 자체를 살짝 위로 띄운다(유저 요청: "화살 살짝 위로 올려 0.5정도") — 판정(줄/명중
-		-- 좌표)에는 영향 없는 순수 시각 오프셋이라 launchPos/waypoints는 그대로 두고 렌더링 좌표에만 더한다.
+		-- 화살 연출 자체를 살짝 위로 띄운다(유저 요청: "화살 살짝 위로 올려 0.5정도") — 판정(명중
+		-- 좌표)에는 영향 없는 순수 시각 오프셋이다.
 		local visualY = self.Card106ArrowVisualYOffset
 		local spawnVisualPos = Vector3(launchPos.x, launchPos.y + visualY, launchPos.z)
-		local fx = self:SpawnEffect(self.Card106ArrowRUID, spawnVisualPos, rotationZ, 1.0, self.Card106ArrowScale, 1)
+		-- "skilleffect"(SpawnEffect 기본)는 SkillEffectAI가 0.8초 뒤 자동으로 파괴한다 — 화면 끝까지
+		-- 날아가야 하는 경우(0.8초 이상 걸림) 도중에 강제로 사라지는 원인이었다. 자동 소멸 타이머가
+		-- 없는 "persistenteffect"를 써서 수명을 아래 실시간 충돌 루프가 직접 제어하게 한다.
+		local fx = self:SpawnEffectWithModel(self.Card106ArrowRUID, spawnVisualPos, rotationZ, 1.0, self.Card106ArrowScale, 1, "persistenteffect")
 		if fx == nil then return end
 		local arrowRenderer = fx.SpriteRendererComponent
 		if arrowRenderer ~= nil then arrowRenderer.FlipX = flipArrow end
 
-		local hitDelays = {}
-		local elapsed = 0
-		for i = 1, #waypoints - 1 do
-			local from = waypoints[i]
-			local to = waypoints[i + 1]
-			local dx = to.x - from.x
-			local dy = to.y - from.y
-			local segDist = math.sqrt(dx * dx + dy * dy)
-			local segDuration = math.max(0.05, segDist / self.Card106ArrowSpeed)
-			local segStart = elapsed
-			_TimerService:SetTimerOnce(function()
-				if not isvalid(fx) then return end
-				_TweenLogic:PlayTween(0.0, 1.0, segDuration, EaseType.Linear, function(t)
-					if not isvalid(fx) then return end
-					local x = from.x + (to.x - from.x) * t
-					local y = from.y + (to.y - from.y) * t
-					fx.TransformComponent.Position = Vector3(x, y + visualY, from.z)
-				end)
-			end, segStart)
-			elapsed = elapsed + segDuration
-			if i <= #hitList then hitDelays[i] = elapsed end
-		end
-		fx:Destroy(elapsed)
+		local arrowY = launchPos.y
+		-- dir 부호가 반대였다(유저 지적: "활은 >일로 쏘는데 화살은 화면밖 <일로 나가잖아" — 활대의
+		-- FlipX(not flyDirRight)가 바라보는 실제 화면 방향과 화살의 이동 방향이 반대였다). 활대와
+		-- 동일한 방향으로 실제 이동하도록 부호를 뒤집는다.
+		local dir = flyDirRight and -1 or 1
+		-- edgeX는 발사 지점(launchPos.x, 항상 ±SidePositionX)이 아니라 그 지점에서 진행 방향(dir)으로
+		-- 화면 폭만큼 더 나아간 지점이어야 한다 — launchPos.x와 같은 값으로 잘못 계산하면(버그) 첫
+		-- 틱에서 곧바로 "끝에 도달"로 판정돼 화살이 나가지도 못하고 그 자리에서 바로 사라진다.
+		local edgeX = launchPos.x + dir * (2 * self.Card106SidePositionX)
+		local maxBudget = pierceCount + 1
+		local hitSet = {}
+		local hitCount = 0
+		local elapsedTime = 0
+		local tickInterval = 1 / 60
+		local timerId = nil
 
-		for idx, m in ipairs(hitList) do
-			local pierceIdx = idx - 1
-			-- 타격 위치는 화살 발사 시점에 미리 캡처해둔 좌표를 쓴다 — 그 사이 몬스터가 완전히
-			-- 파괴돼도(단순 사망 아님) 안전하게 타격 연출을 그 자리에 띄울 수 있다(다른 스킬들과
-			-- 동일한 정책: 연출은 항상 재생, 데미지만 생존 체크로 가드).
-			local hitPos = waypoints[idx + 1]
-			_TimerService:SetTimerOnce(function()
-				if not isvalid(self) then return end
-				if isvalid(m) and isvalid(m.Entity) and not m._dead then
-					local finalDamage = damage
-					if pierceIdx > 0 then finalDamage = damage * self:GetRetreatShotPiercePercent(pierceIdx) end
-					if isCrit then m:TakeDamageCrit(finalDamage * 2)
-					else m:TakeDamage(finalDamage) end
+		-- 시각적 이동은 매 틱 TransformComponent.Position을 직접 대입하는 대신 PlayTween 하나로
+		-- 처리한다(유저 지적: "활당기는 연출은 나오는데 화살이 안나감" — 서버에서 60Hz로 Position을
+		-- 직접 덮어쓰면 클라이언트로 정상적으로 동기화되지 않아 화살이 제자리에 멈춰있다 사라지는
+		-- 것으로 보였다. 다른 모든 스킬이 이동 연출에 PlayTween을 쓰는 것과 동일한 방식으로 맞춘다).
+		-- 충돌 판정은 이 트윈과 별개로, 동일한 수식으로 매 틱 curX를 직접 계산해 처리한다.
+		local totalTravelTime = math.abs(edgeX - launchPos.x) / self.Card106ArrowSpeed
+		_TweenLogic:PlayTween(0.0, 1.0, totalTravelTime, EaseType.Linear, function(t)
+			if not isvalid(fx) then return end
+			local x = launchPos.x + (edgeX - launchPos.x) * t
+			fx.TransformComponent.Position = Vector3(x, arrowY + visualY, launchPos.z)
+		end)
+
+		timerId = _TimerService:SetTimerRepeat(function()
+			if not isvalid(self) or not isvalid(fx) then
+				if timerId then _TimerService:ClearTimer(timerId) end
+				return
+			end
+			elapsedTime = elapsedTime + tickInterval
+			local curX = launchPos.x + dir * self.Card106ArrowSpeed * elapsedTime
+
+			-- 그 순간 화살 위치(curX)에 실제로 겹치는(반경 이내) 몬스터를 그때그때 맞힌다 — 몬스터가
+			-- 계속 움직여도 실제로 스친 순간의 위치 기준이라 순서가 꼬이지 않는다.
+			local monsters = map:GetChildComponentsByTypeName("script.MonsterAI", false)
+			for _, mob in ipairs(monsters) do
+				---@type MonsterAI
+				local m = mob
+				if isvalid(m) and not m._dead and isvalid(m.Entity) and not hitSet[m] then
+					local mp = m.Entity.TransformComponent.Position
+					if math.abs(mp.y - arrowY) <= self.Card106YBandTolerance and math.abs(mp.x - curX) <= self.Card106HitRadius then
+						hitSet[m] = true
+						hitCount = hitCount + 1
+						local pierceIdx = hitCount - 1
+						local finalDamage = damage
+						if pierceIdx > 0 then finalDamage = damage * self:GetRetreatShotPiercePercent(pierceIdx) end
+						if isCrit then m:TakeDamageCrit(finalDamage * 2)
+						else m:TakeDamage(finalDamage) end
+						local hitFx = self:SpawnEffect(self.Card106HitRUID, Vector3(mp.x, mp.y + self.Card106HitYOffset, launchPos.z), 0, 1.0, 1.0, 1)
+						if hitFx ~= nil then hitFx:Destroy(self.HitEffectLifetime) end
+					end
 				end
-				local hitFx = self:SpawnEffect(self.Card106HitRUID, hitPos, 0, 1.0, 1.0, 1)
-				if hitFx ~= nil then hitFx:Destroy(self.HitEffectLifetime) end
-			end, hitDelays[idx])
-		end
+			end
+
+			-- reachedEdge는 flyDirRight가 아니라 실제 이동 부호(dir)를 기준으로 판정해야 한다 —
+			-- flyDirRight로 판정하면 dir 부호를 반대로 고칠 때마다 여기도 같이 안 맞아서 화살이 첫
+			-- 틱에 바로 끝난 것으로 처리되는 동일한 버그가 재발한다.
+			local reachedEdge = (dir > 0 and curX >= edgeX) or (dir < 0 and curX <= edgeX)
+			if hitCount >= maxBudget or reachedEdge then
+				if timerId then _TimerService:ClearTimer(timerId) end
+				if isvalid(fx) then fx:Destroy(0.05) end
+			end
+		end, tickInterval)
 	end
 
 	-- ── 실피드 전용: 에로우 플레터 (카드 118, 조합 스킬) — 리트리트 샷(Card106) Lv5 + 보우
 	-- 액셀레이션(Card109) + 꿰뚫는 의지(Card110, 둘 다 슬롯 없는 패시브) 보유 시 등장 — 새 슬롯이
 	-- 필요없고 리트리트 샷의 슬롯을 그대로 넘겨받는다(헤일 버스트와 동일한 "슬롯 카드 + 슬롯 없는
-	-- 패시브 2개" 조합 패턴). 리트리트 샷과 거의 동일한 구조(횡 관통, 몬스터 많은 쪽 반대편에서
-	-- 화살 연사, 각 화살은 발사 위치에서 가장 가까운 미사용 몬스터를 줄로 삼아 그 줄 위 몬스터를
-	-- 관통) — FireRetreatShotArrow와 동일한 레인/관통 로직을 그대로 재사용하되, 관통 횟수는 레벨
-	-- 무관 고정 4회(관통 대미지 60/70/80/90%, 유저 지정)이고 이 스킬 전용 크리티컬 확률 보너스
-	-- (10%/15%/20%, RollCrit에 cardIdx==118 분기로 추가)가 있다. 캐스트(활대) 연출은 신규 리소스
-	-- (f59e94b2..., 9프레임)로 교체하되, 리소스 자체가 정면을 보고 있지 않아 리트리트 샷과 동일한
-	-- 각도 보정값(-31도)을 그대로 가져다 쓴다(유저 지시: "이걸로 각도보정값을 그대로 가져다써라").
+	-- 패시브 2개" 조합 패턴). 리트리트 샷과 동일한 구조(횡 관통, 몬스터 많은 쪽 반대편에서 화살 연사,
+	-- 각 화살은 발사 위치에서 가장 가까운 미사용 몬스터를 줄(Y)로 삼아 그 줄 위 몬스터를 관통) —
+	-- 관통 횟수는 레벨 무관 고정 4회(관통 대미지 60/70/80/90%, 유저 지정)이고
+	-- 이 스킬 전용 크리티컬 확률 보너스(10%/15%/20%, RollCrit에 cardIdx==118 분기로 추가)가 있다.
+	-- 캐스트(활대) 연출은 신규 리소스(f59e94b2..., 9프레임)로 교체하되, 리소스 자체가 정면을 보고
+	-- 있지 않아 리트리트 샷과 동일한 각도 보정값(-31도)을 그대로 가져다 쓴다(유저 지시: "이걸로
+	-- 각도보정값을 그대로 가져다써라"). 활 당기는 연출은 다음 캐스트를 이전이 끝나기 전에 겹쳐서
+	-- 스폰해 끊김(깜빡임) 없이 이어진다(유저 지적: "지금 연출이 끊기거든(깜빡깜빡)... 연출 겹쳐서
+	-- 안끊기게").
 	@Sync property integer ArrowFletterLevel = 0
 	property string Card118Name = "에로우 플레터"
 	property string Card118IconRUID = "028b253be9894fd28e2b9f8a3af0ff28"
@@ -2863,10 +2875,10 @@ script CardManager extends Logic
 		local arrowCount = self:GetArrowFletterArrowCount(level)
 		local usedTargets = {}
 		for i = 1, arrowCount do
-			-- 유저 지적: "지금 연출이 끊기거든(깜빡깜빡) 끝나기 전에 우리가 다시 연출 겹쳐서 안끊기게" —
-			-- 화살마다 매번 새 캐스트 연출을 스폰하는데, 이전 간격(CastDuration+StaggerDelay)은 연출이
-			-- 끝나고 나서야 다음 연출이 스폰돼 그 사이 빈 프레임(깜빡임)이 생겼다. 다음 연출을 이전
-			-- 연출이 끝나기 Card118CastOverlap초 전에 미리 겹쳐서 스폰해 끊김 없이 이어지게 한다.
+			-- 화살마다 매번 새 캐스트 연출을 스폰하는데, 이전 연출이 끝나고 나서야 다음 연출이 스폰되면
+			-- 그 사이 빈 프레임(깜빡임)이 생긴다. 다음 연출을 이전 연출이 끝나기 Card118CastOverlap초
+			-- 전에 미리 겹쳐서 스폰해 끊김 없이 이어지게 한다(유저 지적: "연출이 끊기거든(깜빡깜빡)...
+			-- 연출 겹쳐서 안끊기게").
 			local delay = (i - 1) * math.max(0.05, self.Card118CastDuration - self.Card118CastOverlap)
 			local isLast = (i == arrowCount)
 			_TimerService:SetTimerOnce(function()
@@ -2879,7 +2891,7 @@ script CardManager extends Logic
 	end
 
 	-- 화살 한 발의 준비 단계 — 리트리트 샷의 FireRetreatShotSequence와 동일한 타겟팅(발사 위치에서
-	-- 가장 가까운 미사용 몬스터를 줄로 삼음).
+	-- 가장 가까운 미사용 몬스터를 줄로 삼음, 유저 재확인: "y축에 적이있는곳에서 발사가 되야하고").
 	@ExecSpace("ServerOnly")
 	method void FireArrowFletterSequence(Entity map, number launchX, boolean flyDirRight, table usedTargets, number damage, boolean isCrit, boolean isLast)
 		local monsters = map:GetChildComponentsByTypeName("script.MonsterAI", false)
@@ -2943,53 +2955,11 @@ script CardManager extends Logic
 		fx:Destroy(dur * #frames)
 	end
 
-	-- 화살 한 발 — 리트리트 샷의 FireRetreatShotArrow와 동일한 레인/관통 로직이지만 관통 횟수가
-	-- 레벨 무관 고정(Card118PierceCount=4)이고 이 스킬 전용 관통 대미지 비율을 쓴다.
+	-- 화살 한 발 — 리트리트 샷의 FireRetreatShotArrow와 동일한 실시간 충돌 로직(매 틱마다 그 순간
+	-- 실제로 겹치는 몬스터를 맞힘)이지만 관통 횟수가 레벨 무관 고정(Card118PierceCount=4)이고
+	-- 이 스킬 전용 관통 대미지 비율을 쓴다.
 	@ExecSpace("ServerOnly")
 	method void FireArrowFletterArrow(Entity map, Vector3 launchPos, boolean flyDirRight, MonsterAI primary, number damage, boolean isCrit)
-		local monsters = map:GetChildComponentsByTypeName("script.MonsterAI", false)
-		local arrowY = launchPos.y
-
-		local lane = {}
-		for _, mob in ipairs(monsters) do
-			---@type MonsterAI
-			local m = mob
-			if isvalid(m) and not m._dead and isvalid(m.Entity) then
-				local mp = m.Entity.TransformComponent.Position
-				local ahead = flyDirRight and (mp.x > launchPos.x) or ((not flyDirRight) and (mp.x < launchPos.x))
-				if ahead and math.abs(mp.y - arrowY) <= self.Card106YBandTolerance then
-					table.insert(lane, m)
-				end
-			end
-		end
-		table.sort(lane, function(a, b)
-			local ax = a.Entity.TransformComponent.Position.x
-			local bx = b.Entity.TransformComponent.Position.x
-			if flyDirRight then return ax < bx end
-			return ax > bx
-		end)
-
-		local pierceCount = self.Card118PierceCount
-		local hitList = {}
-		for _, m in ipairs(lane) do
-			table.insert(hitList, m)
-			if #hitList >= pierceCount + 1 then break end
-		end
-		if #hitList == 0 and isvalid(primary) and isvalid(primary.Entity) and not primary._dead then
-			table.insert(hitList, primary)
-		end
-
-		local waypoints = { launchPos }
-		for _, m in ipairs(hitList) do
-			local hp = m.Entity.TransformComponent.Position
-			table.insert(waypoints, Vector3(hp.x, hp.y, launchPos.z))
-		end
-		if #hitList < pierceCount + 1 then
-			local edgeX = flyDirRight and -self.Card118SidePositionX or self.Card118SidePositionX
-			local lastY = waypoints[#waypoints].y
-			table.insert(waypoints, Vector3(edgeX, lastY, launchPos.z))
-		end
-
 		-- 유저 정정: "각도 반대로해야하고... y축이라고... 좌우" — 방향 판정 부호가 반대였다(리트리트
 		-- 샷과 달리 이 화살 리소스는 기본 방향이 반대인 듯). flipArrow를 뒤집어서 좌우(FlipX) 및
 		-- 각도 보정 부호를 모두 반전한다.
@@ -2997,7 +2967,9 @@ script CardManager extends Logic
 		local arrowRotationZ = flipArrow and -self.Card118ArrowRotationCorrection or self.Card118ArrowRotationCorrection
 		local visualY = self.Card106ArrowVisualYOffset
 		local spawnVisualPos = Vector3(launchPos.x, launchPos.y + visualY, launchPos.z)
-		local fx = self:SpawnEffect(self.Card118ArrowRUID, spawnVisualPos, arrowRotationZ, 1.0, self.Card118ArrowScale, 1)
+		-- "skilleffect"(SpawnEffect 기본)는 0.8초 뒤 자동 파괴되므로(리트리트 샷과 동일한 이유) 자동
+		-- 소멸 타이머가 없는 "persistenteffect"를 써서 수명을 실시간 충돌 루프가 직접 제어하게 한다.
+		local fx = self:SpawnEffectWithModel(self.Card118ArrowRUID, spawnVisualPos, arrowRotationZ, 1.0, self.Card118ArrowScale, 1, "persistenteffect")
 		if fx == nil then return end
 		local arrowRenderer = fx.SpriteRendererComponent
 		-- 유저 정정: "y축이라고... 좌우" — 이 프로젝트에서 "Y축 반전"은 실제 엔진 FlipY(상하)가
@@ -3005,45 +2977,68 @@ script CardManager extends Logic
 		-- 쓰지 않는다.
 		if arrowRenderer ~= nil then arrowRenderer.FlipX = flipArrow end
 
-		local hitDelays = {}
-		local elapsed = 0
-		for i = 1, #waypoints - 1 do
-			local from = waypoints[i]
-			local to = waypoints[i + 1]
-			local dx = to.x - from.x
-			local dy = to.y - from.y
-			local segDist = math.sqrt(dx * dx + dy * dy)
-			local segDuration = math.max(0.05, segDist / self.Card106ArrowSpeed)
-			local segStart = elapsed
-			_TimerService:SetTimerOnce(function()
-				if not isvalid(fx) then return end
-				_TweenLogic:PlayTween(0.0, 1.0, segDuration, EaseType.Linear, function(t)
-					if not isvalid(fx) then return end
-					local x = from.x + (to.x - from.x) * t
-					local y = from.y + (to.y - from.y) * t
-					fx.TransformComponent.Position = Vector3(x, y + visualY, from.z)
-				end)
-			end, segStart)
-			elapsed = elapsed + segDuration
-			if i <= #hitList then hitDelays[i] = elapsed end
-		end
-		fx:Destroy(elapsed)
+		local arrowY = launchPos.y
+		-- dir 부호 반전(리트리트 샷과 동일한 버그 수정 — 활대가 바라보는 실제 화면 방향과 반대로
+		-- 날아가고 있었다).
+		local dir = flyDirRight and -1 or 1
+		-- edgeX는 발사 지점이 아니라 그 지점에서 진행 방향으로 화면 폭만큼 더 나아간 지점이어야 한다
+		-- (리트리트 샷과 동일한 버그 수정 — launchPos.x와 같은 값이면 첫 틱에 바로 종료돼버린다).
+		local edgeX = launchPos.x + dir * (2 * self.Card118SidePositionX)
+		local pierceCount = self.Card118PierceCount
+		local maxBudget = pierceCount + 1
+		local hitSet = {}
+		local hitCount = 0
+		local elapsedTime = 0
+		local tickInterval = 1 / 60
+		local timerId = nil
 
-		for idx, m in ipairs(hitList) do
-			local pierceIdx = idx - 1
-			local hitPos = waypoints[idx + 1]
-			_TimerService:SetTimerOnce(function()
-				if not isvalid(self) then return end
-				if isvalid(m) and isvalid(m.Entity) and not m._dead then
-					local finalDamage = damage
-					if pierceIdx > 0 then finalDamage = damage * self:GetArrowFletterPiercePercent(pierceIdx) end
-					if isCrit then m:TakeDamageCrit(finalDamage * 2)
-					else m:TakeDamage(finalDamage) end
+		-- 시각적 이동은 PlayTween 하나로 처리한다(리트리트 샷과 동일한 수정 — 매 틱 Position을 직접
+		-- 대입하면 클라이언트로 정상 동기화되지 않아 화살이 안 나가는 것처럼 보였다). 충돌 판정은
+		-- 이 트윈과 별개로 동일한 수식의 curX를 매 틱 직접 계산해 처리한다.
+		local totalTravelTime = math.abs(edgeX - launchPos.x) / self.Card106ArrowSpeed
+		_TweenLogic:PlayTween(0.0, 1.0, totalTravelTime, EaseType.Linear, function(t)
+			if not isvalid(fx) then return end
+			local x = launchPos.x + (edgeX - launchPos.x) * t
+			fx.TransformComponent.Position = Vector3(x, arrowY + visualY, launchPos.z)
+		end)
+
+		timerId = _TimerService:SetTimerRepeat(function()
+			if not isvalid(self) or not isvalid(fx) then
+				if timerId then _TimerService:ClearTimer(timerId) end
+				return
+			end
+			elapsedTime = elapsedTime + tickInterval
+			local curX = launchPos.x + dir * self.Card106ArrowSpeed * elapsedTime
+
+			local monsters = map:GetChildComponentsByTypeName("script.MonsterAI", false)
+			for _, mob in ipairs(monsters) do
+				---@type MonsterAI
+				local m = mob
+				if isvalid(m) and not m._dead and isvalid(m.Entity) and not hitSet[m] then
+					local mp = m.Entity.TransformComponent.Position
+					if math.abs(mp.y - arrowY) <= self.Card106YBandTolerance and math.abs(mp.x - curX) <= self.Card106HitRadius then
+						hitSet[m] = true
+						hitCount = hitCount + 1
+						local pierceIdx = hitCount - 1
+						local finalDamage = damage
+						if pierceIdx > 0 then finalDamage = damage * self:GetArrowFletterPiercePercent(pierceIdx) end
+						if isCrit then m:TakeDamageCrit(finalDamage * 2)
+						else m:TakeDamage(finalDamage) end
+						local hitFx = self:SpawnEffect(self.Card118HitRUID, Vector3(mp.x, mp.y, launchPos.z), 0, 1.0, 1.0, 1)
+						if hitFx ~= nil then hitFx:Destroy(self.HitEffectLifetime) end
+					end
 				end
-				local hitFx = self:SpawnEffect(self.Card118HitRUID, hitPos, 0, 1.0, 1.0, 1)
-				if hitFx ~= nil then hitFx:Destroy(self.HitEffectLifetime) end
-			end, hitDelays[idx])
-		end
+			end
+
+			-- reachedEdge는 flyDirRight가 아니라 실제 이동 부호(dir)를 기준으로 판정해야 한다 —
+			-- flyDirRight로 판정하면 dir 부호를 반대로 고칠 때마다 여기도 같이 안 맞아서 화살이 첫
+			-- 틱에 바로 끝난 것으로 처리되는 동일한 버그가 재발한다.
+			local reachedEdge = (dir > 0 and curX >= edgeX) or (dir < 0 and curX <= edgeX)
+			if hitCount >= maxBudget or reachedEdge then
+				if timerId then _TimerService:ClearTimer(timerId) end
+				if isvalid(fx) then fx:Destroy(0.05) end
+			end
+		end, tickInterval)
 	end
 
 	-- ── 실피드 전용: 언카운터 에로우 (카드 107, 슬롯형 정식 스킬 7호) — 종(세로) 범위기. 헤일 스톤과
@@ -3381,6 +3376,9 @@ script CardManager extends Logic
 	property number Card108EffectScale = 1.15  -- 유저 요청으로 15% 확대
 	property number Card108EffectYOffset = 0.4  -- 연출을 위로 띄움(유저 요청, 판정 좌표엔 영향 없는 순수 시각 오프셋)
 	property number Card108KnockbackDuration = 0.5  -- 중앙(0)까지 실제로 밀려나가는 물리 이동 시간(넉백 자체) — 연출 재생 시간과는 별개
+	property number Card108CenterRadius = 1.0  -- 이 반경 안의 몬스터는 "이미 중앙" 취급 — 좌/우 어느 쪽에도 반경 밖 몬스터가 없으면 대신 양끝으로 밀어낸다(유저 지정)
+	property number Card108OutwardOvershoot = 1000.0  -- 양끝으로 밀어낼 때 일부러 넘겨주는 먼 destX — ClampKnockbackDestX가 실제 발판 가장자리로 잘라낸다
+	property number KnockbackScreenSafeHalfWidth = 5.0  -- ClampKnockbackDestX 최종 클램프용 화면 안전 반폭 — GetSpawnPositionFromFootholds 등 스폰 로직이 쓰는 "플레이어 위치 ±5" 관례와 동일(카메라 가시범위 대략 ±6.4 안쪽)
 	-- 연출 재생 시간을 Card108KnockbackDuration에 억지로 맞추면(0.5초÷20프레임=0.025초/프레임) 원본보다
 	-- 훨씬 빨리 재생돼 사실상 원본 그대로가 아니게 된다(유저 강한 지적: "원본 그대로 다 보여주게
 	-- 바꾸랬잖아... 연출 시간이 맞냐고"). 리트리트 샷/언카운터 에로우와 동일하게 프레임당 재생시간을
@@ -3426,41 +3424,68 @@ script CardManager extends Logic
 		local map = self:GetCurrentMap()
 		if map == nil then return end
 		local monsters = map:GetChildComponentsByTypeName("script.MonsterAI", false)
+		local centerX = self:GetZoneCenterX()
 
+		-- Card108CenterRadius(1.0) 밖에 있는 몬스터만 "바깥쪽 최외곽" 후보로 본다 — 그 반경 안에
+		-- 있는 몬스터는 centerCluster에 모아뒀다가, 좌/우 어느 쪽에도 바깥쪽 후보가 하나도 없을 때
+		-- (전부 중앙 근방에 몰려있을 때) FireFleshMirageOutward로 넘긴다(유저 지정: "우선순위는 양끝이
+		-- 지금처럼 맞지만 만약에 중앙에만 있으면... 양끝으로 날아가야해" — 기존 "중앙으로 당기기"만
+		-- 있으면 이미 중앙 근처인 몬스터에게 써도 이동량이 0에 가까워 사실상 아무 효과가 없었다).
 		local leftExtreme, rightExtreme = nil, nil
+		local centerCluster = {}
 		for _, mob in ipairs(monsters) do
 			---@type MonsterAI
 			local m = mob
 			if isvalid(m) and not m._dead and isvalid(m.Entity) then
 				local x = m.Entity.TransformComponent.Position.x
-				if x < 0 and (leftExtreme == nil or x < leftExtreme.Entity.TransformComponent.Position.x) then
+				if x < centerX - self.Card108CenterRadius and (leftExtreme == nil or x < leftExtreme.Entity.TransformComponent.Position.x) then
 					leftExtreme = m
-				elseif x > 0 and (rightExtreme == nil or x > rightExtreme.Entity.TransformComponent.Position.x) then
+				elseif x > centerX + self.Card108CenterRadius and (rightExtreme == nil or x > rightExtreme.Entity.TransformComponent.Position.x) then
 					rightExtreme = m
+				elseif x >= centerX - self.Card108CenterRadius and x <= centerX + self.Card108CenterRadius then
+					table.insert(centerCluster, m)
 				end
 			end
 		end
-		if leftExtreme == nil and rightExtreme == nil then return end
+		if leftExtreme == nil and rightExtreme == nil then
+			self:FireFleshMirageOutward(map, monsters, centerCluster, centerX, damage, isCrit)
+			return
+		end
 
 		local targetCount = self:GetFleshMirageTargetCount()
 		local collisionPct = self:GetFleshMirageCollisionPercent()
 
 		if targetCount >= 2 then
-			-- Lv2+: 있는 쪽 전부 중앙(0)으로 모이게 넉백(유저 요청: "좌우에 한개씩 생겨서 중앙쪽으로 모이게")
-			if leftExtreme ~= nil then self:FireFleshMirageShove(map, monsters, leftExtreme, 0, damage, isCrit, collisionPct) end
-			if rightExtreme ~= nil then self:FireFleshMirageShove(map, monsters, rightExtreme, 0, damage, isCrit, collisionPct) end
+			-- Lv2+: 있는 쪽 전부 존 중심으로 모이게 넉백(유저 요청: "좌우에 한개씩 생겨서 중앙쪽으로 모이게").
+			-- 한쪽만 바깥쪽 후보가 있고 반대쪽엔 바깥쪽 후보 없이 중앙 근방(centerCluster)에만 몬스터가
+			-- 있으면 그동안 반대쪽은 아무 반응이 없었다(유저 지적: "한쪽은 끝정도에 있고 한쪽은 중앙에
+			-- 있으면 발동안되는데... 중앙부 타격해서 끝으로 옮겨야할거같은데"). Lv2+는 항상 2마리가
+			-- 움직이도록, 비어있는 쪽은 centerCluster에서 무작위 1마리를 뽑아 그 반대쪽(비어있는 쪽)
+			-- 끝으로 밀어낸다 — FireFleshMirageOutward와 동일한 오버슈트+클램프 방식 재사용.
+			if leftExtreme ~= nil then
+				self:FireFleshMirageShove(map, monsters, leftExtreme, centerX, damage, isCrit, collisionPct)
+			elseif #centerCluster > 0 then
+				local pick = centerCluster[_UtilLogic:RandomIntegerRange(1, #centerCluster)]
+				self:FireFleshMirageShove(map, monsters, pick, centerX - self.Card108OutwardOvershoot, damage, isCrit, collisionPct)
+			end
+			if rightExtreme ~= nil then
+				self:FireFleshMirageShove(map, monsters, rightExtreme, centerX, damage, isCrit, collisionPct)
+			elseif #centerCluster > 0 then
+				local pick = centerCluster[_UtilLogic:RandomIntegerRange(1, #centerCluster)]
+				self:FireFleshMirageShove(map, monsters, pick, centerX + self.Card108OutwardOvershoot, damage, isCrit, collisionPct)
+			end
 		else
-			-- Lv1: 좌/우 절반 중 하나를 무작위로 골라 그 몬스터를 중앙(0)으로 넉백한다(유저 강한 지적:
+			-- Lv1: 좌/우 절반 중 하나를 무작위로 골라 그 몬스터를 존 중심으로 넉백한다(유저 강한 지적:
 			-- "맨 좌측에 뜨는애를 왜 <이쪽으로 보내내고... >으로 보내야지... 중앙에 모이게 보내라고" —
-			-- 바깥(가장자리)이 아니라 항상 중앙 쪽으로 밀어야 한다. Lv2+와 동일하게 destX=0을 쓴다).
+			-- 바깥(가장자리)이 아니라 항상 중앙 쪽으로 밀어야 한다. Lv2+와 동일하게 destX=centerX를 쓴다).
 			local pickRight
 			if leftExtreme == nil then pickRight = true
 			elseif rightExtreme == nil then pickRight = false
 			else pickRight = _UtilLogic:RandomDouble() < 0.5 end
 			if pickRight then
-				self:FireFleshMirageShove(map, monsters, rightExtreme, 0, damage, isCrit, collisionPct)
+				self:FireFleshMirageShove(map, monsters, rightExtreme, centerX, damage, isCrit, collisionPct)
 			else
-				self:FireFleshMirageShove(map, monsters, leftExtreme, 0, damage, isCrit, collisionPct)
+				self:FireFleshMirageShove(map, monsters, leftExtreme, centerX, damage, isCrit, collisionPct)
 			end
 		end
 	end
@@ -3473,12 +3498,33 @@ script CardManager extends Logic
 	-- nil을 반환하는데, 이 존들은 스폰 로직도 똑같이 하드코딩 대신 FootholdComponent를 직접 훑는 GetFlatRuns를
 	-- 쓰므로(유저 지적: "그럼 그 존은 클램프 없이=공중에 뜬다는 소리?" — 맞는 지적이라 동일하게 대응해야
 	-- 한다) 여기서도 그 방식으로 폴백한다.
+	-- target.Entity.TransformComponent.Position는 "존 컨테이너 기준 로컬 좌표"인데(TransformComponent.d.mlua:
+	-- "Shows coordinates relative to an Entity's parent"), GetZonePlatformBands(+offsetX)/GetFlatRuns가
+	-- 반환하는 밴드는 둘 다 월드(맵 루트) 좌표다 — 프레임이 안 맞았다. 컨테이너가 없는 루트 존(오프셋
+	-- 0)에서는 로컬==월드라 우연히 맞았지만, 컨테이너가 있는 대부분의 존(오프셋이 0이 아닌 거의 모든
+	-- 존)에서는 로컬 좌표가 항상 0 근처라 "월드 X가 0 근처인" 엉뚱한(주로 루트) 존의 밴드가 매번
+	-- 잘못 선택됐다(유저 리포트: "존29에서 플레시 미라주 쓰면 타일을 뚫고 들어간다" — 존29(로컬≈0)가
+	-- 실제로는 존27(월드 x≈0)의 밴드로 잘못 클램프됨, 실측 확인: 존27/29 둘 다 y=-0.49 밴드를 갖고
+	-- 있어 Y로도 구분이 안 됨). GetBowSpawnPosition/GetZoneCenterX와 동일한 패턴으로 컨테이너의
+	-- WorldPosition을 더해 로컬 pos/destX를 월드로 변환해서 비교하고, 최종 결과는 다시 로컬로 되돌려
+	-- 반환한다(호출부 FireFleshMirageShove/FireFlashBomberShove가 전부 로컬 좌표로 이후 계산을
+	-- 이어가므로 — primaryX = primary.Entity.TransformComponent.Position.x와 같은 프레임이어야 한다).
 	@ExecSpace("ServerOnly")
 	method number ClampKnockbackDestX(MonsterAI target, number destX)
+		if not isvalid(target) or not isvalid(target.Entity) or not isvalid(target.Entity.TransformComponent) then return destX end
 		if target._isFlying then return destX end
 		local zoneIdx = target._spawnZoneIndex
 		local bands = _MonsterSpawner:GetZonePlatformBands(zoneIdx)
 		local pos = target.Entity.TransformComponent.Position
+
+		local zoneMap = _MonsterSpawner:GetZoneEntity(zoneIdx)
+		local containerOffsetX = 0
+		if zoneMap ~= nil and isvalid(zoneMap) and isvalid(zoneMap.TransformComponent) then
+			containerOffsetX = zoneMap.TransformComponent.WorldPosition.x
+		end
+		local worldPosX = pos.x + containerOffsetX
+		local worldDestX = destX + containerOffsetX
+
 		-- 하드코딩 밴드(GetZonePlatformBands)는 병합 전 존 로컬 좌표라 월드 좌표로 쓰려면 존 오프셋을
 		-- 더해야 한다(GetSpawnPositionFromFootholds와 동일한 이유) — FootholdComponent에서 직접 뽑는
 		-- GetFlatRuns 결과는 이미 월드 좌표라 오프셋을 더하면 안 된다.
@@ -3496,12 +3542,23 @@ script CardManager extends Logic
 		end
 		if bands == nil or #bands == 0 then return destX end
 
+		-- Y가 같은 밴드가 여러 존에 걸쳐 있을 수 있다(예: 그룹I 존27=존29, 존28=존30이 각각 같은 지면
+		-- 높이) — GetFlatRuns는 존별로 나뉘지 않은 밴드 목록을 그대로 반환하므로, Y만 보고 고르면 여러
+		-- 존이 동률일 때 먼저 나열된 쪽으로 잘못 클램프될 수 있다. Y 차이를 압도적으로 우선하되(다른
+		-- 층이면 절대 안 됨), Y가 같거나 거의 같은 후보들 사이에서는 (월드로 변환한) 현재 위치를 실제로
+		-- 포함/근접한 밴드를 우선하도록 X 거리를 보조 기준으로 추가한다.
 		local bestBand = nil
-		local bestDist = -1
+		local bestScore = -1
 		for _, band in ipairs(bands) do
-			local d = math.abs(band.y - pos.y)
-			if bestDist < 0 or d < bestDist then
-				bestDist = d
+			local dy = math.abs(band.y - pos.y)
+			local bandMinX = band.xMin + offsetX
+			local bandMaxX = band.xMax + offsetX
+			local dx = 0
+			if worldPosX < bandMinX then dx = bandMinX - worldPosX
+			elseif worldPosX > bandMaxX then dx = worldPosX - bandMaxX end
+			local score = dy * 1000 + dx
+			if bestScore < 0 or score < bestScore then
+				bestScore = score
 				bestBand = band
 			end
 		end
@@ -3510,7 +3567,17 @@ script CardManager extends Logic
 		local minX = bestBand.xMin + offsetX + margin
 		local maxX = bestBand.xMax + offsetX - margin
 		if minX > maxX then return pos.x end
-		destX = math.max(minX, math.min(maxX, destX))
+
+		-- 발판 자체가 카메라 가시범위(대략 ±6.4)보다 넓을 수 있다 — 특히 GetFlatRuns 폴백(bands==nil)은
+		-- 병합 맵 전체 FootholdComponent를 훑으므로 존 경계 없이 이어진 발판이면 xMin/xMax가 옆 존까지
+		-- 뻗어있을 수 있다. 발판 가장자리 클램프만으로는 부족해서(유저 리포트: "양끝으로 보낼때 화면
+		-- 밖으로 나가는 케이스"), GetSpawnPositionFromFootholds가 스폰 위치에 이미 쓰는 것과 동일한
+		-- "플레이어 현재 위치 ±5" 화면 안전범위로 한 번 더 좁힌다.
+		local playerWorldX = self:GetPlayerCenterX()
+		minX = math.max(minX, playerWorldX - self.KnockbackScreenSafeHalfWidth)
+		maxX = math.min(maxX, playerWorldX + self.KnockbackScreenSafeHalfWidth)
+		if minX > maxX then return pos.x end
+		worldDestX = math.max(minX, math.min(maxX, worldDestX))
 
 		-- 존8은 발판 자체는 하나로 이어져 있지만 그 위에 충돌 데이터 없는 순수 장식 기둥이 있어서,
 		-- 발판 폭 클램프만으로는 넉백이 그 기둥을 뚫고 지나가 보였다(유저 지적: "존 8에서 기둥 거기는
@@ -3519,15 +3586,15 @@ script CardManager extends Logic
 		-- 통과 금지 구간으로 별도 처리해, 시작 위치 기준 반대편으로 넘어가려 하면 기둥 이쪽 가장자리에서 멈춘다.
 		if target._spawnZoneIndex == 8 then
 			local pillarMinX, pillarMaxX = 20.7, 21.7
-			local fromX = pos.x
-			if fromX < pillarMinX and destX >= pillarMinX then
-				destX = pillarMinX - margin
-			elseif fromX > pillarMaxX and destX <= pillarMaxX then
-				destX = pillarMaxX + margin
+			local fromX = worldPosX
+			if fromX < pillarMinX and worldDestX >= pillarMinX then
+				worldDestX = pillarMinX - margin
+			elseif fromX > pillarMaxX and worldDestX <= pillarMaxX then
+				worldDestX = pillarMaxX + margin
 			end
 		end
 
-		return destX
+		return worldDestX - containerOffsetX
 	end
 
 	-- 타겟 하나를 destX까지 실제로 밀어붙인다(Lv1은 화면 가장자리, Lv2+는 중앙 0). 실제 이동 방향
@@ -3537,6 +3604,9 @@ script CardManager extends Logic
 	-- 타겟이 실제로 그 몬스터의 X를 지나가는 시점에 맞춘다.
 	@ExecSpace("ServerOnly")
 	method void FireFleshMirageShove(Entity map, table monsters, MonsterAI primary, number destX, number damage, boolean isCrit, number collisionPct)
+		-- 후보로 뽑힌 뒤(FleshMirageAttack) 실제 넉백 처리 전에 다른 스킬/이펙트 스폰 등으로 primary가
+		-- 무효화될 수 있다(실측: 동시다발 스폰이 몰린 상황에서 발생 확인) — 크래시 대신 조용히 스킵.
+		if not isvalid(primary) or not isvalid(primary.Entity) or not isvalid(primary.Entity.TransformComponent) then return end
 		destX = self:ClampKnockbackDestX(primary, destX)
 		local primaryX = primary.Entity.TransformComponent.Position.x
 		local dirRight = destX > primaryX
@@ -3581,8 +3651,32 @@ script CardManager extends Logic
 				end
 			end
 
-			log("FleshMirageShove: dmg=" .. math.floor(isCrit and damage * 2 or damage) .. " collide=" .. collideCount .. " dirRight=" .. tostring(dirRight))
+		log("FleshMirageShove: dmg=" .. math.floor(isCrit and damage * 2 or damage) .. " collide=" .. collideCount .. " dirRight=" .. tostring(dirRight))
 		end, self.Card108KnockbackStartDelay)
+	end
+
+	-- 좌/우 어느 쪽에도 Card108CenterRadius 밖(=의미 있게 바깥)에 있는 몬스터가 하나도 없을 때
+	-- FleshMirageAttack이 대신 호출하는 대체 동작 — centerCluster(중앙 근방에 몰려있는 몬스터들) 중
+	-- 무작위 2마리를 골라 하나는 좌측 끝, 하나는 우측 끝으로 밀어낸다(유저 지정: "우선순위는 양끝이
+	-- 지금처럼 맞지만 만약에 중앙에만있으면... 양끝으로 날아가야해... 랜덤 2마리로"). 몰려있는 몬스터가
+	-- 1마리뿐이면 양쪽으로 동시에 보낼 수 없으므로 아무 것도 하지 않는다(유저 확인: "몬스터가 1마리면
+	-- ... 안움직이는게 맞을거 같고"). destX는 일부러 아주 먼 값(Card108OutwardOvershoot)을 넘겨서
+	-- ClampKnockbackDestX가 각 타겟이 실제로 서 있는 발판의 진짜 가장자리로 알아서 잘라내게 한다 —
+	-- FireFleshMirageShove의 클램프/충돌 로직을 그대로 재사용한다.
+	@ExecSpace("ServerOnly")
+	method void FireFleshMirageOutward(Entity map, table monsters, table centerCluster, number centerX, number damage, boolean isCrit)
+		if #centerCluster < 2 then return end
+		local collisionPct = self:GetFleshMirageCollisionPercent()
+
+		local pool = {}
+		for i, m in ipairs(centerCluster) do pool[i] = m end
+		for i = #pool, 2, -1 do
+			local j = _UtilLogic:RandomIntegerRange(1, i)
+			pool[i], pool[j] = pool[j], pool[i]
+		end
+
+		self:FireFleshMirageShove(map, monsters, pool[1], centerX - self.Card108OutwardOvershoot, damage, isCrit, collisionPct)
+		self:FireFleshMirageShove(map, monsters, pool[2], centerX + self.Card108OutwardOvershoot, damage, isCrit, collisionPct)
 	end
 
 	-- 20프레임 원본을 직접 이어붙여 정확히 1바퀴만 재생(래핑 없음, 유저 지적: "2번 루프 되는거
@@ -3679,6 +3773,7 @@ script CardManager extends Logic
 		local map = self:GetCurrentMap()
 		if map == nil then return end
 		local monsters = map:GetChildComponentsByTypeName("script.MonsterAI", false)
+		local centerX = self:GetZoneCenterX()
 
 		local leftExtreme, rightExtreme = nil, nil
 		for _, mob in ipairs(monsters) do
@@ -3686,9 +3781,9 @@ script CardManager extends Logic
 			local m = mob
 			if isvalid(m) and not m._dead and isvalid(m.Entity) then
 				local x = m.Entity.TransformComponent.Position.x
-				if x < 0 and (leftExtreme == nil or x < leftExtreme.Entity.TransformComponent.Position.x) then
+				if x < centerX and (leftExtreme == nil or x < leftExtreme.Entity.TransformComponent.Position.x) then
 					leftExtreme = m
-				elseif x > 0 and (rightExtreme == nil or x > rightExtreme.Entity.TransformComponent.Position.x) then
+				elseif x > centerX and (rightExtreme == nil or x > rightExtreme.Entity.TransformComponent.Position.x) then
 					rightExtreme = m
 				end
 			end
@@ -3699,14 +3794,15 @@ script CardManager extends Logic
 		local collisionPct = self:GetFlashBomberCollisionPercent(level)
 		local explosionPct = self:GetFlashBomberExplosionPercent(level)
 
-		if leftExtreme ~= nil then self:FireFlashBomberShove(map, monsters, leftExtreme, 0, damage, isCrit, collisionPct, explosionPct, level) end
-		if rightExtreme ~= nil then self:FireFlashBomberShove(map, monsters, rightExtreme, 0, damage, isCrit, collisionPct, explosionPct, level) end
+		if leftExtreme ~= nil then self:FireFlashBomberShove(map, monsters, leftExtreme, centerX, damage, isCrit, collisionPct, explosionPct, level) end
+		if rightExtreme ~= nil then self:FireFlashBomberShove(map, monsters, rightExtreme, centerX, damage, isCrit, collisionPct, explosionPct, level) end
 	end
 
 	-- 플레시 미라주의 FireFleshMirageShove와 동일한 넉백/충돌 로직 + 넉백이 끝나는 시점(멈춘 자리)의
 	-- 신규 폭발 대미지 예약.
 	@ExecSpace("ServerOnly")
 	method void FireFlashBomberShove(Entity map, table monsters, MonsterAI primary, number destX, number damage, boolean isCrit, number collisionPct, number explosionPct, integer level)
+		if not isvalid(primary) or not isvalid(primary.Entity) or not isvalid(primary.Entity.TransformComponent) then return end
 		destX = self:ClampKnockbackDestX(primary, destX)
 		local primaryX = primary.Entity.TransformComponent.Position.x
 		local dirRight = destX > primaryX
@@ -5759,7 +5855,7 @@ script CardManager extends Logic
 			local explosionPct = math.floor(self:GetFlashBomberExplosionPercent(fbLv) * 100)
 			extraStr = "타겟 2명  |  중앙으로 넉백  |  타격 유닛 " .. collidePct .. "%  |  넉백 정지 시 주변 " .. explosionPct .. "% 대미지"
 		elseif cardIdx == 108 then
-			extraStr = "타겟 " .. self:GetFleshMirageTargetCount() .. "명  |  중앙으로 넉백  |  충돌 대상 " .. math.floor(self:GetFleshMirageCollisionPercent() * 100) .. "% 대미지"
+			extraStr = "타겟 " .. self:GetFleshMirageTargetCount() .. "명  |  중앙으로 넉백(중앙에 몰려있으면 양끝으로)  |  충돌 대상 " .. math.floor(self:GetFleshMirageCollisionPercent() * 100) .. "% 대미지"
 		elseif cardIdx == 114 then
 			local statusDur = self:GetArrowIllusionStatusDuration(self.ArrowIllusionLevel)
 			local bonusPct = math.floor((self:GetArrowIllusionSlowedBonusRatio(self.ArrowIllusionLevel)) * 100)
@@ -6217,6 +6313,12 @@ script CardManager extends Logic
 	-- 쏘는 각도(-90도)로 배치한다. 리소스 자체의 반투명이 Color 알파(이미 1.0)로는 안 없어져서,
 	-- 머티리얼/셰이더 대신 유저 제안대로 같은 연출을 Card101LayerCount(3)장 같은 자리에 겹쳐 스폰해서
 	-- 알파 블렌딩이 누적되어 더 진하게 보이도록 한다.
+	-- 활 쏘는 연출(fxBowLayers)은 화살이 전부 나갈 때까지 유지한다(유저 지적: "화살수가 늘어나는데
+	-- 쏘는 연출은 일찍 사라지는거같음") — 예전엔 Card101BowShootDuration이 지나면 무조건 연출을 끄고
+	-- 그 뒤에 화살을 순차 발사해서, 레벨업으로 화살 수(arrowStaggerDelay 누적)가 늘어날수록 연출이
+	-- 꺼진 채로 화살만 계속 나가는 구간이 길어졌다. 화살 발사 시작 시점(Card101BowShootDuration)부터
+	-- 마지막 화살이 나가는 시점(그로부터 arrowSpan 뒤)까지를 hold 시간으로 계산해 PlayWindPoemShootHold에
+	-- 넘긴다.
 	@ExecSpace("ServerOnly")
 	method void PlayWindPoemBow(any targets, number damage, boolean isCrit)
 		local fxGlowLayers = self:SpawnWindPoemLayers(self.Card101BowGlowRUID)
@@ -6225,11 +6327,11 @@ script CardManager extends Logic
 			if not isvalid(self) then return end
 			self:HideWindPoemLayers(fxGlowLayers)
 
-			local fxBowLayers = self:SpawnWindPoemLayers(self.Card101BowEffectRUID)
+			local arrowSpan = (#targets - 1) * self.Card101ArrowStaggerDelay
+			self:PlayWindPoemShootHold(self.Card101BowEffectRUID, self.Card101BowShootDuration + arrowSpan)
 
 			_TimerService:SetTimerOnce(function()
 				if not isvalid(self) then return end
-				self:HideWindPoemLayers(fxBowLayers)
 				-- 유저 요청: 여러 타겟이어도 동시발사가 아니라 순서대로 줄줄이 발사한다
 				for i, target in ipairs(targets) do
 					local staggerDelay = (i - 1) * self.Card101ArrowStaggerDelay
@@ -6247,6 +6349,30 @@ script CardManager extends Logic
 		end, self.Card101BowGlowDuration)
 	end
 
+	-- 활 쏘는 연출을 holdDuration만큼 유지하다가 끈다. 레이어가 쓰는 "skilleffectlong" 모델은 고정
+	-- Duration(Card101BowEffectModelDuration, 2.5초)이 지나면 자동 파괴되므로, holdDuration이 그
+	-- 한계(여유분 Card101BowEffectOverlapMargin을 뺀 안전 구간)를 넘으면 자동 파괴로 뚝 끊기기 전에
+	-- 같은 자리에 새 레이어를 겹쳐 스폰해서 이어붙인다(유저 요청: "연출이 끊기지않게, 만약 끊기면
+	-- 겹치기 방법 사용"). 현재 레벨 스케일(최대 5발, staggerDelay 0.1초)로는 절대 안 걸리는 여유
+	-- 구간이지만, 나중에 화살 수/간격이 늘어나도 끊김 없이 자연히 이어지도록 재귀적으로 처리한다.
+	@ExecSpace("ServerOnly")
+	method void PlayWindPoemShootHold(string ruid, number holdDuration)
+		local layers = self:SpawnWindPoemLayers(ruid)
+		local safeLifetime = self.Card101BowEffectModelDuration - self.Card101BowEffectOverlapMargin
+		if holdDuration <= safeLifetime then
+			_TimerService:SetTimerOnce(function()
+				if not isvalid(self) then return end
+				self:HideWindPoemLayers(layers)
+			end, holdDuration)
+		else
+			_TimerService:SetTimerOnce(function()
+				if not isvalid(self) then return end
+				self:HideWindPoemLayers(layers)
+				self:PlayWindPoemShootHold(ruid, holdDuration - safeLifetime)
+			end, safeLifetime)
+		end
+	end
+
 	-- 같은 연출을 같은 위치/각도/스케일로 Card101LayerCount장 겹쳐 스폰한다(유저 제안: "같은 연출을
 	-- 3개 겹치면 찐해지지 않을까").
 	@ExecSpace("ServerOnly")
@@ -6254,7 +6380,7 @@ script CardManager extends Logic
 		local layers = {}
 		for i = 1, self.Card101LayerCount do
 			-- 유저 요청으로 틴트 제거 — 리소스 원본 색 그대로 스폰한다
-			local fx = self:SpawnEffectWithModel(ruid, self.Card101BowPosition, self.Card101BowRotation, 1.0, self.Card101BowScale, 1.0, "skilleffectlong")
+			local fx = self:SpawnEffectWithModel(ruid, self:GetBowSpawnPosition(), self.Card101BowRotation, 1.0, self.Card101BowScale, 1.0, "skilleffectlong")
 			if fx ~= nil then
 				table.insert(layers, fx)
 			end
@@ -6285,7 +6411,7 @@ script CardManager extends Logic
 	method void FireWindPoemArrow(MonsterAI target, number damage, boolean isCrit)
 		local p1 = target.Entity.TransformComponent.Position
 		local hitPos = Vector3(p1.x, p1.y + 0.3, p1.z)
-		local startPos = self.Card101BowPosition
+		local startPos = self:GetBowSpawnPosition()
 
 		local dx = hitPos.x - startPos.x
 		local dy = hitPos.y - startPos.y
@@ -7253,6 +7379,42 @@ script CardManager extends Logic
 			end
 		end
 		return _MonsterSpawner:GetZoneOffsetX(_MapManager.CurrentMapIndex)
+	end
+
+	-- 플레시 미라주/플래시 봄버(둘 다 Card108 공용 속성) 공용 "존 중심" X — GetPlayerCenterX()는 월드
+	-- 좌표인데, 몬스터 Entity.TransformComponent.Position은 map(존 컨테이너) 기준 로컬 좌표라서
+	-- 그대로 비교하면 안 맞는다. GetBowSpawnPosition과 동일한 패턴으로 존 컨테이너의 WorldPosition을
+	-- 빼서 로컬로 변환한다. 예전엔 "중심"을 리터럴 0으로 하드코딩해서, 루트 존(offsetX=0)에서만 우연히
+	-- 맞고 병합 존(대부분 맵4+)에서는 몬스터가 전부 오프셋 근처(0이 아닌 곳)에 있어 "왼쪽/오른쪽" 판정
+	-- 자체가 항상 한쪽으로만 쏠리고, 넉백 목적지(destX=0)도 자기 존 발판 범위를 아득히 벗어난 곳이라
+	-- 옆 존(들)을 관통해 날아가는 버그의 원인이었다(유저 리포트: "존29에서 플레시 미라주 쓰면 타일을
+	-- 뚫고 들어간다").
+	@ExecSpace("ServerOnly")
+	method number GetZoneCenterX()
+		local map = self:GetCurrentMap()
+		local mapWorldPos = Vector3(0, 0, 0)
+		if map ~= nil and isvalid(map) and isvalid(map.TransformComponent) then
+			mapWorldPos = map.TransformComponent.WorldPosition
+		end
+		return self:GetPlayerCenterX() - mapWorldPos.x
+	end
+
+	-- 활 스킬(바람의 시/폭풍의 시/애로우 블로우/강화 애로우 블로우) 공용 발사 원점 — Card101BowPosition은
+	-- "화면 중앙" 고정 좌표(x=0)로 설계됐는데, SpawnByModelId(...,map)의 좌표는 map(존 컨테이너) 기준
+	-- 로컬 좌표다. 존 컨테이너 자체가 월드에서 0이 아닌 곳에 있으면(대부분의 존이 그렇다) 그 차이만큼
+	-- 그대로 어긋난 채로 스폰돼, 화면 중앙이 아니라 옆(존12처럼 오프셋이 큰 존일수록 더 크게)으로 밀려
+	-- 보이는 버그가 있었다(유저 리포트: "존12에서 쏘는모션이 화면 우측에 뜸") — KingPepeAttack과 동일한
+	-- 원인/수정 패턴(GetPlayerCenterX 참고). 루트 존(container=nil)은 map.TransformComponent 자체가
+	-- 없어(map16 실측 확인) 월드 오프셋 0으로 폴백한다.
+	@ExecSpace("ServerOnly")
+	method Vector3 GetBowSpawnPosition()
+		local map = self:GetCurrentMap()
+		local mapWorldPos = Vector3(0, 0, 0)
+		if map ~= nil and isvalid(map) and isvalid(map.TransformComponent) then
+			mapWorldPos = map.TransformComponent.WorldPosition
+		end
+		local centerX = self:GetPlayerCenterX() - mapWorldPos.x
+		return Vector3(centerX + self.Card101BowPosition.x, self.Card101BowPosition.y - mapWorldPos.y, self.Card101BowPosition.z)
 	end
 
 	@ExecSpace("ServerOnly")
