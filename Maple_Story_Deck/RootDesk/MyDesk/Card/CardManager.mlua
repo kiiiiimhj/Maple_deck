@@ -654,6 +654,674 @@ script CardManager extends Logic
 	-- 재생 자체를 짧게 끊는다.
 	property number HitEffectLifetime = 0.3
 
+	-- ── 레이온 전용: 기본공격(콤보어택 패시브, 카드 150) — 파이어샷/애로우샷과 동일하게 슬롯 배치와
+	-- 무관하게 항상 발동하는 상시 기본공격이며, GameManager.SelectedCharacter==2(레이온)일 때만 틱된다.
+	-- 데미지/쿨타임 강화 공식도 동일(×1.2 최대 5회, 이후 +20 고정 / ×0.85 최대 5회)하되 독립된 값으로
+	-- 관리한다. 콤보어택 자체(적중 시 대상에게 스택이 쌓이고 5스택에서 자동 폭발)는 MonsterAI에
+	-- ComboStack으로 구현되어 있다(FreezeStack과 동일한 "대상에 스택이 쌓이는" 패턴).
+	@Sync property number LeionAttackDamage = 100
+	@Sync property number LeionAttackCooldown = 0.8
+	@Sync property integer LeionAttackUpgradeCount = 0
+	property integer LeionAttackMultiplierCap = 5
+	property number LeionAttackFlatDamageBonus = 20
+	property string LeionAttackName = "연격"
+	-- 유저가 지정한 콤보어택 리소스팩("코마")의 skill 아이콘을 그대로 재사용
+	property string LeionAttackIconRUID = "38a6aefef6784c42967a997795dba30f"
+	-- 유저 지정 공격 스킬 연출(단일 animationclip이라 다른 다중프레임 스킬과 달리 네이티브 재생 그대로 사용)
+	property string LeionAttackEffectRUID = "ffaf507b148744f49715a8253477fec0"
+	-- 크기 1/4(0.375)→10%↑(0.4125)→5%↑(0.433125)→유저 재지정 20%↑(0.433125*1.2=0.51975)
+	property number LeionAttackEffectScale = 0.51975
+	-- 유저 지정: 오른쪽(+X)으로 더, 위로 살짝(+Y)
+	property number LeionAttackEffectOffsetX = 0.5
+	property number LeionAttackEffectOffsetY = 0.15
+	-- HitEffectLifetime(0.3초, 여러 스킬 공용)을 그대로 쓰다가 유저 지정으로 0.3초 빠르게(=그대로) 했더니
+	-- "연출이 끊기는 느낌"이라는 피드백을 받아, 공용 값은 안 건드리고 레이온 전용 지속시간을 따로 둔다
+	property number LeionAttackEffectLifetime = 0.6
+	property number _timerBasicLeion = 0
+
+	-- 콤보어택 — 유저 정정: 스택 자체에는 데미지 보너스를 두지 않는다(이전엔 스택당 +4%를 매 타격에
+	-- 곱해서 4~20%가 항상 적용됐었다). 대신 5스택 도달 시 그 마지막 타격 데미지의 200%를 폭발 데미지로
+	-- 한 번 추가 적용한다(PlayComboFinishBurst 참고).
+	-- 5스택 도달 시 자동 폭발 연출 — 리소스팩 "코마"
+	property string ComboFinishSoundRUID = "15cbdb9c56db4e87a379ba631e06a3d1"
+	-- 콤보어택(Card151)은 기본공격에 딸린 항상-발동 효과가 아니라 별도 슬롯형 스킬 카드다(유저 정정:
+	-- "스킬 추가하는거고 레이온 스킬이야"). 레벨(1~5)에 따라 기본공격 적중 시 스택이 붙을 확률만
+	-- 오르고(10/15/20/30/35%, _CardRegistry.GetChance(151, lv) 참고), 0이면(미해금) 전혀 안 붙는다.
+	@Sync property integer ComboAttackLevel = 0
+
+	-- 레이온 기본공격 — 콤보어택(Card151)을 해금한 상태에서만, 적중 시 그 레벨의 확률로 대상에게
+	-- 콤보 스택을 쌓는다(유저 지정: "캐릭터한테 스택이 쌓이는게 아니라 몬스터한테 스택이 쌓이게").
+	-- 스택 자체엔 데미지 보너스가 없다(유저 정정) — 5스택 도달 시 PlayComboFinishBurst가 그 마지막
+	-- 타격 데미지의 200%를 폭발 데미지로 한 번 추가할 뿐이다.
+	@ExecSpace("ServerOnly")
+	method void LeionBasicAttack(number damage, boolean isCrit, MonsterAI target)
+		if not isvalid(target) or not isvalid(target.Entity) or target._dead then return end
+
+		-- 유저 제안: 연출을 데미지보다 먼저 스폰해서, 이 타격으로 몬스터가 죽어 Die()의 사망 처리
+		-- (드랍 계산 등)가 뒤이어 실행되더라도 연출 스폰 코드 자체는 이미 끝난 뒤라 절대 영향받지
+		-- 않게 한다(유저 리포트: "몬스터가 죽더라도 연출은 나가야지" — 여전히 가끔 안 나오는 케이스가
+		-- 있어서, "캡처 후 데미지→연출" 순서보다 한 발 더 나아가 "연출 먼저→데미지"로 완전히 바꿨다).
+		-- WorldPosition을 GetCurrentMap() 기준 로컬로 변환한 뒤(존 오프셋 두 번 겹침 방지 —
+		-- WorldToCurrentMapLocal 주석 참고), 유저 지정 오프셋(오른쪽으로 더, 위로 살짝)만큼 옮긴다.
+		local p1 = self:WorldToCurrentMapLocal(target.Entity.TransformComponent.WorldPosition)
+		local hitPos = Vector3(p1.x + self.LeionAttackEffectOffsetX, p1.y + self.LeionAttackEffectOffsetY, p1.z)
+		local fx = self:SpawnEffect(self.LeionAttackEffectRUID, hitPos, 0, 1.0, self.LeionAttackEffectScale * (self:GetEffectScaleRatio(target)), 1.0)
+		if fx ~= nil then fx:Destroy(self.LeionAttackEffectLifetime) end
+
+		-- 콤보 스택 자체에는 데미지 보너스가 없다 — 5스택 폭발(PlayComboFinishBurst)이 실제 적용된
+		-- 데미지(크리티컬 반영 후)의 200%를 따로 터뜨리므로, AddComboStack에 그 값을 그대로 넘긴다.
+		-- (and/or 삼항 표현 대신 if/else로 명시 — 삼항식은 mlua 정적 타입 추론이 number로 확정하지
+		-- 못해 강타입 MonsterAI 파라미터에 대한 메서드 호출에서 LEA-1102가 발생했다)
+		local appliedDamage = damage
+		if isCrit then
+			appliedDamage = damage * 2
+			target:TakeDamageCrit(appliedDamage)
+		else
+			target:TakeDamage(appliedDamage)
+		end
+		if self.ComboAttackLevel > 0 and not target._dead then
+			local chance = _CardRegistry:GetChance(151, self.ComboAttackLevel)
+			if _UtilLogic:RandomDouble() < chance then
+				target:AddComboStack(appliedDamage)
+			end
+		end
+		log("LeionBasicAttack: dmg=" .. math.floor(appliedDamage))
+	end
+
+	-- 실제 "콤보 어택" 계열 오브 클립(6프레임: index0=생성 연출, index1~5=스택 1~5 표시 프레임).
+	-- MonsterAI가 스택 개수만큼(오브 슬롯 1~5) 스폰해서 원형으로 돌리는데, 각 오브는 자기 슬롯
+	-- 번호(N)에 도달할 때까지 index 0→N을 순서대로 재생하다가 N에서 정지 유지한다(유저 지정 —
+	-- "1->3(두번째 콤보)" 등 프레임 진행+정지 규칙). 애니메이션 자동재생이 아니라 MonsterAI가
+	-- StartFrameIndex=EndFrameIndex를 매 프레임 수동으로 갱신하는 방식으로 구현
+	property string ComboOrbRUID = "5a61ef5c39564849ac042304d4cb245b"
+
+	-- 콤보어택 리소스팩("코마") finish/1~10 — 5스택 도달 시 무작위 하나를 재생해 매번 다르게 보이게 한다
+	-- (유저 확인: "코마는 콤보를 터트리는 효과"라 폭발 연출 용도로는 정확하다)
+	method table GetComboFinishRUIDs()
+		return {
+			"8f260fa8eb49460691544a8806e80342",
+			"e6eefdb13ca4452ba51437f1bca9d165",
+			"7b5b0596abbd4f44afaa332f11943ebf",
+			"6c60534394bf4fba8a2553528f3f9ec3",
+			"8d638b1a7d5a4fac9de02f4c875ab956",
+			"7805bdc3c28b471fb90fc27b51801d1b",
+			"1e5b27a588564f44ab0ffc30040c1308",
+			"895a0c9854634b88af00e658e2fb5327",
+			"2672e793d7274cb5b8e4daa716671832",
+			"3f6088e8a7134c5aaa65b4f5ac12e374",
+		}
+	end
+
+	-- MonsterAI.TriggerComboFinish()가 5스택 도달 시점에 호출 — 무작위 폭발 연출 + 전용 사운드 +
+	-- 5번째 스택을 쌓은 그 마지막 타격 데미지(lastHitDamage, 크리티컬 반영 후)의 200% 폭발 데미지.
+	@ExecSpace("ServerOnly")
+	method void PlayComboFinishBurst(MonsterAI target, number lastHitDamage)
+		if not isvalid(target) or not isvalid(target.Entity) then return end
+		local finishRuids = self:GetComboFinishRUIDs()
+		local ruid = finishRuids[_UtilLogic:RandomIntegerRange(1, #finishRuids)]
+		local pos = target.Entity.TransformComponent.Position
+		local scale = self:GetEffectScaleRatio(target) * 1.3
+		local fx = self:SpawnEffect(ruid, pos, 0, 1.0, scale, 1.0)
+		if fx ~= nil then fx:Destroy(1.0) end
+		self:PlayComboFinishSound()
+		if not target._dead then
+			target:TakeDamage(lastHitDamage * 2.0)
+		end
+		log("PlayComboFinishBurst: ruid=" .. ruid .. " burstDmg=" .. math.floor(lastHitDamage * 2.0))
+	end
+
+	@ExecSpace("Multicast")
+	method void PlayComboFinishSound()
+		if self:IsServer() then return end
+		_SoundService:PlaySound(self.ComboFinishSoundRUID, 1.0)
+	end
+
+	-- ── 레이온 전용: 슬래시 (카드 152, 슬롯형 정식 스킬 1호) — "슬래시 블러스트" 리소스팩 재사용.
+	-- Lv1~5 고정 데미지 테이블(120/120/140/160/200), 쿨타임은 레벨 무관 3초 고정, 타겟 수만
+	-- 레벨별로 늘어난다(Lv1:1명/Lv2~4:2명/Lv5:3명, GetClosestTargets로 선정, 각 단일 타격).
+	-- 맞은 대상마다 100% 확률(=항상) 콤보 스택 1을 추가한다 — ComboAttackLevel(Card151) 보유 여부와
+	-- 무관하게 이 스킬 자체의 고정 효과.
+	@Sync property integer SlashLevel = 0
+	property number Card152Cooldown = 3.0
+	-- 유저 지정: 5~10프레임 재생(원복 — "옆존에서 연출" 문제의 실제 원인은 프레임이 아니라
+	-- GetCurrentMap() 존 오프셋 이중 적용이었음, WorldToCurrentMapLocal로 별도 수정됨)
+	property string SlashEffectRUID = "eaa71284041b4c8390c32ade11286e16"
+	property integer SlashEffectStartFrame = 5
+	property integer SlashEffectEndFrame = 10
+	property number SlashEffectFrameStepDuration = 0.06
+	-- 유저 지정: 기존 대비 20% 축소(1.3*0.8=1.04)
+	property number SlashEffectScale = 1.04
+	-- 여러 번 조정(1→0.1→0.25→0) 끝에 유저 재지정으로 0.3만큼 오른쪽 이동
+	property number SlashEffectOffsetX = 1.3
+	property string SlashHitEffectRUID = "3ebd5d6967394c2589408f69c2bc5c54"
+	-- 유저 지정: 기존 대비 20% 축소(1.0*0.8=0.8)
+	property number SlashHitEffectScale = 0.8
+	property string SlashSoundRUID = "ca35cb7d0652411395a5bb90a5beecd3"
+
+	-- 타당 데미지(레벨별 고정값, 배율 아님 — 유저 지정 표)
+	method number GetSlashDamage(integer level)
+		if level >= 5 then return 240
+		elseif level >= 4 then return 200
+		elseif level >= 3 then return 170
+		elseif level >= 2 then return 150
+		end
+		return 130
+	end
+
+	-- 타겟 수(서로 다른 몬스터) — Lv1:1 / Lv2~4:2 / Lv5:3
+	method integer GetSlashTargetCount(integer level)
+		if level >= 5 then return 3
+		elseif level >= 2 then return 2
+		end
+		return 1
+	end
+
+	-- 스윙 연출(frames 5~10)을 대상 몬스터 위치에 한 번씩 스폰해서 정확히 한 번만 재생하고 정지한다
+	-- (콤보어택 오브와 동일한 "정지-프레임" 수동 제어 — 네이티브 재생은 이 구간을 계속 반복했다).
+	-- 유저 지정: "각각 나가야지" — 캐스터 위치 1곳이 아니라 맞은 몬스터마다 개별로 재생한다.
+	-- pos/scale은 SlashAttack이 데미지를 넣기 "전" 시점에 미리 캡처해서 넘긴다(아래 SlashAttack 주석 참고).
+	@ExecSpace("ServerOnly")
+	method void PlaySlashSwingEffect(Vector3 pos, number scale)
+		local map = self:GetCurrentMap()
+		if map == nil then return end
+		local fx = _SpawnService:SpawnByModelId("skilleffectlong", "FX", pos, map)
+		if fx == nil then return end
+		local renderer = fx.SpriteRendererComponent
+		if renderer ~= nil then renderer.SpriteRUID = self.SlashEffectRUID end
+		fx.TransformComponent.Scale = Vector3(scale, scale, 1.0)
+		local frameCount = self.SlashEffectEndFrame - self.SlashEffectStartFrame + 1
+		for i = 0, frameCount - 1 do
+			local frameIdx = self.SlashEffectStartFrame + i
+			_TimerService:SetTimerOnce(function()
+				if isvalid(fx) and isvalid(renderer) then
+					renderer.StartFrameIndex = frameIdx
+					renderer.EndFrameIndex = frameIdx
+				end
+			end, i * self.SlashEffectFrameStepDuration)
+		end
+		fx:Destroy(frameCount * self.SlashEffectFrameStepDuration + 0.05)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SlashAttack(number damage, boolean isCrit)
+		local targets = self:GetClosestTargets(self:GetSlashTargetCount(self.SlashLevel))
+		if #targets == 0 then return end
+
+		self:PlaySlashSound()
+
+		for _, target in ipairs(targets) do
+			-- 유저 제안: 연출을 데미지보다 먼저 스폰해서, 이 타격으로 몬스터가 죽어 Die()의 사망
+			-- 처리가 뒤이어 실행되더라도 연출 스폰 코드 자체는 이미 끝난 뒤라 절대 영향받지 않게 한다
+			-- (유저 리포트: 여전히 가끔 연출이 안 나오는 케이스가 있어 "캡처 후 데미지→연출" 순서보다
+			-- 한 발 더 나아가 "연출 먼저→데미지"로 완전히 바꿨다).
+			local p = self:WorldToCurrentMapLocal(target.Entity.TransformComponent.WorldPosition)
+			local scaleRatio = self:GetEffectScaleRatio(target)
+
+			self:PlaySlashSwingEffect(Vector3(p.x + self.SlashEffectOffsetX, p.y + 0.3, p.z - 0.1), self.SlashEffectScale * scaleRatio)
+			local hitFx = self:SpawnEffect(self.SlashHitEffectRUID, Vector3(p.x, p.y, p.z), 0, 1.0, self.SlashHitEffectScale * scaleRatio, 1.0)
+			if hitFx ~= nil then hitFx:Destroy(self.HitEffectLifetime) end
+
+			local appliedDamage = damage
+			if isCrit then
+				appliedDamage = damage * 2
+				target:TakeDamageCrit(appliedDamage)
+			else
+				target:TakeDamage(appliedDamage)
+			end
+			target:AddComboStack(appliedDamage)
+		end
+		log("SlashAttack: hit=" .. #targets .. "/" .. self:GetSlashTargetCount(self.SlashLevel))
+	end
+
+	@ExecSpace("Multicast")
+	method void PlaySlashSound()
+		if self:IsServer() then return end
+		_SoundService:PlaySound(self.SlashSoundRUID, 1.0)
+	end
+
+	-- ── 레이온 전용: 브랜디쉬 (카드 153, 슬롯형 액티브 2호) — 슬래시(152)와 데미지/쿨타임 테이블은
+	-- 유사하며 방식도 동일하다: 맞은 대상마다 스윙+타격 연출을 "각각" 재생한다(유저 정정 — "이것도
+	-- 개별 타겟이야", 캐스터 위치 1곳 공용 연출로 잘못 구현했던 최초 버전을 폐기하고 슬래시와 동일한
+	-- per-target 패턴으로 수정). GetClosestTargets로 대상 선정(Lv1-2:1명/Lv3-5:2명). 쿨타임은 Lv1만
+	-- 5초, Lv2 이상은 4.5초 고정.
+	@Sync property integer BrandishLevel = 0
+	property string BrandishSwingEffectRUID = "8b26a0cdb63d455e82d1ca0fddf5e139"
+	property integer BrandishSwingStartFrame = 0
+	property integer BrandishSwingEndFrame = 9
+	property number BrandishSwingFrameStepDuration = 0.06
+	property number BrandishSwingScale = 1.0
+	property number BrandishSwingOffsetX = 1.5
+	property number BrandishSwingOffsetY = 0.3
+	property string BrandishHitEffectRUID = "38e9351c34b843ddbcc191c762e7464c"
+	property number BrandishHitEffectScale = 1.0
+	property string BrandishSoundRUID = "6c06fe8ab27b469eb61f466ea7f7e182"
+
+	-- 타당 데미지(레벨별 고정값 — 유저 지정 표)
+	method number GetBrandishDamage(integer level)
+		if level >= 5 then return 200
+		elseif level >= 4 then return 180
+		elseif level >= 3 then return 160
+		elseif level >= 2 then return 140
+		end
+		return 120
+	end
+
+	-- 쿨타임 — Lv1만 5초, Lv2 이상은 4.5초 고정(유저 지정 표)
+	method number GetBrandishCooldown(integer level)
+		if level >= 2 then return 4.5 end
+		return 5.0
+	end
+
+	-- 타겟 수(GetClosestTargets로 선정) — Lv1-2:1 / Lv3-5:2
+	method integer GetBrandishTargetCount(integer level)
+		if level >= 3 then return 2 end
+		return 1
+	end
+
+	-- 스윙 연출(PlaySlashSwingEffect와 동일한 "정지-프레임" 수동 제어) — 맞은 대상마다 개별 호출된다
+	-- (유저 정정: "이것도 개별 타겟이야" — 캐스터 위치 1곳 공용 스폰 방식은 폐기).
+	@ExecSpace("ServerOnly")
+	method void PlayBrandishSwingEffect(Vector3 pos, number scale)
+		local map = self:GetCurrentMap()
+		if map == nil then return end
+		local fx = _SpawnService:SpawnByModelId("skilleffectlong", "FX", pos, map)
+		if fx == nil then return end
+		local renderer = fx.SpriteRendererComponent
+		if renderer ~= nil then renderer.SpriteRUID = self.BrandishSwingEffectRUID end
+		fx.TransformComponent.Scale = Vector3(scale, scale, 1.0)
+		local frameCount = self.BrandishSwingEndFrame - self.BrandishSwingStartFrame + 1
+		for i = 0, frameCount - 1 do
+			local frameIdx = self.BrandishSwingStartFrame + i
+			_TimerService:SetTimerOnce(function()
+				if isvalid(fx) and isvalid(renderer) then
+					renderer.StartFrameIndex = frameIdx
+					renderer.EndFrameIndex = frameIdx
+				end
+			end, i * self.BrandishSwingFrameStepDuration)
+		end
+		fx:Destroy(frameCount * self.BrandishSwingFrameStepDuration + 0.05)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void BrandishAttack(number damage, boolean isCrit)
+		local targets = self:GetClosestTargets(self:GetBrandishTargetCount(self.BrandishLevel))
+		if #targets == 0 then return end
+
+		self:PlayBrandishSound()
+
+		for _, target in ipairs(targets) do
+			-- 유저 확정 패턴: 연출을 데미지보다 먼저 스폰(몬스터가 죽어도 연출은 항상 나가야 함)
+			local p = self:WorldToCurrentMapLocal(target.Entity.TransformComponent.WorldPosition)
+			local scaleRatio = self:GetEffectScaleRatio(target)
+
+			self:PlayBrandishSwingEffect(Vector3(p.x + self.BrandishSwingOffsetX, p.y + self.BrandishSwingOffsetY, p.z - 0.1), self.BrandishSwingScale * scaleRatio)
+			local hitFx = self:SpawnEffect(self.BrandishHitEffectRUID, Vector3(p.x, p.y, p.z), 0, 1.0, self.BrandishHitEffectScale * scaleRatio, 1.0)
+			if hitFx ~= nil then hitFx:Destroy(self.HitEffectLifetime) end
+
+			local appliedDamage = damage
+			if isCrit then
+				appliedDamage = damage * 2
+				target:TakeDamageCrit(appliedDamage)
+			else
+				target:TakeDamage(appliedDamage)
+			end
+			target:AddComboStack(appliedDamage)
+		end
+		log("BrandishAttack: hit=" .. #targets .. "/" .. self:GetBrandishTargetCount(self.BrandishLevel))
+	end
+
+	@ExecSpace("Multicast")
+	method void PlayBrandishSound()
+		if self:IsServer() then return end
+		_SoundService:PlaySound(self.BrandishSoundRUID, 1.0)
+	end
+
+	-- ── 레이온 전용: 플래시 슬래시 (카드 154, 슬롯형 액티브 3호) — 슬래시/브랜디쉬와 달리 "그 대상만"
+	-- 맞는 스킬이 아니다. GetClosestTargets로 뽑힌 대상 수만큼, 각 대상의 위치에서 좌/우 랜덤 방향으로
+	-- 이동하는 연출을 하나씩 띄우고, 그 연출이 지나가는 경로에 닿는 몬스터는(애초 뽑힌 대상이 아니어도)
+	-- 전부 맞는 관통형 이동 판정이다(더블 커터의 LaunchDoubleCutterTravel과 동일 패턴 재사용 — 단,
+	-- 이동 거리가 아니라 유저 지정대로 "연출이 사라질 때까지"인 지속시간으로 종료). 오른쪽으로 이동할
+	-- 때는 연출을 좌우 반전한다(유저 지정: "우는 스킬 연출 반대로 해야함").
+	@Sync property integer FlashSlashLevel = 0
+	property number Card154Cooldown = 5.0
+	property string FlashSlashTravelEffectRUID = "7bc3041a25934c14a2c6e4a78420bc89"
+	property string FlashSlashHitEffectRUID = "9c968d7e53ba4ccc8b242ac6d5748e40"
+	property string FlashSlashSoundRUID = "3a0e45300efd4623addaa0c30ba4cadc"
+	property number FlashSlashTravelSpeed = 3.0
+	property number FlashSlashTravelDuration = 0.6
+	property number FlashSlashTravelTickInterval = 0.1
+	property number FlashSlashHitRadius = 0.9
+	property number FlashSlashScale = 1.0
+
+	-- 타당 데미지(레벨별 고정값 — 유저 지정 표)
+	method number GetFlashSlashDamage(integer level)
+		if level >= 5 then return 200
+		elseif level >= 4 then return 180
+		elseif level >= 3 then return 160
+		elseif level >= 2 then return 140
+		end
+		return 120
+	end
+
+	-- 타겟 수(각각 별도의 이동 연출을 받는 시작 지점 개수) — Lv1:1 / Lv2-4:2 / Lv5:3
+	method integer GetFlashSlashTargetCount(integer level)
+		if level >= 5 then return 3 end
+		if level >= 2 then return 2 end
+		return 1
+	end
+
+	@ExecSpace("ServerOnly")
+	method void FlashSlashAttack(number damage, boolean isCrit)
+		local targets = self:GetClosestTargets(self:GetFlashSlashTargetCount(self.FlashSlashLevel))
+		if #targets == 0 then return end
+
+		self:PlayFlashSlashSound()
+
+		for _, target in ipairs(targets) do
+			local p = self:WorldToCurrentMapLocal(target.Entity.TransformComponent.WorldPosition)
+			local scaleRatio = self:GetEffectScaleRatio(target)
+			local direction = 1
+			if _UtilLogic:RandomDouble() < 0.5 then direction = -1 end
+
+			local map = self:GetCurrentMap()
+			if map ~= nil then
+				local fx = _SpawnService:SpawnByModelId("skilleffectlong", "FX", Vector3(p.x, p.y, p.z - 0.1), map)
+				if fx ~= nil then
+					local renderer = fx.SpriteRendererComponent
+					if renderer ~= nil then
+						renderer.SpriteRUID = self.FlashSlashTravelEffectRUID
+						renderer.FlipX = (direction > 0)
+					end
+					local s = self.FlashSlashScale * scaleRatio
+					fx.TransformComponent.Scale = Vector3(s, s, 1.0)
+					self:LaunchFlashSlashTravel(fx, Vector3(p.x, p.y, p.z), direction, damage, isCrit, target)
+				end
+			end
+		end
+		log("FlashSlashAttack: targets=" .. #targets)
+	end
+
+	-- direction(+1=오른쪽/-1=왼쪽)으로 매 틱(FlashSlashTravelTickInterval) 위치를 옮기고, 그 위치 반경
+	-- 안의 몬스터를(한 번씩만, hitSet으로 관리) 타격한다. 더블 커터와 달리 이동 거리가 아니라
+	-- FlashSlashTravelDuration(연출이 사라질 때까지)으로 종료한다(유저 지정: "이동은 많이하는건 아니고
+	-- 스킬이 사라질떄까지 하면됨").
+	@ExecSpace("ServerOnly")
+	method void LaunchFlashSlashTravel(Entity fx, Vector3 startPos, integer direction, number damage, boolean isCrit, MonsterAI depthAnchor)
+		if not isvalid(fx) then return end
+		local hitSet = {}
+		local elapsed = 0
+		local tickId = 0
+		tickId = _TimerService:SetTimerRepeat(function()
+			if not isvalid(self) or not isvalid(fx) then
+				_TimerService:ClearTimer(tickId)
+				return
+			end
+			elapsed = elapsed + self.FlashSlashTravelTickInterval
+			local curX = startPos.x + direction * self.FlashSlashTravelSpeed * elapsed
+			local fxPos = fx.TransformComponent.Position
+			fx.TransformComponent.Position = Vector3(curX, fxPos.y, fxPos.z)
+
+			local map = self:GetCurrentMap()
+			if map ~= nil then
+				local monsters = map:GetChildComponentsByTypeName("script.MonsterAI", false)
+				for _, mob in ipairs(monsters) do
+					---@type MonsterAI
+					local m = mob
+					if not m._dead and not hitSet[m] then
+						local mp = m.Entity.TransformComponent.Position
+						local dx = mp.x - curX
+						local dy = mp.y - startPos.y
+						if (dx * dx + dy * dy) <= (self.FlashSlashHitRadius * self.FlashSlashHitRadius) and self:IsSameDepthBand(depthAnchor, m) then
+							hitSet[m] = true
+							local finalDamage = damage
+							if isCrit then
+								finalDamage = damage * 2
+								m:TakeDamageCrit(finalDamage)
+							else
+								m:TakeDamage(finalDamage)
+							end
+							m:AddComboStack(finalDamage)
+							local hp = m.Entity.TransformComponent.Position
+							local hfx = self:SpawnEffect(self.FlashSlashHitEffectRUID, Vector3(hp.x, hp.y, hp.z), 0, 1.0, self:GetEffectScaleRatio(m), 1.0)
+							if hfx ~= nil then hfx:Destroy(self.HitEffectLifetime) end
+							log("FlashSlashAttack: travel hit dmg=" .. math.floor(finalDamage))
+						end
+					end
+				end
+			end
+
+			if elapsed >= self.FlashSlashTravelDuration then
+				_TimerService:ClearTimer(tickId)
+				if isvalid(fx) then fx:Destroy() end
+			end
+		end, self.FlashSlashTravelTickInterval)
+	end
+
+	@ExecSpace("Multicast")
+	method void PlayFlashSlashSound()
+		if self:IsServer() then return end
+		_SoundService:PlaySound(self.FlashSlashSoundRUID, 1.0)
+	end
+
+	-- ── 레이온 전용: 돌진 (카드 155, 슬롯형 액티브 4호) — 실피드의 플레시 미라주(Card108)와 완전히
+	-- 동일한 시스템 재사용(유저 지정: "플레시 미라쥬랑 동일 시스템"). 좌/우 최외곽 대상을 중앙(존
+	-- 중심)으로 넉백시키고, 그 이동 경로에 있는 다른 몬스터는 충돌 대미지(타격 유닛 %)만 받는다.
+	-- 전부 중앙 근방(Card108CenterRadius 안)에 몰려있으면 대신 무작위 2마리를 양끝으로 밀어낸다.
+	-- 데미지/타겟수/충돌비율 표가 플레시 미라주와 완전히 동일해서 Card108KnockbackDuration/
+	-- Card108CenterRadius/Card108OutwardOvershoot/Card108KnockbackStartDelay 등 공용 타이밍 상수를
+	-- 그대로 재사용한다 — 연출(2개 클립을 순서대로 이어붙임)/아이콘/사운드만 레이온 전용으로 교체.
+	-- 콤보스택은 붙지 않는다(유저 표에 콤보스택 항목이 없음).
+	@Sync property integer ChargeLevel = 0
+	property number Card155Cooldown = 5.0
+	property string ChargeEffect1RUID = "ef91af157e1a481cb46a3dc06add959c"
+	property string ChargeEffect2RUID = "17d0678308ed420bbcf6599d7f2ddf84"
+	property integer ChargeEffect1FrameCount = 8
+	property integer ChargeEffect2FrameCount = 8
+	property number ChargeEffectFrameStepDuration = 0.07
+	-- 유저 지정: 첫 연출은 즉시, 두번째 연출은 첫 연출이 끝나길 기다리지 않고 0.2초 뒤 겹쳐서 등장
+	property number ChargeEffect2Delay = 0.2
+	-- 유저 지정: 넉백은 연출 시작과 동시에 바로 들어간다("넉백 바로 되게해야겠다 연출즉시") — 플레시
+	-- 미라주/플래시 봄버가 쓰는 공용 Card108KnockbackStartDelay(0.7초)는 그대로 두고 돌진만 독립된
+	-- 지연값(0초)을 쓴다.
+	property number ChargeKnockbackStartDelay = 0
+	property number ChargeEffectScale = 1.0
+	property string ChargeHitEffectRUID = "f0f5068c3da743f1addd85e35f2f4b5f"
+	property number ChargeHitEffectScale = 1.0
+	property string ChargeSoundRUID = "f5a9f40c07c645c88e069849a566b4ff"
+
+	-- 타당 데미지 — 플레시 미라주(Card108)와 완전히 동일한 표
+	method number GetChargeDamage(integer level)
+		if level >= 5 then return 200
+		elseif level >= 4 then return 160
+		elseif level >= 3 then return 140
+		end
+		return 100
+	end
+
+	-- 타겟 수(=동시에 넉백시키는 유닛 수) — 플레시 미라주와 동일: Lv1:1명 / Lv2~5:2명
+	method integer GetChargeTargetCount(integer level)
+		if level >= 2 then return 2 end
+		return 1
+	end
+
+	-- 충돌 대상("타격 유닛") 대미지 비율 — 플레시 미라주와 완전히 동일한 표(30/30/40/50/60%)
+	method number GetChargeCollisionPercent(integer level)
+		if level >= 5 then return 0.60
+		elseif level >= 4 then return 0.50
+		elseif level >= 3 then return 0.40
+		end
+		return 0.30
+	end
+
+	-- FleshMirageAttack과 동일한 좌/우 최외곽 탐색 + 중앙 넉백 + 중앙근방 예외(양끝으로 밀어냄) 로직
+	@ExecSpace("ServerOnly")
+	method void ChargeAttack(number damage, boolean isCrit)
+		local map = self:GetCurrentMap()
+		if map == nil then return end
+		local monsters = map:GetChildComponentsByTypeName("script.MonsterAI", false)
+		local centerX = self:GetZoneCenterX()
+
+		local leftExtreme, rightExtreme = nil, nil
+		local centerCluster = {}
+		for _, mob in ipairs(monsters) do
+			---@type MonsterAI
+			local m = mob
+			if isvalid(m) and not m._dead and isvalid(m.Entity) then
+				local x = m.Entity.TransformComponent.Position.x
+				if x < centerX - self.Card108CenterRadius and (leftExtreme == nil or x < leftExtreme.Entity.TransformComponent.Position.x) then
+					leftExtreme = m
+				elseif x > centerX + self.Card108CenterRadius and (rightExtreme == nil or x > rightExtreme.Entity.TransformComponent.Position.x) then
+					rightExtreme = m
+				elseif x >= centerX - self.Card108CenterRadius and x <= centerX + self.Card108CenterRadius then
+					table.insert(centerCluster, m)
+				end
+			end
+		end
+		if leftExtreme == nil and rightExtreme == nil then
+			self:FireChargeOutward(map, monsters, centerCluster, centerX, damage, isCrit)
+			return
+		end
+
+		local targetCount = self:GetChargeTargetCount(self.ChargeLevel)
+		local collisionPct = self:GetChargeCollisionPercent(self.ChargeLevel)
+
+		if targetCount >= 2 then
+			if leftExtreme ~= nil then
+				self:FireChargeShove(map, monsters, leftExtreme, centerX, damage, isCrit, collisionPct)
+			elseif #centerCluster > 0 then
+				local pick = centerCluster[_UtilLogic:RandomIntegerRange(1, #centerCluster)]
+				self:FireChargeShove(map, monsters, pick, centerX - self.Card108OutwardOvershoot, damage, isCrit, collisionPct)
+			end
+			if rightExtreme ~= nil then
+				self:FireChargeShove(map, monsters, rightExtreme, centerX, damage, isCrit, collisionPct)
+			elseif #centerCluster > 0 then
+				local pick = centerCluster[_UtilLogic:RandomIntegerRange(1, #centerCluster)]
+				self:FireChargeShove(map, monsters, pick, centerX + self.Card108OutwardOvershoot, damage, isCrit, collisionPct)
+			end
+		else
+			local pickRight
+			if leftExtreme == nil then pickRight = true
+			elseif rightExtreme == nil then pickRight = false
+			else pickRight = _UtilLogic:RandomDouble() < 0.5 end
+			if pickRight then
+				self:FireChargeShove(map, monsters, rightExtreme, centerX, damage, isCrit, collisionPct)
+			else
+				self:FireChargeShove(map, monsters, leftExtreme, centerX, damage, isCrit, collisionPct)
+			end
+		end
+	end
+
+	-- FireFleshMirageOutward와 동일한 "전부 중앙 근방" 예외 처리 — 무작위 2마리를 양끝으로 밀어낸다
+	@ExecSpace("ServerOnly")
+	method void FireChargeOutward(Entity map, table monsters, table centerCluster, number centerX, number damage, boolean isCrit)
+		if #centerCluster < 2 then return end
+		local collisionPct = self:GetChargeCollisionPercent(self.ChargeLevel)
+
+		local pool = {}
+		for i, m in ipairs(centerCluster) do pool[i] = m end
+		for i = #pool, 2, -1 do
+			local j = _UtilLogic:RandomIntegerRange(1, i)
+			pool[i], pool[j] = pool[j], pool[i]
+		end
+
+		self:FireChargeShove(map, monsters, pool[1], centerX - self.Card108OutwardOvershoot, damage, isCrit, collisionPct)
+		self:FireChargeShove(map, monsters, pool[2], centerX + self.Card108OutwardOvershoot, damage, isCrit, collisionPct)
+	end
+
+	-- FireFleshMirageShove와 완전히 동일한 넉백/충돌 로직 — 연출/타격이펙트만 돌진 전용으로 교체
+	@ExecSpace("ServerOnly")
+	method void FireChargeShove(Entity map, table monsters, MonsterAI primary, number destX, number damage, boolean isCrit, number collisionPct)
+		if not isvalid(primary) or not isvalid(primary.Entity) or not isvalid(primary.Entity.TransformComponent) then return end
+		destX = self:ClampKnockbackDestX(primary, destX)
+		local primaryX = primary.Entity.TransformComponent.Position.x
+		local dirRight = destX > primaryX
+		local totalDist = math.abs(destX - primaryX)
+
+		local pp = primary.Entity.TransformComponent.Position
+		self:PlayChargeSound()
+		self:PlayChargeEffect(Vector3(pp.x, pp.y + self.Card108EffectYOffset, pp.z), dirRight, self:GetEffectScaleRatio(primary))
+
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) or not isvalid(primary) or not isvalid(primary.Entity) or primary._dead then return end
+
+			if isCrit then primary:TakeDamageDelayedDeath(damage * 2, true, self.Card108KnockbackDuration)
+			else primary:TakeDamageDelayedDeath(damage, false, self.Card108KnockbackDuration) end
+
+			primary:ApplyLateralShove(destX, self.Card108KnockbackDuration)
+
+			local collideCount = 0
+			if totalDist > 0 then
+				for _, mob in ipairs(monsters) do
+					---@type MonsterAI
+					local m = mob
+					if isvalid(m) and m ~= primary and not m._dead and isvalid(m.Entity) and self:IsSameDepthBand(primary, m) then
+						local mx = m.Entity.TransformComponent.Position.x
+						local inPath = (dirRight and mx >= primaryX and mx <= destX)
+							or ((not dirRight) and mx <= primaryX and mx >= destX)
+						if inPath then
+							collideCount = collideCount + 1
+							local hitDelay = self.Card108KnockbackDuration * (math.abs(mx - primaryX) / totalDist)
+							local collideDamage = damage * collisionPct
+							_TimerService:SetTimerOnce(function()
+								if not isvalid(m) or m._dead or not isvalid(m.Entity) then return end
+								local hitPos = m.Entity.TransformComponent.Position
+								local hitFx = self:SpawnEffect(self.ChargeHitEffectRUID, hitPos, 0, 1.0, self.ChargeHitEffectScale, 1)
+								if hitFx ~= nil then hitFx:Destroy(self.HitEffectLifetime) end
+								if isCrit then m:TakeDamageCrit(collideDamage * 2)
+								else m:TakeDamage(collideDamage) end
+							end, hitDelay)
+						end
+					end
+				end
+			end
+
+			log("ChargeShove: dmg=" .. math.floor(isCrit and damage * 2 or damage) .. " collide=" .. collideCount .. " dirRight=" .. tostring(dirRight))
+		end, self.ChargeKnockbackStartDelay)
+	end
+
+	-- 유저 정정: 첫 연출은 즉시 날아가고, 두번째 연출은 첫 연출이 끝나길 기다리지 않고 그로부터
+	-- 0.2초 뒤에 겹쳐서 등장한다("연출하고 0.2s있다 ㄱㄱ") — 순차 재생이 아니라 각자 독립된 엔티티로
+	-- 동시에(겹쳐서) 재생해야 하므로 fx를 클립별로 따로 스폰한다. 각 클립은 슬래시/브랜디쉬와 동일한
+	-- "정지-프레임" 수동 제어로 정확히 한 번씩만 재생한다(네이티브 루프 방지). 오른쪽으로 이동할 때
+	-- 좌우 반전.
+	@ExecSpace("ServerOnly")
+	method void PlayChargeEffect(Vector3 pos, boolean dirRight, number scaleRatio)
+		self:PlayChargeEffectClip(pos, dirRight, scaleRatio, self.ChargeEffect1RUID, self.ChargeEffect1FrameCount, 0)
+		self:PlayChargeEffectClip(pos, dirRight, scaleRatio, self.ChargeEffect2RUID, self.ChargeEffect2FrameCount, self.ChargeEffect2Delay)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void PlayChargeEffectClip(Vector3 pos, boolean dirRight, number scaleRatio, string clipRUID, integer frameCount, number startDelay)
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) then return end
+			local map = self:GetCurrentMap()
+			if map == nil then return end
+			local fx = _SpawnService:SpawnByModelId("skilleffectlong", "FX", pos, map)
+			if fx == nil then return end
+			local renderer = fx.SpriteRendererComponent
+			if renderer == nil then return end
+			renderer.FlipX = dirRight
+			local s = self.ChargeEffectScale * scaleRatio
+			fx.TransformComponent.Scale = Vector3(s, s, 1.0)
+			renderer.SpriteRUID = clipRUID
+			for i = 0, frameCount - 1 do
+				_TimerService:SetTimerOnce(function()
+					if isvalid(fx) and isvalid(renderer) then
+						renderer.StartFrameIndex = i
+						renderer.EndFrameIndex = i
+					end
+				end, i * self.ChargeEffectFrameStepDuration)
+			end
+			fx:Destroy(frameCount * self.ChargeEffectFrameStepDuration + 0.05)
+		end, startDelay)
+	end
+
+	@ExecSpace("Multicast")
+	method void PlayChargeSound()
+		if self:IsServer() then return end
+		_SoundService:PlaySound(self.ChargeSoundRUID, 1.0)
+	end
+
 	-- ── 실피드 전용: 바람의 시 (카드 101, 슬롯형 정식 스킬 1호) — 상시발동인 애로우샷과 달리 슬롯에
 	-- 배치되는 일반 액티브 스킬이다. Lv1~5 고정 데미지 테이블(90/90/130/130/170), 쿨타임은 레벨
 	-- 무관 3.5초 고정, 타겟 수만 레벨별로 늘어난다(Lv1-2:1명/Lv3-4:2명/Lv5:3명, GetClosestTargets로
@@ -671,8 +1339,13 @@ script CardManager extends Logic
 	property number Card101BowEffectModelDuration = 2.5  -- 활 쏘는 연출이 쓰는 "skilleffectlong" 모델의 고정 Duration
 	property number Card101BowEffectOverlapMargin = 0.3  -- 모델 Duration에서 이 여유만큼 남았을 때 다음 레이어를 겹쳐 스폰
 	-- y=3.0으로 처음 잡았다가 화면(카메라) 밖으로 나가 안 보이는 걸 실측 확인 — 이후 라이브로 직접
-	-- 보면서 유저가 "경험치바 아래쯤"으로 지정(화면 상단 HUD 바로 아래)해 다시 올렸다.
-	property Vector3 Card101BowPosition = Vector3(0, 2.2, -0.1)
+	-- 보면서 유저가 "경험치바 아래쯤"으로 지정(화면 상단 HUD 바로 아래)해 2.2로 재조정했었다.
+	-- 이후 GetBowSpawnPosition을 플레이어 실제 좌표 기준으로 바꾸면서(맵마다 발판 높이가 달라도 항상
+	-- 같은 상대 높이가 나오게 하려고) 이 y값의 의미도 "화면 절대 높이"에서 "플레이어 기준 오프셋"으로
+	-- 바뀌었다. 맵1에서 플레이어의 실제 로컬 y가 -1.349였던 걸 실측으로 확인해서, 계산상으론 2.2 -
+	-- (-1.349) = 3.549가 예전 절대 높이 2.2와 동일한 화면 위치였지만, 라이브 스크린샷으로 직접 보면서
+	-- 유저가 3.8로 조금 더 올려 확정했다(유저 요청: "경험치바 아래로 다시" → 스크린샷 확인 → "3.8로하면 될듯").
+	property Vector3 Card101BowPosition = Vector3(0, 3.8, -0.1)
 	-- -90도로 돌렸다가 유저 요청으로 180도 더 돌림(-90+180=90) — 생성 연출/활 쏘는 연출 둘 다 공용.
 	property number Card101BowRotation = 90
 	-- 유저 요청: 기존 대비 1.5배
@@ -1547,11 +2220,11 @@ script CardManager extends Logic
 	property string Card114IconRUID = "333f9c5876124f14aa9a1ad80265a3f3"
 	property number Card114Cooldown = 4.0  -- 레벨 무관 고정
 	property integer Card114TargetCount = 2  -- 레벨 무관 고정 anchor 수
-	-- 기준값(30% 축소 적용된 값) — 실제 사용값은 레벨별 배율(GetArrowIllusionRadius/EffectScale)이
-	-- 곱해진 값이다. 유저 요청: "크기 한 15%만 키우자 ~ 3레벨일때는 20%(대미지 범위도 변경되야함)"
-	property number Card114BaseRadius = 0.63
+	-- 기준값 — 실제 사용값은 레벨별 배율(GetArrowIllusionRadius/EffectScale)이 곱해진 값이다.
+	-- 유저 요청으로 연출크기 1.7배 확대(0.63 → 1.071) + 히트 판정 반경도 동일 배율로 동반 확대
+	property number Card114BaseRadius = 1.071
 	property number Card114EffectYOffset = 0.0  -- 유저 요청으로 위로 1만큼 이동(-1.0 → 0.0)
-	property number Card114BaseEffectScale = 0.63
+	property number Card114BaseEffectScale = 1.071
 
 	-- 레벨별 연출/판정 배율 — Lv1~2: +15% / Lv3: +20%
 	method number GetArrowIllusionSizeMult(integer level)
@@ -2499,12 +3172,15 @@ script CardManager extends Logic
 	property string Card106CastFrame1RUID = "fb64437061834e3597957c3d973f777f"
 	property string Card106CastFrame2RUID = "7bdae609fee44c4a9e49fadccfe63270"
 	property string Card106CastFrame3RUID = "2783c93ee8134c5c9cb7b7fa64b67cea"
-	property number Card106CastFrameDuration = 0.06  -- 프레임 1장당 재생 시간
-	property number Card106CastDuration = 0.6  -- 전체 재생 시간(프레임을 여러 바퀴 이어붙여서 채움) — 유저 요청으로 다시 0.6초
+	-- 유저 요청: "쏘는속도 조금더 올리면 좋겠어" — 에로우 플레터 1.5배 속도 조정과 동일한 기법으로
+	-- 프레임 재생 속도/전체 재생시간/겹침 시간을 전부 1.2로 나눠서 발사 간격(CastDuration-Overlap)
+	-- 자체가 1.2배 빨라지게 한다(0.5초 → 0.4167초).
+	property number Card106CastFrameDuration = 0.05  -- 프레임 1장당 재생 시간 — 기존 0.06의 1/1.2
+	property number Card106CastDuration = 0.5  -- 전체 재생 시간 — 기존 0.6의 1/1.2
 	property number Card106CastScale = 1.15  -- 유저 요청으로 15% 확대
 	-- 다음 화살의 캐스트를 이전 캐스트가 끝나기 이 시간 전에 미리 겹쳐서 스폰한다(에로우 플레터의
 	-- Card118CastOverlap과 동일한 기법) — 화살 발사 간격 자체도 이 값만큼 줄어들어 더 빠르게 연사된다.
-	property number Card106CastOverlap = 0.1
+	property number Card106CastOverlap = 0.0833  -- 기존 0.1의 1/1.2
 	-- 마지막 화살의 캐스트는 끝까지 다 재생하지 않고, 화살이 실제로 발사되는 시점 직후 바로 끈다
 	-- (그 전 화살들은 다음 캐스트가 겹쳐서 스폰되므로 끝까지 재생해도 자연스럽게 이어짐).
 	property number Card106LastCastCutoff = 0.15
@@ -2512,7 +3188,7 @@ script CardManager extends Logic
 	property string Card106HitRUID = "34d1273d29b2435aa0b97036f4e7416c"
 	property number Card106ArrowScale = 1.05  -- 유저 요청으로 5% 확대
 	property number Card106ArrowLaunchDelay = 0.05  -- 캐스트 시작 후 화살이 나가기까지의 지연 — 거의 즉시(유저 요청: "활이 바로 나가야하고")
-	property number Card106ArrowSpeed = 7.0  -- 화살 이동 속도(초당 월드유닛) — 유저 요청으로 12→7(너무 빨리 사라졌음)
+	property number Card106ArrowSpeed = 8.5  -- 화살 이동 속도(초당 월드유닛) — 12→7(너무 빨리 사라졌음)→8.5(유저 요청: "화살속도 조금더 올리면 좋겠어")
 	-- 화살은 캐스트와 달리 대각선 기울기 보정이 필요 없다 — 각도 보정 없이 FlipX(좌우 반전)만으로
 	-- 방향을 처리한다("Y축 반전"이라는 유저 표현은 엔진 FlipY가 아니라 "Y축 기준 반사"=좌우 반전을
 	-- 뜻했음, 뒤늦게 파악).
@@ -2720,6 +3396,17 @@ script CardManager extends Logic
 			fx.TransformComponent.Position = Vector3(x, arrowY + visualY, launchPos.z)
 		end)
 
+		-- 유저 리포트(에로우 플레터에서 먼저 확인, 리트리트 샷도 동일 구조라 재확인): "관통이 남으면
+		-- 화면 끝까지 가고 거기서 살짝 멈춰있다" — 시각 이동(Tween, 실제 엔진 경과시간)과 충돌판정
+		-- 틱루프(elapsedTime을 tickInterval만큼 수동 누적하는 별도 시계)가 다른 시계를 쓰다 보니 틱루프가
+		-- 살짝 밀리면 Tween은 이미 끝나 화면 끝에 멈춰 보이는데 reachedEdge가 아직 안 걸려 fx:Destroy가
+		-- 늦게 불린다. Tween과 동일한 totalTravelTime으로 별도 안전장치 타이머를 걸어 확실히 사라지게
+		-- 한다(관통 예산이 남아도 끝까지 이동하는 동작 자체는 그대로 유지).
+		_TimerService:SetTimerOnce(function()
+			if timerId then _TimerService:ClearTimer(timerId) end
+			if isvalid(fx) then fx:Destroy(0.05) end
+		end, totalTravelTime)
+
 		timerId = _TimerService:SetTimerRepeat(function()
 			if not isvalid(self) or not isvalid(fx) then
 				if timerId then _TimerService:ClearTimer(timerId) end
@@ -2797,6 +3484,10 @@ script CardManager extends Logic
 	property number Card118CastScale = 0.7  -- 유저 요청으로 30% 축소
 	property string Card118ArrowRUID = "3aa8859ff9a44b969c96ef722d1c24f0"
 	property string Card118HitRUID = "fb0500173c6f494fb71f963bc9fd6b7e"
+	-- 유저 요청: "타격 연출 화살에 닿고 바로 터지면 좋겠고" — HitEffectLifetime(0.3초)이 9프레임 클립의
+	-- 원본 재생시간보다 짧아서 기본 재생속도(1.0)로는 절정(burst) 프레임까지 못 가고 잘렸다. 재생속도를
+	-- 높여 0.3초 안에 절정까지 확실히 도달하도록 한다.
+	property number Card118HitPlayRate = 2.5
 	property number Card118ArrowScale = 0.85  -- 유저 요청으로 15% 축소
 	-- 유저 지적: "각도가 한개도 안바뀌는데" — 화살 스폰을 rotationZ=0으로 하드코딩해놔서 애초에
 	-- 보정이 반영될 수가 없었다(진짜 원인). 리트리트 샷과 동일하게 조정 가능한 보정값으로 분리.
@@ -3002,6 +3693,18 @@ script CardManager extends Logic
 			fx.TransformComponent.Position = Vector3(x, arrowY + visualY, launchPos.z)
 		end)
 
+		-- 유저 리포트: "화살이 관통이 남으면 화면 끝까지 가고 거기서 머물러있는데" — 시각적 이동(Tween,
+		-- 실제 엔진 경과시간 기준)과 충돌판정 틱루프(elapsedTime을 매번 tickInterval만큼 수동으로
+		-- 누적하는 별도 시계)가 서로 다른 시계를 쓰다 보니, 틱루프 쪽이 살짝이라도 밀리면(프레임 드랍
+		-- 등) Tween은 이미 끝나 화살이 화면 끝에 멈춰 보이는데 틱루프의 reachedEdge는 아직 안 걸려서
+		-- fx:Destroy가 늦게 불린다 — 그동안 "멈춰서 안 사라지는" 것처럼 보인다. Tween과 동일한
+		-- totalTravelTime으로 별도의 안전장치 타이머를 걸어, 실제 이동이 끝나는 시점에 맞춰 확실히
+		-- 사라지게 한다(유저 재확인: 관통 예산이 남아도 끝까지 이동하는 동작 자체는 그대로 유지해야 함).
+		_TimerService:SetTimerOnce(function()
+			if timerId then _TimerService:ClearTimer(timerId) end
+			if isvalid(fx) then fx:Destroy(0.05) end
+		end, totalTravelTime)
+
 		timerId = _TimerService:SetTimerRepeat(function()
 			if not isvalid(self) or not isvalid(fx) then
 				if timerId then _TimerService:ClearTimer(timerId) end
@@ -3024,7 +3727,7 @@ script CardManager extends Logic
 						if pierceIdx > 0 then finalDamage = damage * self:GetArrowFletterPiercePercent(pierceIdx) end
 						if isCrit then m:TakeDamageCrit(finalDamage * 2)
 						else m:TakeDamage(finalDamage) end
-						local hitFx = self:SpawnEffect(self.Card118HitRUID, Vector3(mp.x, mp.y, launchPos.z), 0, 1.0, 1.0, 1)
+						local hitFx = self:SpawnEffect(self.Card118HitRUID, Vector3(mp.x, mp.y, launchPos.z), 0, self.Card118HitPlayRate, 1.0, 1)
 						if hitFx ~= nil then hitFx:Destroy(self.HitEffectLifetime) end
 					end
 				end
@@ -4420,6 +5123,11 @@ script CardManager extends Logic
 		if cardIdx == 111 then return self.CriticalShotLevel > 0 end
 		if cardIdx == 112 then return self.FinalAttackBowLevel > 0 end
 		if cardIdx == 113 then return self.RapidFireLevel > 0 end
+		if cardIdx == 151 then return self.ComboAttackLevel > 0 end
+		if cardIdx == 152 then return self.SlashLevel > 0 end
+		if cardIdx == 153 then return self.BrandishLevel > 0 end
+		if cardIdx == 154 then return self.FlashSlashLevel > 0 end
+		if cardIdx == 155 then return self.ChargeLevel > 0 end
 		return self.Slot1Card == cardIdx or self.Slot2Card == cardIdx or self.Slot3Card == cardIdx
 			or self.Slot4Card == cardIdx or self.Slot5Card == cardIdx or self.Slot6Card == cardIdx
 	end
@@ -4546,6 +5254,7 @@ script CardManager extends Logic
 		local base = self.Card5Damage
 		if cardIdx == 1 then base = self.Card1Damage
 		elseif cardIdx == 25 then base = self.ArrowShotDamage
+		elseif cardIdx == 150 then base = self.LeionAttackDamage
 		elseif cardIdx == 2 then base = self.Card2Damage
 		elseif cardIdx == 3 then base = self:GetColdBeamDamage()
 		elseif cardIdx == 4 then base = self:GetThunderBoltDamage()
@@ -4577,6 +5286,10 @@ script CardManager extends Logic
 		elseif cardIdx == 115 then base = self:GetEvolveDamage(self.EvolveLevel)
 		elseif cardIdx == 116 then base = self:GetStormPoemDamage(self.StormPoemLevel)
 		elseif cardIdx == 117 then base = self:GetEnhancedArrowBlowDamage(self.EnhancedArrowBlowLevel)
+		elseif cardIdx == 152 then base = self:GetSlashDamage(self.SlashLevel)
+		elseif cardIdx == 153 then base = self:GetBrandishDamage(self.BrandishLevel)
+		elseif cardIdx == 154 then base = self:GetFlashSlashDamage(self.FlashSlashLevel)
+		elseif cardIdx == 155 then base = self:GetChargeDamage(self.ChargeLevel)
 		end
 		return base * self:GetMeditationMult() * self:GetSkillInvDamageMult(cardIdx) * self:GetRapidFireMult()
 	end
@@ -4716,6 +5429,7 @@ script CardManager extends Logic
 	method number GetCardCooldown(integer cardIdx)
 		if cardIdx == 1 then return self.Card1Cooldown
 		elseif cardIdx == 25 then return self.ArrowShotCooldown
+		elseif cardIdx == 150 then return self.LeionAttackCooldown
 		elseif cardIdx == 2 then return self.Card2Cooldown
 		elseif cardIdx == 3 then return self.Card3Cooldown
 		elseif cardIdx == 4 then return self.Card4Cooldown
@@ -4750,6 +5464,10 @@ script CardManager extends Logic
 		elseif cardIdx == 115 then return self:GetEvolveCooldown(self.EvolveLevel)
 		elseif cardIdx == 116 then return self.Card116Cooldown
 		elseif cardIdx == 117 then return self.Card117Cooldown
+		elseif cardIdx == 152 then return self.Card152Cooldown
+		elseif cardIdx == 153 then return self:GetBrandishCooldown(self.BrandishLevel)
+		elseif cardIdx == 154 then return self.Card154Cooldown
+		elseif cardIdx == 155 then return self.Card155Cooldown
 		end
 		return 1.0
 	end
@@ -4757,6 +5475,7 @@ script CardManager extends Logic
 	method string GetCardIconRUID(integer cardIdx)
 		if cardIdx == 1 then return self.Card1IconRUID
 		elseif cardIdx == 25 then return self.ArrowShotIconRUID
+		elseif cardIdx == 150 then return self.LeionAttackIconRUID
 		elseif cardIdx == 2 then return self.Card2IconRUID
 		elseif cardIdx == 3 then return self.Card3IconRUID
 		elseif cardIdx == 4 then return self.Card4IconRUID
@@ -4799,6 +5518,7 @@ script CardManager extends Logic
 		elseif cardIdx == 111 then return self.Card111IconRUID
 		elseif cardIdx == 112 then return self.Card112IconRUID
 		elseif cardIdx == 113 then return self.Card113IconRUID
+		elseif _CardRegistry:HasCard(cardIdx) then return _CardRegistry:GetIcon(cardIdx)
 		end
 		return ""
 	end
@@ -4967,6 +5687,11 @@ script CardManager extends Logic
 		elseif cardIdx == 111 then return self.CriticalShotLevel
 		elseif cardIdx == 112 then return self.FinalAttackBowLevel
 		elseif cardIdx == 113 then return self.RapidFireLevel
+		elseif cardIdx == 151 then return self.ComboAttackLevel
+		elseif cardIdx == 152 then return self.SlashLevel
+		elseif cardIdx == 153 then return self.BrandishLevel
+		elseif cardIdx == 154 then return self.FlashSlashLevel
+		elseif cardIdx == 155 then return self.ChargeLevel
 		end
 		return 0
 	end
@@ -5204,6 +5929,10 @@ script CardManager extends Logic
 			if self.FinalAttackBowLevel > 0 then self:NotifyFinalAttackBowOnPermanent() end
 		elseif name == "RapidFireLevel" then
 			if self.RapidFireLevel > 0 then self:NotifyRapidFireOnPermanent() end
+		elseif name == "SlashLevel" then self:RefreshSlotIfHoldsCard(152)
+		elseif name == "BrandishLevel" then self:RefreshSlotIfHoldsCard(153)
+		elseif name == "FlashSlashLevel" then self:RefreshSlotIfHoldsCard(154)
+		elseif name == "ChargeLevel" then self:RefreshSlotIfHoldsCard(155)
 		end
 	end
 
@@ -5634,6 +6363,7 @@ script CardManager extends Logic
 		elseif cardIdx == 111 then name = self.Card111Name .. " Lv." .. self.CriticalShotLevel
 		elseif cardIdx == 112 then name = self.Card112Name .. " Lv." .. self.FinalAttackBowLevel
 		elseif cardIdx == 113 then name = self.Card113Name .. " Lv." .. self.RapidFireLevel
+		elseif _CardRegistry:HasCard(cardIdx) then name = _CardRegistry:GetName(cardIdx) .. " Lv." .. self:GetSlotLevelNum(cardIdx)
 		end
 
 		-- 데미지
@@ -5724,12 +6454,23 @@ script CardManager extends Logic
 			dmg = "추가 공격 확률 " .. math.floor(self:GetFinalAttackBowChance() * 100) .. "%  (영구)"
 		elseif cardIdx == 113 then
 			dmg = "데미지 증가 : +" .. self:GetRapidFirePercent() .. "%  (영구)"
+		elseif cardIdx == 151 then
+			dmg = "스택 확률 : " .. math.floor(_CardRegistry:GetChance(151, self.ComboAttackLevel) * 100) .. "%  (영구)"
+		elseif cardIdx == 152 then
+			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
+		elseif cardIdx == 153 then
+			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
+		elseif cardIdx == 154 then
+			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
+		elseif cardIdx == 155 then
+			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
 		end
 
 		-- 쿨타임 (부스터 활성 중이면 실효 쿨타임 추가 표시)
 		local cd = self:GetCardCooldown(cardIdx)
 		local isPassiveCard = cardIdx == 10 or cardIdx == 18 or cardIdx == 22
 			or cardIdx == 109 or cardIdx == 110 or cardIdx == 111 or cardIdx == 112 or cardIdx == 113
+			or cardIdx == 151
 		local cdStr = isPassiveCard and "패시브 스킬" or ("쿨타임 : " .. string.format("%.1f", cd) .. "s")
 		local boosterOn = false
 		if self._activeBuffOrder ~= nil then
@@ -5877,6 +6618,14 @@ script CardManager extends Logic
 			extraStr = "강화 확률(화살마다) " .. enhancePct .. "%  |  강화 시 " .. self.Card117EnhancedHitCount .. "연타(" .. string.format("%.2f", self.Card117EnhancedHitInterval) .. "초 간격)"
 		elseif cardIdx == 112 then
 			extraStr = "추가 공격 대미지 " .. math.floor(self:GetFinalAttackBowMultiplier() * 100) .. "%"
+		elseif cardIdx == 152 then
+			extraStr = "타겟 " .. self:GetSlashTargetCount(self.SlashLevel) .. "명  |  콤보스택 +1 (100%)"
+		elseif cardIdx == 153 then
+			extraStr = "타겟 " .. self:GetBrandishTargetCount(self.BrandishLevel) .. "명  |  콤보스택 +1 (100%)"
+		elseif cardIdx == 154 then
+			extraStr = "타겟 " .. self:GetFlashSlashTargetCount(self.FlashSlashLevel) .. "명  |  관통 이동 판정  |  콤보스택 +1 (100%)"
+		elseif cardIdx == 155 then
+			extraStr = "타겟 " .. self:GetChargeTargetCount(self.ChargeLevel) .. "명  |  중앙으로 돌진(중앙에 몰려있으면 양끝으로)  |  타격 유닛 " .. math.floor(self:GetChargeCollisionPercent(self.ChargeLevel) * 100) .. "% 대미지"
 		end
 
 		self.tooltipName.Text  = name
@@ -5920,9 +6669,11 @@ script CardManager extends Logic
 		local target = self:FindTarget()
 
 		-- 기본공격은 슬롯 배치와 무관하게 항상 활성 — 캐릭터별로 완전히 다른 트랙을 탄다
-		-- (0=아르카나: 파이어샷, 1=실피드: 애로우샷)
+		-- (0=아르카나: 파이어샷, 1=실피드: 애로우샷, 2=레이온: 콤보어택 기본공격)
 		if _GameManager.SelectedCharacter == 1 then
 			self._timerBasicArrow = self:TickCard(25, 0, self._timerBasicArrow, delta, target)
+		elseif _GameManager.SelectedCharacter == 2 then
+			self._timerBasicLeion = self:TickCard(150, 0, self._timerBasicLeion, delta, target)
 		else
 			self._timerBasic = self:TickCard(1, 0, self._timerBasic, delta, target)
 		end
@@ -6033,6 +6784,16 @@ script CardManager extends Logic
 					self:UncounterArrowVAttack(damage, isCrit)
 				elseif cardIndex == 120 then
 					self:FlashBomberAttack(damage, isCrit)
+				elseif cardIndex == 150 then
+					self:LeionBasicAttack(damage, isCrit, target)
+				elseif cardIndex == 152 then
+					self:SlashAttack(damage, isCrit)
+				elseif cardIndex == 153 then
+					self:BrandishAttack(damage, isCrit)
+				elseif cardIndex == 154 then
+					self:FlashSlashAttack(damage, isCrit)
+				elseif cardIndex == 155 then
+					self:ChargeAttack(damage, isCrit)
 				else
 					if isCrit then target:TakeDamageCrit(damage * 2)
 					else target:TakeDamage(damage) end
@@ -7381,6 +8142,20 @@ script CardManager extends Logic
 		return _MonsterSpawner:GetZoneOffsetX(_MapManager.CurrentMapIndex)
 	end
 
+	-- GetPlayerCenterX와 동일한 목적의 Y판 — 활 스킬 발사 원점(GetBowSpawnPosition)이 존마다 발판
+	-- 높이가 달라도 항상 "플레이어 기준 같은 상대 높이"에서 나가도록, 존 컨테이너 오프셋 보정 없이
+	-- 플레이어 엔티티의 실제 월드 Y를 직접 조회한다(유저 리포트: "맵을 이동하면 살짝 어떤 맵은 더
+	-- 아래에있고 그런다" — 카메라 각도 문제가 아니라 Y가 플레이어 위치를 전혀 안 따라가던 게 원인).
+	@ExecSpace("ServerOnly")
+	method number GetPlayerCenterY()
+		for _, userEntity in pairs(_UserService.UserEntities) do
+			if isvalid(userEntity) then
+				return userEntity.TransformComponent.WorldPosition.y
+			end
+		end
+		return 0
+	end
+
 	-- 플레시 미라주/플래시 봄버(둘 다 Card108 공용 속성) 공용 "존 중심" X — GetPlayerCenterX()는 월드
 	-- 좌표인데, 몬스터 Entity.TransformComponent.Position은 map(존 컨테이너) 기준 로컬 좌표라서
 	-- 그대로 비교하면 안 맞는다. GetBowSpawnPosition과 동일한 패턴으로 존 컨테이너의 WorldPosition을
@@ -7406,6 +8181,10 @@ script CardManager extends Logic
 	-- 보이는 버그가 있었다(유저 리포트: "존12에서 쏘는모션이 화면 우측에 뜸") — KingPepeAttack과 동일한
 	-- 원인/수정 패턴(GetPlayerCenterX 참고). 루트 존(container=nil)은 map.TransformComponent 자체가
 	-- 없어(map16 실측 확인) 월드 오프셋 0으로 폴백한다.
+	-- Y도 X와 동일한 이유로 GetPlayerCenterY 기반으로 바꿨다 — 예전엔 Card101BowPosition.y(맵1에서
+	-- 육안 튜닝된 고정 높이)에서 존 컨테이너 오프셋만 빼서, 존마다 발판 높이가 달라 플레이어가 실제로
+	-- 서 있는 높이가 맵1과 다르면 그 차이만큼 화면상 더 아래/위로 보이는 버그가 있었다(유저 리포트:
+	-- "맵을 이동하면 살짝 어떤 맵은 더 아래에있고 그런다"). 이제 항상 "플레이어 기준 상대 높이"로 고정된다.
 	@ExecSpace("ServerOnly")
 	method Vector3 GetBowSpawnPosition()
 		local map = self:GetCurrentMap()
@@ -7414,7 +8193,23 @@ script CardManager extends Logic
 			mapWorldPos = map.TransformComponent.WorldPosition
 		end
 		local centerX = self:GetPlayerCenterX() - mapWorldPos.x
-		return Vector3(centerX + self.Card101BowPosition.x, self.Card101BowPosition.y - mapWorldPos.y, self.Card101BowPosition.z)
+		local centerY = self:GetPlayerCenterY() - mapWorldPos.y
+		return Vector3(centerX + self.Card101BowPosition.x, centerY + self.Card101BowPosition.y, self.Card101BowPosition.z)
+	end
+
+	-- GetCurrentMap()(=GetZoneEntity(CurrentMapIndex))은 병합 존에서 파일 루트가 아니라 오프셋이 있는
+	-- 존 자식 컨테이너를 반환할 수 있다. SpawnEffect류는 전부 이 map을 부모로 스폰하므로, 몬스터의
+	-- WorldPosition(이미 존 오프셋 포함)을 그대로 넘기면 존 오프셋이 두 번 겹쳐 적용돼 옆 존 위치에
+	-- 나타난다(유저 리포트: "연출이 옆존에서 일어난다"). GetBowSpawnPosition과 동일하게 map의
+	-- WorldPosition을 빼서 진짜 로컬 좌표로 변환해야 한다.
+	@ExecSpace("ServerOnly")
+	method Vector3 WorldToCurrentMapLocal(Vector3 worldPos)
+		local map = self:GetCurrentMap()
+		local mapWorldPos = Vector3(0, 0, 0)
+		if map ~= nil and isvalid(map) and isvalid(map.TransformComponent) then
+			mapWorldPos = map.TransformComponent.WorldPosition
+		end
+		return Vector3(worldPos.x - mapWorldPos.x, worldPos.y - mapWorldPos.y, worldPos.z - mapWorldPos.z)
 	end
 
 	@ExecSpace("ServerOnly")
@@ -7835,17 +8630,19 @@ script CardManager extends Logic
 		-- 슬롯엔 영영 배치되지 못한 채 사실상 사라졌었다(선택지 낭비 버그)
 		local hasEmptySlot = self:GetNextEmptySlot() > 0
 
-		-- 캐릭터별 스킬 분리 — 아래 카드 1~24는 전부 아르카나 전용이다. 실피드(SelectedCharacter==1)는
-		-- 이 블록 전체를 건너뛰고, 공용 카드(포션)만 공유한다. 실피드 전용 카드가 생기면 이 아래에
-		-- "if isSylph then ... end" 블록을 새로 추가한다(카드 번호는 100번대로 구분).
+		-- 캐릭터별 스킬 분리 — 아래 카드 1~24는 전부 아르카나 전용이다. 실피드(SelectedCharacter==1)/
+		-- 레이온(SelectedCharacter==2)은 이 블록 전체를 건너뛰고, 공용 카드(포션)만 공유한다. 각자의
+		-- 전용 카드는 "if isSylph then ... end" / "if isLeion then ... end" 블록에 추가한다(카드 번호는
+		-- 실피드 100번대, 레이온 150번대 이후로 구분).
 		local isSylph = (_GameManager.SelectedCharacter == 1)
+		local isLeion = (_GameManager.SelectedCharacter == 2)
 
 		-- 포션 — 유일한 공용(캐릭터 무관) 카드
 		if self.PotionLevel < 5 then
 			table.insert(pool, { card = 6, type = "potion" })
 		end
 
-		if not isSylph then
+		if not isSylph and not isLeion then
 
 		-- 에너지볼트: 미해금이면 해금(슬롯 여유 있을 때만), 해금 후 레벨 < 5이면 강화
 		-- 단, 체인 라이트닝으로 이미 조합된 뒤(ChainLightningLevel>0)에는 에너지볼트 자체의 강화
@@ -8186,6 +8983,44 @@ script CardManager extends Logic
 			end
 		end
 
+		if isLeion then
+			-- 콤보 어택(Card151, 패시브 — 슬롯 없이 레벨만 증가). 기본공격(Card150) 적중 시 이 레벨의
+			-- 확률만큼 대상 몬스터에게 콤보 스택이 붙는다.
+			if self.ComboAttackLevel == 0 then
+				table.insert(pool, { card = 151, type = "unlock" })
+			elseif self.ComboAttackLevel < 5 then
+				table.insert(pool, { card = 151, type = "comboattack_up" })
+			end
+
+			-- 슬래시(Card152, 슬롯형 액티브) — 미해금이면 슬롯 여유 있을 때만 해금
+			if self.SlashLevel == 0 then
+				if hasEmptySlot then table.insert(pool, { card = 152, type = "unlock" }) end
+			elseif self.SlashLevel < 5 then
+				table.insert(pool, { card = 152, type = "slash_up" })
+			end
+
+			-- 브랜디쉬(Card153, 슬롯형 액티브) — 미해금이면 슬롯 여유 있을 때만 해금
+			if self.BrandishLevel == 0 then
+				if hasEmptySlot then table.insert(pool, { card = 153, type = "unlock" }) end
+			elseif self.BrandishLevel < 5 then
+				table.insert(pool, { card = 153, type = "brandish_up" })
+			end
+
+			-- 플래시 슬래시(Card154, 슬롯형 액티브) — 미해금이면 슬롯 여유 있을 때만 해금
+			if self.FlashSlashLevel == 0 then
+				if hasEmptySlot then table.insert(pool, { card = 154, type = "unlock" }) end
+			elseif self.FlashSlashLevel < 5 then
+				table.insert(pool, { card = 154, type = "flashslash_up" })
+			end
+
+			-- 돌진(Card155, 슬롯형 액티브) — 미해금이면 슬롯 여유 있을 때만 해금
+			if self.ChargeLevel == 0 then
+				if hasEmptySlot then table.insert(pool, { card = 155, type = "unlock" }) end
+			elseif self.ChargeLevel < 5 then
+				table.insert(pool, { card = 155, type = "charge_up" })
+			end
+		end
+
 		-- Fisher-Yates 셔플
 		for i = #pool, 2, -1 do
 			local j = _UtilLogic:RandomIntegerRange(1, i)
@@ -8203,13 +9038,23 @@ script CardManager extends Logic
 			end
 		end
 
-		-- 풀이 3개 미만이면 상시 기본공격(파이어샷/애로우샷) 강화로 패딩 — 다른 모든 카드가 업그레이드할
-		-- 게 없을 때 진입하는 유일한 경로. 5회 이후로는 쿨타임 선택지가 없으므로(영구 고정) 데미지만
-		-- 나온다. 실피드(SelectedCharacter==1)는 파이어샷이 아예 안 틱되므로 애로우샷(카드25)으로 패딩해야
-		-- 한다 — 안 그러면 실피드가 다른 카드를 다 채운 뒤엔 아무 효과 없는 선택지만 계속 뜨게 된다.
-		local basicCard = (_GameManager.SelectedCharacter == 1) and 25 or 1
-		local basicUpgradeCount = (basicCard == 25) and self.ArrowShotUpgradeCount or self.Card1UpgradeCount
-		local basicMultiplierCap = (basicCard == 25) and self.ArrowShotMultiplierCap or self.Card1MultiplierCap
+		-- 풀이 3개 미만이면 상시 기본공격(파이어샷/애로우샷/레이온 기본공격) 강화로 패딩 — 다른 모든
+		-- 카드가 업그레이드할 게 없을 때 진입하는 유일한 경로. 5회 이후로는 쿨타임 선택지가 없으므로
+		-- (영구 고정) 데미지만 나온다. 실피드/레이온은 아르카나 파이어샷이 아예 안 틱되므로 각자의
+		-- 기본공격(카드25/150)으로 패딩해야 한다 — 안 그러면 다른 카드를 다 채운 뒤엔 아무 효과 없는
+		-- 선택지만 계속 뜨게 된다.
+		local basicCard = 1
+		if _GameManager.SelectedCharacter == 1 then basicCard = 25
+		elseif _GameManager.SelectedCharacter == 2 then basicCard = 150 end
+		local basicUpgradeCount = self.Card1UpgradeCount
+		local basicMultiplierCap = self.Card1MultiplierCap
+		if basicCard == 25 then
+			basicUpgradeCount = self.ArrowShotUpgradeCount
+			basicMultiplierCap = self.ArrowShotMultiplierCap
+		elseif basicCard == 150 then
+			basicUpgradeCount = self.LeionAttackUpgradeCount
+			basicMultiplierCap = self.LeionAttackMultiplierCap
+		end
 		while #chosen < 3 do
 			local basicType = "dmg"
 			if basicUpgradeCount < basicMultiplierCap and _UtilLogic:RandomDouble() < 0.5 then
@@ -8233,6 +9078,7 @@ script CardManager extends Logic
 		if cardIdx == 6 then return "지속회복"
 		elseif cardIdx == 1 then return "기본공격"
 		elseif cardIdx == 25 then return "기본공격"
+		elseif cardIdx == 150 then return "기본공격"
 		elseif cardIdx == 2 then return "다단타격"
 		elseif cardIdx == 3 then return "관통,둔화"
 		elseif cardIdx == 4 then return "관통,스턴"
@@ -8275,6 +9121,7 @@ script CardManager extends Logic
 		elseif cardIdx == 111 then return "패시브,크리티컬대미지"
 		elseif cardIdx == 112 then return "패시브,확률추가공격"
 		elseif cardIdx == 113 then return "패시브,피해증가"
+		elseif _CardRegistry:HasCard(cardIdx) then return _CardRegistry:GetTags(cardIdx)
 		end
 		return ""
 	end
@@ -8466,6 +9313,53 @@ script CardManager extends Logic
 			icon.ImageRUID = self.ArrowShotIconRUID
 			title.Text = "Lv1"
 			name.Text  = self.ArrowShotName
+			return
+		end
+
+		if cardIdx == 150 then
+			icon.ImageRUID = self.LeionAttackIconRUID
+			title.Text = "Lv1"
+			name.Text  = self.LeionAttackName
+			return
+		end
+
+		if cardIdx == 151 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.ComboAttackLevel + 1)
+			icon.ImageRUID = _CardRegistry:GetIcon(151)
+			title.Text = "Lv" .. nextLevel
+			name.Text  = _CardRegistry:GetName(151)
+			return
+		end
+
+		if cardIdx == 152 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.SlashLevel + 1)
+			icon.ImageRUID = _CardRegistry:GetIcon(152)
+			title.Text = "Lv" .. nextLevel
+			name.Text  = _CardRegistry:GetName(152)
+			return
+		end
+
+		if cardIdx == 153 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.BrandishLevel + 1)
+			icon.ImageRUID = _CardRegistry:GetIcon(153)
+			title.Text = "Lv" .. nextLevel
+			name.Text  = _CardRegistry:GetName(153)
+			return
+		end
+
+		if cardIdx == 154 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.FlashSlashLevel + 1)
+			icon.ImageRUID = _CardRegistry:GetIcon(154)
+			title.Text = "Lv" .. nextLevel
+			name.Text  = _CardRegistry:GetName(154)
+			return
+		end
+
+		if cardIdx == 155 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.ChargeLevel + 1)
+			icon.ImageRUID = _CardRegistry:GetIcon(155)
+			title.Text = "Lv" .. nextLevel
+			name.Text  = _CardRegistry:GetName(155)
 			return
 		end
 
@@ -9424,6 +10318,104 @@ script CardManager extends Logic
 			return
 		end
 
+		-- 레이온 기본공격(Card150)도 파이어샷/애로우샷과 동일한 공식을 독립된 프로퍼티로 따른다.
+		if cardIdx == 150 and (upgradeType == "dmg" or upgradeType == "cd") then
+			if upgradeType == "dmg" then
+				if self.LeionAttackUpgradeCount < self.LeionAttackMultiplierCap then
+					self.LeionAttackDamage = self.LeionAttackDamage * 1.2
+				else
+					self.LeionAttackDamage = self.LeionAttackDamage + self.LeionAttackFlatDamageBonus
+				end
+				self.LeionAttackUpgradeCount = self.LeionAttackUpgradeCount + 1
+			elseif upgradeType == "cd" then
+				if self.LeionAttackUpgradeCount < self.LeionAttackMultiplierCap then
+					self.LeionAttackCooldown = self.LeionAttackCooldown * 0.85
+					self.LeionAttackUpgradeCount = self.LeionAttackUpgradeCount + 1
+				end
+			end
+			log("Card150(레이온 기본공격) upgrade: count=" .. self.LeionAttackUpgradeCount .. " dmg=" .. math.floor(self.LeionAttackDamage) .. " cd=" .. string.format("%.2f", self.LeionAttackCooldown))
+			return
+		end
+
+		-- 콤보 어택(패시브 — 슬롯 없이 레벨만 증가)
+		if cardIdx == 151 then
+			if upgradeType == "unlock" then
+				self.ComboAttackLevel = 1
+			elseif upgradeType == "comboattack_up" and self.ComboAttackLevel < 5 then
+				self.ComboAttackLevel = self.ComboAttackLevel + 1
+			end
+			log("ComboAttack L" .. self.ComboAttackLevel .. " (스택 확률 " .. math.floor(_CardRegistry:GetChance(151, self.ComboAttackLevel) * 100) .. "%)")
+			return
+		end
+
+		-- 슬래시(슬롯형 액티브)
+		if cardIdx == 152 then
+			if upgradeType == "unlock" then
+				self.SlashLevel = 1
+				local slotIdx = self:GetNextEmptySlot()
+				if slotIdx > 0 then
+					self:AssignCardToSlot(slotIdx, 152)
+					self:ResetSlotTimer(slotIdx)
+					log("Card152(Slash) -> Slot" .. slotIdx)
+				end
+			elseif upgradeType == "slash_up" and self.SlashLevel < 5 then
+				self.SlashLevel = self.SlashLevel + 1
+			end
+			log("Slash L" .. self.SlashLevel .. " (dmg=" .. math.floor(self:GetSlashDamage(self.SlashLevel)) .. " targets=" .. self:GetSlashTargetCount(self.SlashLevel) .. ")")
+			return
+		end
+
+		-- 브랜디쉬(슬롯형 액티브)
+		if cardIdx == 153 then
+			if upgradeType == "unlock" then
+				self.BrandishLevel = 1
+				local slotIdx = self:GetNextEmptySlot()
+				if slotIdx > 0 then
+					self:AssignCardToSlot(slotIdx, 153)
+					self:ResetSlotTimer(slotIdx)
+					log("Card153(Brandish) -> Slot" .. slotIdx)
+				end
+			elseif upgradeType == "brandish_up" and self.BrandishLevel < 5 then
+				self.BrandishLevel = self.BrandishLevel + 1
+			end
+			log("Brandish L" .. self.BrandishLevel .. " (dmg=" .. math.floor(self:GetBrandishDamage(self.BrandishLevel)) .. " targets=" .. self:GetBrandishTargetCount(self.BrandishLevel) .. ")")
+			return
+		end
+
+		-- 플래시 슬래시(슬롯형 액티브)
+		if cardIdx == 154 then
+			if upgradeType == "unlock" then
+				self.FlashSlashLevel = 1
+				local slotIdx = self:GetNextEmptySlot()
+				if slotIdx > 0 then
+					self:AssignCardToSlot(slotIdx, 154)
+					self:ResetSlotTimer(slotIdx)
+					log("Card154(FlashSlash) -> Slot" .. slotIdx)
+				end
+			elseif upgradeType == "flashslash_up" and self.FlashSlashLevel < 5 then
+				self.FlashSlashLevel = self.FlashSlashLevel + 1
+			end
+			log("FlashSlash L" .. self.FlashSlashLevel .. " (dmg=" .. math.floor(self:GetFlashSlashDamage(self.FlashSlashLevel)) .. " targets=" .. self:GetFlashSlashTargetCount(self.FlashSlashLevel) .. ")")
+			return
+		end
+
+		-- 돌진(슬롯형 액티브)
+		if cardIdx == 155 then
+			if upgradeType == "unlock" then
+				self.ChargeLevel = 1
+				local slotIdx = self:GetNextEmptySlot()
+				if slotIdx > 0 then
+					self:AssignCardToSlot(slotIdx, 155)
+					self:ResetSlotTimer(slotIdx)
+					log("Card155(Charge) -> Slot" .. slotIdx)
+				end
+			elseif upgradeType == "charge_up" and self.ChargeLevel < 5 then
+				self.ChargeLevel = self.ChargeLevel + 1
+			end
+			log("Charge L" .. self.ChargeLevel .. " (dmg=" .. math.floor(self:GetChargeDamage(self.ChargeLevel)) .. " targets=" .. self:GetChargeTargetCount(self.ChargeLevel) .. ")")
+			return
+		end
+
 		-- 데미지 강화
 		if upgradeType == "dmg" or upgradeType == "unlock_dmg" then
 			if cardIdx == 2 then self.Card2Damage = self.Card2Damage * 1.2
@@ -9641,6 +10633,11 @@ script CardManager extends Logic
 			if self:IsCardUnlocked(106) and self.RetreatShotLevel < 5 then table.insert(pool, 106) end
 			if self:IsCardUnlocked(107) and self.UncounterArrowLevel < 5 then table.insert(pool, 107) end
 			if self:IsCardUnlocked(108) and self.FleshMirageLevel < 5 then table.insert(pool, 108) end
+			return pool
+		end
+		-- 레이온도 아르카나 카드가 안 틱되므로 별도 풀(아직 기본공격뿐이라 빈 풀)을 쓴다 — 이 분기가
+		-- 없으면 아래 아르카나 카드 목록으로 그대로 흘러들어가 전사 컨셉에 안 맞는 카드가 섞여 나온다.
+		if _GameManager.SelectedCharacter == 2 then
 			return pool
 		end
 		if self:IsCardUnlocked(2) then table.insert(pool, 2) end

@@ -1,0 +1,218 @@
+@Logic
+script Map23ErdasEasterEggLogic extends Logic
+
+	-- 존40/41/42(좌→우 물리 순서)에 있는 object-4502_1/object-4502/object-4502_2를 각각 2번 터치하면
+	-- 그 자리에 "불안정한 에르다스"(일반 몬스터 체력 2배, 공격력 동일)가 소환된다. 3마리를 모두 처치하면
+	-- 존43의 포탈(portal-12)이 활성화되고, 정수(erdas_essence) 3개를 모으면 그 포탈로 map24(진 힐라의
+	-- 보물상자 비밀방, 존44)에 들어갈 수 있다. 정수는 포탈 통과로 소모되지 않는다(유저 지정).
+	@Sync property integer TouchCount1 = 0
+	@Sync property integer TouchCount2 = 0
+	@Sync property integer TouchCount3 = 0
+	@Sync property boolean Triggered1 = false
+	@Sync property boolean Triggered2 = false
+	@Sync property boolean Triggered3 = false
+	@Sync property integer KillCount = 0
+	@Sync property boolean PortalActive = false
+
+	-- 리소스팩 "불안정한 에르다스"
+	property string ErdasStandRUID = "c9275f3f8cd242099528ada23a4c47d0"
+	property string ErdasMoveRUID = "533038b27694499b8655cee509158128"
+	property string ErdasHitRUID = "d2f49e08d8ac4213b88c9f42d4926fd2"
+	property string ErdasDieRUID = "864a7dffe15b437caa066be53eded1eb"
+	property number ErdasDieDuration = 1.0
+	property string ErdasHitSoundRUID = "2275dcfb3ffc4d5395f29fa750c8c632"
+	property string ErdasDieSoundRUID = "4564be7f548e49139fe99a18e45afb77"
+
+	property string EssenceItemId = "erdas_essence"
+	property integer EssenceRequiredCount = 3
+	property string PortalPath = "/maps/map23/portal-12"
+	property string InsufficientEssenceText = "정수가 부족합니다"
+
+	-- Map23ErdasObjectTrigger.RequestTouch()가 호출 (ordinal 1/2/3 = 좌→우 물리 순서)
+	@ExecSpace("ServerOnly")
+	method void OnObjectTouched(integer ordinal, Entity objectEntity)
+		if ordinal == 1 then
+			if self.Triggered1 then return end
+			self.TouchCount1 = self.TouchCount1 + 1
+			if self.TouchCount1 < 2 then return end
+			self.Triggered1 = true
+		elseif ordinal == 2 then
+			if self.Triggered2 then return end
+			self.TouchCount2 = self.TouchCount2 + 1
+			if self.TouchCount2 < 2 then return end
+			self.Triggered2 = true
+		elseif ordinal == 3 then
+			if self.Triggered3 then return end
+			self.TouchCount3 = self.TouchCount3 + 1
+			if self.TouchCount3 < 2 then return end
+			self.Triggered3 = true
+		else
+			return
+		end
+		self:SpawnErdas(ordinal, objectEntity)
+	end
+
+	-- ordinal(1/2/3, 좌→우 물리 순서) → 실제 존 번호(40/41/42)
+	method integer GetOrdinalZone(integer ordinal)
+		if ordinal == 1 then return 40
+		elseif ordinal == 2 then return 41
+		end
+		return 42
+	end
+
+	-- ordinal → 그 존의 공중 발판 월드 X 범위(실측 foothold 참고: 존40 -0.85~2.65 / 존41 15.35~18.85 /
+	-- 존42 30.65~32.35) + 가장자리를 살짝 넘어가도록 여유를 둔 배회 범위(유저 요청: "좌우로 움직이면서
+	-- 발판을 벗어나면 아래로 떨어지게" — 항상 안전하게 발판 안에만 머무르면 낙하가 절대 안 일어난다)
+	method number GetOrdinalPatrolMinX(integer ordinal)
+		if ordinal == 1 then return -1.3
+		elseif ordinal == 2 then return 14.9
+		end
+		return 30.2
+	end
+
+	method number GetOrdinalPatrolMaxX(integer ordinal)
+		if ordinal == 1 then return 3.1
+		elseif ordinal == 2 then return 19.3
+		end
+		return 32.8
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SpawnErdas(integer ordinal, Entity objectEntity)
+		if not isvalid(objectEntity) then return end
+		-- 물리 파일 루트(발판 레이캐스트/월드 오프셋 계산 기준) — object-4502류는 전부 이 루트의
+		-- 직계 자식이라 objectEntity.CurrentMap으로 항상 이걸 얻는다
+		local fileRoot = objectEntity.CurrentMap
+		if fileRoot == nil then return end
+		-- 실제 스폰 부모는 "그 존" 컨테이너여야 한다 — CardManager의 자동공격 타겟 검색이
+		-- GetCurrentMap()(=GetZoneEntity(CurrentMapIndex))의 직계 자식만 훑기 때문에, 존40은
+		-- 파일 루트 자신(container=nil)이지만 존41/42는 별도 자식 컨테이너("Zone41"/"Zone42")다.
+		-- 여기서 파일 루트에만 부모를 붙이면 존41/42에서 소환된 에르다스는 그 존에 있을 때
+		-- 자동공격 대상 검색 범위 밖으로 빠져 공격이 전혀 안 들어가는 버그가 생긴다(유저 실측: "2번째
+		-- 에르다스 공격이 안 되는 것 같다").
+		local zoneIndex = self:GetOrdinalZone(ordinal)
+		local zoneMap = _MonsterSpawner:GetZoneEntity(zoneIndex)
+		if zoneMap == nil then return end
+		-- 유저 요청: 오브젝트 위치가 아니라 그 존의 필드 중앙 하단 타일에서 소환(보스 스폰과 동일한
+		-- "존 중심(offsetX) + 바닥 발판" 관례 — MonsterSpawner.GetSpawnPosition의 isBoss 분기 참고).
+		-- offsetX/발판 레이캐스트는 병합된 월드 좌표 기준이라 파일 루트 기준으로 계산한 뒤, 실제
+		-- 스폰 부모(zoneMap) 기준 로컬 좌표로 변환한다(일반 웨이브 스폰과 동일한 ToLocalSpawnPos 패턴)
+		local centerX = _MonsterSpawner:GetZoneOffsetX(zoneIndex)
+		local groundY = _MonsterSpawner:GetGroundY(fileRoot, centerX)
+		local worldPos = Vector3(centerX, groundY, 0)
+		local spawnPos = _MonsterSpawner:ToLocalSpawnPos(zoneMap, worldPos)
+		local entity = _SpawnService:SpawnByModelId(_MonsterSpawner.MonsterModelId, "Erdas", spawnPos, zoneMap)
+		if entity == nil then
+			log_error("Map23ErdasEasterEggLogic: SpawnByModelId failed")
+			return
+		end
+		-- 배회 범위도 월드 X 기준으로 정의돼 있으므로(GetOrdinalPatrolMinX/MaxX), 스폰 좌표와 동일하게
+		-- zoneMap 기준 로컬 X로 변환해서 넘긴다(UpdateErdasPatrol은 로컬 Position만 다룬다)
+		local patrolMinLocal = _MonsterSpawner:ToLocalSpawnPos(zoneMap, Vector3(self:GetOrdinalPatrolMinX(ordinal), 0, 0))
+		local patrolMaxLocal = _MonsterSpawner:ToLocalSpawnPos(zoneMap, Vector3(self:GetOrdinalPatrolMaxX(ordinal), 0, 0))
+		---@type MonsterAI
+		local ai = entity:GetComponent("script.MonsterAI")
+		if ai ~= nil then
+			ai:InitializeErdas(ordinal, zoneIndex, self.ErdasStandRUID, self.ErdasMoveRUID, self.ErdasHitRUID, self.ErdasDieRUID, self.ErdasDieDuration, self.ErdasHitSoundRUID, self.ErdasDieSoundRUID, patrolMinLocal.x, patrolMaxLocal.x)
+		end
+		_UIToast:ShowMessage(self:GetOrdinalText(ordinal) .. " 에르다스가 소환되었다.")
+		log("Map23ErdasEasterEggLogic: spawned Erdas #" .. ordinal)
+	end
+
+	method string GetOrdinalText(integer ordinal)
+		if ordinal == 1 then return "첫번째"
+		elseif ordinal == 2 then return "두번째"
+		end
+		return "세번째"
+	end
+
+	-- MonsterAI.Die()가 에르다스 처치 시점에 호출 — 존 잡템 대신 정수를 100% 확정 지급하고 킬카운트를 올린다
+	@ExecSpace("ServerOnly")
+	method void OnErdasKilled(integer ordinal, Vector3 worldPos, number fallHeight, number groundWorldY, number dropScale)
+		self.KillCount = self.KillCount + 1
+		local itemId = self.EssenceItemId
+		local iconRuid = _PlayerInventory:GetItemDef(itemId).icon
+		_PlayerInventory:ReserveAcquisitionOrder(itemId)
+		_GameManager:ScheduleLootDrop(worldPos, iconRuid, fallHeight, groundWorldY, function()
+			_PlayerInventory:AddItem(itemId, 1)
+		end, dropScale)
+		log("Map23ErdasEasterEggLogic: Erdas #" .. ordinal .. " killed (" .. self.KillCount .. "/3)")
+		if self.KillCount >= 3 and not self.PortalActive then
+			self:ActivatePortal()
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ActivatePortal()
+		self.PortalActive = true
+		local portal = _EntityService:GetEntityByPath(self.PortalPath)
+		if portal ~= nil then portal.Enable = true end
+		_UIToast:ShowMessage("어딘가에 포탈이 활성화되었다!")
+		log("Map23ErdasEasterEggLogic: portal activated")
+	end
+
+	-- Map23PortalTrigger.RequestTouch()가 호출
+	@ExecSpace("ServerOnly")
+	method void OnPortalTouched(Entity portalEntity)
+		if not self.PortalActive then return end
+		local count = _PlayerInventory:GetItemCount(self.EssenceItemId)
+		if count < self.EssenceRequiredCount then
+			self:ShowInsufficientEssenceText(portalEntity)
+			return
+		end
+		self:TeleportToMap24()
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ShowInsufficientEssenceText(Entity portalEntity)
+		if not isvalid(portalEntity) then return end
+		local map = portalEntity.CurrentMap
+		if map == nil then return end
+		local pos = portalEntity.TransformComponent.WorldPosition
+		local textPos = Vector3(pos.x, pos.y + 1.2, pos.z - 0.1)
+		local fx = _SpawnService:SpawnByModelId("damagenumber", "InsufficientEssence", textPos, map)
+		if fx == nil then return end
+		local renderer = fx.TextRendererComponent
+		if renderer ~= nil then
+			renderer.Text = self.InsufficientEssenceText
+			renderer.FontColor = Color(1, 0.3, 0.3, 1)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void TeleportToMap24()
+		local targetIndex = 44
+		local mapName = _MapManager:GetMapName(targetIndex)
+		local spawnPos = _MapManager:GetSpawnPositionForIndex(targetIndex)
+
+		_MapTransitionLogic:PlayCover("right")
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) then return end
+			for _, userEntity in pairs(_UserService.UserEntities) do
+				_TeleportService:TeleportToMapPosition(userEntity, spawnPos, mapName)
+			end
+			_MapManager.CurrentMapIndex = targetIndex
+			_Map24TreasureChestLogic:SpawnChestIfNeeded()
+			_MapMoveUI:NotifyMapChanged(targetIndex)
+			_TimerService:SetTimerOnce(function()
+				if isvalid(self) then _MapTransitionLogic:PlayReveal("right") end
+			end, _MapTransitionLogic.CameraSettleDelay)
+		end, _MapTransitionLogic.CoverDuration)
+	end
+
+	-- GameManager.RestartGame()이 호출 — 새 런에서는 오브젝트/포탈을 다시 도전할 수 있게 초기화한다
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		self.TouchCount1 = 0
+		self.TouchCount2 = 0
+		self.TouchCount3 = 0
+		self.Triggered1 = false
+		self.Triggered2 = false
+		self.Triggered3 = false
+		self.KillCount = 0
+		self.PortalActive = false
+		local portal = _EntityService:GetEntityByPath(self.PortalPath)
+		if portal ~= nil then portal.Enable = false end
+	end
+
+end

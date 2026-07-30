@@ -1,0 +1,90 @@
+@Logic
+script CardRegistry extends Logic
+
+	-- 레이온(3번째 캐릭터) 이후 신규 카드는 CardManager의 touchpoint 함수(아이콘/이름/태그/레벨업 팝업 등)
+	-- 마다 if/elseif를 추가하는 대신, 여기 테이블에 항목 하나만 추가하면 되도록 만든 레지스트리(기존
+	-- 아르카나 1-24/실피드 100+ 카드는 이미 touchpoint 방식이라 마이그레이션하지 않는다 — 결정 사항).
+	-- CardManager 쪽 터치포인트들은 cardIdx가 여기 테이블에 있으면 이 레지스트리로 위임하는 라우팅
+	-- 한 줄만 추가하고, 실제 데이터/레벨별 수치는 전부 이 파일에서만 관리한다.
+	method table GetReionCardDefs()
+		return {
+			-- 콤보 어택(Card151, 패시브·슬롯 없음) — 기본공격(Card150) 적중 시 이 확률만큼 대상
+			-- 몬스터에게 콤보 스택이 쌓인다(레벨업 시 확률만 오른다. 스택 자체에는 데미지 보너스가
+			-- 없고, 5스택 도달 시 마지막 타격 데미지의 200%를 폭발 데미지로 추가 적용한다 —
+			-- MonsterAI.ComboStack + CardManager.PlayComboFinishBurst에서 처리)
+			[151] = {
+				name = "콤보 어택",
+				icon = "d714c4d5a90a43a7b5a7bfb3b49c4628",
+				tags = "패시브,확률스택",
+				chancePerLevel = { 0.10, 0.15, 0.20, 0.30, 0.35 },
+			},
+			-- 슬래시(Card152, 슬롯형 액티브) — "슬래시 블러스트" 리소스팩 아이콘 재사용. 데미지/타겟
+			-- 수/쿨타임은 레벨별 표가 단순 배율이 아니라 CardManager.GetSlashDamage/GetSlashTargetCount
+			-- 고정 테이블로 관리(레지스트리는 정적 표시 데이터만 담당)
+			[152] = {
+				name = "슬래시",
+				icon = "3c9bcefb5e6941adb3e3dfd342639164",
+				tags = "다중타격,콤보스택",
+			},
+			-- 브랜디쉬(Card153, 슬롯형 액티브 2호) — 슬래시와 데미지 테이블은 같지만 방식이 다르다.
+			-- 슬래시는 맞은 대상마다 스윙+타격 연출을 각각 재생하는 반면, 브랜디쉬는 스윙 연출을
+			-- 캐스터 위치 1곳에서 한 번만 재생하고 그 범위 안의 몬스터가 맞는다(타격 연출은 개별).
+			[153] = {
+				name = "브랜디쉬",
+				icon = "f01f2a399af5468cabccba2eb25ed523",
+				tags = "다중타격,콤보스택",
+			},
+			-- 플래시 슬래시(Card154, 슬롯형 액티브 3호) — 슬래시/브랜디쉬와 달리 "고정 대상 한정 타격"이
+			-- 아니라, GetClosestTargets로 뽑힌 대상 수만큼 각각 그 위치에서 좌/우 랜덤 방향으로 이동하는
+			-- 연출을 띄우고, 그 연출이 지나가는 경로에 닿는 몬스터는(원래 대상이 아니어도) 전부 맞는
+			-- 관통형 이동 판정이다(더블 커터의 LaunchDoubleCutterTravel과 동일 패턴, 단 거리가 아니라
+			-- 지속시간으로 종료).
+			[154] = {
+				name = "플래시 슬래시",
+				icon = "cd91e94eee914c7d94908c5d4994efe1",
+				tags = "관통이동,콤보스택",
+			},
+			-- 돌진(Card155, 슬롯형 액티브 4호) — 실피드의 플레시 미라주(Card108)와 완전히 동일한
+			-- 시스템(좌/우 최외곽 대상 중앙으로 넉백+충돌 대미지, 전부 중앙 근방이면 양끝으로 대신
+			-- 밀어냄)을 재사용한 스킬. 데미지/타겟수/충돌비율 표까지 플레시 미라주와 완전히 동일(유저
+			-- 지정: "플레시 미라쥬랑 동일 시스템"), 연출/아이콘/사운드만 레이온 전용으로 교체. 콤보스택은
+			-- 붙지 않는다(표에 콤보스택 항목 없음).
+			[155] = {
+				name = "돌진",
+				icon = "5250cebd192a41fab47ffde667facda7",
+				tags = "넉백,충돌피해",
+			},
+		}
+	end
+
+	method boolean HasCard(integer cardIdx)
+		return self:GetReionCardDefs()[cardIdx] ~= nil
+	end
+
+	method string GetName(integer cardIdx)
+		local c = self:GetReionCardDefs()[cardIdx]
+		if c == nil then return "" end
+		return c.name
+	end
+
+	method string GetIcon(integer cardIdx)
+		local c = self:GetReionCardDefs()[cardIdx]
+		if c == nil then return "" end
+		return c.icon
+	end
+
+	method string GetTags(integer cardIdx)
+		local c = self:GetReionCardDefs()[cardIdx]
+		if c == nil then return "" end
+		return c.tags
+	end
+
+	-- level이 표에 없는 범위(0 이하/최대 초과)면 각각 0과 마지막 레벨 값으로 클램프한다
+	method number GetChance(integer cardIdx, integer level)
+		local c = self:GetReionCardDefs()[cardIdx]
+		if c == nil or level <= 0 then return 0 end
+		local idx = math.min(level, #c.chancePerLevel)
+		return c.chancePerLevel[idx]
+	end
+
+end

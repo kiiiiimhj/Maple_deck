@@ -1,0 +1,57 @@
+@Component
+script Map23ErdasObjectTrigger extends Component
+
+	-- object-4502/_1/_2 3곳에 공용으로 붙는다 — Ordinal(1/2/3, 좌→우 물리 순서)만 인스턴스별로 다르게
+	-- 오버라이드해서 Map23ErdasEasterEggLogic이 어느 오브젝트가 눌렸는지 구분한다
+	property integer Ordinal = 0
+
+	property any _touchHandler = nil
+	property any _shakeTween = nil
+	property number ShakeDuration = 0.35
+	property number ShakeAngle = 10
+
+	method void OnBeginPlay()
+		if self:IsClient() then
+			self._touchHandler = self.Entity:ConnectEvent(TouchEvent, self.OnTouched)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnTouched(TouchEvent event)
+		if _GameManager.GameOver then return end
+		if _TitleUI.titleGroup.Enable then return end
+		self:PlayShake()
+		self:RequestTouch()
+	end
+
+	-- 누를 때마다 살짝 흔들리는 느낌을 준다(Zone21AlienObjectTrigger와 동일한 감쇠 사인파 패턴)
+	@ExecSpace("ClientOnly")
+	method void PlayShake()
+		local transform = self.Entity.TransformComponent
+		if self._shakeTween ~= nil then
+			self._shakeTween:Stop()
+			self._shakeTween = nil
+		end
+		self._shakeTween = _TweenLogic:PlayTween(0.0, 1.0, self.ShakeDuration, EaseType.Linear, function(t)
+			if not isvalid(self) or not isvalid(self.Entity) then return end
+			local angle = self.ShakeAngle * math.sin(t * math.pi * 3) * (1.0 - t)
+			transform.ZRotation = angle
+			if t >= 1.0 then
+				transform.ZRotation = 0
+				self._shakeTween = nil
+			end
+		end)
+	end
+
+	@ExecSpace("Server")
+	method void RequestTouch()
+		_Map23ErdasEasterEggLogic:OnObjectTouched(self.Ordinal, self.Entity)
+	end
+
+	method void OnEndPlay()
+		if self:IsClient() and self._touchHandler ~= nil then
+			self.Entity:DisconnectEvent(TouchEvent, self._touchHandler)
+		end
+	end
+
+end

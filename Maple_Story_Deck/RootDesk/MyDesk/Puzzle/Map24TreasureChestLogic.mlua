@@ -1,0 +1,138 @@
+@Logic
+script Map24TreasureChestLogic extends Logic
+
+	-- 존44(map24) 진입 시(Map23ErdasEasterEggLogic.TeleportToMap24) 공중 타일 중간에 고정된 "진 힐라의
+	-- 보물상자"(이동 애니메이션 없음, 고정 체력, 플레이어를 공격하지 않음)를 1회 스폰한다. 처치하면 그
+	-- 자리에 portal-12와 동일한 모양의 귀환 포탈이 생겨 존43으로 돌아갈 수 있다.
+	@Sync property boolean ChestSpawned = false
+	@Sync property boolean ChestKilled = false
+
+	-- 리소스팩 "진 힐라의 보물상자"
+	property string ChestStandRUID = "57fa3816f73546da93fb22b5a4df61df"
+	property string ChestHitRUID = "5fd67d7d2b554255860edc902f7d58eb"
+	property string ChestDieRUID = "21f9602418304c8f8b41ae9ca8261f9e"
+	property number ChestDieDuration = 1.0
+	property string ChestHitSoundRUID = "34ab6ad2f6ab4517af0b2023642a50a3"
+	property string ChestDieSoundRUID = "bf3e70f7aef24669a2d5db108c432d16"
+	-- 유저 지정 고정 체력(웨이브 개념이 없는 전용 맵이라 배율이 아닌 절대값)
+	property number ChestHp = 3000
+
+	-- 공중 발판(존44 실측 foothold: x=-2.6~2.6, 가운데 낮은 구간 x=-1.0~1.0 y=0.07 + 양옆 높은 구간
+	-- y=0.67) 중앙 — Y는 고정값이 아니라 스폰 시점에 실제 발판을 레이캐스트해서 구한다(유저 지적:
+	-- "상자몬스터는 아래 타일에 붙어있으면 좋겠어" — 예전엔 y=2.9로 하드코딩해서 실제 발판보다
+	-- 한참 위 허공에 떠 있었다).
+	property number ChestSpawnX = 0
+	-- 배회 범위 — 가운데 낮은 구간(-1.0~1.0)보다 살짝 넓게 잡아서, 배회하다 이 구간을 벗어나면
+	-- 옆의 높은 구간을 오르는 대신 아래로 떨어지게 한다(유저 요청: "좌우로 움직이면서 발판을
+	-- 벗어나면 아래로 떨어지게")
+	property number ChestPatrolMinX = -1.3
+	property number ChestPatrolMaxX = 1.3
+
+	-- 귀환 포탈 — map23 portal-12와 동일한 모양(SpriteRUID/Color/Scale)을 재사용(유저 지정: "맵23에 쓰는
+	-- 포탈 똑같이 사용, 색상도")
+	property string PortalSpriteRUID = "5026c66a0841489ba029396b3d91f821"
+	property Color PortalColor = Color(0.414279938, 0.567378044, 0.9511719, 1.0)
+	property number PortalScale = 1.84193623
+
+	@ExecSpace("ServerOnly")
+	method void SpawnChestIfNeeded()
+		if self.ChestSpawned then return end
+		self.ChestSpawned = true
+		local map = _EntityService:GetEntityByPath("/maps/map24")
+		if map == nil then
+			log_error("Map24TreasureChestLogic: map24 root not found")
+			return
+		end
+		local groundY = _MonsterSpawner:GetGroundY(map, self.ChestSpawnX)
+		local spawnPos = Vector3(self.ChestSpawnX, groundY, 0)
+		local entity = _SpawnService:SpawnByModelId(_MonsterSpawner.MonsterModelId, "TreasureChest", spawnPos, map)
+		if entity == nil then
+			log_error("Map24TreasureChestLogic: SpawnByModelId failed")
+			return
+		end
+		---@type MonsterAI
+		local ai = entity:GetComponent("script.MonsterAI")
+		if ai ~= nil then
+			ai:InitializeTreasureChest(self.ChestHp, self.ChestStandRUID, self.ChestHitRUID, self.ChestDieRUID, self.ChestDieDuration, self.ChestHitSoundRUID, self.ChestDieSoundRUID, self.ChestPatrolMinX, self.ChestPatrolMaxX)
+		end
+		log("Map24TreasureChestLogic: chest spawned HP=" .. self.ChestHp)
+	end
+
+	-- MonsterAI.Die()가 보물상자 처치 시점에 호출
+	@ExecSpace("ServerOnly")
+	method void OnChestKilled(Vector3 worldPos)
+		if self.ChestKilled then return end
+		self.ChestKilled = true
+		self:SpawnReturnPortal(worldPos)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SpawnReturnPortal(Vector3 worldPos)
+		local map = _EntityService:GetEntityByPath("/maps/map24")
+		if map == nil then return end
+		-- 상자가 배회/낙하 도중 죽으면 죽은 위치가 발판 표면과 살짝 어긋날 수 있다(호핑 연출 등) —
+		-- 포탈은 항상 실제 발판 위에 붙어야 하므로(유저 지적: "포탈도 지금 생성위치에서 아래에있는
+		-- 타일이야") 죽은 자리 바로 아래로 다시 레이캐스트해서 정확한 발판 표면 Y에 스폰한다.
+		-- GetGroundY(항상 y=100에서 아래로 쏨)는 존44처럼 발판이 여러 층(공중 발판+메인 바닥)으로
+		-- 겹쳐있으면 죽은 위치보다 훨씬 위에 있는 다른 층을 잘못 찾아올 수 있어(실측 확인 — 상자가
+		-- 메인 바닥에서 죽었는데 포탈이 위쪽 공중 발판 높이에 생성됨) 쓰지 않는다 — 죽은 Y 바로 위에서만
+		-- 짧게 훑어야 상자가 실제로 서 있던 그 발판을 찾는다.
+		local groundY = worldPos.y
+		---@type FootholdComponent
+		local foothold = map:GetComponent("FootholdComponent")
+		if foothold ~= nil then
+			local hit = foothold:Raycast(Vector2(worldPos.x, worldPos.y + 0.3), Vector2(0, -1), 1.0)
+			if hit ~= nil then groundY = hit:GetYByX(worldPos.x) end
+		end
+		local snappedPos = Vector3(worldPos.x, groundY, worldPos.z)
+		local entity = _SpawnService:SpawnByModelId("portal", "ReturnPortal", snappedPos, map)
+		if entity == nil then
+			log_error("Map24TreasureChestLogic: return portal spawn failed")
+			return
+		end
+		local renderer = entity.SpriteRendererComponent
+		if renderer ~= nil then
+			renderer.SpriteRUID = self.PortalSpriteRUID
+			renderer.Color = self.PortalColor
+		end
+		entity.TransformComponent.Scale = Vector3(self.PortalScale, self.PortalScale, 1.0)
+		-- 네이티브 portal 모델은 걸어서 통과하는 자동 텔레포트용(PortalEntityRef)이라, 이 프로젝트의
+		-- 다른 모든 존 이동과 동일하게 "누르면 이동" 방식으로 쓰기 위해 터치 판정을 직접 붙인다
+		local touch = entity:AddComponent("MOD.Core.TouchReceiveComponent")
+		---@type TouchReceiveComponent
+		local touchTyped = touch
+		touchTyped.AutoFitToSize = true
+		entity:AddComponent("script.Map24ReturnPortalTrigger")
+		log("Map24TreasureChestLogic: return portal spawned")
+	end
+
+	-- Map24ReturnPortalTrigger.RequestTouch()가 호출 — 조건 없이 즉시 존43으로 돌아간다
+	@ExecSpace("ServerOnly")
+	method void OnReturnPortalTouched()
+		local targetIndex = 43
+		local mapName = _MapManager:GetMapName(targetIndex)
+		local spawnPos = _MapManager:GetSpawnPositionForIndex(targetIndex)
+
+		_MapTransitionLogic:PlayCover("left")
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) then return end
+			for _, userEntity in pairs(_UserService.UserEntities) do
+				_TeleportService:TeleportToMapPosition(userEntity, spawnPos, mapName)
+			end
+			_MapManager.CurrentMapIndex = targetIndex
+			_MapManager:SetMonstersPaused(_MonsterSpawner:GetZoneEntity(targetIndex), false)
+			_MapMoveUI:NotifyMapChanged(targetIndex)
+			_TimerService:SetTimerOnce(function()
+				if isvalid(self) then _MapTransitionLogic:PlayReveal("left") end
+			end, _MapTransitionLogic.CameraSettleDelay)
+		end, _MapTransitionLogic.CoverDuration)
+	end
+
+	-- GameManager.RestartGame()이 호출
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		self.ChestSpawned = false
+		self.ChestKilled = false
+	end
+
+end

@@ -36,6 +36,19 @@ script MonsterAI extends Component
 	-- GameManager.GetMonsterLootItemId(zoneIndex, speciesIdx)로 "실제 그 몬스터의 드롭템"을 결정하는 데 쓴다
 	property integer _speciesIdx = 0
 
+	-- 맵23 에르다스 이스터에그 전용(InitializeErdas) — 이 몬스터가 죽을 때 존 잡템 대신
+	-- Map23ErdasEasterEggLogic.OnErdasKilled에 알려서 정수 드롭+킬카운트를 처리한다
+	property boolean _isErdas = false
+	property integer _erdasOrdinal = 0
+	-- 맵24 진 힐라의 보물상자 전용(InitializeTreasureChest) — 죽을 때 Map24TreasureChestLogic에 알린다
+	property boolean _isTreasureChest = false
+	-- 에르다스/보물상자 전용 피격·사망 사운드(기본 몬스터 풀은 사운드가 없어 빈 문자열 유지)
+	property string _hitSoundRUID = ""
+	property string _dieSoundRUID = ""
+	-- true면 정면 도달(_reachedPlayer)해도 OnReachPlayer(플레이어 공격)를 호출하지 않는다 — 보물상자처럼
+	-- 스탯 몬스터를 재사용하되 공격은 안 하는 고정 타겟을 만들 때 쓴다
+	property boolean _neverAttacks = false
+
 	-- 슬로우 상태 (콜드 빔)
 	property boolean _isSlowed = false
 	property integer _slowTimerId = 0
@@ -97,6 +110,27 @@ script MonsterAI extends Component
 	property integer BonusGoldPerHit = 8
 	property number BonusPotionChance = 0.10
 	property number BonusSkillChance = 0.01
+
+	-- 맵23 에르다스 전용 — 도달(_reachedPlayer)한 뒤 제자리에 얼어붙는 대신 공중 발판 위를 좌우로
+	-- 배회하며 공격한다(유저 요청: "좌우로 이동하면서 공격하면 좋겠거든"). 배회 목표가 발판 범위를
+	-- 벗어나면(유저 요청: "발판을 벗어나면 아래로 떨어지게") 실제 발판 유무를 매 프레임 레이캐스트로
+	-- 확인해서 없으면 낙하로 전환한다. BonusBoss의 UpdateWander(고정 Y, 항상 안전한 바닥)와 달리
+	-- 지형을 따라 Y가 실시간으로 바뀌고, 발판이 없으면 중력으로 떨어지다가 아래쪽 발판(맵23 메인
+	-- 바닥이 전체 폭을 덮고 있어 결국 착지함)에 닿으면 다시 배회를 재개한다.
+	property number _erdasPatrolMinX = -1.3
+	property number _erdasPatrolMaxX = 1.3
+	property number _erdasPatrolTargetX = 0
+	property number ErdasPatrolSpeed = 0.8
+	property number _erdasPatrolRetargetTimer = 0
+	property boolean _isErdasFalling = false
+	property number _erdasFallVelocity = 0
+	property number ErdasGravity = 9.8
+	-- 맞을 때마다 스케일이 커지는 효과(유저 요청: "때릴때마다 2%씩 스케일이 커지면 좋겠어 맥스 20%") —
+	-- _scaleMultiplier 자체를 곱하지 않고 별도 배율로 둔다(그래야 정확히 +2%p씩 20%까지 선형으로
+	-- 쌓이고, 이미 적용된 사이즈 절반(0.5배)과도 독립적으로 곱연산된다)
+	property number _erdasHitGrowthBonus = 0
+	property number ErdasHitGrowthPerHit = 0.02
+	property number ErdasHitGrowthMaxBonus = 0.20
 
 	-- 스폰 시점 웨이브의 die1 / hit1 / attack1 애니메이션 RUID 및 재생 시간
 	property string _dieRUID = ""
@@ -204,6 +238,36 @@ script MonsterAI extends Component
 	@Sync property integer FreezeStack = 0
 	property Entity _freezeIndicator = nil
 	property boolean _freezeSlowed = false
+
+	-- 콤보어택 스택(레이온 기본공격 전용) — FreezeStack과 동일하게 "맞는 대상(몬스터)"에게 스택이
+	-- 쌓이는 패턴(유저 지정: "캐릭터한테 스택이 쌓이는게 아니라 몬스터한테"). 최대 5스택, 5스택에서
+	-- 자동으로 폭발 연출(코마 팩 finish/1~10 무작위, 유저 확인: "코마는 콤보를 터트리는 효과" — 이
+	-- 용도로는 정확) 후 스택이 초기화된다.
+	-- 오브 연출은 CardManager.ComboOrbRUID(6프레임 클립)를 스택 개수만큼 스폰해서 몬스터 주위를
+	-- 시계방향으로 도는 것처럼 표현한다(유저가 실제 게임 스크린샷으로 확인: 슬롯 개수만큼 같은
+	-- 오브가 원형으로 돈다). 슬롯 5개를 각각 프로퍼티로 들고(_comboOrb1~5), OnUpdate에서
+	-- _comboOrbAngle을 누적해 위치를, _comboOrbReveal1~5를 누적해 프레임(자기 슬롯 번호까지
+	-- 0→N 순서 재생 후 정지)을 매 프레임 갱신한다.
+	@Sync property integer ComboStack = 0
+	property Entity _comboOrb1 = nil
+	property Entity _comboOrb2 = nil
+	property Entity _comboOrb3 = nil
+	property Entity _comboOrb4 = nil
+	property Entity _comboOrb5 = nil
+	property number _comboOrbReveal1 = 0
+	property number _comboOrbReveal2 = 0
+	property number _comboOrbReveal3 = 0
+	property number _comboOrbReveal4 = 0
+	property number _comboOrbReveal5 = 0
+	-- 프레임 1개당 재생 시간(초) — 오브가 생성돼서 자기 목표 프레임까지 세는 데 걸리는 시간
+	property number ComboOrbFrameStepDuration = 0.08
+	property number _comboOrbAngle = 0
+	property number ComboOrbRadius = 0.45
+	-- 실제 콤보어택 오브 리소스(44x44px, 작은 아이콘형)로 교체하면서 재조정한 배율(유저 지정:
+	-- "지금의 1/2로")
+	property number ComboOrbScaleMultiplier = 0.5
+	-- 라디안/초. 양수 = 화면 기준 시계방향(각도가 커질수록 -sin 성분이 아래로 향하게 좌표식을 짬)
+	property number ComboOrbRotateSpeed = 3.0
 
 	-- 스턴(감전) 중 머리 위에 뺑글뻉글 도는 별 이펙트
 	property Entity _stunStarsIndicator = nil
@@ -422,6 +486,78 @@ script MonsterAI extends Component
 		log("MonsterAI: alien invader initialized HP=" .. hp)
 	end
 
+	-- Map23ErdasEasterEggLogic.SpawnErdas()가 스폰 직후 호출: 일반 지상형 몬스터와 동일한 접근(스케일 성장)
+	-- +공격 로직을 그대로 쓰되, 체력만 "현재 웨이브 기준 일반 몬스터 HP"의 2배(유저 요청: "일반 몬스터의
+	-- 체력 2배 공격력은 같음")로 고정한다. attackRUID는 리소스팩에 전용 공격 연출이 없어 빈 문자열로
+	-- 두면(zone4~6 풀과 동일한 패턴) 도달 시 기본 들이받기(PlayLungeAnimation)로 공격한다.
+	@ExecSpace("ServerOnly")
+	method void InitializeErdas(integer ordinal, integer zoneIndex, string standRUID, string moveRUID, string hitRUID, string dieRUID, number dieDuration, string hitSoundRUID, string dieSoundRUID, number patrolMinX, number patrolMaxX)
+		self._isErdas = true
+		self._erdasOrdinal = ordinal
+		self._spawnZoneIndex = zoneIndex
+		self._erdasPatrolMinX = patrolMinX
+		self._erdasPatrolMaxX = patrolMaxX
+		self:PickNewErdasPatrolTarget()
+		local hp = _GameManager:GetWaveHp(_GameManager.Wave) * 2
+		self.MaxHp = hp
+		self.CurrentHp = hp
+		self.ApproachSpeed = _GameManager:GetWaveApproachSpeed(_GameManager.Wave)
+		local variance = (_UtilLogic:RandomDouble() * 2 - 1) * self.ApproachSpeedVariance
+		self.ApproachSpeed = self.ApproachSpeed + variance
+		self._standRUID = standRUID
+		self._moveRUID = moveRUID
+		self._hitRUID = hitRUID
+		self._dieRUID = dieRUID
+		self._dieDuration = dieDuration
+		self._attackRUID = ""
+		self._hitSoundRUID = hitSoundRUID
+		self._dieSoundRUID = dieSoundRUID
+		self._isFlying = false
+		-- 유저 요청: 사이즈 절반
+		self._scaleMultiplier = self._scaleMultiplier * 0.5
+		self._erdasHitGrowthBonus = 0
+		if self._moveRUID ~= "" then
+			self.MonsterSprite = self._moveRUID
+		else
+			self.MonsterSprite = self._standRUID
+		end
+		self.Entity.TransformComponent.Scale = Vector3(self._currentScale * self._scaleMultiplier, self._currentScale * self._scaleMultiplier, 1.0)
+		self:SyncDepthOverlaySprite()
+		self:UpdateDepth()
+		log("MonsterAI: Erdas #" .. ordinal .. " initialized HP=" .. hp)
+	end
+
+	-- Map24TreasureChestLogic.SpawnChest()가 스폰 직후 호출: 공중 타일 중간에 고정된 채 등장하는
+	-- 일회성 특수 몬스터(진 힐라의 보물상자). 이동 애니메이션이 없어 접근 성장 연출 없이 처음부터
+	-- 완전한 크기로 등장하고(InitializeBonusBoss와 동일한 방식), 플레이어를 공격하지 않는다
+	-- (_neverAttacks — 유저 요청: "고정 체력 + 플레이어 공격하지 않음"). 체력은 웨이브 개념이 없는
+	-- map24 전용이라 고정값을 그대로 받는다(유저 지정: 3000).
+	@ExecSpace("ServerOnly")
+	method void InitializeTreasureChest(number hp, string standRUID, string hitRUID, string dieRUID, number dieDuration, string hitSoundRUID, string dieSoundRUID)
+		self._isTreasureChest = true
+		self._neverAttacks = true
+		self.MaxHp = hp
+		self.CurrentHp = hp
+		self._standRUID = standRUID
+		self._moveRUID = ""
+		self._hitRUID = hitRUID
+		self._dieRUID = dieRUID
+		self._dieDuration = dieDuration
+		self._attackRUID = ""
+		self._hitSoundRUID = hitSoundRUID
+		self._dieSoundRUID = dieSoundRUID
+		self._isFlying = false
+		self._currentScale = self._reachedScaleThreshold
+		-- 유저 확인: 보물상자는 고정이 맞다(좌우 배회는 에르다스 얘기였음) — 도달 상태로 그 자리에
+		-- 고정하고, 실제 공격 호출만 _neverAttacks로 막는다
+		self._reachedPlayer = true
+		self.MonsterSprite = standRUID
+		self.Entity.TransformComponent.Scale = Vector3(self._currentScale * self._scaleMultiplier, self._currentScale * self._scaleMultiplier, 1.0)
+		self:SyncDepthOverlaySprite()
+		self:HideDepthOverlay()
+		log("MonsterAI: treasure chest initialized HP=" .. hp)
+	end
+
 	-- NinjaStatuePuzzleLogic.SpawnMiniMoore()가 스폰 직후 호출: 존 몬스터 풀/HP/전투 시스템을 완전히
 	-- 건너뛰는 일회성 특수 몬스터(얄미운 미니무르)를 InitializeAlienInvader와 동일한 방식(비행형)으로
 	-- 초기화한다. 전투 대상이 아니라서(타격 완전 무시) hitRUID/dieRUID/attackRUID가 전혀 필요 없다 —
@@ -578,12 +714,23 @@ script MonsterAI extends Component
 			self._stunStarsIndicator.TransformComponent.Position = Vector3(spos.x, spos.y + 0.9, spos.z - 0.1)
 		end
 
+		-- 콤보어택 오브 회전(몬스터 자식 엔티티라 로컬 좌표만 갱신하면 됨 — 존 오프셋 보정 불필요)
+		self:UpdateComboOrbPositions(delta)
+
 		if self._reachedPlayer then
 			-- 스턴/속박(ApplyStun) 중에는 이미 도달해서 공격 중이던 지상(근접) 유닛도 완전히 멈춰야
 			-- 한다 — UpdateFlying(비행형)엔 이미 있던 체크인데 이 지상형 분기엔 빠져 있어서, 속박 중에도
 			-- 이미 붙어있던 몬스터는 계속 공격이 나가는 버그가 있었다. 타이머 자체를 멈춰서 스턴이
 			-- 끝나면 정상적으로 AttackInterval부터 다시 카운트되게 한다.
 			if self._isStunned or self._isHardFrozen then return end
+			-- 보물상자처럼 도달 상태를 재사용하되 실제로 공격하면 안 되는 고정 타겟은 여기서 건너뛴다
+			if self._neverAttacks then return end
+			-- 유저 요청: 에르다스는 도달 후에도 제자리에 얼어붙지 않고 공중 발판 위를 좌우로
+			-- 배회하면서(발판을 벗어나면 낙하) 계속 공격한다 — 이동과 공격 타이머는 서로 독립적으로
+			-- 같은 프레임에 같이 처리된다.
+			if self._isErdas then
+				self:UpdateErdasPatrol(delta)
+			end
 			-- 정면에 멈춰서 일정 간격으로 계속 공격
 			self._attackTimer = self._attackTimer - delta
 			if self._attackTimer <= 0 then
@@ -622,7 +769,8 @@ script MonsterAI extends Component
 		if self._currentScale >= self._reachedScaleThreshold then
 			-- 도달 임계값(근접 1.5 / 원거리는 더 낮음)에 도달 → 소멸하지 않고 그 자리에서 계속 공격 시작
 			self._currentScale = self._reachedScaleThreshold
-			self.Entity.TransformComponent.Scale = Vector3(self._reachedScaleThreshold * self._scaleMultiplier, self._reachedScaleThreshold * self._scaleMultiplier, 1.0)
+			local reachedScale = self._reachedScaleThreshold * self._scaleMultiplier * (1.0 + self._erdasHitGrowthBonus)
+			self.Entity.TransformComponent.Scale = Vector3(reachedScale, reachedScale, 1.0)
 			self:UpdateDepth()
 			self._reachedPlayer = true
 			self._attackTimer = self.AttackInterval
@@ -632,7 +780,8 @@ script MonsterAI extends Component
 			self:SyncDepthOverlaySprite()
 			self:OnReachPlayer()
 		else
-			self.Entity.TransformComponent.Scale = Vector3(self._currentScale * self._scaleMultiplier, self._currentScale * self._scaleMultiplier, 1.0)
+			local approachScale = self._currentScale * self._scaleMultiplier * (1.0 + self._erdasHitGrowthBonus)
+			self.Entity.TransformComponent.Scale = Vector3(approachScale, approachScale, 1.0)
 			self:UpdateDepth()
 		end
 	end
@@ -663,6 +812,95 @@ script MonsterAI extends Component
 	method void PickNewWanderTarget()
 		self._wanderTargetX = self._wanderMinX + _UtilLogic:RandomDouble() * (self._wanderMaxX - self._wanderMinX)
 		self._wanderRetargetTimer = 0.4 + _UtilLogic:RandomDouble() * 0.6
+	end
+
+	-- 에르다스 전용 — 도달한 뒤 공중 발판 위를 좌우로 배회한다(공격 타이머는 호출부인 OnUpdate의
+	-- _reachedPlayer 분기가 그대로 담당). BonusBoss.UpdateWander처럼 고정 Y가 아니라, 목표 X로 이동한
+	-- 뒤 그 자리 아래에 실제 발판이 있는지 매 프레임 레이캐스트로 확인해 Y를 지형에 맞춰 갱신한다.
+	-- 발판이 없으면(배회 범위가 발판 가장자리를 넘어섬) 낙하로 전환한다.
+	@ExecSpace("ServerOnly")
+	method void UpdateErdasPatrol(number delta)
+		local map = self.Entity.CurrentMap
+		if map == nil then return end
+		local pos = self.Entity.TransformComponent.Position
+		---@type FootholdComponent
+		local foothold = map:GetComponent("FootholdComponent")
+
+		if self._isErdasFalling then
+			self._erdasFallVelocity = self._erdasFallVelocity + self.ErdasGravity * delta
+			local fallY = pos.y - self._erdasFallVelocity * delta
+			local landed = false
+			if foothold ~= nil then
+				local hit = foothold:Raycast(Vector2(pos.x, pos.y), Vector2(0, -1), 200)
+				if hit ~= nil then
+					local groundY = hit:GetYByX(pos.x)
+					if fallY <= groundY then
+						fallY = groundY
+						landed = true
+					end
+				end
+			end
+			self.Entity.TransformComponent.Position = Vector3(pos.x, fallY, pos.z)
+			if landed then
+				self._isErdasFalling = false
+				self._erdasFallVelocity = 0
+			end
+			return
+		end
+
+		self._erdasPatrolRetargetTimer = self._erdasPatrolRetargetTimer - delta
+		if self._erdasPatrolRetargetTimer <= 0 then
+			self:PickNewErdasPatrolTarget()
+		end
+
+		local dx = self._erdasPatrolTargetX - pos.x
+		local step = self.ErdasPatrolSpeed * delta
+		local moveX = pos.x
+		if math.abs(dx) <= step then
+			moveX = self._erdasPatrolTargetX
+		elseif dx > 0 then
+			moveX = pos.x + step
+		else
+			moveX = pos.x - step
+		end
+
+		-- 짧은 거리만 살펴서 "지금 딛고 있는 발판"만 인식한다 — 아래로 멀리까지 훑으면 훨씬 아래에 있는
+		-- 메인 바닥까지 걸려서 발판을 벗어나도 계속 그 자리에 붙어있는 것처럼 보인다
+		local onFoothold = false
+		local groundY = pos.y
+		if foothold ~= nil then
+			local hit = foothold:Raycast(Vector2(moveX, pos.y + 0.2), Vector2(0, -1), 0.6)
+			if hit ~= nil then
+				groundY = hit:GetYByX(moveX)
+				onFoothold = true
+			end
+		end
+
+		if onFoothold then
+			self.Entity.TransformComponent.Position = Vector3(moveX, groundY, pos.z)
+		else
+			self._isErdasFalling = true
+			self._erdasFallVelocity = 0
+			self.Entity.TransformComponent.Position = Vector3(moveX, pos.y, pos.z)
+		end
+	end
+
+	method void PickNewErdasPatrolTarget()
+		self._erdasPatrolTargetX = self._erdasPatrolMinX + _UtilLogic:RandomDouble() * (self._erdasPatrolMaxX - self._erdasPatrolMinX)
+		self._erdasPatrolRetargetTimer = 1.5 + _UtilLogic:RandomDouble() * 1.5
+	end
+
+	-- 에르다스 전용 — 맞을 때마다(TakeDamage 계열 전부에서 호출) 스케일이 2%p씩 커지다 20%에서 멈춘다
+	-- (유저 요청: "때릴때마다 2%씩 스케일이 커지면 좋겠어 맥스 20%"). _scaleMultiplier 자체를 곱하지
+	-- 않고 별도 배율(_erdasHitGrowthBonus)로 둬서 정확히 선형으로 20%까지만 쌓이게 한다 — OnUpdate의
+	-- 두 Scale 대입 지점(접근 중/도달 직후)이 이미 이 배율을 곱해서 쓰므로 여기서는 값만 갱신하고
+	-- 즉시 한 번 더 반영한다(도달 후에는 OnUpdate가 매프레임 Scale을 다시 대입하지 않기 때문).
+	@ExecSpace("ServerOnly")
+	method void ApplyErdasHitGrowth()
+		if self._erdasHitGrowthBonus >= self.ErdasHitGrowthMaxBonus then return end
+		self._erdasHitGrowthBonus = math.min(self.ErdasHitGrowthMaxBonus, self._erdasHitGrowthBonus + self.ErdasHitGrowthPerHit)
+		local scale = self._currentScale * self._scaleMultiplier * (1.0 + self._erdasHitGrowthBonus)
+		self.Entity.TransformComponent.Scale = Vector3(scale, scale, 1.0)
 	end
 
 	-- 비행형(박쥐) 전용: 접근/도달 개념 없이 화면 안에서 2D로 자유롭게 날아다니다가, FlyAttackInterval마다 계속 공격한다.
@@ -803,6 +1041,7 @@ script MonsterAI extends Component
 			return
 		end
 		self.CurrentHp = self.CurrentHp - damage
+		if self._isErdas then self:ApplyErdasHitGrowth() end
 		log("Monster HP: " .. self.CurrentHp .. "/" .. self.MaxHp)
 		self:PlayDamageSkin(damage, false)
 		self:PlayHitAnimation(self._hitRUID, self.MonsterSprite)
@@ -816,6 +1055,7 @@ script MonsterAI extends Component
 	method void PlayHitAnimation(string hitRUID, string standRUID)
 		if self:IsServer() then return end
 		if self._dead then return end
+		if self._hitSoundRUID ~= "" then _SoundService:PlaySound(self._hitSoundRUID, 1.0) end
 		local renderer = self.Entity.SpriteRendererComponent
 		if renderer == nil or hitRUID == "" then return end
 		renderer.SpriteRUID = hitRUID
@@ -859,6 +1099,7 @@ script MonsterAI extends Component
 			return
 		end
 		self.CurrentHp = self.CurrentHp - damage
+		if self._isErdas then self:ApplyErdasHitGrowth() end
 		log("Monster HP: " .. self.CurrentHp .. "/" .. self.MaxHp)
 		self:PlayDamageSkinWithOffset(damage, false, offset)
 		self:PlayHitAnimation(self._hitRUID, self.MonsterSprite)
@@ -882,6 +1123,7 @@ script MonsterAI extends Component
 			return
 		end
 		self.CurrentHp = self.CurrentHp - damage
+		if self._isErdas then self:ApplyErdasHitGrowth() end
 		log("Monster HP (CRIT): " .. self.CurrentHp .. "/" .. self.MaxHp)
 		self:PlayDamageSkinWithOffset(damage, true, offset)
 		self:PlayHitAnimation(self._hitRUID, self.MonsterSprite)
@@ -906,6 +1148,7 @@ script MonsterAI extends Component
 			return
 		end
 		self.CurrentHp = self.CurrentHp - damage
+		if self._isErdas then self:ApplyErdasHitGrowth() end
 		log("Monster HP (CRIT): " .. self.CurrentHp .. "/" .. self.MaxHp)
 		self:PlayDamageSkin(damage, true)
 		self:PlayHitAnimation(self._hitRUID, self.MonsterSprite)
@@ -933,6 +1176,7 @@ script MonsterAI extends Component
 			return
 		end
 		self.CurrentHp = self.CurrentHp - damage
+		if self._isErdas then self:ApplyErdasHitGrowth() end
 		log("Monster HP (delayed-death): " .. self.CurrentHp .. "/" .. self.MaxHp)
 		self:PlayDamageSkin(damage, isCrit)
 		self:PlayHitAnimation(self._hitRUID, self.MonsterSprite)
@@ -1142,6 +1386,150 @@ script MonsterAI extends Component
 			local t = self._freezeIndicator.TextRendererComponent
 			if t ~= nil then t.Text = tostring(self.FreezeStack) end
 		end
+	end
+
+	-- 레이온 기본공격/슬래시/브랜디쉬가 적중할 때마다 호출 — 스택 자체엔 데미지 보너스가 없고, 5스택
+	-- 도달 시 이 마지막 타격 데미지(lastHitDamage, 크리티컬 반영 후)의 200%를 폭발 데미지로 추가
+	-- 적용한 뒤 초기화된다(파라미터 필수 — 기본값 파라미터는 mlua에서 Logic/Component 전체가 조용히
+	-- nil이 되는 버그가 있어 사용하지 않는다).
+	@ExecSpace("ServerOnly")
+	method void AddComboStack(number lastHitDamage)
+		if self._dead then return end
+		if self.ComboStack >= 5 then return end
+		self.ComboStack = self.ComboStack + 1
+		self:UpdateComboIndicator()
+		if self.ComboStack >= 5 then
+			self:TriggerComboFinish(lastHitDamage)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetComboStack()
+		if self.ComboStack <= 0 and not self:HasAnyComboOrb() then return end
+		self.ComboStack = 0
+		self:UpdateComboIndicator()
+	end
+
+	method boolean HasAnyComboOrb()
+		return isvalid(self._comboOrb1) or isvalid(self._comboOrb2) or isvalid(self._comboOrb3)
+			or isvalid(self._comboOrb4) or isvalid(self._comboOrb5)
+	end
+
+	method Entity GetComboOrb(integer idx)
+		if idx == 1 then return self._comboOrb1
+		elseif idx == 2 then return self._comboOrb2
+		elseif idx == 3 then return self._comboOrb3
+		elseif idx == 4 then return self._comboOrb4
+		elseif idx == 5 then return self._comboOrb5
+		end
+		return nil
+	end
+
+	method void SetComboOrb(integer idx, Entity e)
+		if idx == 1 then self._comboOrb1 = e
+		elseif idx == 2 then self._comboOrb2 = e
+		elseif idx == 3 then self._comboOrb3 = e
+		elseif idx == 4 then self._comboOrb4 = e
+		elseif idx == 5 then self._comboOrb5 = e
+		end
+	end
+
+	method number GetComboOrbReveal(integer idx)
+		if idx == 1 then return self._comboOrbReveal1
+		elseif idx == 2 then return self._comboOrbReveal2
+		elseif idx == 3 then return self._comboOrbReveal3
+		elseif idx == 4 then return self._comboOrbReveal4
+		elseif idx == 5 then return self._comboOrbReveal5
+		end
+		return 0
+	end
+
+	method void SetComboOrbReveal(integer idx, number v)
+		if idx == 1 then self._comboOrbReveal1 = v
+		elseif idx == 2 then self._comboOrbReveal2 = v
+		elseif idx == 3 then self._comboOrbReveal3 = v
+		elseif idx == 4 then self._comboOrbReveal4 = v
+		elseif idx == 5 then self._comboOrbReveal5 = v
+		end
+	end
+
+	-- 스택 개수만큼 오브 슬롯(1~5)을 켜고 끈다. 실제 위치/회전/프레임은 OnUpdate의
+	-- UpdateComboOrbPositions가 매 프레임 갱신하므로 여기서는 존재 여부(스폰/제거)만 맞춘다.
+	@ExecSpace("ServerOnly")
+	method void UpdateComboIndicator()
+		for i = 1, 5 do
+			local orb = self:GetComboOrb(i)
+			if i <= self.ComboStack then
+				if not isvalid(orb) then
+					local newOrb = _SpawnService:SpawnByModelId("comboorbeffect", "ComboOrb" .. i, Vector3(self.ComboOrbRadius, 0.3, -0.1), self.Entity)
+					if newOrb ~= nil then
+						local renderer = newOrb.SpriteRendererComponent
+						if renderer ~= nil then
+							renderer.SpriteRUID = _CardManager.ComboOrbRUID
+							renderer.StartFrameIndex = 0
+							renderer.EndFrameIndex = 0
+						end
+						self:SetComboOrbReveal(i, 0)
+						self:SetComboOrb(i, newOrb)
+					end
+				end
+			else
+				if isvalid(orb) then
+					orb:Destroy()
+					self:SetComboOrb(i, nil)
+				end
+			end
+		end
+	end
+
+	-- 켜져 있는 오브들을 몬스터 주위로 시계방향 원형 배치하고(유저 확인: 실제 게임처럼 스택 개수만큼
+	-- 같은 오브가 원형으로 돎), 각 오브를 자기 슬롯 번호(i)까지 프레임 0→i를 순서대로 재생한 뒤
+	-- 정지시킨다(유저 지정: "1->3(두번째 콤보)" 등 — 애니메이션 자동재생이 아니라 매 프레임
+	-- StartFrameIndex=EndFrameIndex를 수동으로 갱신하는 "정지 프레임" 방식). y = -sin(...)으로
+	-- 각도가 커질수록 아래로 향하게 해서 화면 기준 시계방향(오른쪽→아래→왼쪽→위)으로 돌게 한다.
+	method void UpdateComboOrbPositions(number delta)
+		if self.ComboStack <= 0 then return end
+		self._comboOrbAngle = self._comboOrbAngle + delta * self.ComboOrbRotateSpeed
+		local scale = _CardManager:GetEffectScaleRatio(self) * self.ComboOrbScaleMultiplier
+		local step = (2 * math.pi) / self.ComboStack
+		for i = 1, self.ComboStack do
+			local orb = self:GetComboOrb(i)
+			if isvalid(orb) then
+				local a = self._comboOrbAngle + (i - 1) * step
+				local x = math.cos(a) * self.ComboOrbRadius
+				local y = 0.3 - math.sin(a) * self.ComboOrbRadius
+				orb.TransformComponent.Position = Vector3(x, y, -0.1)
+				orb.TransformComponent.Scale = Vector3(scale, scale, 1.0)
+
+				local reveal = self:GetComboOrbReveal(i) + delta
+				self:SetComboOrbReveal(i, reveal)
+				local frame = math.min(i, math.floor(reveal / self.ComboOrbFrameStepDuration))
+				local renderer = orb.SpriteRendererComponent
+				if renderer ~= nil then
+					renderer.StartFrameIndex = frame
+					renderer.EndFrameIndex = frame
+				end
+			end
+		end
+	end
+
+	-- Die() / 소멸 시점에 켜져 있는 오브 슬롯을 전부 정리한다
+	method void ClearAllComboOrbs()
+		for i = 1, 5 do
+			local orb = self:GetComboOrb(i)
+			if isvalid(orb) then
+				orb:Destroy()
+				self:SetComboOrb(i, nil)
+			end
+		end
+	end
+
+	-- 5스택 도달 시 자동으로 터지는 폭발 연출(리소스팩 "코마"의 finish/1~10 중 무작위 + 전용 사운드)
+	-- 후 스택을 초기화한다. 유저 지정: "5개되면...코마처럼 자동으로 터지면 좋겠구먼"
+	@ExecSpace("ServerOnly")
+	method void TriggerComboFinish(number lastHitDamage)
+		_CardManager:PlayComboFinishBurst(self, lastHitDamage)
+		self:ResetComboStack()
 	end
 
 	@ExecSpace("ServerOnly")
@@ -1368,6 +1756,8 @@ script MonsterAI extends Component
 			self._freezeIndicator:Destroy()
 			self._freezeIndicator = nil
 		end
+		self.ComboStack = 0
+		self:ClearAllComboOrbs()
 		log("Monster died")
 		-- 보스는 OnBossDefeated()가 처치 보상(Exp/Gold)까지 전부 처리한다. OnMonsterKilled()도
 		-- 같이 부르면 NotifyExpChanged가 한 프레임 안에 두 번 겹쳐 호출되어, 레벨업 트윈이 강제로
@@ -1449,7 +1839,13 @@ script MonsterAI extends Component
 			_GameManager:TryDropBounceKnockbackItem(self.Entity.TransformComponent.WorldPosition, fallHeight, groundWorldY, dropScale)
 		end
 		-- 존16~17(그림자 존) 전용: 야누스의 검 교환권 5% 확률 드롭 (보스/일반/엘리트 무관하게 처치마다 판정)
-		if self._spawnZoneIndex == 16 or self._spawnZoneIndex == 17 then
+		if self._isErdas then
+			-- 존 잡템 풀 대신 Map23ErdasEasterEggLogic이 정수 드롭(100% 확정)+킬카운트를 전담한다
+			_Map23ErdasEasterEggLogic:OnErdasKilled(self._erdasOrdinal, self.Entity.TransformComponent.WorldPosition, fallHeight, groundWorldY, dropScale)
+		elseif self._isTreasureChest then
+			-- map24는 웨이브/존 잡템 개념이 없다 — 처치 시점에 그 자리에 귀환 포탈을 생성한다
+			_Map24TreasureChestLogic:OnChestKilled(self.Entity.TransformComponent.WorldPosition)
+		elseif self._spawnZoneIndex == 16 or self._spawnZoneIndex == 17 then
 			_GameManager:TryDropShadowVoucher(self.Entity.TransformComponent.WorldPosition, fallHeight, groundWorldY, dropScale)
 		else
 			-- 그 외 전 구간: 확률로 "이 몬스터가 실제로 잡으면 주는" 잡템 1개를 가방에 지급 (보스/일반/엘리트 무관)
@@ -1466,6 +1862,7 @@ script MonsterAI extends Component
 	@ExecSpace("Multicast")
 	method void PlayDeathAnimation(string dieRUID, number dieDuration)
 		if self:IsServer() then return end
+		if self._dieSoundRUID ~= "" then _SoundService:PlaySound(self._dieSoundRUID, 1.0) end
 		local renderer = self.Entity.SpriteRendererComponent
 		if renderer == nil then return end
 		-- 상태이상 색상 제거 + die1 스프라이트로 전환해 메이플 원본 죽는 연출 재생
@@ -1718,6 +2115,7 @@ script MonsterAI extends Component
 			self._freezeIndicator:Destroy()
 			self._freezeIndicator = nil
 		end
+		self:ClearAllComboOrbs()
 		self:DestroyStunStars()
 	end
 
