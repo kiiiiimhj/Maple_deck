@@ -4963,6 +4963,8 @@ script CardManager extends Logic
 	property SpriteGUIRendererComponent finalAttackBowFill = "a5e989f2-61ac-45fe-94d5-95bd1065ffe1"
 	property Entity rapidFireBuff = "3889a510-9ad3-40ea-90b5-cc85a0f60ca1"
 	property SpriteGUIRendererComponent rapidFireFill = "29f51406-be4d-43a6-90fb-a2123d29eca7"
+	property Entity comboBuff = "bc7b9a21-5da3-44dc-9895-bd3170e7093f"
+	property SpriteGUIRendererComponent comboFill = "54ad40a0-3f3e-4c71-a9ca-d18e3a1ad4b8"
 
 	-- 활성 버프 순서 추적 (획득 순으로 왼쪽부터)
 	property any _activeBuffOrder = nil
@@ -5929,6 +5931,8 @@ script CardManager extends Logic
 			if self.FinalAttackBowLevel > 0 then self:NotifyFinalAttackBowOnPermanent() end
 		elseif name == "RapidFireLevel" then
 			if self.RapidFireLevel > 0 then self:NotifyRapidFireOnPermanent() end
+		elseif name == "ComboAttackLevel" then
+			if self.ComboAttackLevel > 0 then self:NotifyComboOnPermanent() end
 		elseif name == "SlashLevel" then self:RefreshSlotIfHoldsCard(152)
 		elseif name == "BrandishLevel" then self:RefreshSlotIfHoldsCard(153)
 		elseif name == "FlashSlashLevel" then self:RefreshSlotIfHoldsCard(154)
@@ -6167,24 +6171,72 @@ script CardManager extends Logic
 		self:ShowBuffIconPermanent(self.rapidFireBuff, self.rapidFireFill)
 	end
 
+	@ExecSpace("Multicast")
+	method void NotifyComboOnPermanent()
+		if self:IsServer() then return end
+		self:ShowBuffIconPermanent(self.comboBuff, self.comboFill)
+	end
+
+	-- 버프 아이콘 패널 Entity ↔ 내부 buffName 키 매핑. 신규 패시브 추가 시 이 두 함수(과 그 역함수
+	-- GetBuffPanelForKey)에만 한 줄씩 추가하면 Show/Hide/Reposition 전부에 반영된다 — 예전에는 아래
+	-- 4개 함수(ShowBuffIconPermanent/ShowBuffIcon/HideBuffIcon/RepositionBuffIcons) 각각에 동일한
+	-- if/elseif 체인이 중복되어 있어서 하나라도 빠뜨리면 아이콘이 조용히 안 뜨는 문제가 있었다.
+	method string GetBuffKeyForPanel(Entity panel)
+		if panel == self.boosterBuff then return "booster"
+		elseif panel == self.critBuff then return "crit"
+		elseif panel == self.freezeBuff then return "freeze"
+		elseif panel == self.armorBuff then return "armor"
+		elseif panel == self.meditationBuff then return "meditation"
+		elseif panel == self.bowAccelBuff then return "bowaccel"
+		elseif panel == self.piercingWillBuff then return "piercingwill"
+		elseif panel == self.criticalShotBuff then return "criticalshot"
+		elseif panel == self.finalAttackBowBuff then return "finalattackbow"
+		elseif panel == self.rapidFireBuff then return "rapidfire"
+		elseif panel == self.comboBuff then return "combo"
+		end
+		return ""
+	end
+
+	method Entity GetBuffPanelForKey(string buffName)
+		if buffName == "booster" then return self.boosterBuff
+		elseif buffName == "crit" then return self.critBuff
+		elseif buffName == "freeze" then return self.freezeBuff
+		elseif buffName == "armor" then return self.armorBuff
+		elseif buffName == "meditation" then return self.meditationBuff
+		elseif buffName == "bowaccel" then return self.bowAccelBuff
+		elseif buffName == "piercingwill" then return self.piercingWillBuff
+		elseif buffName == "criticalshot" then return self.criticalShotBuff
+		elseif buffName == "finalattackbow" then return self.finalAttackBowBuff
+		elseif buffName == "rapidfire" then return self.rapidFireBuff
+		elseif buffName == "combo" then return self.comboBuff
+		end
+		return nil
+	end
+
+	-- 등록된 패시브 버프 아이콘 전부 숨김 — '다시하기' 등 전체 초기화 시 한 곳만 호출하면 되도록
+	-- BroadcastResetCardSlots에서 사용(예전엔 booster/crit 2개만 리셋되고 나머지는 리셋 누락 버그가 있었다)
+	@ExecSpace("ClientOnly")
+	method void HideAllBuffIcons()
+		self:HideBuffIcon(self.boosterBuff, self.boosterFill)
+		self:HideBuffIcon(self.critBuff, self.critFill)
+		self:HideBuffIcon(self.freezeBuff, self.freezeFill)
+		self:HideBuffIcon(self.armorBuff, self.armorFill)
+		self:HideBuffIcon(self.meditationBuff, self.meditationFill)
+		self:HideBuffIcon(self.bowAccelBuff, self.bowAccelFill)
+		self:HideBuffIcon(self.piercingWillBuff, self.piercingWillFill)
+		self:HideBuffIcon(self.criticalShotBuff, self.criticalShotFill)
+		self:HideBuffIcon(self.finalAttackBowBuff, self.finalAttackBowFill)
+		self:HideBuffIcon(self.rapidFireBuff, self.rapidFireFill)
+		self:HideBuffIcon(self.comboBuff, self.comboFill)
+	end
+
 	@ExecSpace("ClientOnly")
 	method void ShowBuffIconPermanent(Entity panel, SpriteGUIRendererComponent fill)
 		-- 영구 패시브 버프 아이콘 표시 — 잔여시간 fill 없이 아이콘만 상시 표시
 		if panel == nil or fill == nil then return end
 		if self._activeBuffOrder == nil then self._activeBuffOrder = {} end
 
-		local buffName = ""
-		if panel == self.boosterBuff then buffName = "booster"
-		elseif panel == self.critBuff then buffName = "crit"
-		elseif panel == self.freezeBuff then buffName = "freeze"
-		elseif panel == self.armorBuff then buffName = "armor"
-		elseif panel == self.meditationBuff then buffName = "meditation"
-		elseif panel == self.bowAccelBuff then buffName = "bowaccel"
-		elseif panel == self.piercingWillBuff then buffName = "piercingwill"
-		elseif panel == self.criticalShotBuff then buffName = "criticalshot"
-		elseif panel == self.finalAttackBowBuff then buffName = "finalattackbow"
-		elseif panel == self.rapidFireBuff then buffName = "rapidfire"
-		end
+		local buffName = self:GetBuffKeyForPanel(panel)
 		if buffName ~= "" then
 			local found = false
 			for _, name in ipairs(self._activeBuffOrder) do
@@ -6212,18 +6264,7 @@ script CardManager extends Logic
 		if panel == nil or fill == nil then return end
 		if self._activeBuffOrder == nil then self._activeBuffOrder = {} end
 
-		local buffName = ""
-		if panel == self.boosterBuff then buffName = "booster"
-		elseif panel == self.critBuff then buffName = "crit"
-		elseif panel == self.freezeBuff then buffName = "freeze"
-		elseif panel == self.armorBuff then buffName = "armor"
-		elseif panel == self.meditationBuff then buffName = "meditation"
-		elseif panel == self.bowAccelBuff then buffName = "bowaccel"
-		elseif panel == self.piercingWillBuff then buffName = "piercingwill"
-		elseif panel == self.criticalShotBuff then buffName = "criticalshot"
-		elseif panel == self.finalAttackBowBuff then buffName = "finalattackbow"
-		elseif panel == self.rapidFireBuff then buffName = "rapidfire"
-		end
+		local buffName = self:GetBuffKeyForPanel(panel)
 		if buffName ~= "" then
 			local found = false
 			for _, name in ipairs(self._activeBuffOrder) do
@@ -6244,18 +6285,7 @@ script CardManager extends Logic
 		if panel == nil then return end
 		if self._activeBuffOrder == nil then self._activeBuffOrder = {} end
 
-		local buffName = ""
-		if panel == self.boosterBuff then buffName = "booster"
-		elseif panel == self.critBuff then buffName = "crit"
-		elseif panel == self.freezeBuff then buffName = "freeze"
-		elseif panel == self.armorBuff then buffName = "armor"
-		elseif panel == self.meditationBuff then buffName = "meditation"
-		elseif panel == self.bowAccelBuff then buffName = "bowaccel"
-		elseif panel == self.piercingWillBuff then buffName = "piercingwill"
-		elseif panel == self.criticalShotBuff then buffName = "criticalshot"
-		elseif panel == self.finalAttackBowBuff then buffName = "finalattackbow"
-		elseif panel == self.rapidFireBuff then buffName = "rapidfire"
-		end
+		local buffName = self:GetBuffKeyForPanel(panel)
 		if buffName ~= "" then
 			for i = #self._activeBuffOrder, 1, -1 do
 				if self._activeBuffOrder[i] == buffName then
@@ -6284,18 +6314,7 @@ script CardManager extends Logic
 		local startY = 195
 		for i = 1, #self._activeBuffOrder do
 			local buffName = self._activeBuffOrder[i]
-			local panel = nil
-			if buffName == "booster" then panel = self.boosterBuff
-			elseif buffName == "crit" then panel = self.critBuff
-			elseif buffName == "freeze" then panel = self.freezeBuff
-			elseif buffName == "armor" then panel = self.armorBuff
-			elseif buffName == "meditation" then panel = self.meditationBuff
-			elseif buffName == "bowaccel" then panel = self.bowAccelBuff
-			elseif buffName == "piercingwill" then panel = self.piercingWillBuff
-			elseif buffName == "criticalshot" then panel = self.criticalShotBuff
-			elseif buffName == "finalattackbow" then panel = self.finalAttackBowBuff
-			elseif buffName == "rapidfire" then panel = self.rapidFireBuff
-			end
+			local panel = self:GetBuffPanelForKey(buffName)
 			if panel ~= nil then
 				local tf = panel:GetComponent(UITransformComponent)
 				if tf ~= nil then
@@ -10344,6 +10363,7 @@ script CardManager extends Logic
 			elseif upgradeType == "comboattack_up" and self.ComboAttackLevel < 5 then
 				self.ComboAttackLevel = self.ComboAttackLevel + 1
 			end
+			self:NotifyComboOnPermanent()
 			log("ComboAttack L" .. self.ComboAttackLevel .. " (스택 확률 " .. math.floor(_CardRegistry:GetChance(151, self.ComboAttackLevel) * 100) .. "%)")
 			return
 		end
@@ -10584,9 +10604,9 @@ script CardManager extends Logic
 		self.potionImage.Color = Color(1, 1, 1, 0)
 		self.potionCooldown.Entity:SetEnable(false)
 
-		-- 버프 아이콘 초기화
-		if self.boosterBuff ~= nil then self:HideBuffIcon(self.boosterBuff, self.boosterFill) end
-		if self.critBuff ~= nil then self:HideBuffIcon(self.critBuff, self.critFill) end
+		-- 버프 아이콘 초기화 (등록된 패시브 전부 — 예전엔 booster/crit만 리셋해서 아머·메디테이션 등은
+		-- 다시하기 후에도 화면에 남는 버그가 있었다)
+		self:HideAllBuffIcons()
 	end
 
 	@ExecSpace("Multicast")
