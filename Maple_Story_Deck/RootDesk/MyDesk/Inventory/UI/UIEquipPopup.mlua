@@ -1,13 +1,7 @@
 @Component
 script UIEquipPopup extends Component
 
-	property TextComponent TextMessage = nil
-
-	property TextComponent TextConfirm = nil
-
-	property TextComponent TextCancel = nil
-
-	property TextComponent TextLock = nil
+	property TextComponent TitleText = nil
 
 	property UIItemSlot ItemSlot = nil
 
@@ -17,72 +11,111 @@ script UIEquipPopup extends Component
 
 	property boolean IsOpenedFromInventory = false
 
+	property ButtonComponent BtnClose = "6eef8a6f-3f56-4e86-90bd-a70221fbdf17"
+
+	property TextGUIRendererComponent LevelBadgeText = "3eb01c9f-6c4e-45e7-9716-446508801d42"
+
+	property TextGUIRendererComponent StatValueText = "4a556226-b3fc-40e1-a724-ecd88adc4b2d"
+
+	property TextGUIRendererComponent DescText = "daa61354-9d65-4169-83be-c60f64aeb55b"
+
+	property TextGUIRendererComponent GoldText = "5009a399-2408-45a3-8922-cebb3a880852"
+
+	-- 유물 업그레이드와 동일한 골드 코스트 자리 — 실제 레벨업 수치 체계가 정해지기 전까지는 임시값
+	property integer PlaceholderUpgradeCost = 1000
+
+	property ButtonComponent ButtonEquip = "92346884-1f4e-4b95-b71a-524130b189f6"
+
+	property TextGUIRendererComponent ButtonEquipLabel = "2e2531ba-a99f-43dd-9f4a-99523b2b8c49"
+
+	property ButtonComponent ButtonLevelUp = "2542e63e-ec24-4a5b-8544-0f7ee8290b8a"
+
+	property ButtonComponent ButtonBatchLevelUp = "657b5177-d87b-42bf-a191-e760311979e4"
+
+	property ButtonComponent ComposeButton = "4adeaac0-8c50-4897-b301-d0671ac948a9"
+
+	property ButtonComponent GradeUpButton = "5480e133-4451-41c6-b4a8-599c9cffa272"
+
+	property ButtonComponent ButtonDelete = "c9ff01cc-a0db-48d7-b75d-2adf8b7428de"
+
+	property ButtonComponent ButtonLock = "21883e82-2424-4bd7-b0a3-355b3c751216"
+
 	@ExecSpace("ClientOnly")
 	method void OnBeginPlay()
 		local panel = self.Entity:GetChildByName("Panel")
-		local textTitle = panel:GetChildByName("Title").TextComponent
-		textTitle.Text = "장비"
-		
+		self.TitleText = panel:GetChildByName("Title").TextComponent
+
 		local itemDecoration = panel:GetChildByName("ItemDecoration")
 		local itemSlotEntity = _SpawnService:SpawnByModelId(_EntryService:GetModelIdByName("UIItemSlot"), "ItemSlot", Vector3.zero, itemDecoration)
 		self.ItemSlot = itemSlotEntity.UIItemSlot
-		
-		self.TextMessage = panel:GetChildByName("Message").TextComponent
-		
-		local buttonConfirm = panel:GetChildByName("ButtonConfirm")
-		buttonConfirm:ConnectEvent(ButtonClickEvent, function() self:OnConfirmButtonClicked() end)
-		self.TextConfirm = buttonConfirm.TextComponent
-		
-		local buttonCancel = panel:GetChildByName("ButtonCancel")
-		buttonCancel:ConnectEvent(ButtonClickEvent, function() self:OnCancelButtonClicked() end)
-		self.TextCancel = buttonCancel.TextComponent
-		
-		local buttonDelete = panel:GetChildByName("ButtonDelete")
-		buttonDelete:ConnectEvent(ButtonClickEvent, function() self:OnDeleteButtonClicked() end)
-		
-		local buttonLock = panel:GetChildByName("ButtonLock")
-		buttonLock:ConnectEvent(ButtonClickEvent, function() self:OnLockButtonClicked() end)
-		self.TextLock = buttonLock:GetChildByName("TextLock").TextComponent
+
+		self.BtnClose.Entity:ConnectEvent(ButtonClickEvent, function() self:Close() end)
+
+		self.ButtonEquip.Entity:ConnectEvent(ButtonClickEvent, function() self:OnEquipButtonClicked() end)
+		self.ButtonDelete.Entity:ConnectEvent(ButtonClickEvent, function() self:OnDeleteButtonClicked() end)
+		self.ButtonLock.Entity:ConnectEvent(ButtonClickEvent, function() self:OnLockButtonClicked() end)
+
+		-- 레벨업/일괄 레벨업/합성/등급 상향 — 디자인 확정 전 자리만(유저 지정: "일단 플레이스홀더 수치로 뼈대만").
+		-- 실제 레벨/스탯 성장 데이터 모델이 아직 없어서 클릭하면 준비중 로그만 남긴다.
+		self.ButtonLevelUp.Entity:ConnectEvent(ButtonClickEvent, function() self:OnPlaceholderButtonClicked("레벨업") end)
+		self.ButtonBatchLevelUp.Entity:ConnectEvent(ButtonClickEvent, function() self:OnPlaceholderButtonClicked("일괄 레벨업") end)
+		self.ComposeButton.Entity:ConnectEvent(ButtonClickEvent, function() self:OnPlaceholderButtonClicked("합성") end)
+		self.GradeUpButton.Entity:ConnectEvent(ButtonClickEvent, function() self:OnPlaceholderButtonClicked("등급 상향") end)
 	end
 
 	@ExecSpace("ClientOnly")
 	method void Open(boolean isOpenedFromInventory, ItemStruct itemStruct)
 		self.IsOpenedFromInventory = isOpenedFromInventory
 		self.ItemStruct = itemStruct
-		
+
 		self.ItemSlot:Set(itemStruct)
 		self.ItemSlot.ImageDim.Enable = false
-		
-		local mainKeyword = itemStruct:IsAttached() and "해제" or "장착"
-		self.TextMessage.Text = string.format("%s하시겠습니까?", mainKeyword)
-		self.TextConfirm.Text = mainKeyword
-		
+
+		local itemData = itemStruct:GetItemData()
+		self.TitleText.Text = itemData.Name
+
+		-- 스탯 카탈로그가 아직 없어서(유저 지정: 뼈대만 먼저) 등급 기반 임시 수치로 채운다 — 실제 밸런스는 나중에 데이터로 교체
+		local gearStruct = itemStruct:GetGearStruct()
+		local placeholderHp = 10 + (gearStruct ~= nil and gearStruct.Grade or 0) * 10
+		self.StatValueText.Text = tostring(placeholderHp)
+
+		self.DescText.Text = "아이템 설명이 아직 등록되지 않았습니다."
+		self.LevelBadgeText.Text = "Lv. 1 / 10"
+
+		self.GoldText.Text = string.format("%d / %d", _GameManager.Gold, self.PlaceholderUpgradeCost)
+
+		local mainKeyword = itemStruct:IsAttached() and "장착 해제" or "장착"
+		self.ButtonEquipLabel.Text = mainKeyword
+
 		self.Entity.Enable = true
+		-- EquipPopup은 인벤토리 메인 패널(Inventory/Panel)과 형제 관계라 형제 순서상 뒤에 그려지는
+		-- 패널에 가려질 수 있다 — InventoryUI가 자기 그룹을 맨 앞으로 올릴 때 쓰는 것과 동일한 방식으로
+		-- 열릴 때마다 확정적으로 맨 앞으로 올린다.
+		_UILogic:SetSiblingIndex(self.Entity.UITransformComponent, 1000000)
 	end
 
 	@ExecSpace("ClientOnly")
-	method void OnConfirmButtonClicked()
+	method void OnEquipButtonClicked()
 		if self.Entity.Enable == false or self.ItemStruct == nil then
 			return
 		end
-		
+
 		---@type ItemStruct
 		local itemStruct = self.ItemStruct
-		local itemData = itemStruct:GetItemData()
 		local playerInventory = _UserService.LocalPlayer.PkgPlayerInventory
-		
-		if itemStruct:IsAttached() then	
+
+		if itemStruct:IsAttached() then
 			playerInventory:RequestDetachNormalGear(playerInventory.CurrentJob, itemStruct:GetGearData().GearCategory)
-		else 
+		else
 			playerInventory:RequestAttachNormalGear(playerInventory.CurrentJob, itemStruct.GUID)
 		end
-		
+
 		self:Close()
 	end
 
 	@ExecSpace("ClientOnly")
-	method void OnCancelButtonClicked()
-		self:Close()
+	method void OnPlaceholderButtonClicked(string label)
+		log("UIEquipPopup: " .. label .. " 버튼 클릭 — 준비중(디자인 확정 전)")
 	end
 
 	@ExecSpace("ClientOnly")
@@ -90,11 +123,11 @@ script UIEquipPopup extends Component
 		if self.Entity.Enable == false or self.ItemStruct == nil then
 			return
 		end
-		
+
 		---@type ItemStruct
 		local itemStruct = self.ItemStruct
 		_UserService.LocalPlayer.PkgPlayerInventory:RequestDiscardItem(itemStruct.GUID, 1)
-		
+
 		self:Close()
 	end
 
@@ -103,7 +136,7 @@ script UIEquipPopup extends Component
 		if self.Entity.Enable == false or self.ItemStruct == nil then
 			return
 		end
-		
+
 		---@type ItemStruct
 		local itemStruct = self.ItemStruct
 		_UserService.LocalPlayer.PkgPlayerInventory:RequestLockItem(itemStruct.GUID, not itemStruct.Lock)
@@ -112,7 +145,7 @@ script UIEquipPopup extends Component
 	@ExecSpace("ClientOnly")
 	method void Close()
 		self.ItemStruct = nil
-		
+
 		self.Entity.Enable = false
 	end
 
@@ -122,18 +155,18 @@ script UIEquipPopup extends Component
 		-- Parameters
 		local GUIDs = event.GUIDs
 		---------------------------------------------------------
-		
+
 		if self.Entity.Enable == false then
 			return
 		end
-		
+
 		---@type ItemStruct
 		local itemStruct = self.ItemStruct
 		if itemStruct == nil then
 			return
 		end
 		local itemGUID = itemStruct.GUID
-		
+
 		for i, modifiedItemGUID in ipairs(GUIDs) do
 			if itemGUID == modifiedItemGUID then
 				self:Open(self.IsOpenedFromInventory, itemStruct)

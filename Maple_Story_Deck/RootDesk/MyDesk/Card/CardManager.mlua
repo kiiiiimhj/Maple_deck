@@ -671,9 +671,11 @@ script CardManager extends Logic
 	property string LeionAttackEffectRUID = "ffaf507b148744f49715a8253477fec0"
 	-- 크기 1/4(0.375)→10%↑(0.4125)→5%↑(0.433125)→20%↑(0.51975)→15%↑(0.51975*1.15=0.5977125)
 	property number LeionAttackEffectScale = 0.5977125
-	-- 유저 지정: 오른쪽(+X)으로 더, 위로 살짝(+Y)
-	property number LeionAttackEffectOffsetX = 0.5
+	-- 유저 지정: 오른쪽(+X)으로 더, 위로 살짝(+Y). 이후 유저 요청으로 오른쪽으로 0.1 추가 이동(0.5->0.6)
+	property number LeionAttackEffectOffsetX = 0.6
 	property number LeionAttackEffectOffsetY = 0.15
+	-- 유저 요청: 연출 스폰 후 이 시간만큼 늦춰서 데미지를 적용(타격 타이밍 싱크)
+	property number LeionAttackDamageDelay = 0.2
 	-- HitEffectLifetime(0.3초, 여러 스킬 공용)을 그대로 쓰다가 유저 지정으로 0.3초 빠르게(=그대로) 했더니
 	-- "연출이 끊기는 느낌"이라는 피드백을 받아, 공용 값은 안 건드리고 레이온 전용 지속시간을 따로 둔다
 	property number LeionAttackEffectLifetime = 0.6
@@ -708,24 +710,32 @@ script CardManager extends Logic
 		local fx = self:SpawnEffect(self.LeionAttackEffectRUID, hitPos, 0, 1.0, self.LeionAttackEffectScale * (self:GetEffectScaleRatio(target)), 1.0)
 		if fx ~= nil then fx:Destroy(self.LeionAttackEffectLifetime) end
 
-		-- 콤보 스택 자체에는 데미지 보너스가 없다 — 5스택 폭발(PlayComboFinishBurst)이 실제 적용된
-		-- 데미지(크리티컬 반영 후)의 200%를 따로 터뜨리므로, AddComboStack에 그 값을 그대로 넘긴다.
-		-- (and/or 삼항 표현 대신 if/else로 명시 — 삼항식은 mlua 정적 타입 추론이 number로 확정하지
-		-- 못해 강타입 MonsterAI 파라미터에 대한 메서드 호출에서 LEA-1102가 발생했다)
-		local appliedDamage = damage
-		if isCrit then
-			appliedDamage = damage * 2
-			target:TakeDamageCrit(appliedDamage)
-		else
-			target:TakeDamage(appliedDamage)
-		end
-		if self.ComboAttackLevel > 0 and not target._dead then
-			local chance = _CardRegistry:GetChance(151, self.ComboAttackLevel)
-			if _UtilLogic:RandomDouble() < chance then
-				target:AddComboStack(appliedDamage)
+		-- 유저 요청: 데미지 적용 타이밍을 연출 스폰 시점보다 LeionAttackDamageDelay만큼 늦춘다.
+		-- 그 사이 대상이 다른 공격으로 먼저 죽을 수 있으니 콜백 시점에 다시 유효성을 확인한다.
+		local capturedTarget = target
+		local capturedDamage = damage
+		local capturedIsCrit = isCrit
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(capturedTarget) or not isvalid(capturedTarget.Entity) or capturedTarget._dead then return end
+			-- 콤보 스택 자체에는 데미지 보너스가 없다 — 5스택 폭발(PlayComboFinishBurst)이 실제 적용된
+			-- 데미지(크리티컬 반영 후)의 200%를 따로 터뜨리므로, AddComboStack에 그 값을 그대로 넘긴다.
+			-- (and/or 삼항 표현 대신 if/else로 명시 — 삼항식은 mlua 정적 타입 추론이 number로 확정하지
+			-- 못해 강타입 MonsterAI 파라미터에 대한 메서드 호출에서 LEA-1102가 발생했다)
+			local appliedDamage = capturedDamage
+			if capturedIsCrit then
+				appliedDamage = capturedDamage * 2
+				capturedTarget:TakeDamageCrit(appliedDamage)
+			else
+				capturedTarget:TakeDamage(appliedDamage)
 			end
-		end
-		log("LeionBasicAttack: dmg=" .. math.floor(appliedDamage))
+			if self.ComboAttackLevel > 0 and not capturedTarget._dead then
+				local chance = _CardRegistry:GetChance(151, self.ComboAttackLevel)
+				if _UtilLogic:RandomDouble() < chance then
+					capturedTarget:AddComboStack(appliedDamage)
+				end
+			end
+			log("LeionBasicAttack: dmg=" .. math.floor(appliedDamage))
+		end, self.LeionAttackDamageDelay)
 	end
 
 	-- 실제 "콤보 어택" 계열 오브 클립(6프레임: index0=생성 연출, index1~5=스택 1~5 표시 프레임).
@@ -2079,7 +2089,7 @@ script CardManager extends Logic
 	property number Card159HitInterval = 0.35  -- 2연타 사이 간격 — 레이징 블로우와 동일 간격 재사용
 	property number Card159Scale = 0.91  -- 유저 요청으로 30% 축소(1.3 * 0.7)
 	property number Card159HitScale = 1.0
-	property number Card159HitRadius = 1.2  -- 찌르는 모션이 닿는 범위 판정
+	property number Card159HitRadius = 1.3  -- 찌르는 모션이 닿는 범위 판정(2026-08-05: 1.2→1.3, 유저 지적 — 연출보다 판정이 좁아 보임)
 	property Vector3 Card159SpawnPosition = Vector3(0, 3.0, -0.1)  -- 근처에 적이 하나도 없을 때만 쓰는 대체 위치(피닉스와 동일값 재사용)
 	property number Card159HoverYOffset = 0.1  -- 타겟 위치 기준 높이 오프셋
 	property number Card159DepthZ = -2.0  -- 몬스터 Z 범위보다 앞선 고정값 — 항상 몬스터 위에 그려지게(피닉스/허수아비와 동일 방식)
@@ -2328,7 +2338,7 @@ script CardManager extends Logic
 	property number ScarringBladeHitInterval = 0.35
 	property number ScarringBladeScale = 0.91
 	property number ScarringBladeHitScale = 1.0
-	property number ScarringBladeHitRadius = 1.2
+	property number ScarringBladeHitRadius = 1.5  -- 2026-08-05: 1.2→1.5, 유저 지적 — 연출보다 판정이 좁아 보임
 	property Vector3 ScarringBladeSpawnPosition = Vector3(0, 3.0, -0.1)  -- 근처에 적이 하나도 없을 때만 쓰는 대체 위치
 	property number ScarringBladeHoverYOffset = 0.1
 	property number ScarringBladeDepthZ = -2.0
@@ -7213,6 +7223,9 @@ script CardManager extends Logic
 		end
 		return base * self:GetMeditationMult() * self:GetSkillInvDamageMult(cardIdx) * self:GetRapidFireMult() * self:GetWarriorMasteryMult()
 	end
+
+	-- 2026-08-03: 몬스터 체력을 플레이어 화력에 비례시키던 GetBasicAttackCardIdx/GetStrongestActiveDamage는
+	-- 순수 시간 단계 기반 설계로 되돌아가면서 제거됨(GameManager.GetTimeStep/GetTimeStepHp 참고).
 
 	method number GetKingPepeDamage()
 		-- Lv1~3: 기본(300) / Lv4~5: +70(370)
@@ -13317,9 +13330,21 @@ script CardManager extends Logic
 			if self:IsCardUnlocked(108) and self.FleshMirageLevel < 5 then table.insert(pool, 108) end
 			return pool
 		end
-		-- 레이온도 아르카나 카드가 안 틱되므로 별도 풀(아직 기본공격뿐이라 빈 풀)을 쓴다 — 이 분기가
-		-- 없으면 아래 아르카나 카드 목록으로 그대로 흘러들어가 전사 컨셉에 안 맞는 카드가 섞여 나온다.
+		-- 레이온도 아르카나 카드가 안 틱되므로 별도 풀을 쓴다 — 이 분기가 없으면 아래 아르카나 카드
+		-- 목록으로 그대로 흘러들어가 전사 컨셉에 안 맞는 카드가 섞여 나온다. (2026-08-02: 이 분기가
+		-- 계속 빈 풀이었던 걸 발견/수정 — 이 함수를 재사용하는 엘리트 처치/상자 이스터에그/얄미운
+		-- 미니무르/보너스 보스(발록) 전부에서 레이온 스킬이 한 번도 안 나오고 있었다. 유저 지적:
+		-- "상자 누르면 아이템 나오는 이스터에그에 스킬 안들어간거 같은데?" — 조합 결과 카드(160,
+		-- 165~170)는 상점과 동일한 정책으로 계속 제외한다.
 		if _GameManager.SelectedCharacter == 2 then
+			if self:IsCardUnlocked(152) and self.SlashLevel < 5 then table.insert(pool, 152) end
+			if self:IsCardUnlocked(153) and self.BrandishLevel < 5 then table.insert(pool, 153) end
+			if self:IsCardUnlocked(154) and self.FlashSlashLevel < 5 then table.insert(pool, 154) end
+			if self:IsCardUnlocked(155) and self.ChargeLevel < 5 then table.insert(pool, 155) end
+			if self:IsCardUnlocked(156) and self.AuraBladeLevel < 5 then table.insert(pool, 156) end
+			if self:IsCardUnlocked(157) and self.RagingBlowLevel < 5 then table.insert(pool, 157) end
+			if self:IsCardUnlocked(158) and self.LeapAttackLevel < 5 then table.insert(pool, 158) end
+			if self:IsCardUnlocked(159) and self.ScarringSwordLevel < 5 then table.insert(pool, 159) end
 			return pool
 		end
 		if self:IsCardUnlocked(2) then table.insert(pool, 2) end
@@ -13363,6 +13388,19 @@ script CardManager extends Logic
 		elseif cardIdx == 111 then return "criticalshot_up"
 		elseif cardIdx == 112 then return "finalattackbow_up"
 		elseif cardIdx == 113 then return "rapidfire_up"
+		elseif cardIdx == 151 then return "comboattack_up"
+		elseif cardIdx == 152 then return "slash_up"
+		elseif cardIdx == 153 then return "brandish_up"
+		elseif cardIdx == 154 then return "flashslash_up"
+		elseif cardIdx == 155 then return "charge_up"
+		elseif cardIdx == 156 then return "aurablade_up"
+		elseif cardIdx == 157 then return "ragingblow_up"
+		elseif cardIdx == 158 then return "leapattack_up"
+		elseif cardIdx == 159 then return "scarringsword_up"
+		elseif cardIdx == 161 then return "chanceattack_up"
+		elseif cardIdx == 162 then return "coma_up"
+		elseif cardIdx == 163 then return "selfrecovery_up"
+		elseif cardIdx == 164 then return "warriormastery_up"
 		end
 		return (_UtilLogic:RandomDouble() < 0.5) and "dmg" or "cd"
 	end
@@ -13456,6 +13494,12 @@ script CardManager extends Logic
 		if self:IsCardUnlocked(111) and self.CriticalShotLevel < 5 then table.insert(passivePool, 111) end
 		if self:IsCardUnlocked(112) and self.FinalAttackBowLevel < 5 then table.insert(passivePool, 112) end
 		if self:IsCardUnlocked(113) and self.RapidFireLevel < 5 then table.insert(passivePool, 113) end
+		-- 레이온 슬롯없는 패시브(2026-08-02 추가 — BuildActiveUpgradePool과 동일한 이유로 빠져있었음)
+		if self:IsCardUnlocked(151) and self.ComboAttackLevel < 5 then table.insert(passivePool, 151) end
+		if self:IsCardUnlocked(161) and self.ChanceAttackLevel < 5 then table.insert(passivePool, 161) end
+		if self:IsCardUnlocked(162) and self.ComaLevel < 5 then table.insert(passivePool, 162) end
+		if self:IsCardUnlocked(163) and self.SelfRecoveryLevel < 5 then table.insert(passivePool, 163) end
+		if self:IsCardUnlocked(164) and self.WarriorMasteryLevel < 5 then table.insert(passivePool, 164) end
 		if #passivePool > 0 then
 			self:GrantCardUpgradesFromPool(passivePool, worldPos, fallHeight, groundWorldY, dropScale, 1, 1)
 		end
