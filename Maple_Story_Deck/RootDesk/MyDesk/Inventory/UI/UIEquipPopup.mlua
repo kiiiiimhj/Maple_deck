@@ -3,7 +3,11 @@ script UIEquipPopup extends Component
 
 	property TextComponent TitleText = nil
 
-	property UIItemSlot ItemSlot = nil
+	property SpriteGUIRendererComponent ItemIcon = "3e2662ab-05a0-4e7c-9e77-d5a8b1053fa9"
+
+	property SpriteGUIRendererComponent PartBadge = "8d70b8b7-ad61-442b-95f9-15ea60e9ba50"
+
+	property TextGUIRendererComponent QualityText = "5eb9d87e-2365-4def-abf4-332b25b22459"
 
 	property UIInventory Inventory = nil
 
@@ -45,10 +49,6 @@ script UIEquipPopup extends Component
 		local panel = self.Entity:GetChildByName("Panel")
 		self.TitleText = panel:GetChildByName("Title").TextComponent
 
-		local itemDecoration = panel:GetChildByName("ItemDecoration")
-		local itemSlotEntity = _SpawnService:SpawnByModelId(_EntryService:GetModelIdByName("UIItemSlot"), "ItemSlot", Vector3.zero, itemDecoration)
-		self.ItemSlot = itemSlotEntity.UIItemSlot
-
 		self.BtnClose.Entity:ConnectEvent(ButtonClickEvent, function() self:Close() end)
 
 		self.ButtonEquip.Entity:ConnectEvent(ButtonClickEvent, function() self:OnEquipButtonClicked() end)
@@ -68,16 +68,28 @@ script UIEquipPopup extends Component
 		self.IsOpenedFromInventory = isOpenedFromInventory
 		self.ItemStruct = itemStruct
 
-		self.ItemSlot:Set(itemStruct)
-		self.ItemSlot.ImageDim.Enable = false
-
 		local itemData = itemStruct:GetItemData()
+		self.ItemIcon.ImageRUID = itemData.RUID
 		self.TitleText.Text = itemData.Name
+
+		-- 부위 배지: 장비 아이템만 있는 GearData의 GearCategory로 판별. 인벤토리/장비판(EquipInfoGrid)에서
+		-- 이미 쓰고 있는 부위별 픽토그램과 동일한 걸 재사용해서 "슬롯에서 쓰는 아이콘"과 통일한다.
+		local gearData = itemStruct:GetGearData()
+		if gearData ~= nil then
+			self.PartBadge.Enable = true
+			self.PartBadge.ImageRUID = self:GetPartBadgeRUID(gearData.GearCategory)
+		else
+			self.PartBadge.Enable = false
+		end
 
 		-- 스탯 카탈로그가 아직 없어서(유저 지정: 뼈대만 먼저) 등급 기반 임시 수치로 채운다 — 실제 밸런스는 나중에 데이터로 교체
 		local gearStruct = itemStruct:GetGearStruct()
 		local placeholderHp = 10 + (gearStruct ~= nil and gearStruct.Grade or 0) * 10
 		self.StatValueText.Text = tostring(placeholderHp)
+
+		-- 아이템 품질(D~SS, 기존 Rare/Epic 같은 Grade와는 별개 축) — 실제 산출 로직/데이터가 아직 없어서
+		-- 유저 지정대로 우선 전부 "A" 고정 표시
+		self.QualityText.Text = "A"
 
 		self.DescText.Text = "아이템 설명이 아직 등록되지 않았습니다."
 		self.LevelBadgeText.Text = "Lv. 1 / 10"
@@ -92,6 +104,25 @@ script UIEquipPopup extends Component
 		-- 패널에 가려질 수 있다 — InventoryUI가 자기 그룹을 맨 앞으로 올릴 때 쓰는 것과 동일한 방식으로
 		-- 열릴 때마다 확정적으로 맨 앞으로 올린다.
 		_UILogic:SetSiblingIndex(self.Entity.UITransformComponent, 1000000)
+	end
+
+	-- EquipInfoGrid(장비판) 슬롯이 쓰는 부위별 픽토그램 RUID를 그대로 재사용한다. 장비판에 전용 슬롯이
+	-- 없는 부위(신발/어깨/귀/펜던트/보조무기 등)는 GearCategoryEnum의 범용 아이콘으로 대체한다.
+	@ExecSpace("ClientOnly")
+	method string GetPartBadgeRUID(integer gearCategory)
+		if gearCategory == _GearCategoryEnum.Cap then
+			return "42e5e834544e4b05b11160213f712635"
+		elseif gearCategory == _GearCategoryEnum.Cape then
+			return "1d74d38d49ac41c5a14009e6f6414772"
+		elseif gearCategory == _GearCategoryEnum.Longcoat or gearCategory == _GearCategoryEnum.Pants then
+			return "b41b2a76b9cf4074baa4c727ca5e1ac9"
+		elseif gearCategory == _GearCategoryEnum.Glove then
+			return "1c9eba05b6c142e789f5a197c472c066"
+		elseif gearCategory == _GearCategoryEnum.OneHandedWeapon or gearCategory == _GearCategoryEnum.TwoHandedWeapon or gearCategory == _GearCategoryEnum.SubWeapon then
+			return "3ceaa3af732e4956b623b5f470f628c5"
+		end
+
+		return _GearCategoryEnum:ToIconRUID(gearCategory)
 	end
 
 	@ExecSpace("ClientOnly")
