@@ -1,0 +1,472 @@
+@Component
+script UIComposePopup extends Component
+
+	property SpriteGUIRendererComponent BaseSlotIcon = "5a07ad40-19ce-40d3-92a5-2f820635f824"
+
+	property ButtonComponent Material1 = "2484832f-d6fb-48d5-aabb-993fc9b5274d"
+
+	property SpriteGUIRendererComponent Material1Icon = "dc1a393e-9ae6-4281-828f-c65c7b11a237"
+
+	property ButtonComponent Material2 = "661c11d7-7c05-4ea7-87df-256032283fb0"
+
+	property SpriteGUIRendererComponent Material2Icon = "18d126f9-a00c-4610-99fb-9631a1be9427"
+
+	property SpriteGUIRendererComponent ResultSlotIcon = "84dea8a2-50b5-4d39-816b-da79c3b480de"
+
+	property TextGUIRendererComponent CountText = "d737bb41-aaa5-493b-8608-1b6b4aa88450"
+
+	property TextGUIRendererComponent GradeText = "ca03316c-a85a-4b69-8997-8345837aee8f"
+
+	property TextGUIRendererComponent StatText = "c9cd33fb-5cba-46b9-b089-704dd21fc4e7"
+
+	property TextGUIRendererComponent SkillText = "839c0657-31d9-4237-96fc-9242224df35c"
+
+	property GridViewComponent Grid = "34a7947c-ccae-4f93-97a3-f2c4a0de7eda"
+
+	property ButtonComponent ComposeButton = "a0d42036-263b-4541-a34b-e82eb6e86638"
+
+	property ButtonComponent BtnClose = "334deb82-2aec-438b-8954-85dae52ec58f"
+
+	property TextComponent CapacityText = "1d86768a-e487-468e-b897-e10b475cda0e"
+
+	property Entity TabHolder = "f8ee4e33-b7fd-4a9e-b534-a4be279f5e56"
+
+	property UIEquipPopup EquipPopup = nil
+
+	property any BaseItemStruct = nil
+
+	property any Material1Struct = nil
+
+	property any Material2Struct = nil
+
+	property Entity GridCellBaseEntity = nil
+
+	property table CandidateItemStructs = {}
+
+	-- 탭 필터링 — UIInventoryTabHolder와 동일한 InsertFunc 패턴(전량검색계속/찾으면중단/불일치)
+	property integer InsertFunc_MatchAndKeepSearch = 1
+
+	property integer InsertFunc_MatchAndStop = 2
+
+	property integer InsertFunc_NotMatch = 3
+
+	property table InsertFunctions = {}
+
+	property integer TabEnum = 1
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		self.BtnClose.Entity:ConnectEvent(ButtonClickEvent, function() self:Close() end)
+		self.ComposeButton.Entity:ConnectEvent(ButtonClickEvent, function() self:OnComposeClicked() end)
+		self.Material1.Entity:ConnectEvent(ButtonClickEvent, function() self:OnMaterialSlotClicked(1) end)
+		self.Material2.Entity:ConnectEvent(ButtonClickEvent, function() self:OnMaterialSlotClicked(2) end)
+
+		-- 재료 후보 그리드 — 메인 인벤토리 그리드와 동일하게 UIItemSlot을 런타임 스폰해서 셀 템플릿으로 쓴다
+		local originalGridCell = _SpawnService:SpawnByModelId(_EntryService:GetModelIdByName("UIItemSlot"), "ComposeGridCell", Vector3.zero, self.Entity)
+		originalGridCell.Enable = false
+		self.GridCellBaseEntity = originalGridCell
+
+		self.Grid.ItemEntity = originalGridCell
+		self.Grid.OnRefresh = function(index, entity) self:OnGridRefresh(index + 1, entity) end
+		self.Grid.OnClear = function(index, entity) self:OnGridClear(entity) end
+
+		self:SetupTabs()
+	end
+
+	-- 인벤토리와 동일한 All/Weapon/Armor/etc 4탭 — 재료 후보도 부위별로 필터링해서 보여준다(유저 지정)
+	@ExecSpace("ClientOnly")
+	method void SetupTabs()
+		local tabNames = { "All", "Weapon", "Armor", "etc" }
+		local children = self.TabHolder.Children
+		for i, child in ipairs(children) do
+			child.UIComposeTab:Initalize(self, i, tabNames[i])
+		end
+
+		local function IsAll(itemData)
+			return self.InsertFunc_MatchAndKeepSearch
+		end
+
+		local function IsWeapon(itemData)
+			local itemGearData = itemData:GetGearData()
+			if itemGearData == nil then
+				return self.InsertFunc_NotMatch
+			end
+			if _GearCategoryEnum:IsWeapon(itemGearData.GearCategory) then
+				return self.InsertFunc_MatchAndStop
+			end
+			return self.InsertFunc_NotMatch
+		end
+
+		local function IsArmor(itemData)
+			local itemGearData = itemData:GetGearData()
+			if itemGearData == nil then
+				return self.InsertFunc_NotMatch
+			end
+			if _GearCategoryEnum:IsArmor(itemGearData.GearCategory) then
+				return self.InsertFunc_MatchAndStop
+			end
+			return self.InsertFunc_NotMatch
+		end
+
+		local function IsNotGear(itemData)
+			if itemData:GetGearData() == nil then
+				return self.InsertFunc_MatchAndStop
+			end
+			return self.InsertFunc_NotMatch
+		end
+
+		self.InsertFunctions = { IsAll, IsWeapon, IsArmor, IsNotGear }
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnTabClicked(integer tabEnum)
+		if self.TabEnum == tabEnum then
+			return
+		end
+
+		local previousTab = self.TabHolder.Children[self.TabEnum]
+		previousTab.UIComposeTab:OnDeselected()
+
+		local currentTab = self.TabHolder.Children[tabEnum]
+		currentTab.UIComposeTab:OnSelected()
+
+		self.TabEnum = tabEnum
+		self:RefreshCandidates()
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean MatchesCurrentTab(any itemStruct)
+		local itemData = itemStruct:GetItemData()
+		local resultEnum = self.InsertFunctions[self.TabEnum](itemData)
+		return resultEnum ~= self.InsertFunc_NotMatch
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Open(any itemStruct)
+		---@type ItemStruct
+		local baseItemStruct = itemStruct
+		self.BaseItemStruct = baseItemStruct
+		self.Material1Struct = nil
+		self.Material2Struct = nil
+
+		local itemData = baseItemStruct:GetItemData()
+		self.BaseSlotIcon.ImageRUID = itemData.RUID
+
+		self.Material1Icon.Entity.Enable = false
+		self.Material2Icon.Entity.Enable = false
+		self.Material2.Entity.Enable = self:RequiredMaterialCount() >= 2
+
+		local playerInventory = _UserService.LocalPlayer.PkgPlayerInventory
+		self.CapacityText.Text = string.format("%d / %d", _Util:TableLen(playerInventory.Items), playerInventory.InventoryCapacity)
+
+		self:RefreshCandidates()
+		self:UpdateResultPreview()
+
+		self.Entity.Enable = true
+		_UILogic:SetSiblingIndex(self.Entity.UITransformComponent, 1000000)
+	end
+
+	-- 합성 팝업은 장착 팝업에서 파고든 하위 화면이라, X로 그냥 나가든 합성에 성공하든 항상 인벤토리
+	-- 그리드가 아니라 장착 팝업(아이템 정보창)으로 되돌아간다(유저 지정)
+	@ExecSpace("ClientOnly")
+	method void Close()
+		---@type ItemStruct
+		local baseItemStruct = self.BaseItemStruct
+		self.BaseItemStruct = nil
+		self.Entity.Enable = false
+
+		if baseItemStruct ~= nil then
+			local playerInventory = _UserService.LocalPlayer.PkgPlayerInventory
+			local freshItemStruct = playerInventory.Items[baseItemStruct.GUID]
+			if freshItemStruct ~= nil then
+				self.EquipPopup:Open(true, freshItemStruct)
+			end
+		end
+	end
+
+	-- 노말→레어만 "동일 아이템 2개(+베이스 1개=3개) 즉시 합성", 그 외(레어→에픽 이상)는 "동일등급+동일부위
+	-- 아이템 1개씩 3회 반복 합성" — GearGradeEnum.IsInstantComposeTier가 이 두 모드를 가르는 단일 기준점
+	@ExecSpace("ClientOnly")
+	method integer RequiredMaterialCount()
+		---@type ItemStruct
+		local baseItemStruct = self.BaseItemStruct
+		if baseItemStruct == nil then
+			return 0
+		end
+
+		local gearStruct = baseItemStruct:GetGearStruct()
+		if gearStruct == nil then
+			return 0
+		end
+
+		if _GearGradeEnum:IsInstantComposeTier(gearStruct.Grade) then
+			return 2
+		end
+
+		return 1
+	end
+
+	-- 서버(PkgPlayerInventory.CanComposeItem)와 동일한 판정 로직 — 그리드 유효 하이라이트/선택 차단에 재사용
+	@ExecSpace("ClientOnly")
+	method boolean IsValidMaterial(any candidateStruct)
+		---@type ItemStruct
+		local baseItemStruct = self.BaseItemStruct
+		---@type ItemStruct
+		local candidate = candidateStruct
+		if baseItemStruct == nil or candidate == nil then
+			return false
+		end
+
+		if candidate.GUID == baseItemStruct.GUID then
+			return false
+		end
+
+		if candidate:IsAttached() then
+			return false
+		end
+
+		local baseGearStruct = baseItemStruct:GetGearStruct()
+		local candidateGearStruct = candidate:GetGearStruct()
+		if baseGearStruct == nil or candidateGearStruct == nil then
+			return false
+		end
+
+		if candidateGearStruct.Grade ~= baseGearStruct.Grade then
+			return false
+		end
+
+		if _GearGradeEnum:IsInstantComposeTier(baseGearStruct.Grade) then
+			return candidate.ItemId == baseItemStruct.ItemId
+		end
+
+		local baseGearData = baseItemStruct:GetGearData()
+		local candidateGearData = candidate:GetGearData()
+		if baseGearData == nil or candidateGearData == nil then
+			return false
+		end
+
+		return candidateGearData.GearCategory == baseGearData.GearCategory
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshCandidates()
+		local playerInventory = _UserService.LocalPlayer.PkgPlayerInventory
+		local selectedGUIDs = {}
+		if self.Material1Struct ~= nil then
+			selectedGUIDs[self.Material1Struct.GUID] = true
+		end
+		if self.Material2Struct ~= nil then
+			selectedGUIDs[self.Material2Struct.GUID] = true
+		end
+
+		local list = {}
+		for guid, itemStruct in pairs(playerInventory.Items) do
+			if selectedGUIDs[guid] then
+				continue
+			end
+			if not self:MatchesCurrentTab(itemStruct) then
+				continue
+			end
+			table.insert(list, itemStruct)
+		end
+
+		table.sort(list, function(a, b) return a.ItemId < b.ItemId end)
+
+		self.CandidateItemStructs = list
+		self.Grid.TotalCount = #list
+		self.Grid:Refresh(true, true)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnGridRefresh(integer index, Entity entity)
+		local itemStruct = self.CandidateItemStructs[index]
+		entity.UIItemSlot:Set(itemStruct)
+
+		local isValid = self:IsValidMaterial(itemStruct)
+		if isValid then
+			entity.UIItemSlot.IconBackground.Outline = true
+			entity.UIItemSlot.IconBackground.OutlineColor = Color(0.3, 0.9, 0.4, 1)
+			entity.UIItemSlot.IconBackground.OutlineWidth = 4
+		else
+			-- 등급색 테두리는 유지하되(UIItemSlot.Set이 이미 그려둠), 유효 재료 강조만 초록으로 덮어씀
+			local gearStruct = itemStruct:GetGearStruct()
+			if gearStruct ~= nil then
+				entity.UIItemSlot.IconBackground.Outline = true
+				entity.UIItemSlot.IconBackground.OutlineColor = _GearGradeEnum:GetEnumColor(gearStruct.Grade)
+				entity.UIItemSlot.IconBackground.OutlineWidth = 4
+			end
+		end
+
+		entity.UIItemSlot.OnItemClickedFunc = function() self:OnCandidateClicked(itemStruct) end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnGridClear(Entity entity)
+		entity.UIItemSlot:Clear()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnCandidateClicked(any itemStruct)
+		if not self:IsValidMaterial(itemStruct) then
+			return
+		end
+
+		if self.Material1Struct == nil then
+			self.Material1Struct = itemStruct
+		elseif self.Material2Struct == nil and self:RequiredMaterialCount() >= 2 then
+			self.Material2Struct = itemStruct
+		else
+			return
+		end
+
+		self:RefreshMaterialSlots()
+		self:RefreshCandidates()
+		self:UpdateResultPreview()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnMaterialSlotClicked(integer slotIndex)
+		if slotIndex == 1 then
+			self.Material1Struct = nil
+		else
+			self.Material2Struct = nil
+		end
+
+		self:RefreshMaterialSlots()
+		self:RefreshCandidates()
+		self:UpdateResultPreview()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshMaterialSlots()
+		---@type ItemStruct
+		local m1 = self.Material1Struct
+		if m1 ~= nil then
+			self.Material1Icon.ImageRUID = m1:GetItemData().RUID
+			self.Material1Icon.Entity.Enable = true
+			self:ApplyGradeBorder(self.Material1Icon, m1)
+		else
+			self.Material1Icon.Entity.Enable = false
+		end
+
+		---@type ItemStruct
+		local m2 = self.Material2Struct
+		if m2 ~= nil then
+			self.Material2Icon.ImageRUID = m2:GetItemData().RUID
+			self.Material2Icon.Entity.Enable = true
+			self:ApplyGradeBorder(self.Material2Icon, m2)
+		else
+			self.Material2Icon.Entity.Enable = false
+		end
+	end
+
+	-- 베이스/재료/결과 슬롯 아이콘에도 인벤토리 그리드와 동일한 등급색 테두리를 적용(유저 지정)
+	@ExecSpace("ClientOnly")
+	method void ApplyGradeBorder(SpriteGUIRendererComponent icon, any itemStruct)
+		---@type ItemStruct
+		local struct = itemStruct
+		local gearStruct = struct:GetGearStruct()
+		if gearStruct == nil then
+			icon.Outline = false
+			return
+		end
+
+		icon.Outline = true
+		icon.OutlineWidth = 4
+		icon.OutlineColor = _GearGradeEnum:GetEnumColor(gearStruct.Grade)
+	end
+
+	-- 실제 스탯 카탈로그가 아직 없어서(다른 팝업들과 동일 정책) 등급 기반 임시 공식으로 전/후 미리보기만 보여준다
+	@ExecSpace("ClientOnly")
+	method void UpdateResultPreview()
+		---@type ItemStruct
+		local baseItemStruct = self.BaseItemStruct
+		if baseItemStruct == nil then
+			return
+		end
+
+		local itemData = baseItemStruct:GetItemData()
+		self.ResultSlotIcon.ImageRUID = itemData.RUID
+
+		local gearStruct = baseItemStruct:GetGearStruct()
+		local grade = gearStruct.Grade
+		local nextGrade = _GearGradeEnum:GetNextGrade(grade)
+
+		self:ApplyGradeBorder(self.BaseSlotIcon, baseItemStruct)
+		self:ApplyGradeBorder(self.ResultSlotIcon, baseItemStruct)
+
+		self.CountText.Text = tostring(gearStruct.ComposeCount)
+
+		if nextGrade == -1 then
+			self.GradeText.Text = _GearGradeEnum:GetKoreanName(grade) .. " (최고 등급)"
+			self.StatText.Text = ""
+			self.SkillText.Enable = false
+			self.ComposeButton.Entity.Enable = false
+			return
+		end
+
+		self.ComposeButton.Entity.Enable = true
+		self.GradeText.Text = _GearGradeEnum:GetKoreanName(grade) .. " → " .. _GearGradeEnum:GetKoreanName(nextGrade)
+
+		local placeholderHpBefore = 10 + grade * 10
+		local placeholderHpAfter = 10 + nextGrade * 10
+		self.StatText.Text = string.format("HP %d → %d", placeholderHpBefore, placeholderHpAfter)
+
+		local isInstant = _GearGradeEnum:IsInstantComposeTier(grade)
+		local willGradeUp = isInstant or (gearStruct.ComposeCount + 1 >= 3)
+		self.SkillText.Enable = willGradeUp
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnComposeClicked()
+		---@type ItemStruct
+		local baseItemStruct = self.BaseItemStruct
+		if baseItemStruct == nil then
+			return
+		end
+
+		local requiredCount = self:RequiredMaterialCount()
+		local materialGUIDs = {}
+		if self.Material1Struct ~= nil then
+			table.insert(materialGUIDs, self.Material1Struct.GUID)
+		end
+		if self.Material2Struct ~= nil then
+			table.insert(materialGUIDs, self.Material2Struct.GUID)
+		end
+
+		if #materialGUIDs ~= requiredCount then
+			return
+		end
+
+		_UserService.LocalPlayer.PkgPlayerInventory:RequestComposeItem(baseItemStruct.GUID, materialGUIDs)
+	end
+
+	@ExecSpace("ClientOnly")
+	@EventSender("LocalPlayer")
+	handler HandleInvenItemModifiedEvent(InvenItemModifiedEvent event)
+		-- Parameters
+		local GUIDs = event.GUIDs
+		---------------------------------------------------------
+
+		if self.Entity.Enable == false then
+			return
+		end
+
+		---@type ItemStruct
+		local baseItemStruct = self.BaseItemStruct
+		if baseItemStruct == nil then
+			return
+		end
+
+		for i, guid in ipairs(GUIDs) do
+			if guid == baseItemStruct.GUID then
+				-- 합성 성공: 토스트 띄우고 팝업 닫기(Close()가 장착 팝업을 최신 상태로 다시 연다) —
+				-- 에픽 이상 3회 진행형이라도 매번 닫고, 이어서 하려면 장착 팝업에서 합성을 다시 눌러야 함
+				_UIToast:ShowMessage("합성 성공!")
+				self:Close()
+				return
+			end
+		end
+	end
+
+end
