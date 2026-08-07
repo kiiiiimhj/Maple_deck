@@ -9,6 +9,10 @@ script UIEquipPopup extends Component
 
 	property TextGUIRendererComponent QualityText = "5eb9d87e-2365-4def-abf4-332b25b22459"
 
+	property SpriteGUIRendererComponent ComposeCountBadge = "3b119caf-0cd3-4777-8c38-f478068e0cd7"
+
+	property TextGUIRendererComponent ComposeCountText = "edcf299d-52a4-45cd-a625-fbde0b426535"
+
 	property UIComposePopup ComposePopup = nil
 
 	property UIInventory Inventory = nil
@@ -46,6 +50,33 @@ script UIEquipPopup extends Component
 
 	property ButtonComponent ButtonLock = "21883e82-2424-4bd7-b0a3-355b3c751216"
 
+	-- 등급 스킬 5행(Row0~4, ui/EquipmentGroup.ui RightColumn/GradeSkillBox) — 유저 정정: 4칸이 "현재
+	-- 등급의 스킬 변형 4종"이 아니라 "매직/레어/에픽/유니크/레전더리 5단계 등급 진행"에 각각 매핑된다
+	-- (Row0=매직/Row1=레어/Row2=에픽/Row3=유니크/Row4=레전더리, 원래 템플릿엔 4행뿐이라 Row4를 새로
+	-- 복제해 추가했다). 각 행은 "이 아이템이 그 등급에 도달하면 실제로 받을 텍스트"를 항상 보여주고
+	-- (SkillVariant로 4종 중 1개 선택 — 매직/에픽/유니크처럼 4종이 동일한 등급은 어차피 결과가 같음),
+	-- 지금 등급이 그 행의 등급에 도달했으면(같거나 높으면) 잠금 해제, 아직이면 잠금 아이콘으로 덮는다.
+	-- 노말은 어떤 행의 기준 등급도 만족 못 해서 5행 전부 잠긴 채로 유지된다.
+	property SpriteGUIRendererComponent GradeSkillLock0 = "0f8a6bfd-04b0-4148-ac35-ccfce137cde8"
+
+	property TextGUIRendererComponent GradeSkillText0 = "4a2ebbfc-1de2-464a-aa0b-a02beec7f368"
+
+	property SpriteGUIRendererComponent GradeSkillLock1 = "c0bc8cf1-6ee7-4ed8-854e-679c0d80c05d"
+
+	property TextGUIRendererComponent GradeSkillText1 = "2c8a00bb-663f-4d60-b5b3-67a6a1cfd0b9"
+
+	property SpriteGUIRendererComponent GradeSkillLock2 = "dc552e33-9e4f-4644-9060-f307ce73c267"
+
+	property TextGUIRendererComponent GradeSkillText2 = "c70db38d-506c-4e42-b80b-e7fed382ff7d"
+
+	property SpriteGUIRendererComponent GradeSkillLock3 = "6462af0d-8557-4beb-8b95-f5be892cb6ee"
+
+	property TextGUIRendererComponent GradeSkillText3 = "c836d03a-efa9-4e78-a3f2-8bbf22bc69db"
+
+	property SpriteGUIRendererComponent GradeSkillLock4 = "50bfd744-d16c-470e-8863-a56b67b68ae2"
+
+	property TextGUIRendererComponent GradeSkillText4 = "b18dd9d9-f40d-4b7c-8d7e-d938d7a433d0"
+
 	@ExecSpace("ClientOnly")
 	method void OnBeginPlay()
 		local panel = self.Entity:GetChildByName("Panel")
@@ -71,8 +102,18 @@ script UIEquipPopup extends Component
 		self.ItemStruct = itemStruct
 
 		local itemData = itemStruct:GetItemData()
-		self.ItemIcon.ImageRUID = itemData.RUID
-		self.TitleText.Text = itemData.Name
+		self.ItemIcon.ImageRUID = itemStruct:GetDisplayRUID()
+		self.TitleText.Text = itemStruct:GetDisplayName()
+
+		-- 아이템 아이콘 등급색 테두리 — 인벤토리/합성 팝업 그리드와 동일 규칙(등급 없는 잡템은 테두리 없음)
+		local iconGearStruct = itemStruct:GetGearStruct()
+		if iconGearStruct ~= nil then
+			self.ItemIcon.Outline = true
+			self.ItemIcon.OutlineWidth = 4
+			self.ItemIcon.OutlineColor = _GearGradeEnum:GetEnumColor(iconGearStruct.Grade)
+		else
+			self.ItemIcon.Outline = false
+		end
 
 		-- 부위 배지: 장비 아이템만 있는 GearData의 GearCategory로 판별. 인벤토리/장비판(EquipInfoGrid)에서
 		-- 이미 쓰고 있는 부위별 픽토그램과 동일한 걸 재사용해서 "슬롯에서 쓰는 아이콘"과 통일한다.
@@ -84,16 +125,35 @@ script UIEquipPopup extends Component
 			self.PartBadge.Enable = false
 		end
 
-		-- 스탯 카탈로그가 아직 없어서(유저 지정: 뼈대만 먼저) 등급 기반 임시 수치로 채운다 — 실제 밸런스는 나중에 데이터로 교체
 		local gearStruct = itemStruct:GetGearStruct()
-		local placeholderHp = 10 + (gearStruct ~= nil and gearStruct.Grade or 0) * 10
-		self.StatValueText.Text = tostring(placeholderHp)
 
-		-- 아이템 품질(D~SS, 기존 Rare/Epic 같은 Grade와는 별개 축) — 실제 산출 로직/데이터가 아직 없어서
-		-- 유저 지정대로 우선 전부 "A" 고정 표시
-		self.QualityText.Text = "A"
+		-- 무기 아이템은 드롭 시 1회 고정된 ATK/등급별 보너스/등급 스킬을 실제 데이터로 표시.
+		-- 그 외(방어구 등)는 스탯 카탈로그가 아직 없어서(유저 지정: 뼈대만 먼저) 등급 기반 임시 수치 유지
+		if _WeaponTierDataLogic:IsWeaponItem(itemStruct.ItemId) and gearStruct ~= nil then
+			self.StatValueText.Text = "공격력 " .. tostring(gearStruct.Atk)
+			local bonusText = _WeaponTierDataLogic:GetBonusText(gearStruct.Grade, gearStruct.Quality)
+			self.DescText.Text = bonusText
+			self.QualityText.Text = _QualityEnum:GetKoreanName(gearStruct.Quality)
+			self:UpdateGradeSkillBox(gearStruct)
+		else
+			local placeholderHp = 10 + (gearStruct ~= nil and gearStruct.Grade or 0) * 10
+			self.StatValueText.Text = tostring(placeholderHp)
+			self.DescText.Text = "아이템 설명이 아직 등록되지 않았습니다."
 
-		self.DescText.Text = "아이템 설명이 아직 등록되지 않았습니다."
+			-- 아이템 품질(D~SS, 기존 Rare/Epic 같은 Grade와는 별개 축) — 무기 외에는 실제 산출 로직/데이터가
+			-- 아직 없어서 유저 지정대로 우선 전부 "A" 고정 표시
+			self.QualityText.Text = "A"
+		end
+
+		-- 합성 진행도(ComposeCount) 원형 뱃지 — ComposePopup의 CountBadge와 동일 이미지/스타일 재사용.
+		-- 다음 등급이 있고 진행중일 때만 표시(합성팝업/인벤토리 그리드와 동일 규칙)
+		if gearStruct ~= nil and _GearGradeEnum:GetNextGrade(gearStruct.Grade) ~= -1 and gearStruct.ComposeCount > 0 then
+			self.ComposeCountText.Text = tostring(gearStruct.ComposeCount)
+			self.ComposeCountBadge.Entity.Enable = true
+		else
+			self.ComposeCountBadge.Entity.Enable = false
+		end
+
 		self.LevelBadgeText.Text = "Lv. 1 / 10"
 
 		self.GoldText.Text = string.format("%d / %d", _GameManager.Gold, self.PlaceholderUpgradeCost)
@@ -106,6 +166,23 @@ script UIEquipPopup extends Component
 		-- 패널에 가려질 수 있다 — InventoryUI가 자기 그룹을 맨 앞으로 올릴 때 쓰는 것과 동일한 방식으로
 		-- 열릴 때마다 확정적으로 맨 앞으로 올린다.
 		_UILogic:SetSiblingIndex(self.Entity.UITransformComponent, 1000000)
+	end
+
+	-- 등급 스킬 5행(유저 정정): Row0~4가 매직/레어/에픽/유니크/레전더리 5단계 등급에 각각 매핑된다.
+	-- 각 행 텍스트는 "그 등급에서 이 아이템의 SkillVariant가 받는 실제 텍스트"(매직/에픽/유니크는 4종이
+	-- 전부 동일해서 어차피 결과가 같음), 잠금 해제 여부는 현재 등급이 그 행의 기준 등급 이상인지로
+	-- 판정한다. 노말은 매직조차 미달이라 5행 전부 잠긴 채로 유지된다.
+	@ExecSpace("ClientOnly")
+	method void UpdateGradeSkillBox(any gearStruct)
+		local rowGrades = { _GearGradeEnum.Magic, _GearGradeEnum.Rare, _GearGradeEnum.Epic, _GearGradeEnum.Unique, _GearGradeEnum.Legendary }
+		local locks = { self.GradeSkillLock0, self.GradeSkillLock1, self.GradeSkillLock2, self.GradeSkillLock3, self.GradeSkillLock4 }
+		local labels = { self.GradeSkillText0, self.GradeSkillText1, self.GradeSkillText2, self.GradeSkillText3, self.GradeSkillText4 }
+
+		for i = 1, 5 do
+			local rowGrade = rowGrades[i]
+			labels[i].Text = _WeaponTierDataLogic:GetSkillText(rowGrade, gearStruct.SkillVariant)
+			locks[i].Entity.Enable = gearStruct.Grade < rowGrade
+		end
 	end
 
 	-- EquipInfoGrid(장비판) 슬롯이 쓰는 부위별 픽토그램 RUID를 그대로 재사용한다. 장비판에 전용 슬롯이

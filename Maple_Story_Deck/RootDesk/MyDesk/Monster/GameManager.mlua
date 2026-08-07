@@ -134,6 +134,18 @@ script GameManager extends Logic
 	property Vector2 LootFlyTargetUI = Vector2(882, 316)
 	property ButtonComponent btnInventory = "22519eca-9947-4040-bbd4-45afb7d9f95a"
 
+	-- 무기 드롭(유저 지정: 킬당 0.05%, 태초의 마을 전 구간 공통) — 등급업 없이 항상 노말(나무 스태프)
+	-- 티어로 지급하고, 품질(F~S)만 별도 확률표로 굴린다. 로비 전용 장비 인벤토리(PkgPlayerInventory)
+	-- 시스템에 직접 지급하고, 잡템과 동일한 팝-바운스 연출 뒤 평소엔 숨겨진 "로비 인벤토리 아이콘"
+	-- (ui/DefaultGroup.ui WeaponDropLobbyIcon, BtnInventory 바로 아래)으로 날아가 잠깐 알림처럼 켜졌다 꺼진다
+	property number WeaponDropChance = 0.0005
+	property SpriteGUIRendererComponent weaponFlyIcon = "85419574-ad70-40f3-9f78-392334e80509"
+	property SpriteGUIRendererComponent weaponLobbyIcon = "bbdd16bb-5bd8-4719-ad5b-51c098c5518c"
+	property boolean _weaponFlyActive = false
+	-- WeaponDropLobbyIcon(top-right anchor, anchoredPosition -78,-322)의 중심을 화면 중앙 기준 좌표
+	-- (DropFlyIcon과 동일한 좌표계, LootFlyTargetUI와 동일한 방식으로 환산)로 환산한 값
+	property Vector2 WeaponLobbyIconTargetUI = Vector2(882, 218)
+
 	-- "얼음 파편" — 일반 몬스터 처치 시 2% 확률 드롭. 포션/잡템과 달리 가방에 들어가지 않고, 잡템보다
 	-- 훨씬 높이 튀어올랐다가 떨어진 뒤 아무 획득 연출 없이 그 자리에서 페이드아웃되며 사라진다.
 	-- 사라지는 즉시 전체 맵의 모든 몬스터를 얼려버리는 스킬이 발동한다(빙결스택과는 무관한 별도 효과).
@@ -1403,6 +1415,7 @@ script GameManager extends Logic
 		if self.GameStarted then return end
 		self.GameStarted = true
 		_MapManager:BeginGameplay()
+		_CardManager:InitWeaponSkillForRun()
 		log("GameManager: game started (TimeAttackMode=" .. tostring(timeAttack) .. ", SelectedCharacter=" .. characterIndex .. ")")
 	end
 
@@ -1463,6 +1476,7 @@ script GameManager extends Logic
 		-- 이전 런에서 맵4+까지 진행했더라도 시작 맵(map02)으로 되돌린다. 이미 시작 맵이면 내부에서 no-op
 		_MapManager:SilentMoveToMap(_MapManager.CurrentMapIndex, _MapManager.DesiredStartMapIndex)
 		_CardManager:ResetAllCards()
+		_CardManager:InitWeaponSkillForRun()
 		-- 그림자숲 상점 스킬 슬롯(3~5번)도 새 런 기준으로 다시 뽑는다 — 매진 상태도 같이 초기화된다
 		_ShadowShopUI:ForceReroll()
 		-- 존21 외계인 이스터에그도 새 런에서는 다시 도전할 수 있게 초기화한다("이어하기"는 건드리지 않음)
@@ -1585,6 +1599,123 @@ script GameManager extends Logic
 			local i = math.max(1, math.min(speciesIdx, #pool))
 			return pool[i]
 		end
+	end
+
+	-- 무기 드롭(유저 지정: 킬당 0.05%, 태초의 마을 전 구간 공통 — 보스/엘리트/그림자존 등 몬스터 종류 무관).
+	-- 등급은 노말 90% / 매직 10%로 굴리고(유저 지정), 품질(F~S)은 등급과 무관하게 동일한 확률표
+	-- (QualityEnum.RollDropQuality())로 별도로 굴린다. ATK는 그 등급+품질 구간 내에서 1회 확정 롤
+	-- (WeaponTierDataLogic.RollAtk) 후 영구 저장. 잡템과 달리 로비 전용 장비 인벤토리(PkgPlayerInventory)에
+	-- 직접 지급 — 가방(_PlayerInventory)이 아니다.
+	property number WeaponDropMagicChance = 0.10
+
+	@ExecSpace("ServerOnly")
+	method void TryDropWeaponItem(Vector3 worldPos, number fallHeight, number groundWorldY, number dropScale)
+		if self.GameOver then return end
+		if _UtilLogic:RandomDouble() >= self.WeaponDropChance then return end
+
+		local mapName = _MapManager:GetMapName(_MapManager.CurrentMapIndex)
+		local users = _UserService:GetUsersByMapName(mapName)
+		if #users == 0 then return end
+		local userId = users[1].PlayerComponent.UserId
+
+		local grade = (_UtilLogic:RandomDouble() < self.WeaponDropMagicChance) and _GearGradeEnum.Magic or _GearGradeEnum.None
+		local quality = _QualityEnum:RollDropQuality()
+		local atk = _WeaponTierDataLogic:RollAtk(grade, quality)
+		local skillVariant = _WeaponTierDataLogic:RollSkillVariant()
+		local procChancePerMille = _WeaponTierDataLogic:RollProcChancePerMille(quality)
+
+		local createParam = ItemCreateParamStruct()
+		createParam.ItemId = _WeaponTierDataLogic.WeaponItemId
+		createParam.ItemCount = 1
+		createParam.Grade = grade
+		createParam.Quality = quality
+		createParam.ProcChancePerMille = procChancePerMille
+		createParam.Atk = atk
+		createParam.SkillVariant = skillVariant
+
+		local resultStruct = ItemCreateResultStruct()
+		local errorCode = _ItemFactoryLogic:TryAddItem(userId, createParam, resultStruct)
+		if errorCode ~= _ErrorCodeEnum.Success then
+			log_error("TryDropWeaponItem: TryAddItem failed. Error : " .. tostring(errorCode))
+			return
+		end
+
+		self:PlayWeaponDropVisual(Vector2(worldPos.x, worldPos.y), fallHeight, groundWorldY, dropScale, grade)
+	end
+
+	@ExecSpace("Multicast")
+	method void PlayWeaponDropVisual(Vector2 worldPos, number fallHeight, number groundWorldY, number dropScale, integer grade)
+		-- 잡템과 동일한 팝-바운스 연출(짧은 홉 3단) 뒤, 평소엔 숨겨진 로비 인벤토리 아이콘으로 날아간다.
+		-- 무기 드롭은 극히 드물어서(0.05%) 잡템처럼 슬롯 풀을 둘 필요 없이 단일 슬롯 가드로 충분하다
+		if self:IsServer() then return end
+		if self._weaponFlyActive then return end
+		self._weaponFlyActive = true
+
+		local icon = self.weaponFlyIcon
+		local rawUI = _UILogic:ScreenToUIPosition(_UILogic:WorldToScreenPosition(worldPos))
+		local startUI = Vector2(rawUI.x, rawUI.y + self.DropYOffset)
+		icon.ImageRUID = _WeaponTierDataLogic:GetDisplayRUID(grade)
+		icon.Color = Color(1, 1, 1, 1)
+		icon.Entity:SetEnable(true)
+		local tc = icon.Entity.UITransformComponent
+		tc.anchoredPosition = startUI
+		tc.Scale = Vector3(dropScale, dropScale, 1)
+		tc.ZRotation = 0
+
+		local continueFromGround = function(groundUI)
+			self:PlayDropPop(icon, groundUI, function(landUI)
+				_TimerService:SetTimerOnce(function()
+					self:FlyWeaponToLobbyIcon(icon, landUI, dropScale)
+				end, 0.4)
+			end)
+		end
+
+		local landYCorrection = self:GetDropLandYCorrection(dropScale)
+		if fallHeight > 0 then
+			local groundUI = _UILogic:ScreenToUIPosition(_UILogic:WorldToScreenPosition(Vector2(worldPos.x, groundWorldY)))
+			groundUI = Vector2(groundUI.x, groundUI.y + landYCorrection)
+			self:PlayFallSpin(icon, startUI, groundUI, fallHeight, continueFromGround)
+		else
+			continueFromGround(Vector2(rawUI.x, rawUI.y + landYCorrection))
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void FlyWeaponToLobbyIcon(SpriteGUIRendererComponent icon, Vector2 startUI, number dropScale)
+		-- 도착 직전 로비 인벤토리 아이콘을 팝인시켜서 "어디로 들어가는지" 보여주고, 아이콘이 도착하면
+		-- 펀치 연출 후 짧게 머물렀다가 다시 숨긴다(유저 지정: 평소엔 숨김, 드롭 알림 용도로만 잠깐 노출)
+		if not isvalid(icon) then return end
+		local lobbyIcon = self.weaponLobbyIcon
+		lobbyIcon.Entity.UITransformComponent.Scale = Vector3(0.6, 0.6, 1)
+		lobbyIcon.Entity:SetEnable(true)
+		_TweenLogic:ScaleTo(lobbyIcon.Entity, Vector2(1, 1), 0.2, EaseType.BackEaseOut)
+
+		local endUI = self.WeaponLobbyIconTargetUI
+		local arcHeight = 150
+		_TweenLogic:PlayTween(0.0, 1.0, self.PotionFlyDuration, EaseType.QuadEaseOut, function(t)
+			if not isvalid(icon) then return end
+			local x = startUI.x + (endUI.x - startUI.x) * t
+			local y = startUI.y + (endUI.y - startUI.y) * t + math.sin(t * math.pi) * arcHeight
+			icon.Entity.UITransformComponent.anchoredPosition = Vector2(x, y)
+			local scale = (1.0 - 0.5 * t) * dropScale
+			icon.Entity.UITransformComponent.Scale = Vector3(scale, scale, 1)
+			icon.Color = Color(1, 1, 1, 1.0 - 0.6 * t)
+		end)
+
+		_TimerService:SetTimerOnce(function()
+			if isvalid(icon) then icon.Entity:SetEnable(false) end
+			self._weaponFlyActive = false
+			if isvalid(lobbyIcon) then
+				_TweenLogic:ScaleTo(lobbyIcon.Entity, Vector2(1.15, 1.15), 0.1, EaseType.BackEaseOut)
+				_TimerService:SetTimerOnce(function()
+					if not isvalid(lobbyIcon) then return end
+					_TweenLogic:ScaleTo(lobbyIcon.Entity, Vector2(1, 1), 0.12, EaseType.QuadEaseOut)
+					_TimerService:SetTimerOnce(function()
+						if isvalid(lobbyIcon) then lobbyIcon.Entity:SetEnable(false) end
+					end, 0.9)
+				end, 0.1)
+			end
+		end, self.PotionFlyDuration)
 	end
 
 	@ExecSpace("ServerOnly")

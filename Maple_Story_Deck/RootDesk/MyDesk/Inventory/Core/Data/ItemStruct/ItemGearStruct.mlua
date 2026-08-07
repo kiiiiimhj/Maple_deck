@@ -10,10 +10,34 @@ script ItemGearStruct
 	-- Grade를 1단계 올리고 0으로 리셋한다. 노말→레어(동일 아이템 3개 1회성 합성)에는 쓰이지 않는다.
 	property integer ComposeCount = 0
 
+	-- 무기 전용 품질(F~S, 유저 지정) — 같은 무기 티어 안에서 스탯 롤 폭을 결정. 방어구 등 품질 개념이
+	-- 없는 아이템은 항상 0(F)로 무시된다. QualityEnum.F(0)이 기본값
+	property integer Quality = 0
+
+	-- 무기 전용 ATK(유저 지정: 드롭 시 딱 1회만 굴려서 영구 저장, 매번 재롤 금지) — WeaponTierDataLogic의
+	-- Grade+Quality 구간에서 드롭 시점에 굴린 값을 그대로 들고 다닌다. 방어구는 항상 0로 무시
+	property integer Atk = 0
+
+	-- 무기 전용 등급 스킬 변형(1~4, 유저 지정: 레어/레전더리는 등급 스킬1~4가 서로 다른 스킬 — 예:
+	-- 이블윙즈 변형1=썬더볼트/변형2=썬더커터/변형3=에너지볼트/변형4=페페). 드롭 시 1회 균등 랜덤(1~4) 후
+	-- 영구 저장, 합성(티어업/품질합성 둘 다)에도 그대로 승계된다. 품질과 마찬가지로 합성 재료 자격에는
+	-- 영향 없음(유저 지정: "스킬은 달라도 재료로 상관없다"). 방어구는 의미 없음(항상 기본값 1)
+	property integer SkillVariant = 1
+
+	-- 레전더리 전용 "기본공격 확률발동" 수치(유저 지정: 중앙값 상수 말고 아이템 자체에 고정된 값을 읽어야
+	-- 함) — ATK와 동일한 패턴으로 드롭 시 품질 구간 내에서 1회 확정 롤 후 영구 저장. 1000분율 정수로 저장
+	-- (예: 35 = 3.5%), 사용할 땐 /1000로 환산. 방어구/무기라도 레전더리가 아니면 사용되지 않지만 값 자체는
+	-- 드롭 시 품질 기준으로 항상 굴려둔다(등급은 합성으로만 오르고 품질 범위 자체는 등급과 무관하므로 재롤 불필요)
+	property integer ProcChancePerMille = 0
+
 	method void CopyFrom(ItemGearStruct other)
 		self.IsAttached = other.IsAttached
 		self.Grade = other.Grade
 		self.ComposeCount = other.ComposeCount
+		self.Quality = other.Quality
+		self.Atk = other.Atk
+		self.SkillVariant = other.SkillVariant
+		self.ProcChancePerMille = other.ProcChancePerMille
 	end
 
 	method ItemGearStruct Clone()
@@ -40,6 +64,30 @@ script ItemGearStruct
 				self.ComposeCount = 0
 			end
 
+			-- strs[3](Quality)도 동일하게 이 필드 추가 이전 데이터엔 없을 수 있어 하위호환 처리
+			self.Quality = math.tointeger(tonumber(strs[3]))
+			if self.Quality == nil then
+				self.Quality = 0
+			end
+
+			-- strs[4](Atk)도 동일하게 하위호환 처리
+			self.Atk = math.tointeger(tonumber(strs[4]))
+			if self.Atk == nil then
+				self.Atk = 0
+			end
+
+			-- strs[5](SkillVariant)도 동일하게 하위호환 처리(기본값 1)
+			self.SkillVariant = math.tointeger(tonumber(strs[5]))
+			if self.SkillVariant == nil then
+				self.SkillVariant = 1
+			end
+
+			-- strs[6](ProcChancePerMille)도 동일하게 하위호환 처리(기본값 0)
+			self.ProcChancePerMille = math.tointeger(tonumber(strs[6]))
+			if self.ProcChancePerMille == nil then
+				self.ProcChancePerMille = 0
+			end
+
 			hasDeserializedData = true
 		end
 
@@ -47,10 +95,14 @@ script ItemGearStruct
 	end
 
 	method boolean Serialize(table dbItem)
-		if self.Grade ~= 0 or self.ComposeCount ~= 0 then
+		if self.Grade ~= 0 or self.ComposeCount ~= 0 or self.Quality ~= 0 or self.Atk ~= 0 or self.SkillVariant ~= 1 or self.ProcChancePerMille ~= 0 then
 			local strs = {}
 			table.insert(strs, tostring(self.Grade))
 			table.insert(strs, tostring(self.ComposeCount))
+			table.insert(strs, tostring(self.Quality))
+			table.insert(strs, tostring(self.Atk))
+			table.insert(strs, tostring(self.SkillVariant))
+			table.insert(strs, tostring(self.ProcChancePerMille))
 
 			local str = table.concat(strs, ',')
 			dbItem['G'] = str

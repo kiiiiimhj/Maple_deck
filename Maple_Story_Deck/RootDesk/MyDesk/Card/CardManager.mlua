@@ -2014,7 +2014,9 @@ script CardManager extends Logic
 	property number Card160Cooldown = 3.0  -- 레벨 무관 고정(유저 표)
 	property number BraveSlashStunDuration = 2.0  -- 레벨 무관 고정(유저 표)
 	property string BraveSlashSwingEffectRUID = "f7286265340c49dc8b3bbed151c75b82"
-	property number BraveSlashSwingEffectLifetime = 0.4
+	-- 이 클립은 13프레임짜리라(브랜디쉬 10프레임/0.6초, 오라블레이드 15프레임/0.9초와 동일하게
+	-- 프레임당 0.06초로 환산하면 13프레임=0.78초) 기존 0.4초로는 절반쯤에서 잘렸다 — 유저 지적으로 수정
+	property number BraveSlashSwingEffectLifetime = 0.8
 	property string BraveSlashHitEffectRUID = "f5b2ce0a2286437db948e5ebefaf3b29"
 	property number BraveSlashHitEffectLifetime = 0.3
 	property string BraveSlashSoundRUID = "01641f672ecd4a7b9a7d065ce59f887e"
@@ -2089,7 +2091,7 @@ script CardManager extends Logic
 	property number Card159HitInterval = 0.35  -- 2연타 사이 간격 — 레이징 블로우와 동일 간격 재사용
 	property number Card159Scale = 0.91  -- 유저 요청으로 30% 축소(1.3 * 0.7)
 	property number Card159HitScale = 1.0
-	property number Card159HitRadius = 1.3  -- 찌르는 모션이 닿는 범위 판정(2026-08-05: 1.2→1.3, 유저 지적 — 연출보다 판정이 좁아 보임)
+	property number Card159HitRadius = 1.5  -- 찌르는 모션이 닿는 범위 판정(2026-08-05: 1.2→1.3, 유저 지적 — 연출보다 판정이 좁아 보임 / 2026-08-07: 1.3→1.5, 유저 요청으로 +0.2 확장)
 	property Vector3 Card159SpawnPosition = Vector3(0, 3.0, -0.1)  -- 근처에 적이 하나도 없을 때만 쓰는 대체 위치(피닉스와 동일값 재사용)
 	property number Card159HoverYOffset = 0.1  -- 타겟 위치 기준 높이 오프셋
 	property number Card159DepthZ = -2.0  -- 몬스터 Z 범위보다 앞선 고정값 — 항상 몬스터 위에 그려지게(피닉스/허수아비와 동일 방식)
@@ -2338,7 +2340,7 @@ script CardManager extends Logic
 	property number ScarringBladeHitInterval = 0.35
 	property number ScarringBladeScale = 0.91
 	property number ScarringBladeHitScale = 1.0
-	property number ScarringBladeHitRadius = 1.5  -- 2026-08-05: 1.2→1.5, 유저 지적 — 연출보다 판정이 좁아 보임
+	property number ScarringBladeHitRadius = 1.7  -- 2026-08-05: 1.2→1.5, 유저 지적 — 연출보다 판정이 좁아 보임 / 2026-08-07: 1.5→1.7, 유저 요청으로 +0.2 확장
 	property Vector3 ScarringBladeSpawnPosition = Vector3(0, 3.0, -0.1)  -- 근처에 적이 하나도 없을 때만 쓰는 대체 위치
 	property number ScarringBladeHoverYOffset = 0.1
 	property number ScarringBladeDepthZ = -2.0
@@ -8792,6 +8794,14 @@ script CardManager extends Logic
 		if self.Slot5Card > 0 then self._timer5 = self:TickCard(self.Slot5Card, 5, self._timer5, delta, target) end
 		if self.Slot6Card > 0 then self._timer6 = self:TickCard(self.Slot6Card, 6, self._timer6, delta, target) end
 
+		-- 무기 스킬(레어 등급 100마리 처치 해금) — 카드 슬롯과 무관하게 자체 쿨타임으로 반복 시전
+		if self.WeaponSkillUnlocked then
+			self.WeaponSkillTimer = self.WeaponSkillTimer - delta
+			if self.WeaponSkillTimer <= 0 and target ~= nil then
+				self.WeaponSkillTimer = self:CastWeaponSkill(self.WeaponSkillVariant, 1)
+			end
+		end
+
 		-- 포션 자동 사용 — 체력이 가득 찬 동안은 쿨타임을 돌리지 않고 대기, 실제로 회복이 필요해지는 순간 바로 사용한다
 		if self.PotionLevel > 0 then
 			self._potionTimer = self._potionTimer - delta
@@ -8836,6 +8846,11 @@ script CardManager extends Logic
 
 			-- 적이 없으면 활성화 상태로 대기만 한다 (연출 재생/재시작 없음)
 			if aliveTarget then
+				-- 기본 공격(slotIndex==0)이 몬스터를 타격하는 시점 — 기본 공격 자체 로직은 그대로 두고
+				-- 레전더리 무기 스킬 확률 발동만 별개로 체크한다(유저 지정)
+				if slotIndex == 0 then
+					self:TryProcWeaponSkill()
+				end
 				local isCrit = self:RollCrit(cardIndex)
 				if cardIndex == 2 then
 					self:MagicClawAttack(damage, isCrit)
@@ -13122,6 +13137,123 @@ script CardManager extends Logic
 		elseif slotIdx == 5 then self._timer5 = 0
 		elseif slotIdx == 6 then self._timer6 = 0
 		end
+	end
+
+	-- ── 무기 스킬(장비 인벤토리 등급 스킬, 유저 지정) ────────────────────────────────
+	-- 레어 등급 무기 장착 중 "이번 런" 동안 처치 100마리를 채우면, 카드 슬롯/보유 여부와 완전히
+	-- 무관하게 Lv.1 스킬이 자동으로(자체 쿨타임으로 반복) 발동되기 시작한다. 어떤 스킬이냐는
+	-- ItemGearStruct.SkillVariant(1~4: 썬더볼트/썬더커터/에너지볼트/페페)로 결정되고, 무기 등급이
+	-- 레어/레전더리가 아니면(매직/에픽/유니크는 4칸이 전부 같은 수치 보너스라 변형이 의미 없음) 아무
+	-- 효과도 없다. 장비는 인게임에서 해제할 수 없으므로 "장착 해제 시 꺼짐" 처리는 불필요하다.
+	-- 레전더리의 "기본 공격시 확률로 Lv.3 즉발"은 TickCard 반환값에 발동 여부가 없어 후속 작업으로 미룸.
+	property integer WeaponSkillGrade = 0
+	property integer WeaponSkillVariant = 1
+	property integer WeaponSkillQuality = 0
+	property integer WeaponSkillProcChancePerMille = 0
+	property integer WeaponSkillKillCount = 0
+	property boolean WeaponSkillUnlocked = false
+	property number WeaponSkillTimer = 0
+
+	-- 런 시작(최초 시작/다시하기 공통) 시 1회, 로비 장비 인벤토리에서 현재 장착된 무기의 등급+스킬
+	-- 변형을 읽어와 이번 런 동안 고정한다(런 중에는 장비를 바꿀 수 없으므로 재확인 불필요)
+	@ExecSpace("ServerOnly")
+	method void InitWeaponSkillForRun()
+		self.WeaponSkillGrade = 0
+		self.WeaponSkillVariant = 1
+		self.WeaponSkillQuality = 0
+		self.WeaponSkillProcChancePerMille = 0
+		self.WeaponSkillKillCount = 0
+		self.WeaponSkillUnlocked = false
+		self.WeaponSkillTimer = 0
+
+		local playerInventory = _UserService.LocalPlayer.PkgPlayerInventory
+		local weaponStruct = playerInventory:GetAttachedGearItemStruct(playerInventory.CurrentJob, _GearCategoryEnum.OneHandedWeapon)
+		if weaponStruct == nil then return end
+		if not _WeaponTierDataLogic:IsWeaponItem(weaponStruct.ItemId) then return end
+
+		local gearStruct = weaponStruct:GetGearStruct()
+		if gearStruct == nil then return end
+
+		self.WeaponSkillGrade = gearStruct.Grade
+		self.WeaponSkillVariant = gearStruct.SkillVariant
+		self.WeaponSkillQuality = gearStruct.Quality
+		-- 유저 지정: 확률은 중앙값 상수가 아니라 그 아이템에 드롭 시 고정된 실제 값을 그대로 읽어온다
+		self.WeaponSkillProcChancePerMille = gearStruct.ProcChancePerMille
+		log("InitWeaponSkillForRun: grade=" .. self.WeaponSkillGrade .. " variant=" .. self.WeaponSkillVariant)
+	end
+
+	-- 레전더리 등급 무기 장착 중, 기본 공격이 몬스터를 타격할 때마다 호출 — 기본 공격 자체는 그대로
+	-- 두고(유저 지정: "기본 공격은 현재상태 유지"), 별개로 확률만 굴려서 통과하면 Lv.3 스킬을 추가 발동한다.
+	-- 확률은 그 무기 아이템에 드롭 시 고정된 ProcChancePerMille(1000분율)을 그대로 사용
+	@ExecSpace("ServerOnly")
+	method void TryProcWeaponSkill()
+		if self.WeaponSkillGrade ~= _GearGradeEnum.Legendary then return end
+		if _UtilLogic:RandomIntegerRange(1, 1000) <= self.WeaponSkillProcChancePerMille then
+			self:CastWeaponSkill(self.WeaponSkillVariant, 3)
+		end
+	end
+
+	-- 몬스터 처치마다(보스 포함) MonsterAI.Die()가 호출 — 레어 등급 장착 중일 때만 카운트해서
+	-- 100마리째에 잠금 해제(그 뒤로는 OnUpdate가 자체 쿨타임으로 계속 반복 발동)
+	@ExecSpace("ServerOnly")
+	method void OnWeaponSkillKill()
+		if self.WeaponSkillUnlocked then return end
+		if self.WeaponSkillGrade ~= _GearGradeEnum.Rare then return end
+
+		self.WeaponSkillKillCount = self.WeaponSkillKillCount + 1
+		if self.WeaponSkillKillCount >= 100 then
+			self.WeaponSkillUnlocked = true
+			self.WeaponSkillTimer = 0
+			log("WeaponSkill unlocked: variant=" .. self.WeaponSkillVariant)
+		end
+	end
+
+	-- 고정 레벨(fixedLevel)로 해당 스킬을 1회 시전한다 — 카드 실제 소유/레벨과 완전히 무관하게 동작하도록,
+	-- 레벨 프로퍼티를 잠깐 fixedLevel로 바꿔 기존 Get*Damage/Attack 로직을 그대로 재사용한 뒤 원래 값으로
+	-- 되돌린다(같은 프레임 안에서 동기 실행되므로 안전 — 다른 스크립트가 그 사이 값을 읽을 일이 없다).
+	-- 반환값은 그 레벨 기준 쿨타임(다음 자동 발동까지 대기시간)
+	@ExecSpace("ServerOnly")
+	method number CastWeaponSkill(integer skillVariant, integer fixedLevel)
+		local targets = self:GetClosestTargets(1)
+		local target = targets[1]
+		if target == nil then return 1.0 end
+
+		if skillVariant == 2 then
+			local prev = self.ThunderCutterLevel
+			self.ThunderCutterLevel = fixedLevel
+			local damage = self:GetThunderCutterDamage()
+			local isCrit = self:RollCrit(13)
+			self:ThunderCutterAttack(damage, isCrit, target)
+			local cooldown = self.Card13Cooldown
+			self.ThunderCutterLevel = prev
+			return cooldown
+		elseif skillVariant == 3 then
+			local prev = self.EnergyBoltLevel
+			self.EnergyBoltLevel = fixedLevel
+			self:EnergyBoltAttack(target)
+			local cooldown = self.Card9Cooldown
+			self.EnergyBoltLevel = prev
+			return cooldown
+		elseif skillVariant == 4 then
+			local prev = self.KingPepeLevel
+			self.KingPepeLevel = fixedLevel
+			local damage = self:GetKingPepeDamage()
+			local isCrit = self:RollCrit(12)
+			self:KingPepeAttack(damage, isCrit, target, false)
+			local cooldown = self:GetKingPepeCooldown()
+			self.KingPepeLevel = prev
+			return cooldown
+		end
+
+		-- 기본값(variant 1): 썬더볼트
+		local prev = self.ThunderBoltLevel
+		self.ThunderBoltLevel = fixedLevel
+		local damage = self:GetThunderBoltDamage()
+		local isCrit = self:RollCrit(4)
+		self:ThunderAttack(damage, isCrit)
+		local cooldown = self.Card4Cooldown
+		self.ThunderBoltLevel = prev
+		return cooldown
 	end
 
 	@ExecSpace("ServerOnly")

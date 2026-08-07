@@ -885,8 +885,14 @@ script PkgPlayerInventory extends Component
 			end
 		end
 
+		-- 등급이 실제로 올랐으면 ATK도 새 등급 기준으로 재롤한다(유저 지정: "노말 F 공격력5 →
+		-- 등급업하면 매직 F등급의 공격력이 되어야지" — 품질은 그대로 승계, 등급만 바뀐 구간에서 재추첨)
+		if gearStruct.Grade ~= grade and _WeaponTierDataLogic:IsWeaponItem(baseItem.ItemId) then
+			gearStruct.Atk = _WeaponTierDataLogic:RollAtk(gearStruct.Grade, gearStruct.Quality)
+		end
+
 		self.IsSaveDB = true
-		self:SyncComposeResultToClient(baseGUID, gearStruct.Grade, gearStruct.ComposeCount, userId)
+		self:SyncComposeResultToClient(baseGUID, gearStruct.Grade, gearStruct.ComposeCount, gearStruct.Atk, userId)
 
 		return _ErrorCodeEnum.Success
 	end
@@ -948,6 +954,12 @@ script PkgPlayerInventory extends Component
 				return _ErrorCodeEnum.Item_ComposeInvalidMaterial
 			end
 
+			-- 재료 자체가 이미 다른 합성 진행도(ComposeCount>0)를 갖고 있으면 안 된다(유저 지정) —
+			-- 진행 중인 아이템을 다른 아이템의 재료로 갈아넣는 걸 막는다. 항상 ComposeCount=0인 아이템만 재료 가능
+			if materialGearStruct.ComposeCount ~= 0 then
+				return _ErrorCodeEnum.Item_ComposeInvalidMaterial
+			end
+
 			if isInstant then
 				if materialItem.ItemId ~= baseItem.ItemId then
 					return _ErrorCodeEnum.Item_ComposeInvalidMaterial
@@ -964,7 +976,7 @@ script PkgPlayerInventory extends Component
 	end
 
 	@ExecSpace("Client")
-	method void SyncComposeResultToClient(string baseGUID, integer grade, integer composeCount)
+	method void SyncComposeResultToClient(string baseGUID, integer grade, integer composeCount, integer atk)
 		---@type ItemStruct
 		local itemStruct = self.Items[baseGUID]
 		if itemStruct == nil then
@@ -980,6 +992,134 @@ script PkgPlayerInventory extends Component
 
 		gearStruct.Grade = grade
 		gearStruct.ComposeCount = composeCount
+		gearStruct.Atk = atk
+
+		local evt = InvenItemModifiedEvent()
+		evt.GUIDs = {baseGUID}
+		self.Entity:SendEvent(evt)
+	end
+
+	-- 무기 전용 품질(F~S) 합성. 같은 등급의 재료 1개(품질이 베이스와 달라야 함)를 소모해서, 무기 티어별
+	-- 고정 확률(QualityEnum.WeaponTierSuccessRateTable)로 성공하면 [베이스/재료 중 더 높은 품질] 그대로,
+	-- 실패하면 [더 높은 품질 - 1단계]가 된다. 등급(Grade)/ComposeCount는 건드리지 않는다
+	@ExecSpace("Server")
+	method void RequestComposeQuality(string baseGUID, string materialGUID)
+		self:ComposeQuality(baseGUID, materialGUID)
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer ComposeQuality(string baseGUID, string materialGUID)
+		local userId = self.Entity.PlayerComponent.UserId
+
+		local errorCode = self:CanComposeQuality(baseGUID, materialGUID)
+		if errorCode ~= _ErrorCodeEnum.Success then
+			self:SendErrorCodeToClient(errorCode, '', userId)
+			return errorCode
+		end
+
+		---@type ItemStruct
+		local baseItem = self.Items[baseGUID]
+		---@type ItemStruct
+		local materialItem = self.Items[materialGUID]
+		---@type ItemGearStruct
+		local baseGearStruct = baseItem:GetGearStruct()
+		---@type ItemGearStruct
+		local materialGearStruct = materialItem:GetGearStruct()
+
+		local higherQuality = math.max(baseGearStruct.Quality, materialGearStruct.Quality)
+
+		local deleteParam = ItemDeleteParamStruct()
+		deleteParam.ItemGUID = materialGUID
+		deleteParam.ItemCount = 1
+		local resultStruct = ItemDeleteResultStruct()
+		local deleteErrorCode = _ItemFactoryLogic:TryDeleteItem(userId, deleteParam, resultStruct)
+		if deleteErrorCode ~= _ErrorCodeEnum.Success then
+			self:SendErrorCodeToClient(deleteErrorCode, '', userId)
+			return deleteErrorCode
+		end
+
+		local rate = _QualityEnum:GetWeaponTierSuccessRate(baseGearStruct.Grade)
+		local isSuccess = _UtilLogic:RandomDouble() * 100 < rate
+		if isSuccess then
+			baseGearStruct.Quality = higherQuality
+		else
+			local failQuality = higherQuality - 1
+			if failQuality < _QualityEnum.F then
+				failQuality = _QualityEnum.F
+			end
+			baseGearStruct.Quality = failQuality
+		end
+
+		self.IsSaveDB = true
+		self:SyncComposeQualityResultToClient(baseGUID, baseGearStruct.Quality, userId)
+
+		return _ErrorCodeEnum.Success
+	end
+
+	method integer CanComposeQuality(string baseGUID, string materialGUID)
+		---@type ItemStruct
+		local baseItem = self.Items[baseGUID]
+		if baseItem == nil then
+			return _ErrorCodeEnum.Item_CannotFind
+		end
+
+		if not _WeaponTierDataLogic:IsWeaponItem(baseItem.ItemId) then
+			return _ErrorCodeEnum.Item_ComposeInvalidMaterial
+		end
+
+		---@type ItemGearStruct
+		local baseGearStruct = baseItem:GetGearStruct()
+		if baseGearStruct == nil then
+			return _ErrorCodeEnum.Item_InvalidGearStruct
+		end
+
+		if baseGUID == materialGUID then
+			return _ErrorCodeEnum.Item_ComposeInvalidMaterial
+		end
+
+		---@type ItemStruct
+		local materialItem = self.Items[materialGUID]
+		if materialItem == nil then
+			return _ErrorCodeEnum.Item_CannotFind
+		end
+
+		if materialItem:IsAttached() then
+			return _ErrorCodeEnum.Item_ComposeMaterialAttached
+		end
+
+		---@type ItemGearStruct
+		local materialGearStruct = materialItem:GetGearStruct()
+		if materialGearStruct == nil or materialGearStruct.Grade ~= baseGearStruct.Grade then
+			return _ErrorCodeEnum.Item_ComposeInvalidMaterial
+		end
+
+		if materialGearStruct.ComposeCount ~= 0 then
+			return _ErrorCodeEnum.Item_ComposeInvalidMaterial
+		end
+
+		if materialGearStruct.Quality == baseGearStruct.Quality then
+			return _ErrorCodeEnum.Item_ComposeInvalidMaterial
+		end
+
+		return _ErrorCodeEnum.Success
+	end
+
+	@ExecSpace("Client")
+	method void SyncComposeQualityResultToClient(string baseGUID, integer quality)
+		---@type ItemStruct
+		local itemStruct = self.Items[baseGUID]
+		if itemStruct == nil then
+			self:SendErrorCodeToClient(_ErrorCodeEnum.Item_CannotFind, nil)
+			return
+		end
+
+		---@type ItemGearStruct
+		local gearStruct = itemStruct:GetGearStruct()
+		if gearStruct == nil then
+			return
+		end
+
+		gearStruct.Quality = quality
 
 		local evt = InvenItemModifiedEvent()
 		evt.GUIDs = {baseGUID}
