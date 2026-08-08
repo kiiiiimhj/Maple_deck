@@ -30,6 +30,21 @@ script ItemGearStruct
 	-- 드롭 시 품질 기준으로 항상 굴려둔다(등급은 합성으로만 오르고 품질 범위 자체는 등급과 무관하므로 재롤 불필요)
 	property integer ProcChancePerMille = 0
 
+	-- 매직/에픽/유니크 전용 "공격력%/쿨타임%" 보너스 — 현재 Grade에서 실제로 적용 중인 값(1000분율,
+	-- 예: 35 = 3.5%). AtkByGrade/BonusPercentPerMilleByGrade에서 그대로 꺼내온 값이라 등급업해도
+	-- 재굴림되지 않는다. 레어/레전더리/노말은 사용하지 않음(항상 0)
+	property integer BonusPercentPerMille = 0
+
+	-- 유저 강한 정정: 등급업마다 새로 굴리면 미리보기(등급 스킬 박스)에서 본 값과 실제로 그 등급에
+	-- 도달했을 때 받는 값이 어긋날 수 있다 — "품질 F는 등급이 바뀌어도 F에 해당하는 값을 그대로
+	-- 승계받아야지, 등급업했다고 엉뚱한 값이 나오면 안 된다"는 요구. 그래서 드롭 시 이 아이템의
+	-- Quality로 None~레전더리 전 등급의 ATK/보너스를 한 번에 굴려서 여기 영구 저장해두고(정수 키
+	-- 0~5 = GearGradeEnum 값), 등급업(PkgPlayerInventory.ComposeItem)과 미리보기
+	-- (UIEquipPopup.UpdateGradeSkillBox) 둘 다 재굴림 없이 이 표에서 값을 꺼내 쓰기만 한다.
+	property table AtkByGrade = {}
+
+	property table BonusPercentPerMilleByGrade = {}
+
 	method void CopyFrom(ItemGearStruct other)
 		self.IsAttached = other.IsAttached
 		self.Grade = other.Grade
@@ -38,6 +53,19 @@ script ItemGearStruct
 		self.Atk = other.Atk
 		self.SkillVariant = other.SkillVariant
 		self.ProcChancePerMille = other.ProcChancePerMille
+		self.BonusPercentPerMille = other.BonusPercentPerMille
+
+		local atkByGrade = {}
+		for grade, v in pairs(other.AtkByGrade) do
+			atkByGrade[grade] = v
+		end
+		self.AtkByGrade = atkByGrade
+
+		local bonusByGrade = {}
+		for grade, v in pairs(other.BonusPercentPerMilleByGrade) do
+			bonusByGrade[grade] = v
+		end
+		self.BonusPercentPerMilleByGrade = bonusByGrade
 	end
 
 	method ItemGearStruct Clone()
@@ -88,14 +116,58 @@ script ItemGearStruct
 				self.ProcChancePerMille = 0
 			end
 
+			-- strs[7](BonusPercentPerMille)도 동일하게 하위호환 처리(기본값 0)
+			self.BonusPercentPerMille = math.tointeger(tonumber(strs[7]))
+			if self.BonusPercentPerMille == nil then
+				self.BonusPercentPerMille = 0
+			end
+
+			-- strs[8]/strs[9](AtkByGrade/BonusPercentPerMilleByGrade) — 이 필드 추가 이전 저장
+			-- 데이터엔 없을 수 있어 빈 테이블로 하위호환 처리
+			self.AtkByGrade = self:DeserializeByGradeTable(strs[8])
+			self.BonusPercentPerMilleByGrade = self:DeserializeByGradeTable(strs[9])
+
 			hasDeserializedData = true
 		end
 
 		return hasDeserializedData
 	end
 
+	-- "-"로 이은 GearGradeEnum 0~5 순서의 6개 정수를 정수 키(0~5) 테이블로 되돌린다
+	method table DeserializeByGradeTable(string str)
+		local result = {}
+		if _Util:IsNilorEmptyString(str) then
+			return result
+		end
+
+		local parts = _UtilLogic:Split(str, '-')
+		for i = 1, #parts do
+			local v = math.tointeger(tonumber(parts[i]))
+			if v == nil then
+				v = 0
+			end
+			result[i - 1] = v
+		end
+
+		return result
+	end
+
+	-- GearGradeEnum 0~5 순서로 값을 뽑아 "-"로 이어붙인다(빠진 등급은 0으로 채움)
+	method string SerializeByGradeTable(table byGradeTable)
+		local parts = {}
+		for grade = 0, 5 do
+			local v = byGradeTable[grade]
+			if v == nil then
+				v = 0
+			end
+			table.insert(parts, tostring(v))
+		end
+
+		return table.concat(parts, '-')
+	end
+
 	method boolean Serialize(table dbItem)
-		if self.Grade ~= 0 or self.ComposeCount ~= 0 or self.Quality ~= 0 or self.Atk ~= 0 or self.SkillVariant ~= 1 or self.ProcChancePerMille ~= 0 then
+		if self.Grade ~= 0 or self.ComposeCount ~= 0 or self.Quality ~= 0 or self.Atk ~= 0 or self.SkillVariant ~= 1 or self.ProcChancePerMille ~= 0 or self.BonusPercentPerMille ~= 0 then
 			local strs = {}
 			table.insert(strs, tostring(self.Grade))
 			table.insert(strs, tostring(self.ComposeCount))
@@ -103,6 +175,9 @@ script ItemGearStruct
 			table.insert(strs, tostring(self.Atk))
 			table.insert(strs, tostring(self.SkillVariant))
 			table.insert(strs, tostring(self.ProcChancePerMille))
+			table.insert(strs, tostring(self.BonusPercentPerMille))
+			table.insert(strs, self:SerializeByGradeTable(self.AtkByGrade))
+			table.insert(strs, self:SerializeByGradeTable(self.BonusPercentPerMilleByGrade))
 
 			local str = table.concat(strs, ',')
 			dbItem['G'] = str

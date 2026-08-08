@@ -816,10 +816,14 @@ script PkgPlayerInventory extends Component
 		self:SyncItemLockToClient(itemStruct.GUID, lock, true, userId)
 	end
 
-	-- 장비 합성(등급업). 두 가지 모드:
+	-- 장비 합성(등급업 + 품질 보정이 매번 동시에 적용됨, 유저 강한 정정: 별개 모드가 아니라 한 번의
+	-- 합성에서 둘 다 처리). 등급 축:
 	-- 1) 노말→레어(IsInstantComposeTier): baseGUID와 완전히 동일한 ItemId 아이템 2개를 재료로 소모, 즉시 1단계 승급
 	-- 2) 레어→에픽 이상: baseGUID와 같은 등급+같은 부위(GearCategory) 아이템 1개를 재료로 소모, ComposeCount만 누적
 	--    (아이템 종류는 달라도 됨). ComposeCount가 3에 도달하는 순간 1단계 승급하고 0으로 리셋.
+	-- 품질 축(매번 함께 처리): 베이스/재료(들) 중 가장 높은 품질을 목표로 잡아 그 등급 성공률로 굴린다
+	-- (성공: 그 품질 그대로 / 실패: 1단계 낮게). 재료 품질이 전부 베이스와 같으면 목표 품질=현재 품질이라
+	-- 굴릴 필요 자체가 없다(품질 변화 없음).
 	@ExecSpace("Server")
 	method void RequestComposeItem(string baseGUID, table materialGUIDs)
 		self:ComposeItem(baseGUID, materialGUIDs, true)
@@ -843,6 +847,23 @@ script PkgPlayerInventory extends Component
 		local gearStruct = baseItem:GetGearStruct()
 		local grade = gearStruct.Grade
 		local isInstant = _GearGradeEnum:IsInstantComposeTier(grade)
+
+		-- 품질 축 계산에 쓸 값들(베이스 원래 품질 + 재료들의 품질) — 재료를 지우기 전에 미리 모아둔다.
+		-- 유저 확정 규칙(2026-08-08 전면 교체): 셋 이상(노말→매직, 재료 2개) 입력이면 가장 높은 값은
+		-- 계산에서 완전히 제외되고, 남은 값들 중 "가장 낮은 값(low)"과 "두 번째로 낮은 값(higher)"의
+		-- 등급 차이(gap)로 승급 확률이 정해진다. 결과는 higher(유지) 또는 higher+1(승급, S 클램프) 둘 중
+		-- 하나뿐 — 재료가 전부 베이스와 같은 품질이어도 매번 승급 기회가 있다(예전처럼 스킵하지 않음).
+		-- ⚠ 베이스가 셋 중 유일하게 제일 좋은 품질이면 그 값이 통째로 버려질 수 있음(유저 확인/의도된 리스크,
+		-- UIComposePopup에서 이 조합이면 합성 전 경고창을 띄운다)
+		local qualities = { gearStruct.Quality }
+		for i, guid in ipairs(materialGUIDs) do
+			---@type ItemStruct
+			local matItem = self.Items[guid]
+			local matGearStruct = matItem:GetGearStruct()
+			if matGearStruct ~= nil then
+				table.insert(qualities, matGearStruct.Quality)
+			end
+		end
 
 		-- 재료를 한 번에 하나씩 순차 삭제한다. TryDeleteMultipleItems는 같은 ItemId가 파라미터 목록에
 		-- 두 번 이상 나오면 IsValidDeleteParamList에서 무조건 InvalidParam으로 거부하는데, 노말→레어
@@ -874,6 +895,7 @@ script PkgPlayerInventory extends Component
 			table.insert(deletedResults, resultStruct)
 		end
 
+		-- 등급 축
 		if isInstant then
 			gearStruct.Grade = _GearGradeEnum:GetNextGrade(grade)
 			gearStruct.ComposeCount = 0
@@ -885,14 +907,49 @@ script PkgPlayerInventory extends Component
 			end
 		end
 
-		-- 등급이 실제로 올랐으면 ATK도 새 등급 기준으로 재롤한다(유저 지정: "노말 F 공격력5 →
-		-- 등급업하면 매직 F등급의 공격력이 되어야지" — 품질은 그대로 승계, 등급만 바뀐 구간에서 재추첨)
-		if gearStruct.Grade ~= grade and _WeaponTierDataLogic:IsWeaponItem(baseItem.ItemId) then
-			gearStruct.Atk = _WeaponTierDataLogic:RollAtk(gearStruct.Grade, gearStruct.Quality)
+		-- 품질 축 — 매번 무조건 굴린다(전부 같은 품질이어도 승급 기회가 있음, 유저 확정)
+		local higherQuality = _QualityEnum:GetPromoteHigherQuality(qualities)
+		local gap = _QualityEnum:GetPromoteGap(qualities)
+		local promoteRate = _QualityEnum:GetGapPromoteRate(higherQuality, gap)
+		local isPromote = _UtilLogic:RandomDouble() * 100 < promoteRate
+		local newQuality = higherQuality
+		if isPromote then
+			newQuality = higherQuality + 1
+			if newQuality > _QualityEnum.S then
+				newQuality = _QualityEnum.S
+			end
+		end
+		local qualityChanged = newQuality ~= gearStruct.Quality
+		gearStruct.Quality = newQuality
+
+		-- 품질이 바뀌면 드롭 시 굴려둔 등급별 표(AtkByGrade/BonusPercentPerMilleByGrade)가 옛 품질
+		-- 기준이라 더 이상 정확하지 않다 — 새 품질로 전 등급 표를 다시 굴려서 갱신한다(유저 강한 정정:
+		-- "미리 본 값 = 실제 받는 값"을 이 경우에도 유지하려면 품질이 바뀌는 순간 표 자체를 다시 만드는
+		-- 수밖에 없음. 등급업 미리보기는 이 새 표를 기준으로 다시 계산됨)
+		if qualityChanged and _WeaponTierDataLogic:IsWeaponItem(baseItem.ItemId) then
+			gearStruct.AtkByGrade = _WeaponTierDataLogic:RollAtkByGrade(gearStruct.Quality)
+			gearStruct.BonusPercentPerMilleByGrade = _WeaponTierDataLogic:RollBonusPercentPerMilleByGrade(gearStruct.Quality)
+		end
+
+		-- 등급이 실제로 올랐으면(또는 품질이 바뀌어 표가 새로 갱신됐으면) ATK/BonusPercentPerMille을
+		-- 새 등급+새 품질 기준 표에서 꺼내 갱신한다(재굴림 아님 — AtkByGrade/BonusPercentPerMilleByGrade
+		-- 조회만). 레거시 아이템(표 필드 추가 전 드롭)은 표가 비어있을 수 있어 기존 재굴림으로 폴백한다
+		if (gearStruct.Grade ~= grade or qualityChanged) and _WeaponTierDataLogic:IsWeaponItem(baseItem.ItemId) then
+			local newAtk = gearStruct.AtkByGrade[gearStruct.Grade]
+			if newAtk == nil then
+				newAtk = _WeaponTierDataLogic:RollAtk(gearStruct.Grade, gearStruct.Quality)
+			end
+			gearStruct.Atk = newAtk
+
+			local newBonusPercentPerMille = gearStruct.BonusPercentPerMilleByGrade[gearStruct.Grade]
+			if newBonusPercentPerMille == nil then
+				newBonusPercentPerMille = _WeaponTierDataLogic:RollBonusPercentPerMille(gearStruct.Grade, gearStruct.Quality)
+			end
+			gearStruct.BonusPercentPerMille = newBonusPercentPerMille
 		end
 
 		self.IsSaveDB = true
-		self:SyncComposeResultToClient(baseGUID, gearStruct.Grade, gearStruct.ComposeCount, gearStruct.Atk, userId)
+		self:SyncComposeResultToClient(baseGUID, gearStruct.Grade, gearStruct.ComposeCount, gearStruct.Atk, gearStruct.BonusPercentPerMille, gearStruct.Quality, gearStruct.AtkByGrade, gearStruct.BonusPercentPerMilleByGrade, userId)
 
 		return _ErrorCodeEnum.Success
 	end
@@ -976,7 +1033,7 @@ script PkgPlayerInventory extends Component
 	end
 
 	@ExecSpace("Client")
-	method void SyncComposeResultToClient(string baseGUID, integer grade, integer composeCount, integer atk)
+	method void SyncComposeResultToClient(string baseGUID, integer grade, integer composeCount, integer atk, integer bonusPercentPerMille, integer quality, table atkByGrade, table bonusPercentPerMilleByGrade)
 		---@type ItemStruct
 		local itemStruct = self.Items[baseGUID]
 		if itemStruct == nil then
@@ -993,133 +1050,10 @@ script PkgPlayerInventory extends Component
 		gearStruct.Grade = grade
 		gearStruct.ComposeCount = composeCount
 		gearStruct.Atk = atk
-
-		local evt = InvenItemModifiedEvent()
-		evt.GUIDs = {baseGUID}
-		self.Entity:SendEvent(evt)
-	end
-
-	-- 무기 전용 품질(F~S) 합성. 같은 등급의 재료 1개(품질이 베이스와 달라야 함)를 소모해서, 무기 티어별
-	-- 고정 확률(QualityEnum.WeaponTierSuccessRateTable)로 성공하면 [베이스/재료 중 더 높은 품질] 그대로,
-	-- 실패하면 [더 높은 품질 - 1단계]가 된다. 등급(Grade)/ComposeCount는 건드리지 않는다
-	@ExecSpace("Server")
-	method void RequestComposeQuality(string baseGUID, string materialGUID)
-		self:ComposeQuality(baseGUID, materialGUID)
-	end
-
-	@ExecSpace("ServerOnly")
-	method integer ComposeQuality(string baseGUID, string materialGUID)
-		local userId = self.Entity.PlayerComponent.UserId
-
-		local errorCode = self:CanComposeQuality(baseGUID, materialGUID)
-		if errorCode ~= _ErrorCodeEnum.Success then
-			self:SendErrorCodeToClient(errorCode, '', userId)
-			return errorCode
-		end
-
-		---@type ItemStruct
-		local baseItem = self.Items[baseGUID]
-		---@type ItemStruct
-		local materialItem = self.Items[materialGUID]
-		---@type ItemGearStruct
-		local baseGearStruct = baseItem:GetGearStruct()
-		---@type ItemGearStruct
-		local materialGearStruct = materialItem:GetGearStruct()
-
-		local higherQuality = math.max(baseGearStruct.Quality, materialGearStruct.Quality)
-
-		local deleteParam = ItemDeleteParamStruct()
-		deleteParam.ItemGUID = materialGUID
-		deleteParam.ItemCount = 1
-		local resultStruct = ItemDeleteResultStruct()
-		local deleteErrorCode = _ItemFactoryLogic:TryDeleteItem(userId, deleteParam, resultStruct)
-		if deleteErrorCode ~= _ErrorCodeEnum.Success then
-			self:SendErrorCodeToClient(deleteErrorCode, '', userId)
-			return deleteErrorCode
-		end
-
-		local rate = _QualityEnum:GetWeaponTierSuccessRate(baseGearStruct.Grade)
-		local isSuccess = _UtilLogic:RandomDouble() * 100 < rate
-		if isSuccess then
-			baseGearStruct.Quality = higherQuality
-		else
-			local failQuality = higherQuality - 1
-			if failQuality < _QualityEnum.F then
-				failQuality = _QualityEnum.F
-			end
-			baseGearStruct.Quality = failQuality
-		end
-
-		self.IsSaveDB = true
-		self:SyncComposeQualityResultToClient(baseGUID, baseGearStruct.Quality, userId)
-
-		return _ErrorCodeEnum.Success
-	end
-
-	method integer CanComposeQuality(string baseGUID, string materialGUID)
-		---@type ItemStruct
-		local baseItem = self.Items[baseGUID]
-		if baseItem == nil then
-			return _ErrorCodeEnum.Item_CannotFind
-		end
-
-		if not _WeaponTierDataLogic:IsWeaponItem(baseItem.ItemId) then
-			return _ErrorCodeEnum.Item_ComposeInvalidMaterial
-		end
-
-		---@type ItemGearStruct
-		local baseGearStruct = baseItem:GetGearStruct()
-		if baseGearStruct == nil then
-			return _ErrorCodeEnum.Item_InvalidGearStruct
-		end
-
-		if baseGUID == materialGUID then
-			return _ErrorCodeEnum.Item_ComposeInvalidMaterial
-		end
-
-		---@type ItemStruct
-		local materialItem = self.Items[materialGUID]
-		if materialItem == nil then
-			return _ErrorCodeEnum.Item_CannotFind
-		end
-
-		if materialItem:IsAttached() then
-			return _ErrorCodeEnum.Item_ComposeMaterialAttached
-		end
-
-		---@type ItemGearStruct
-		local materialGearStruct = materialItem:GetGearStruct()
-		if materialGearStruct == nil or materialGearStruct.Grade ~= baseGearStruct.Grade then
-			return _ErrorCodeEnum.Item_ComposeInvalidMaterial
-		end
-
-		if materialGearStruct.ComposeCount ~= 0 then
-			return _ErrorCodeEnum.Item_ComposeInvalidMaterial
-		end
-
-		if materialGearStruct.Quality == baseGearStruct.Quality then
-			return _ErrorCodeEnum.Item_ComposeInvalidMaterial
-		end
-
-		return _ErrorCodeEnum.Success
-	end
-
-	@ExecSpace("Client")
-	method void SyncComposeQualityResultToClient(string baseGUID, integer quality)
-		---@type ItemStruct
-		local itemStruct = self.Items[baseGUID]
-		if itemStruct == nil then
-			self:SendErrorCodeToClient(_ErrorCodeEnum.Item_CannotFind, nil)
-			return
-		end
-
-		---@type ItemGearStruct
-		local gearStruct = itemStruct:GetGearStruct()
-		if gearStruct == nil then
-			return
-		end
-
+		gearStruct.BonusPercentPerMille = bonusPercentPerMille
 		gearStruct.Quality = quality
+		gearStruct.AtkByGrade = atkByGrade
+		gearStruct.BonusPercentPerMilleByGrade = bonusPercentPerMilleByGrade
 
 		local evt = InvenItemModifiedEvent()
 		evt.GUIDs = {baseGUID}

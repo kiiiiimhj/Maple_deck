@@ -3,15 +3,40 @@ script UIComposePopup extends Component
 
 	property SpriteGUIRendererComponent BaseSlotIcon = "5a07ad40-19ce-40d3-92a5-2f820635f824"
 
+	-- 등급색 테두리 대상(유저 지정: 아이콘 자체가 아니라 슬롯 배경에 테두리를 씌워야 함) — 각 슬롯의
+	-- 부모 SPR 엔티티(Icon의 부모)를 그대로 재사용, Material1/Material2는 ButtonComponent와 같은
+	-- 엔티티라 UUID가 동일하다
+	property SpriteGUIRendererComponent BaseSlotFrame = "4216dee6-8e13-4b3f-b52e-77df82a9b185"
+
 	property ButtonComponent Material1 = "2484832f-d6fb-48d5-aabb-993fc9b5274d"
 
 	property SpriteGUIRendererComponent Material1Icon = "dc1a393e-9ae6-4281-828f-c65c7b11a237"
+
+	property SpriteGUIRendererComponent Material1Frame = "2484832f-d6fb-48d5-aabb-993fc9b5274d"
 
 	property ButtonComponent Material2 = "661c11d7-7c05-4ea7-87df-256032283fb0"
 
 	property SpriteGUIRendererComponent Material2Icon = "18d126f9-a00c-4610-99fb-9631a1be9427"
 
+	property SpriteGUIRendererComponent Material2Frame = "661c11d7-7c05-4ea7-87df-256032283fb0"
+
 	property SpriteGUIRendererComponent ResultSlotIcon = "84dea8a2-50b5-4d39-816b-da79c3b480de"
+
+	property SpriteGUIRendererComponent ResultSlotFrame = "7664ae6d-0fc9-43f9-b798-825fdec15e56"
+
+	-- 품질 배지(유저 지정: 베이스/재료 슬롯에도 품질 표시 필요) — 인벤토리 슬롯/장비 정보 팝업과 동일하게
+	-- 무기는 실제 품질(F~S), 그 외 장비는 "A" 고정. 재료 슬롯은 선택 안 됐으면 배지 자체를 숨긴다
+	property SpriteGUIRendererComponent BaseQualityBg = "061af901-551c-48d8-9ac1-78062c348cca"
+
+	property TextGUIRendererComponent BaseQualityText = "3e7506c1-b133-4748-9563-c7eccd773c39"
+
+	property SpriteGUIRendererComponent Material1QualityBg = "84992153-9b48-4860-bf52-f99ad6e601f3"
+
+	property TextGUIRendererComponent Material1QualityText = "c5e297f8-24b0-4b76-a286-65f4f25ff039"
+
+	property SpriteGUIRendererComponent Material2QualityBg = "20945dde-0fda-477c-9062-dae77549462a"
+
+	property TextGUIRendererComponent Material2QualityText = "bd055143-6491-4dc8-b9b3-35471677e813"
 
 	-- 합성 진행도 뱃지(유저 지정, 2단계로 확정): 베이스 슬롯엔 항상 "지금" 진행도를 보여준다.
 	-- 결과 슬롯은 이번 합성으로 실제 등급이 오르는 경우엔 새 등급에서 0으로 리셋되니 뱃지를 안 보여주고,
@@ -36,6 +61,14 @@ script UIComposePopup extends Component
 
 	property Entity TabHolder = "f8ee4e33-b7fd-4a9e-b534-a4be279f5e56"
 
+	-- 품질 손해 경고창(유저 지정, 2026-08-08 신규): 노말→매직(재료 2개) 조합에서 베이스가 셋 중 유일하게
+	-- 제일 좋은 품질이면 그 값이 통째로 버려질 수 있어서, 합성 실행 전에 한 번 더 확인받는다
+	property Entity RiskWarningPanel = "16acc0f6-1473-4d4f-a38a-e5436d2cbc19"
+
+	property ButtonComponent RiskWarningCancelButton = "1b72de46-80b0-4776-b6fd-3aff41321fd3"
+
+	property ButtonComponent RiskWarningConfirmButton = "ab416671-6a9e-453c-8dea-7566477478a4"
+
 	property UIEquipPopup EquipPopup = nil
 
 	property any BaseItemStruct = nil
@@ -59,19 +92,18 @@ script UIComposePopup extends Component
 
 	property integer TabEnum = 1
 
-	-- 무기 전용 두 번째 합성 축(유저 지정): 재료가 베이스와 같은 품질이면 기존 티어축(등급업) 그대로,
-	-- 다른 품질이면 이 팝업 그대로 재사용해서 신규 품질축(성공시 높은품질/실패시 -1단계, 재료 1개 고정)으로
-	-- 자동 전환된다. 재료가 아직 없으면 항상 티어 모드로 취급(Open() 시점 슬롯 표시 등 기존 동작 유지)
-	property integer ComposeMode_Tier = 1
-
-	property integer ComposeMode_Quality = 2
-
 	@ExecSpace("ClientOnly")
 	method void OnBeginPlay()
 		self.BtnClose.Entity:ConnectEvent(ButtonClickEvent, function() self:Close() end)
+		-- Panel의 다른 자식들(LeftColumn/RightPanel/ComposeButton/LeftPanel/RiskWarning)이 형제 순서상
+		-- BtnClose보다 뒤에 있어서 클릭이 이쪽으로 새는 문제가 있었다(유저 리포트: X를 눌러도 안 닫힘) —
+		-- BtnClose를 Panel 안에서 확정적으로 맨 앞(마지막 순서)으로 올린다
+		_UILogic:SetSiblingIndex(self.BtnClose.Entity.UITransformComponent, 1000000)
 		self.ComposeButton.Entity:ConnectEvent(ButtonClickEvent, function() self:OnComposeClicked() end)
 		self.Material1.Entity:ConnectEvent(ButtonClickEvent, function() self:OnMaterialSlotClicked(1) end)
 		self.Material2.Entity:ConnectEvent(ButtonClickEvent, function() self:OnMaterialSlotClicked(2) end)
+		self.RiskWarningCancelButton.Entity:ConnectEvent(ButtonClickEvent, function() self.RiskWarningPanel.Enable = false end)
+		self.RiskWarningConfirmButton.Entity:ConnectEvent(ButtonClickEvent, function() self:ConfirmRiskyCompose() end)
 
 		-- 재료 후보 그리드 — 메인 인벤토리 그리드와 동일하게 UIItemSlot을 런타임 스폰해서 셀 템플릿으로 쓴다
 		local originalGridCell = _SpawnService:SpawnByModelId(_EntryService:GetModelIdByName("UIItemSlot"), "ComposeGridCell", Vector3.zero, self.Entity)
@@ -162,14 +194,18 @@ script UIComposePopup extends Component
 		self.Material2Struct = nil
 
 		self.BaseSlotIcon.ImageRUID = baseItemStruct:GetDisplayRUID()
+		self:SetQualityBadge(self.BaseQualityBg, self.BaseQualityText, baseItemStruct)
 
 		self.Material1Icon.Entity.Enable = false
 		self.Material2Icon.Entity.Enable = false
 		self.Material2.Entity.Enable = self:RequiredMaterialCount() >= 2
+		self:SetQualityBadge(self.Material1QualityBg, self.Material1QualityText, nil)
+		self:SetQualityBadge(self.Material2QualityBg, self.Material2QualityText, nil)
 
 		-- 이전 합성 연출이 X나 에러로 중간에 끊겼을 수도 있으니 안전하게 초기 상태로 리셋
 		-- (재료 아이콘이 날아가다 만 스케일/좌표로 남아있던 실제 버그로 발견됨)
 		self.ComposeButton.Entity.Enable = true
+		self.RiskWarningPanel.Enable = false
 		self.BaseSlotIcon.Entity.UITransformComponent.Scale = Vector3(1, 1, 1)
 		self.BaseSlotIcon.Color = Color(1, 1, 1, 1)
 		self.Material1Icon.Entity.UITransformComponent.Scale = Vector3(1, 1, 1)
@@ -205,36 +241,7 @@ script UIComposePopup extends Component
 		end
 	end
 
-	-- 무기 1번 재료가 베이스와 다른 품질이면 품질축 합성으로 확정(재료 1개 고정) — 재료가 없거나
-	-- 같은 품질이면(또는 무기가 아니면) 기존 티어축 그대로
-	@ExecSpace("ClientOnly")
-	method integer GetComposeMode()
-		---@type ItemStruct
-		local baseItemStruct = self.BaseItemStruct
-		---@type ItemStruct
-		local m1 = self.Material1Struct
-		if baseItemStruct == nil or m1 == nil then
-			return self.ComposeMode_Tier
-		end
-
-		if not _WeaponTierDataLogic:IsWeaponItem(baseItemStruct.ItemId) then
-			return self.ComposeMode_Tier
-		end
-
-		local baseGearStruct = baseItemStruct:GetGearStruct()
-		local m1GearStruct = m1:GetGearStruct()
-		if baseGearStruct == nil or m1GearStruct == nil then
-			return self.ComposeMode_Tier
-		end
-
-		if m1GearStruct.Quality ~= baseGearStruct.Quality then
-			return self.ComposeMode_Quality
-		end
-
-		return self.ComposeMode_Tier
-	end
-
-	-- 선택된 재료 수가 이번 모드(티어/품질)에서 요구하는 수와 정확히 일치하는지 — 합성 버튼
+	-- 선택된 재료 수가 이번 등급(즉시합성/진행형)에서 요구하는 수와 정확히 일치하는지 — 합성 버튼
 	-- 활성화 조건(유저 지정: 재료 덜 골랐으면 눌러도 아무 일 안 나는 대신 아예 안 눌리게)
 	@ExecSpace("ClientOnly")
 	method boolean HasEnoughMaterials()
@@ -245,8 +252,8 @@ script UIComposePopup extends Component
 	end
 
 	-- 노말→레어만 "동일 아이템 2개(+베이스 1개=3개) 즉시 합성", 그 외(레어→에픽 이상)는 "동일등급+동일부위
-	-- 아이템 1개씩 3회 반복 합성" — GearGradeEnum.IsInstantComposeTier가 이 두 모드를 가르는 단일 기준점.
-	-- 품질축 모드로 확정된 경우엔 등급/즉시합성 여부와 무관하게 재료 1개 고정
+	-- 아이템 1개씩 3회 반복 합성" — GearGradeEnum.IsInstantComposeTier가 이 두 재료 수를 가르는 단일 기준점.
+	-- 등급축/품질축이 매번 함께 처리되므로(유저 강한 정정) 재료 품질은 개수에 영향을 주지 않는다
 	@ExecSpace("ClientOnly")
 	method integer RequiredMaterialCount()
 		---@type ItemStruct
@@ -258,10 +265,6 @@ script UIComposePopup extends Component
 		local gearStruct = baseItemStruct:GetGearStruct()
 		if gearStruct == nil then
 			return 0
-		end
-
-		if self:GetComposeMode() == self.ComposeMode_Quality then
-			return 1
 		end
 
 		if _GearGradeEnum:IsInstantComposeTier(gearStruct.Grade) then
@@ -305,15 +308,8 @@ script UIComposePopup extends Component
 			return false
 		end
 
-		-- 이미 1번 재료가 선택된 상태에서 2번째를 고르는 경우: 1번 재료가 베이스와 같은 품질이라 티어축
-		-- 모드로 확정됐다면, 2번째도 반드시 같은 품질이어야 한다(품질 캐리오버 규칙 — 품질축은 재료 1개짜리
-		-- 별도 흐름이라 애초에 이 분기(2번째 재료 선택)까지 오지 않는다)
-		if self.Material1Struct ~= nil and candidate.GUID ~= self.Material1Struct.GUID then
-			local m1GearStruct = self.Material1Struct:GetGearStruct()
-			if m1GearStruct ~= nil and m1GearStruct.Quality == baseGearStruct.Quality and candidateGearStruct.Quality ~= baseGearStruct.Quality then
-				return false
-			end
-		end
+		-- 등급축/품질축이 매번 함께 처리되므로(유저 강한 정정) 재료 품질은 서로 달라도 무방하다 —
+		-- 목표 품질(베이스+재료들 중 최고)은 서버 ComposeItem이 알아서 계산한다
 
 		if _GearGradeEnum:IsInstantComposeTier(baseGearStruct.Grade) then
 			return candidate.ItemId == baseItemStruct.ItemId
@@ -342,11 +338,19 @@ script UIComposePopup extends Component
 		end
 
 		-- 높은 등급 순으로, 같은 등급이면 같은 종류(ItemId)끼리 묶어서 정렬(유저 지정)
+		-- 유저 지정: 등급 높은 순 → (같은 등급이면) 품질 높은 순 → ItemId(최종 동률 안정용)
 		table.sort(list, function(a, b)
-			local gradeA = a:GetGearStruct() ~= nil and a:GetGearStruct().Grade or -1
-			local gradeB = b:GetGearStruct() ~= nil and b:GetGearStruct().Grade or -1
+			local gearA = a:GetGearStruct()
+			local gearB = b:GetGearStruct()
+			local gradeA = gearA ~= nil and gearA.Grade or -1
+			local gradeB = gearB ~= nil and gearB.Grade or -1
 			if gradeA ~= gradeB then
 				return gradeA > gradeB
+			end
+			local qualityA = gearA ~= nil and gearA.Quality or -1
+			local qualityB = gearB ~= nil and gearB.Quality or -1
+			if qualityA ~= qualityB then
+				return qualityA > qualityB
 			end
 			return a.ItemId < b.ItemId
 		end)
@@ -448,23 +452,55 @@ script UIComposePopup extends Component
 		if m1 ~= nil then
 			self.Material1Icon.ImageRUID = m1:GetDisplayRUID()
 			self.Material1Icon.Entity.Enable = true
-			self:ApplyGradeBorder(self.Material1Icon, m1)
+			self:ApplyGradeBorder(self.Material1Frame, m1)
 		else
 			self.Material1Icon.Entity.Enable = false
 		end
+		self:SetQualityBadge(self.Material1QualityBg, self.Material1QualityText, m1)
 
 		---@type ItemStruct
 		local m2 = self.Material2Struct
 		if m2 ~= nil then
 			self.Material2Icon.ImageRUID = m2:GetDisplayRUID()
 			self.Material2Icon.Entity.Enable = true
-			self:ApplyGradeBorder(self.Material2Icon, m2)
+			self:ApplyGradeBorder(self.Material2Frame, m2)
 		else
 			self.Material2Icon.Entity.Enable = false
 		end
+		self:SetQualityBadge(self.Material2QualityBg, self.Material2QualityText, m2)
 
-		-- 품질축 모드로 확정되면(1번 재료가 베이스와 다른 품질) 2번 슬롯은 등급과 무관하게 숨긴다
+		-- 필요 재료 수(즉시합성=2/진행형=1)에 따라 2번 슬롯 표시 여부만 결정 — 품질축은 매번 등급축과
+		-- 함께 처리되므로 재료 수에 영향을 주지 않는다
 		self.Material2.Entity.Enable = self:RequiredMaterialCount() >= 2
+	end
+
+	-- 베이스/재료 슬롯 품질 배지(유저 지정: 인벤토리 슬롯/장비 정보 팝업과 동일하게 베이스·재료에도
+	-- 품질 표시 필요) — itemStruct가 nil이면(재료 미선택) 배지 자체를 숨긴다
+	@ExecSpace("ClientOnly")
+	method void SetQualityBadge(SpriteGUIRendererComponent bg, TextGUIRendererComponent text, any itemStruct)
+		if itemStruct == nil then
+			-- 버그: bg만 끄고 text는 안 꺼서 재료 미선택 상태에서 배경 없이 글자만 떠있던 문제(유저 지적) —
+			-- bg/text는 부모-자식이 아니라 형제 엔티티라 bg.Entity.Enable로는 text가 안 꺼진다
+			bg.Entity.Enable = false
+			text.Entity.Enable = false
+			return
+		end
+
+		---@type ItemStruct
+		local struct = itemStruct
+		if struct:GetGearData() == nil then
+			bg.Entity.Enable = false
+			text.Entity.Enable = false
+			return
+		end
+
+		bg.Entity.Enable = true
+		text.Entity.Enable = true
+		if _WeaponTierDataLogic:IsWeaponItem(struct.ItemId) then
+			text.Text = _QualityEnum:GetKoreanName(struct:GetGearStruct().Quality)
+		else
+			text.Text = "A"
+		end
 	end
 
 	-- 베이스/재료 슬롯 아이콘에 인벤토리 그리드와 동일한 등급색 테두리를 적용(유저 지정)
@@ -508,7 +544,7 @@ script UIComposePopup extends Component
 			self.ResultSlotIcon.ImageRUID = baseItemStruct:GetItemData().RUID
 		end
 
-		self:ApplyGradeBorder(self.BaseSlotIcon, baseItemStruct)
+		self:ApplyGradeBorder(self.BaseSlotFrame, baseItemStruct)
 
 		-- 베이스 슬롯의 합성 진행도 뱃지: 인벤토리 그리드/장착 팝업과 동일 규칙(다음 등급이 있고
 		-- ComposeCount>0일 때만 표시) — 결과 미리보기와 무관하게 "지금" 상태만 그대로 보여준다
@@ -519,31 +555,20 @@ script UIComposePopup extends Component
 			self.CountText.Entity.Parent.Enable = false
 		end
 
-		-- 품질축 모드(1번 재료가 베이스와 다른 품질)로 확정됐으면 등급은 그대로 두고 품질 결과만
-		-- 미리보기(성공: 높은 품질 유지 / 실패: 그 아래 1단계) — 등급 축 미리보기와는 완전히 별개 표시
-		if self:GetComposeMode() == self.ComposeMode_Quality then
-			---@type ItemStruct
-			local m1 = self.Material1Struct
-			local m1GearStruct = m1:GetGearStruct()
-			local higherQuality = math.max(gearStruct.Quality, m1GearStruct.Quality)
-			local failQuality = higherQuality - 1
-			if failQuality < _QualityEnum.F then
-				failQuality = _QualityEnum.F
-			end
-			local rate = _QualityEnum:GetWeaponTierSuccessRate(grade)
-
-			self:ApplyGradeBorderByGrade(self.ResultSlotIcon, grade)
-			self.GradeText.Text = "품질 합성 — 성공률 " .. tostring(rate) .. "%"
-			self.StatText.Text = string.format("성공: %s   실패: %s", _QualityEnum:GetKoreanName(higherQuality), _QualityEnum:GetKoreanName(failQuality))
-			self.SkillText.Enable = false
-			self.ResultCountText.Entity.Parent.Enable = false
-			self.ComposeButton.Enable = self:HasEnoughMaterials()
-			return
+		-- 품질 축(2026-08-08 전면 교체, gap 기반): 베이스+재료 품질값 중 가장 높은 값은 버려지고,
+		-- 남은 값들 중 낮은 값(low)과 두 번째로 낮은 값(higher)의 차이(gap)로 승급 확률이 정해진다
+		local previewQualities = self:GetPreviewQualities(gearStruct)
+		local previewHigher = _QualityEnum:GetPromoteHigherQuality(previewQualities)
+		local previewGap = _QualityEnum:GetPromoteGap(previewQualities)
+		local previewPromoteRate = _QualityEnum:GetGapPromoteRate(previewHigher, previewGap)
+		local previewPromoteQuality = previewHigher + 1
+		if previewPromoteQuality > _QualityEnum.S then
+			previewPromoteQuality = _QualityEnum.S
 		end
 
 		if nextGrade == -1 then
 			self.ResultCountText.Entity.Parent.Enable = false
-			self:ApplyGradeBorderByGrade(self.ResultSlotIcon, grade)
+			self:ApplyGradeBorderByGrade(self.ResultSlotFrame, grade)
 			self.GradeText.Text = _GearGradeEnum:GetKoreanName(grade) .. " (최고 등급)"
 			self.StatText.Text = ""
 			self.SkillText.Enable = false
@@ -555,9 +580,15 @@ script UIComposePopup extends Component
 		self.GradeText.Text = _GearGradeEnum:GetKoreanName(grade) .. " → " .. _GearGradeEnum:GetKoreanName(nextGrade)
 
 		if isWeapon then
-			-- 티어축은 품질 그대로 승계(유저 지정) — 이름만 다음 티어로 바뀐다는 걸 보여준다
-			self.StatText.Text = _WeaponTierDataLogic:GetDisplayName(grade) .. " → " .. _WeaponTierDataLogic:GetDisplayName(nextGrade)
-				.. " (품질 " .. _QualityEnum:GetKoreanName(gearStruct.Quality) .. " 유지)"
+			local nameChangeText = _WeaponTierDataLogic:GetDisplayName(grade) .. " → " .. _WeaponTierDataLogic:GetDisplayName(nextGrade)
+			-- 등급축과 품질축이 매번 함께 처리된다(유저 강한 정정) — gap 기반 유지/승급 확률을 같이 보여준다
+			if previewHigher >= _QualityEnum.S then
+				self.StatText.Text = nameChangeText .. " (품질 S 유지)"
+			else
+				self.StatText.Text = nameChangeText .. string.format(" (품질 %s 유지 %d%% / %s 승급 %d%%)",
+					_QualityEnum:GetKoreanName(previewHigher), 100 - previewPromoteRate,
+					_QualityEnum:GetKoreanName(previewPromoteQuality), previewPromoteRate)
+			end
 		else
 			local placeholderHpBefore = 10 + grade * 10
 			local placeholderHpAfter = 10 + nextGrade * 10
@@ -568,7 +599,7 @@ script UIComposePopup extends Component
 		-- (에픽 이상 진행형은 3번째 합성 때만 실제로 등급이 오르므로, 그 전까진 현재 등급색 유지)
 		local isInstant = _GearGradeEnum:IsInstantComposeTier(grade)
 		local willGradeUp = isInstant or (gearStruct.ComposeCount + 1 >= 3)
-		self:ApplyGradeBorderByGrade(self.ResultSlotIcon, willGradeUp and nextGrade or grade)
+		self:ApplyGradeBorderByGrade(self.ResultSlotFrame, willGradeUp and nextGrade or grade)
 		if isWeapon then
 			self.ResultSlotIcon.ImageRUID = _WeaponTierDataLogic:GetDisplayRUID(willGradeUp and nextGrade or grade)
 		end
@@ -605,15 +636,88 @@ script UIComposePopup extends Component
 			return
 		end
 
-		local mode = self:GetComposeMode()
+		-- 품질 손해 위험 조합(유저 지정): 베이스가 셋 중 유일하게 제일 좋은 품질이면 그 값이 계산에서
+		-- 통째로 버려질 수 있다 — 실행 전에 한 번 더 확인받는다
+		if self:IsRiskyCombination(baseItemStruct) then
+			self.RiskWarningPanel.Enable = true
+			return
+		end
+
+		self:ExecuteCompose(materialGUIDs)
+	end
+
+	-- 유저 강한 정정: 베이스가 손해보는 경우만 잡던 예전 판정은 비대칭이었음(베이스=S+재료F,F는 걸리는데
+	-- 베이스=F+재료S,F는 안 걸림 — 둘 다 품질값 집합이 {S,F,F}로 동일해서 기댓값도 완전히 같은데도).
+	-- 지금은 역할(베이스/재료) 상관없이 "입력 중 가장 높은 값이 계산에서 통째로 버려지는가"만 본다
+	@ExecSpace("ClientOnly")
+	method boolean IsRiskyCombination(any baseItemStruct)
+		local gearStruct = baseItemStruct:GetGearStruct()
+		if gearStruct == nil then
+			return false
+		end
+		local qualities = self:GetPreviewQualities(gearStruct)
+		local higher = _QualityEnum:GetPromoteHigherQuality(qualities)
+		local discarded = _QualityEnum:GetPromoteDiscardedQuality(qualities)
+		return discarded > higher
+	end
+
+	-- 경고창의 "그래도 합성" 버튼
+	@ExecSpace("ClientOnly")
+	method void ConfirmRiskyCompose()
+		self.RiskWarningPanel.Enable = false
+
+		---@type ItemStruct
+		local baseItemStruct = self.BaseItemStruct
+		if baseItemStruct == nil then
+			return
+		end
+
+		local materialGUIDs = {}
+		if self.Material1Struct ~= nil then
+			table.insert(materialGUIDs, self.Material1Struct.GUID)
+		end
+		if self.Material2Struct ~= nil then
+			table.insert(materialGUIDs, self.Material2Struct.GUID)
+		end
+
+		self:ExecuteCompose(materialGUIDs)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ExecuteCompose(table materialGUIDs)
+		---@type ItemStruct
+		local baseItemStruct = self.BaseItemStruct
+		if baseItemStruct == nil then
+			return
+		end
+
 		self.ComposeButton.Enable = false
 		self:PlayComposeEffect(function()
-			if mode == self.ComposeMode_Quality then
-				_UserService.LocalPlayer.PkgPlayerInventory:RequestComposeQuality(baseItemStruct.GUID, materialGUIDs[1])
-			else
-				_UserService.LocalPlayer.PkgPlayerInventory:RequestComposeItem(baseItemStruct.GUID, materialGUIDs)
-			end
+			_UserService.LocalPlayer.PkgPlayerInventory:RequestComposeItem(baseItemStruct.GUID, materialGUIDs)
 		end)
+	end
+
+	-- 이번 합성에 들어가는 품질값들(베이스 + 선택된 재료) — 서버 ComposeItem의 계산과 동일한 규칙
+	@ExecSpace("ClientOnly")
+	method table GetPreviewQualities(any gearStruct)
+		local qualities = { gearStruct.Quality }
+		---@type ItemStruct
+		local m1 = self.Material1Struct
+		if m1 ~= nil then
+			local m1GearStruct = m1:GetGearStruct()
+			if m1GearStruct ~= nil then
+				table.insert(qualities, m1GearStruct.Quality)
+			end
+		end
+		---@type ItemStruct
+		local m2 = self.Material2Struct
+		if m2 ~= nil then
+			local m2GearStruct = m2:GetGearStruct()
+			if m2GearStruct ~= nil then
+				table.insert(qualities, m2GearStruct.Quality)
+			end
+		end
+		return qualities
 	end
 
 	-- 합성 연출(유저 지정, 포션→HP바 연출과 동일 패턴 재사용): 베이스가 은은하게 커졌다 작아지며 차지되는

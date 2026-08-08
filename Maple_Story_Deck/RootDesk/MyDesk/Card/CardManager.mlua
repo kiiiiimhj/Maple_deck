@@ -13155,9 +13155,12 @@ script CardManager extends Logic
 	property number WeaponSkillTimer = 0
 
 	-- 런 시작(최초 시작/다시하기 공통) 시 1회, 로비 장비 인벤토리에서 현재 장착된 무기의 등급+스킬
-	-- 변형을 읽어와 이번 런 동안 고정한다(런 중에는 장비를 바꿀 수 없으므로 재확인 불필요)
+	-- 변형을 읽어와 이번 런 동안 고정한다(런 중에는 장비를 바꿀 수 없으므로 재확인 불필요).
+	-- userId는 호출부(GameManager.StartGame/RestartGame)가 RequestStartGame/RequestRestart의
+	-- senderUserId를 그대로 흘려보낸 값 — _UserService.LocalPlayer는 클라이언트 전용 개념이라
+	-- 서버(ServerOnly)에서 읽으면 항상 nil이라 절대 쓰면 안 된다(LEA-2007 AttemptToIndex 원인이었음)
 	@ExecSpace("ServerOnly")
-	method void InitWeaponSkillForRun()
+	method void InitWeaponSkillForRun(string userId)
 		self.WeaponSkillGrade = 0
 		self.WeaponSkillVariant = 1
 		self.WeaponSkillQuality = 0
@@ -13166,7 +13169,13 @@ script CardManager extends Logic
 		self.WeaponSkillUnlocked = false
 		self.WeaponSkillTimer = 0
 
-		local playerInventory = _UserService.LocalPlayer.PkgPlayerInventory
+		local playerEntity = _UserService:GetUserEntityByUserId(userId)
+		if not isvalid(playerEntity) then
+			log_error("InitWeaponSkillForRun: invalid userId " .. tostring(userId))
+			return
+		end
+
+		local playerInventory = playerEntity.PkgPlayerInventory
 		local weaponStruct = playerInventory:GetAttachedGearItemStruct(playerInventory.CurrentJob, _GearCategoryEnum.OneHandedWeapon)
 		if weaponStruct == nil then return end
 		if not _WeaponTierDataLogic:IsWeaponItem(weaponStruct.ItemId) then return end

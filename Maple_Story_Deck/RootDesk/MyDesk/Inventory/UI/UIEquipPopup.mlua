@@ -5,6 +5,9 @@ script UIEquipPopup extends Component
 
 	property SpriteGUIRendererComponent ItemIcon = "3e2662ab-05a0-4e7c-9e77-d5a8b1053fa9"
 
+	-- 등급색 테두리 대상(유저 지정: 아이템 아이콘 자체가 아니라 슬롯 배경(IconFrame/Bg)에 테두리를 씌워야 함)
+	property SpriteGUIRendererComponent ItemIconFrameBg = "29b265c5-8292-4865-bdab-6fbaff83a371"
+
 	property SpriteGUIRendererComponent PartBadge = "8d70b8b7-ad61-442b-95f9-15ea60e9ba50"
 
 	property TextGUIRendererComponent QualityText = "5eb9d87e-2365-4def-abf4-332b25b22459"
@@ -73,9 +76,9 @@ script UIEquipPopup extends Component
 
 	property TextGUIRendererComponent GradeSkillText3 = "c836d03a-efa9-4e78-a3f2-8bbf22bc69db"
 
-	property SpriteGUIRendererComponent GradeSkillLock4 = "50bfd744-d16c-470e-8863-a56b67b68ae2"
+	property SpriteGUIRendererComponent GradeSkillLock4 = "3151da2f-2584-406e-9b4b-c80d8513ae02"
 
-	property TextGUIRendererComponent GradeSkillText4 = "b18dd9d9-f40d-4b7c-8d7e-d938d7a433d0"
+	property TextGUIRendererComponent GradeSkillText4 = "6fc8b940-64a8-4590-85a7-29660f2b61e6"
 
 	@ExecSpace("ClientOnly")
 	method void OnBeginPlay()
@@ -83,6 +86,14 @@ script UIEquipPopup extends Component
 		self.TitleText = panel:GetChildByName("Title").TextComponent
 
 		self.BtnClose.Entity:ConnectEvent(ButtonClickEvent, function() self:Close() end)
+		-- ComposePopup과 동일한 잠재 버그(Panel의 다른 자식들이 형제 순서상 BtnClose보다 뒤라 클릭이
+		-- 새는 문제) 예방 차원에서 여기도 확정적으로 맨 앞으로 올린다
+		_UILogic:SetSiblingIndex(self.BtnClose.Entity.UITransformComponent, 1000000)
+
+		-- 합성 팝업 X 버튼이 "완전히 꺼짐"이 아니라 이 장비 정보 팝업으로 되돌아가야 함(유저 지적) —
+		-- ComposePopup.Close()가 self.EquipPopup:Open(...)을 호출하는데, 이 역참조를 아무도 연결해준 적이
+		-- 없어서 항상 nil이었다(= 합성 팝업 X를 누르면 nil 인덱싱 에러 후 그냥 꺼지기만 함)
+		self.ComposePopup.EquipPopup = self
 
 		self.ButtonEquip.Entity:ConnectEvent(ButtonClickEvent, function() self:OnEquipButtonClicked() end)
 		self.ButtonDelete.Entity:ConnectEvent(ButtonClickEvent, function() self:OnDeleteButtonClicked() end)
@@ -105,14 +116,15 @@ script UIEquipPopup extends Component
 		self.ItemIcon.ImageRUID = itemStruct:GetDisplayRUID()
 		self.TitleText.Text = itemStruct:GetDisplayName()
 
-		-- 아이템 아이콘 등급색 테두리 — 인벤토리/합성 팝업 그리드와 동일 규칙(등급 없는 잡템은 테두리 없음)
+		-- 슬롯 배경 등급색 테두리 — 인벤토리 슬롯(IconBackground)/합성 팝업 슬롯과 동일 규칙: 아이템
+		-- 아이콘 자체가 아니라 IconFrame/Bg(슬롯 배경)에 테두리를 씌운다(등급 없는 잡템은 테두리 없음)
 		local iconGearStruct = itemStruct:GetGearStruct()
 		if iconGearStruct ~= nil then
-			self.ItemIcon.Outline = true
-			self.ItemIcon.OutlineWidth = 4
-			self.ItemIcon.OutlineColor = _GearGradeEnum:GetEnumColor(iconGearStruct.Grade)
+			self.ItemIconFrameBg.Outline = true
+			self.ItemIconFrameBg.OutlineWidth = 4
+			self.ItemIconFrameBg.OutlineColor = _GearGradeEnum:GetEnumColor(iconGearStruct.Grade)
 		else
-			self.ItemIcon.Outline = false
+			self.ItemIconFrameBg.Outline = false
 		end
 
 		-- 부위 배지: 장비 아이템만 있는 GearData의 GearCategory로 판별. 인벤토리/장비판(EquipInfoGrid)에서
@@ -131,7 +143,7 @@ script UIEquipPopup extends Component
 		-- 그 외(방어구 등)는 스탯 카탈로그가 아직 없어서(유저 지정: 뼈대만 먼저) 등급 기반 임시 수치 유지
 		if _WeaponTierDataLogic:IsWeaponItem(itemStruct.ItemId) and gearStruct ~= nil then
 			self.StatValueText.Text = "공격력 " .. tostring(gearStruct.Atk)
-			local bonusText = _WeaponTierDataLogic:GetBonusText(gearStruct.Grade, gearStruct.Quality)
+			local bonusText = _WeaponTierDataLogic:GetActualBonusText(gearStruct.Grade, gearStruct.SkillVariant, gearStruct.BonusPercentPerMille, gearStruct.ProcChancePerMille)
 			self.DescText.Text = bonusText
 			self.QualityText.Text = _QualityEnum:GetKoreanName(gearStruct.Quality)
 			self:UpdateGradeSkillBox(gearStruct)
@@ -166,12 +178,23 @@ script UIEquipPopup extends Component
 		-- 패널에 가려질 수 있다 — InventoryUI가 자기 그룹을 맨 앞으로 올릴 때 쓰는 것과 동일한 방식으로
 		-- 열릴 때마다 확정적으로 맨 앞으로 올린다.
 		_UILogic:SetSiblingIndex(self.Entity.UITransformComponent, 1000000)
+
+		-- 인벤토리 전체닫기 버튼과 이 팝업의 X 버튼 클릭 영역이 겹쳐서(유저 리포트), 이 팝업이
+		-- 열려있는 동안은 전체닫기 버튼 자체를 꺼둔다. Close()에서 다시 켠다
+		if self.Inventory ~= nil then
+			self.Inventory:SetCloseButtonEnabled(false)
+		end
 	end
 
 	-- 등급 스킬 5행(유저 정정): Row0~4가 매직/레어/에픽/유니크/레전더리 5단계 등급에 각각 매핑된다.
-	-- 각 행 텍스트는 "그 등급에서 이 아이템의 SkillVariant가 받는 실제 텍스트"(매직/에픽/유니크는 4종이
-	-- 전부 동일해서 어차피 결과가 같음), 잠금 해제 여부는 현재 등급이 그 행의 기준 등급 이상인지로
-	-- 판정한다. 노말은 매직조차 미달이라 5행 전부 잠긴 채로 유지된다.
+	-- 잠금 해제 여부는 현재 등급이 그 행의 기준 등급 이상인지로 판정한다. 노말은 매직조차 미달이라
+	-- 5행 전부 잠긴 채로 유지된다.
+	-- 각 행 텍스트는 절대 "N%~N%" 범위 문구를 쓰지 않는다(유저가 강하게 정정: 범위는 그 구간 안에서
+	-- 아이템이 실제로 하나의 확정값을 굴려서 갖는 것이라, 화면엔 항상 확정된 숫자 하나만 보여야 함).
+	-- 또한 그 값은 드롭 시 한 번에 굴려서 gearStruct.BonusPercentPerMilleByGrade에 영구 저장돼 있으므로
+	-- (WeaponTierDataLogic.RollBonusPercentPerMilleByGrade 참고) 여기서 매번 새로 굴리지 않는다 —
+	-- 아직 도달하지 못한 등급(행)이라도 "미리 정해진" 값을 그대로 보여주며, 실제로 그 등급에
+	-- 도달했을 때(PkgPlayerInventory.ComposeItem) 받는 값과 항상 정확히 일치한다.
 	@ExecSpace("ClientOnly")
 	method void UpdateGradeSkillBox(any gearStruct)
 		local rowGrades = { _GearGradeEnum.Magic, _GearGradeEnum.Rare, _GearGradeEnum.Epic, _GearGradeEnum.Unique, _GearGradeEnum.Legendary }
@@ -180,8 +203,15 @@ script UIEquipPopup extends Component
 
 		for i = 1, 5 do
 			local rowGrade = rowGrades[i]
-			labels[i].Text = _WeaponTierDataLogic:GetSkillText(rowGrade, gearStruct.SkillVariant)
 			locks[i].Entity.Enable = gearStruct.Grade < rowGrade
+
+			-- 레거시 아이템(이 필드 추가 전 드롭)은 표가 비어있을 수 있어 그 자리에서 1회 굴려 보여준다
+			local bonusPercentPerMille = gearStruct.BonusPercentPerMilleByGrade[rowGrade]
+			if bonusPercentPerMille == nil then
+				bonusPercentPerMille = _WeaponTierDataLogic:RollBonusPercentPerMille(rowGrade, gearStruct.Quality)
+			end
+
+			labels[i].Text = _WeaponTierDataLogic:GetActualBonusText(rowGrade, gearStruct.SkillVariant, bonusPercentPerMille, gearStruct.ProcChancePerMille)
 		end
 	end
 
@@ -267,6 +297,12 @@ script UIEquipPopup extends Component
 		self.ItemStruct = nil
 
 		self.Entity.Enable = false
+
+		-- EquipPopup이 진짜로 닫힐 때(그리드로 복귀)만 전체닫기 버튼을 되살린다. ComposePopup으로
+		-- 넘어가는 경로(OnComposeButtonClicked)는 이 Close()를 타지 않으므로 꺼진 채로 유지된다
+		if self.Inventory ~= nil then
+			self.Inventory:SetCloseButtonEnabled(true)
+		end
 	end
 
 	@ExecSpace("ClientOnly")

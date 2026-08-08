@@ -3,7 +3,12 @@ script QualityEnum extends Logic
 
 	property table EnumToKoreanNameTable = {}
 
-	property table WeaponTierSuccessRateTable = {}
+	-- 품질 합성 승급 확률표(유저 지정, 2026-08-08 전면 교체): 등급(GearGradeEnum) 기반 고정 확률 대신
+	-- "이번 합성에 들어간 모든 품질값 중 가장 낮은 값(low)과 두 번째로 낮은 값(higher)의 차이(gap)"로
+	-- 승급 확률을 결정한다. 셋 이상(노말→매직, 재료2개) 입력 시 가장 높은 값은 계산에서 완전히 제외된다.
+	-- 결과는 항상 [higher(유지) / higher+1(승급, S는 클램프)] 둘 중 하나 — 실패해도 higher 밑으로는 안 내려감.
+	-- GapPromoteRateTable[higher등급][gap] = 승급확률(%)
+	property table GapPromoteRateTable = {}
 
 	property integer F = 0
 
@@ -30,17 +35,17 @@ script QualityEnum extends Logic
 		enumToKoreanNameTable[self.A] = "A"
 		enumToKoreanNameTable[self.S] = "S"
 
-		-- 품질 합성(같은 무기, 다른 품질끼리) 성공확률(유저 지정) — 무기 티어(GearGradeEnum)별로
-		-- 고정이고 두 재료의 품질 칸수 차이와는 무관하다. 성공하면 [두 재료 중 높은 품질] 그대로,
-		-- 실패하면 [높은 품질 -1단계]가 나온다
-		local rateTable = {}
-		self.WeaponTierSuccessRateTable = rateTable
-		rateTable[_GearGradeEnum.None] = 70
-		rateTable[_GearGradeEnum.Magic] = 75
-		rateTable[_GearGradeEnum.Rare] = 80
-		rateTable[_GearGradeEnum.Epic] = 85
-		rateTable[_GearGradeEnum.Unique] = 90
-		rateTable[_GearGradeEnum.Legendary] = 95
+		-- gap 페널티 표(유저 지정 원본 수치, "재료 조합" 표와 "노말→매직 gap 페널티" 표를 교차검증해서
+		-- 완전히 동일한 단일 공식임을 확인함): [higher등급][gap] = 승급확률(%)
+		local gapTable = {}
+		self.GapPromoteRateTable = gapTable
+		gapTable[self.F] = { [0] = 30 }
+		gapTable[self.E] = { [0] = 35, [1] = 10 }
+		gapTable[self.D] = { [0] = 40, [1] = 15, [2] = 5 }
+		gapTable[self.C] = { [0] = 45, [1] = 20, [2] = 5, [3] = 3 }
+		gapTable[self.B] = { [0] = 50, [1] = 25, [2] = 5, [3] = 3, [4] = 2 }
+		gapTable[self.A] = { [0] = 60, [1] = 30, [2] = 5, [3] = 2, [4] = 1, [5] = 1 }
+		-- S는 최고 등급이라 gap과 무관하게 항상 승급확률 0%(클램프, GetGapPromoteRate에서 처리)
 	end
 
 	method string GetKoreanName(integer qualityEnum)
@@ -51,10 +56,56 @@ script QualityEnum extends Logic
 		return str
 	end
 
-	method integer GetWeaponTierSuccessRate(integer weaponTierGrade)
-		local rate = self.WeaponTierSuccessRateTable[weaponTierGrade]
+	-- 이번 합성에 들어가는 모든 품질값(베이스+재료들) 중 "두 번째로 낮은 값"을 반환 — 매직 이상
+	-- (입력 2개)은 그냥 더 높은 쪽, 노말→매직(입력 3개)은 가장 높은 값이 계산에서 제외되고 남은
+	-- 둘 중 높은 쪽이 된다
+	method integer GetPromoteHigherQuality(table qualities)
+		local sorted = {}
+		for i, q in ipairs(qualities) do
+			sorted[i] = q
+		end
+		table.sort(sorted)
+		if #sorted >= 2 then
+			return sorted[2]
+		end
+		return sorted[1]
+	end
+
+	-- 이번 합성 계산에서 완전히 배제되는 값(입력들 중 가장 높은 값) — 이 값이 higher보다 크면 그
+	-- 아이템(베이스든 재료든 역할 무관)의 품질이 그대로 버려진다는 뜻(유저 지정: 역할 상관없이 판정)
+	method integer GetPromoteDiscardedQuality(table qualities)
+		local sorted = {}
+		for i, q in ipairs(qualities) do
+			sorted[i] = q
+		end
+		table.sort(sorted)
+		return sorted[#sorted]
+	end
+
+	-- "두 번째로 낮은 값(higher)"과 "가장 낮은 값(low)"의 등급 차이
+	method integer GetPromoteGap(table qualities)
+		local sorted = {}
+		for i, q in ipairs(qualities) do
+			sorted[i] = q
+		end
+		table.sort(sorted)
+		local low = sorted[1]
+		local higher = (#sorted >= 2) and sorted[2] or sorted[1]
+		return higher - low
+	end
+
+	-- (higher, gap) 조합으로 승급확률(%) 조회. 결과는 항상 higher(유지) 또는 higher+1(승급, S 클램프)
+	method integer GetGapPromoteRate(integer higherQuality, integer gap)
+		if higherQuality >= self.S then
+			return 0
+		end
+		local gapTable = self.GapPromoteRateTable[higherQuality]
+		if gapTable == nil then
+			return 0
+		end
+		local rate = gapTable[gap]
 		if rate == nil then
-			return 70
+			return 0
 		end
 		return rate
 	end
