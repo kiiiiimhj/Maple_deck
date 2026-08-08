@@ -21,6 +21,19 @@ script ShadowShopUI extends Logic
 	property TextComponent item4Name = "a8f7088d-6220-4bc0-9bc1-0d529794451e"
 	property TextComponent item5Name = "d63862b8-c56c-42ad-9516-f040caff25da"
 
+	-- 1/2번 슬롯(포션/티켓)도 3~5번 스킬 슬롯과 동일하게 "런당 1개만 구매" 매진 처리를 하기 위한
+	-- 아이콘/이름 바인딩 (유저 지정: 지금까진 무제한 재구매가 가능했음)
+	property SpriteGUIRendererComponent item1Icon = "32d7781f-dd31-4ffd-9464-56f4ca6e1e68"
+	property TextComponent item1Name = "ae8e394c-f369-4fad-89ef-a6668563be23"
+	property SpriteGUIRendererComponent item2Icon = "8ae12c96-c684-444b-ab0b-bd952e03b052"
+	property TextComponent item2Name = "a02c32b0-d570-4b5e-9a2b-bb8b24a486d1"
+	property string PotionName = "엘릭서 포션"
+	property string TicketName = "알 수 없는 티켓"
+
+	-- 구매 성공 안내 텍스트("구매 완료!") — 위로 떠오르며 서서히 사라지는 연출 전용.
+	-- UIBuilder.text()로 만든 엔티티라 다른 이름텍스트(TextComponent)와 달리 TextGUIRendererComponent다
+	property TextGUIRendererComponent purchaseToastText = "4261eea4-6b9b-4d8e-a69d-14aab153e1ab"
+
 	property integer PotionPrice = 2
 	property integer TicketPrice = 3
 	property integer SkillPrice = 2
@@ -59,6 +72,9 @@ script ShadowShopUI extends Logic
 	@Sync property boolean Slot3SoldOut = false
 	@Sync property boolean Slot4SoldOut = false
 	@Sync property boolean Slot5SoldOut = false
+	-- 1/2번 슬롯(포션/티켓) 매진 상태 — 3~5번과 동일하게 이번 "런" 동안 1개만 구매 가능(유저 지정)
+	@Sync property boolean PotionSoldOut = false
+	@Sync property boolean TicketSoldOut = false
 	@Sync property boolean _rolledThisRun = false
 
 	@ExecSpace("ClientOnly")
@@ -90,6 +106,7 @@ script ShadowShopUI extends Logic
 		self.currencyCountText.Text = tostring(_GameManager.ShadowVoucher)
 		self:RequestRollIfNeeded()
 		self:RefreshSlotDisplay()
+		self:RefreshPotionTicketDisplay()
 		self.shopGroup.Enable = true
 		self._selectedSlotIndex = 0
 		self:RefreshItemSelection()
@@ -149,6 +166,9 @@ script ShadowShopUI extends Logic
 		self.Slot3SoldOut = false
 		self.Slot4SoldOut = false
 		self.Slot5SoldOut = false
+		-- 포션/티켓도 같은 "새 런 = 상점 재입고" 타이밍에 매진 상태를 초기화한다
+		self.PotionSoldOut = false
+		self.TicketSoldOut = false
 		if #pool >= 1 then self.LockedSlot3Card = pool[1] end
 		if #pool >= 2 then self.LockedSlot4Card = pool[2] end
 		if #pool >= 3 then self.LockedSlot5Card = pool[3] end
@@ -162,6 +182,8 @@ script ShadowShopUI extends Logic
 		if name == "LockedSlot3Card" or name == "LockedSlot4Card" or name == "LockedSlot5Card"
 			or name == "Slot3SoldOut" or name == "Slot4SoldOut" or name == "Slot5SoldOut" then
 			self:RefreshSlotDisplay()
+		elseif name == "PotionSoldOut" or name == "TicketSoldOut" then
+			self:RefreshPotionTicketDisplay()
 		end
 	end
 
@@ -171,6 +193,28 @@ script ShadowShopUI extends Logic
 		self:ApplySlotDisplay(self.LockedSlot4Card, self.Slot4SoldOut, self.item4Btn, self.item4Icon, self.item4Name)
 		self:ApplySlotDisplay(self.LockedSlot5Card, self.Slot5SoldOut, self.item5Btn, self.item5Icon, self.item5Name)
 		self:RefreshPurchaseButtonState()
+	end
+
+	-- 포션/티켓(1/2번 슬롯) 매진 표시 — 3~5번과 달리 카드가 아니라 고정 아이템이라 이름을 그대로
+	-- 복원하면 되므로 ApplySlotDisplay와 별도의 간단한 헬퍼로 처리한다
+	@ExecSpace("ClientOnly")
+	method void RefreshPotionTicketDisplay()
+		self:ApplyFixedItemDisplay(self.PotionSoldOut, self.item1Btn, self.item1Icon, self.item1Name, self.PotionName)
+		self:ApplyFixedItemDisplay(self.TicketSoldOut, self.item2Btn, self.item2Icon, self.item2Name, self.TicketName)
+		self:RefreshPurchaseButtonState()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ApplyFixedItemDisplay(boolean soldOut, ButtonComponent btn, SpriteGUIRendererComponent icon, TextComponent nameText, string normalName)
+		if soldOut then
+			nameText.Text = "매진"
+			btn.Enable = false
+			icon.Color = Color(0.4, 0.4, 0.4, 1)
+		else
+			nameText.Text = normalName
+			btn.Enable = true
+			icon.Color = Color(1, 1, 1, 1)
+		end
 	end
 
 	@ExecSpace("ClientOnly")
@@ -330,9 +374,9 @@ script ShadowShopUI extends Logic
 	method void RefreshPurchaseButtonState()
 		local canBuy = false
 		if self._selectedSlotIndex == 1 then
-			canBuy = _GameManager.ShadowVoucher >= self.PotionPrice
+			canBuy = not self.PotionSoldOut and _GameManager.ShadowVoucher >= self.PotionPrice
 		elseif self._selectedSlotIndex == 2 then
-			canBuy = _GameManager.ShadowVoucher >= self.TicketPrice
+			canBuy = not self.TicketSoldOut and _GameManager.ShadowVoucher >= self.TicketPrice
 		elseif self._selectedSlotIndex == 3 then
 			canBuy = self.LockedSlot3Card ~= 0 and not self.Slot3SoldOut and _GameManager.ShadowVoucher >= self.SkillPrice
 		elseif self._selectedSlotIndex == 4 then
@@ -349,13 +393,15 @@ script ShadowShopUI extends Logic
 	@ExecSpace("ClientOnly")
 	method void OnPurchaseClicked()
 		if self._selectedSlotIndex == 1 then
-			if _GameManager.ShadowVoucher < self.PotionPrice then return end
+			if self.PotionSoldOut or _GameManager.ShadowVoucher < self.PotionPrice then return end
 			self:QueueReward(self.PotionIconRUID, _GameManager.HpBarFlyTargetUI, "potion", 0)
 			self:RequestBuyPotion()
+			self:PlayPurchaseToast()
 		elseif self._selectedSlotIndex == 2 then
-			if _GameManager.ShadowVoucher < self.TicketPrice then return end
+			if self.TicketSoldOut or _GameManager.ShadowVoucher < self.TicketPrice then return end
 			self:QueueReward(self.TicketIconRUID, _GameManager.LootFlyTargetUI, "ticket", 0)
 			self:RequestBuyTicket()
+			self:PlayPurchaseToast()
 		elseif self._selectedSlotIndex == 3 then
 			self:OnBuySkillSlot(self.LockedSlot3Card, self.Slot3SoldOut)
 		elseif self._selectedSlotIndex == 4 then
@@ -375,6 +421,7 @@ script ShadowShopUI extends Logic
 		if _GameManager.ShadowVoucher < self.SkillPrice then return end
 		self:QueueReward(self:GetCardIconRUID(cardIdx), self:GetSkillFlyTargetUI(cardIdx), "skill", cardIdx)
 		self:RequestBuySkill(cardIdx)
+		self:PlayPurchaseToast()
 	end
 
 	@ExecSpace("ClientOnly")
@@ -490,13 +537,18 @@ script ShadowShopUI extends Logic
 
 	@ExecSpace("Server")
 	method void RequestBuyPotion()
+		-- 클라이언트 값을 신뢰하지 않고 서버 권위 상태로 재검증(스킬 슬롯과 동일 패턴) — 런당 1개만 구매 가능
+		if self.PotionSoldOut then return end
 		if not _GameManager:SpendShadowVoucher(self.PotionPrice) then return end
+		self.PotionSoldOut = true
 		self:QueueGrant({ kind = "potion" })
 	end
 
 	@ExecSpace("Server")
 	method void RequestBuyTicket()
+		if self.TicketSoldOut then return end
 		if not _GameManager:SpendShadowVoucher(self.TicketPrice) then return end
+		self.TicketSoldOut = true
 		self:QueueGrant({ kind = "ticket" })
 	end
 
@@ -600,6 +652,27 @@ script ShadowShopUI extends Logic
 		self.currencyCountText.Text = tostring(newTotal)
 		_InventoryUI:NotifyInventoryChanged()
 		self:RefreshPurchaseButtonState()
+	end
+
+	-- 구매 성공 안내("구매 완료!") — 포션/티켓/스킬 슬롯 구매 공통, 위로 떠오르며 서서히 사라진다
+	@ExecSpace("ClientOnly")
+	method void PlayPurchaseToast()
+		local text = self.purchaseToastText
+		text.Text = "구매 완료!"
+		text.Entity:SetEnable(true)
+		text.FontColor = Color(1, 1, 1, 1)
+		local tc = text.Entity.UITransformComponent
+		tc.anchoredPosition = Vector2(0, 0)
+		local duration = 0.9
+		local riseDistance = 80
+		_TweenLogic:PlayTween(0.0, 1.0, duration, EaseType.QuadEaseOut, function(t)
+			if not isvalid(text) then return end
+			text.Entity.UITransformComponent.anchoredPosition = Vector2(0, riseDistance * t)
+			text.FontColor = Color(1, 1, 1, 1.0 - t)
+		end)
+		_TimerService:SetTimerOnce(function()
+			if isvalid(text) then text.Entity:SetEnable(false) end
+		end, duration)
 	end
 
 	@ExecSpace("ClientOnly")
