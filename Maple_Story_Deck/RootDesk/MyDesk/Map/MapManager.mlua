@@ -88,6 +88,24 @@ script MapManager extends Logic
 		return #self.ZoneInfo
 	end
 
+	-- 현재 선택된 에피소드(1 또는 2) — GameManager.StartGame/RestartGame이 시작/다시하기 시점에 호출.
+	-- MinMapIndex/MaxMapIndex/DesiredStartMapIndex를 통째로 바꿔치기해서, 이후 SpawnWave 순회
+	-- (MinMapIndex~MaxMapIndex)·ResolveCurrentMapIndex 폴백·시작 리다이렉트가 전부 해당 에피소드의
+	-- 범위 안에서만 동작하게 한다. ZoneInfo 자체는 1~44(에피1)/45~54(에피2) 항목을 항상 같이 들고
+	-- 있으므로(위 OnBeginPlay 참고) 여기서 테이블을 바꿔치기할 필요는 없다 — 순회 범위만 좁히면 된다.
+	@ExecSpace("ServerOnly")
+	method void SetEpisodeRange(integer episode)
+		if episode == 2 then
+			self.MinMapIndex = 45
+			self.MaxMapIndex = 54
+			self.DesiredStartMapIndex = 45
+		else
+			self.MinMapIndex = 1
+			self.MaxMapIndex = 44
+			self.DesiredStartMapIndex = 1
+		end
+	end
+
 	-- 네이티브 기본 줌(100)이면 맵 가장자리(발판/배경이 끝나는 지점)에서 카메라가 그 바깥의 빈 공간을
 	-- 살짝 비춰서 검은 틈이 보인다 — 유저가 Maker에서 마우스 휠로 살짝 줌아웃하니 사라짐을 확인. 플레이어는
 	-- IsAllowZoomInOut=false라 스스로 조절할 수 없으므로, 게임 시작 시점에 기본값을 살짝 더 줌아웃된 값으로
@@ -249,6 +267,21 @@ script MapManager extends Logic
 			[43] = { file = "map23", container = "Zone43", spawnX = 46.5, landY = -0.62 },
 			-- 존35(map21)와 동일한 사이드룸 패턴 — 존43의 포탈(portal-12)로만 진입 가능
 			[44] = { file = "map24", container = nil, spawnX = 0 },
+			-- 에피소드2(Ep2_map1.map, 구름정원 컨셉) — 존1~10을 내부적으로 mapIndex 45~54로 배정한다.
+			-- 시작 팝업(WorldCharacterSelectUI)에서 "에피소드2"를 고르면 SetEpisodeRange(2)가
+			-- MinMapIndex/MaxMapIndex/DesiredStartMapIndex를 45/54/45로 바꿔치기해서, 에피1(1~44)의
+			-- 어떤 로직도 건드리지 않고 완전히 독립된 진행 범위로 동작한다. 존 컨테이너는 map01~24
+			-- 그룹들과 동일한 패턴(루트=존1, Zone2~Zone10 자식, spawnX 15.5 간격)으로 이미 맵에 만들어뒀다.
+			[45] = { file = "Ep2_map1", container = nil, spawnX = 0 },
+			[46] = { file = "Ep2_map1", container = "Zone2", spawnX = 15.5 },
+			[47] = { file = "Ep2_map1", container = "Zone3", spawnX = 31.0 },
+			[48] = { file = "Ep2_map1", container = "Zone4", spawnX = 46.5 },
+			[49] = { file = "Ep2_map1", container = "Zone5", spawnX = 62.0 },
+			[50] = { file = "Ep2_map1", container = "Zone6", spawnX = 77.5 },
+			[51] = { file = "Ep2_map1", container = "Zone7", spawnX = 93.0 },
+			[52] = { file = "Ep2_map1", container = "Zone8", spawnX = 108.5 },
+			[53] = { file = "Ep2_map1", container = "Zone9", spawnX = 124.0 },
+			[54] = { file = "Ep2_map1", container = "Zone10", spawnX = 139.5 },
 		}
 		-- 몬스터 스폰/시작맵 리다이렉트는 GameStarted가 될 때까지 미룬다(BeginGameplay 참고) —
 		-- 타이틀 화면을 보는 동안 몬스터가 먼저 쌓이면 안 된다. 여기서는 현재 위치만 계산해둔다.
@@ -548,8 +581,14 @@ script MapManager extends Logic
 		-- 맵4 이상은 레벨5가 되기 전까지 잠겨있다 (예전엔 보스 처치 기준이었는데, 보스를 못 잡는
 		-- 버그가 생길 경우 진행이 완전히 막히는 걸 막기 위해 레벨 기준으로 바꿨다. 2026-08-04:
 		-- 유저 요청으로 기준 레벨을 10→5로 완화 — MapMoveUI.mlua의 자물쇠 표시 기준과 반드시 같이 맞춰야 한다)
-		if targetIndex >= 4 and _GameManager.Level < 5 then
-			log("MapManager: map" .. targetIndex .. " locked until level 5")
+		-- 2026-08-10: 에피소드2(존1~10 = 내부 mapIndex 45~54) 추가로 이 절대 인덱스 비교가 깨졌었다 —
+		-- 45~54는 전부 4 이상이라 에피소드2의 첫 이동(존1→존2)부터 무조건 잠겨서 아예 못 움직이는
+		-- 버그였다(유저 리포트로 발견). 에피소드별 "그 에피소드 안에서 몇 번째 존인지"로 환산해서
+		-- 비교해야 한다 — 에피1은 그대로 1~44, 에피2는 45를 빼서 1~10으로 되돌린다.
+		local localIndex = targetIndex
+		if targetIndex >= 45 then localIndex = targetIndex - 44 end
+		if localIndex >= 4 and _GameManager.Level < 5 then
+			log("MapManager: map" .. targetIndex .. " (local " .. localIndex .. ") locked until level 5")
 			return
 		end
 

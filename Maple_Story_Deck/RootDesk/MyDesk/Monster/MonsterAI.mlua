@@ -49,6 +49,10 @@ script MonsterAI extends Component
 	-- 스탯 몬스터를 재사용하되 공격은 안 하는 고정 타겟을 만들 때 쓴다
 	property boolean _neverAttacks = false
 
+	-- 에피소드2 네펜데스/다크 네펜데스 전용: 이 몬스터가 죽으면(Die) 그 자리에 거대 네펜데스를 별도로
+	-- 소환한다(GameManager.GetMapSpawnsGiantNepenthesOnDeath). 거대 네펜데스 자신은 이 값이 항상 false다.
+	property boolean _spawnsGiantNepenthesOnDeath = false
+
 	-- 슬로우 상태 (콜드 빔)
 	property boolean _isSlowed = false
 	property integer _slowTimerId = 0
@@ -373,6 +377,18 @@ script MonsterAI extends Component
 			if self._isRangedInk or self._isRangedSlash then
 				self._reachedScaleThreshold = self.RangedReachedScale
 			end
+			-- 에피소드2 거대 네펜데스(고정형/공격안함) — 풀에서 직접 뽑힌 경우에도 처음부터 "이미 도달한"
+			-- 고정 타겟으로 스폰한다(InitializeTreasureChest와 동일한 방식). 네펜데스/다크네펜데스는 죽을 때
+			-- 이 자리에 거대 네펜데스를 별도로 소환한다(아래 Die()가 이 플래그를 읽음).
+			self._neverAttacks = _GameManager:GetMapNeverAttacks(appearanceZone, speciesIdx)
+			self._spawnsGiantNepenthesOnDeath = _GameManager:GetMapSpawnsGiantNepenthesOnDeath(appearanceZone, speciesIdx)
+			-- 에피소드2 종 전용 피격/사망 사운드(그 외 기존 존7+ 풀은 원래 사운드가 없어 빈 문자열 유지)
+			self._hitSoundRUID = _GameManager:GetMapHitSoundRUID(appearanceZone, speciesIdx)
+			self._dieSoundRUID = _GameManager:GetMapDieSoundRUID(appearanceZone, speciesIdx)
+			if self._neverAttacks then
+				self._currentScale = self._reachedScaleThreshold
+				self._reachedPlayer = true
+			end
 			self._isFlying = _GameManager:GetMapIsFlying(appearanceZone, speciesIdx)
 			if self._isFlying then
 				-- 접근 애니메이션 없이 스폰 즉시 고정 크기로 보이게 하고, 스폰 X를 중심으로 X/Y 동시
@@ -581,6 +597,38 @@ script MonsterAI extends Component
 		self:SyncDepthOverlaySprite()
 		self:HideDepthOverlay()
 		log("MonsterAI: treasure chest initialized HP=" .. hp)
+	end
+
+	-- MonsterSpawner.SpawnGiantNepenthesAt()이 스폰 직후 호출 — 네펜데스/다크 네펜데스가 죽은 자리에
+	-- 별도로 소환되는 거대 네펜데스(고정형/공격안함)를 초기화한다. InitializeTreasureChest와 동일한
+	-- "이미 도달한 고정 타겟" 패턴 — 존 몬스터 풀(GetMapStandRUID 등)을 거치지 않고 GameManager의
+	-- 고정 Giant Nepenthes RUID를 직접 쓴다(어느 존에서 트리거되든 항상 같은 개체이므로).
+	@ExecSpace("ServerOnly")
+	method void InitializeGiantNepenthes(integer zoneIndex, integer wave)
+		self._dead = false
+		self._spawnZoneIndex = zoneIndex
+		self._neverAttacks = true
+		local hp = _GameManager:GetTimeStepHp(_GameManager:GetTimeStep())
+		self.MaxHp = hp
+		self.CurrentHp = hp
+		self._standRUID = _GameManager.GiantNepenthesStandRUID
+		self._moveRUID = ""
+		self._hitRUID = _GameManager.GiantNepenthesHitRUID
+		self._dieRUID = _GameManager.GiantNepenthesDieRUID
+		self._dieDuration = _GameManager.GiantNepenthesDieDuration
+		self._attackRUID = ""
+		self._hitSoundRUID = _GameManager.GiantNepenthesHitSoundRUID
+		self._dieSoundRUID = _GameManager.GiantNepenthesDieSoundRUID
+		self._isFlying = false
+		self._isRangedInk = false
+		self._isRangedSlash = false
+		self._currentScale = self._reachedScaleThreshold
+		self._reachedPlayer = true
+		self.MonsterSprite = self._standRUID
+		self.Entity.TransformComponent.Scale = Vector3(self._currentScale * self._scaleMultiplier, self._currentScale * self._scaleMultiplier, 1.0)
+		self:SyncDepthOverlaySprite()
+		self:HideDepthOverlay()
+		log("MonsterAI: giant nepenthes spawned from kill (zone=" .. zoneIndex .. ", HP=" .. hp .. ")")
 	end
 
 	-- NinjaStatuePuzzleLogic.SpawnMiniMoore()가 스폰 직후 호출: 존 몬스터 풀/HP/전투 시스템을 완전히
@@ -1824,6 +1872,11 @@ script MonsterAI extends Component
 		self.ComboStack = 0
 		self:ClearAllComboOrbs()
 		log("Monster died")
+		-- 에피소드2 네펜데스/다크 네펜데스 전용: 죽은 자리에 거대 네펜데스를 별도로 소환한다. 드랍/경험치
+		-- 계산과는 무관하므로 가능한 한 앞에서(다른 조기 return이 이후에 생기더라도 안전하게) 처리한다.
+		if self._spawnsGiantNepenthesOnDeath then
+			_MonsterSpawner:SpawnGiantNepenthesAt(self._spawnZoneIndex, self.Entity.TransformComponent.WorldPosition)
+		end
 		-- 보스는 OnBossDefeated()가 처치 보상(Exp/Gold)까지 전부 처리한다. OnMonsterKilled()도
 		-- 같이 부르면 NotifyExpChanged가 한 프레임 안에 두 번 겹쳐 호출되어, 레벨업 트윈이 강제로
 		-- 0%부터 시작하기 직전에 다른 값으로 이미 차오르고 있던 바가 순간적으로 줄어드는 것처럼

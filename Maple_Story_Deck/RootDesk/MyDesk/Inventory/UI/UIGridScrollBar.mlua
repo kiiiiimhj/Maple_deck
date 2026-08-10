@@ -1,0 +1,114 @@
+@Component
+script UIGridScrollBar extends Component
+
+	-- 인벤토리/합성 그리드용 정사각형 뱃지 스크롤바. GridViewComponent 내장 스크롤바는 핸들
+	-- 길이가 항상 보이는 비율에 맞춰 자동 계산되고 두께(Thickness)만 조절 가능해 정사각형
+	-- 뱃지로 고정할 수 없다(필드 조정 한계, 2026-08-10 확인). 그래서 SliderComponent 기반
+	-- 커스텀 바를 별도 엔티티로 만들어 GridView와 값만 양방향으로 동기화한다 —
+	-- SliderComponent는 HandleSize로 뱃지 크기를 직접 고정할 수 있다.
+	-- 같은 부모 아래 이름이 "Grid"인 형제 엔티티를 대상으로 삼는다(main 인벤토리 그리드/
+	-- 합성 팝업 그리드 양쪽에서 동일 스크립트를 재사용하기 위함, UUID 바인딩 불필요).
+	property GridViewComponent TargetGrid = nil
+
+	property any _sliderHandler = nil
+
+	property any _gridHandler = nil
+
+	-- 슬라이더→그리드로 내가 직접 보낸 SetScrollNormalizedPosition 호출 중, 아직 그 결과로
+	-- 되돌아올 ScrollPositionChangedEvent(echo)를 못 받은 개수. "값이 얼마나 다른가"가 아니라
+	-- "몇 개가 아직 안 돌아왔는가"로 echo를 걸러낸다.
+	-- 실측 확인(2026-08-10, 값 비교 방식 실패 사례): echo는 한 박자 늦게(비동기로) 도착하는데,
+	-- 연속 드래그 중에는 그 사이 _lastValue가 이미 여러 번 더 갱신돼 있다. 그래서 "직전 값과
+	-- 거의 같으면 echo"라는 값 비교 가드는 늦게 도착한 echo를 "진짜로 달라진 값"으로 오인해
+	-- 핸들을 옛 위치로 되돌려버렸다 — 이게 "내리다가 위로 튀었다 다시 내려가는" 떨림의 원인.
+	-- 카운터는 순서/지연에 관계없이 "내가 보낸 만큼만 정확히 무시"하므로 이 문제가 없다.
+	property integer _pendingFromSlider = 0
+
+	-- 그리드→슬라이더 방향의 동일한 echo 카운터.
+	property integer _pendingFromGrid = 0
+
+	-- 값이 한 번에 크게 뛴 경우(트랙을 직접 클릭해 순간이동 등)를 감지하는 데 쓰는 마지막 확정 위치.
+	property number _lastValue = 0
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		self.TargetGrid = self.Entity.Parent:GetChildByName("Grid").GridViewComponent
+		log("[UIGridScrollBar] OnBeginPlay target=" .. tostring(self.TargetGrid))
+
+		self._sliderHandler = self.Entity:ConnectEvent(SliderValueChangedEvent, self.OnSliderChanged)
+		self._gridHandler = self.TargetGrid.Entity:ConnectEvent(ScrollPositionChangedEvent, self.OnGridScrolled)
+
+		self:SyncFromGrid()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		if self._sliderHandler then self.Entity:DisconnectEvent(SliderValueChangedEvent, self._sliderHandler) end
+		if self._gridHandler then self.TargetGrid.Entity:DisconnectEvent(ScrollPositionChangedEvent, self._gridHandler) end
+	end
+
+	-- 그리드의 현재 스크롤 위치를 핸들에 반영한다(탭 전환 등으로 목록이 리셋될 때 등).
+	@ExecSpace("ClientOnly")
+	method void SyncFromGrid()
+		self._pendingFromSlider = 0
+		local pos = self.TargetGrid:GetScrollNormalizedPosition(UITransformAxis.Vertical)
+		self._pendingFromGrid = self._pendingFromGrid + 1
+		self.Entity.SliderComponent.Value = pos
+		self._lastValue = pos
+	end
+
+	-- 실측 확인(2026-08-10): 값이 조금씩 연속으로 바뀌는 진짜 드래그 상황에서는
+	-- SetScrollNormalizedPosition만으로 GridView가 새로 보이는 셀을 알아서 정상 갱신한다
+	-- (Refresh() 불필요). 문제는 Refresh()를 매 이벤트마다(또는 일정 주기로) 강제로 불렀을 때
+	-- 생겼다 — 핸들은 매프레임 매끄럽게 움직이는데 콘텐츠만 그 주기에 맞춰 뚝뚝 갱신되면서
+	-- 서로 어긋나 "떨리는" 것처럼 보였다(유저 리포트). 그래서 Refresh는 값이 한 번에 크게
+	-- 뛴 경우(트랙 직접 클릭 등 점프성 이동)에만 안전장치로 호출한다.
+	@ExecSpace("ClientOnly")
+	method void OnSliderChanged(SliderValueChangedEvent event)
+		-- 그리드→슬라이더 방향으로 내가 방금 쓴 값의 echo면 카운터만 소모하고 무시한다.
+		if self._pendingFromGrid > 0 then
+			self._pendingFromGrid = self._pendingFromGrid - 1
+			return
+		end
+		-- 그리드가 이미 같은 위치면(값이 실제로 안 바뀌는 no-op) 카운터를 올리지 않는다 — 엔진이
+		-- 변화 없는 값에는 echo 이벤트를 안 쏘는 경우가 있어서, 여기서 미리 +1 해두면 그 echo가
+		-- 영원히 안 돌아와 카운터가 밀린 채로 남고, 그 빚을 다음 진짜 드래그 스텝들이 대신
+		-- 갚느라(echo로 오인돼 무시당하느라) 초반 한두 스텝이 먹히는 문제가 실측으로 확인됐다.
+		local currentGridPos = self.TargetGrid:GetScrollNormalizedPosition(UITransformAxis.Vertical)
+		if math.abs(event.Value - currentGridPos) < 0.0001 then
+			self._lastValue = event.Value
+			return
+		end
+		self._pendingFromSlider = self._pendingFromSlider + 1
+		self.TargetGrid:SetScrollNormalizedPosition(UITransformAxis.Vertical, event.Value)
+		if math.abs(event.Value - self._lastValue) > 0.05 then
+			self.TargetGrid:Refresh(false, false)
+		end
+		self._lastValue = event.Value
+	end
+
+	-- 그리드 콘텐츠 영역을 직접 드래그해서 스크롤한 경우, 핸들 위치가 따라오게 한다.
+	--
+	-- 실측 확인(2026-08-10, 값 비교 방식 실패 후 카운터 방식으로 교체): 값 비교 가드는
+	-- "직전 값과 거의 같으면 echo"로 판단했는데, echo가 한 박자 늦게(비동기로) 도착하는 동안
+	-- 연속 드래그로 _lastValue가 이미 더 갱신되어 있어서 늦게 온 echo를 "진짜 변경"으로 오인해
+	-- 핸들을 옛 위치로 되돌리는 떨림이 있었다. 그래서 값이 아니라 "내가 보낸 만큼만 정확히
+	-- 무시"하는 카운터로 교체한다 — 순서/지연에 영향받지 않는다.
+	@ExecSpace("ClientOnly")
+	method void OnGridScrolled(ScrollPositionChangedEvent event)
+		if self._pendingFromSlider > 0 then
+			self._pendingFromSlider = self._pendingFromSlider - 1
+			return
+		end
+		-- 대칭 가드: 슬라이더가 이미 같은 값이면(no-op) echo 카운터를 올리지 않는다.
+		local currentSliderValue = self.Entity.SliderComponent.Value
+		if math.abs(event.NormalizedPosition.y - currentSliderValue) < 0.0001 then
+			self._lastValue = event.NormalizedPosition.y
+			return
+		end
+		self._pendingFromGrid = self._pendingFromGrid + 1
+		self.Entity.SliderComponent.Value = event.NormalizedPosition.y
+		self._lastValue = event.NormalizedPosition.y
+	end
+
+end
