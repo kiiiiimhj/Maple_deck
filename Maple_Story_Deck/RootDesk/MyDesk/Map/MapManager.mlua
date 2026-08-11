@@ -275,7 +275,12 @@ script MapManager extends Logic
 			[45] = { file = "Ep2_map1", container = nil, spawnX = 0 },
 			[46] = { file = "Ep2_map1", container = "Zone2", spawnX = 15.5 },
 			[47] = { file = "Ep2_map1", container = "Zone3", spawnX = 31.0 },
-			[48] = { file = "Ep2_map1", container = "Zone4", spawnX = 46.5 },
+			-- 존4만 공통 지면(y=-1.13)이 아니라 별도 둔덕 발판(y=-0.53, x=43.25~48.55)에 spawnX(46.5)가
+			-- 있다(실측: MapBuilder.getFootholds로 전체 지면 밴드 대조). DoScrollMapChange는 기본적으로
+			-- "이전 존의 Y 그대로 재사용"하는데, 존3(-1.13)에서 존4로 들어오면 그 Y엔 발판이 없어(존39/
+			-- 존25와 동일한 원인) 허공에서 맵 밖 세이프티넷에 걸려 이전 존으로 튕겨 돌아가는 버그가
+			-- 있었다(유저 리포트: "존5는 아마 다시 맵 튕기는 이슈가 있으니깐" → 실제로는 존4 진입 시점).
+			[48] = { file = "Ep2_map1", container = "Zone4", spawnX = 46.5, landY = -0.53 },
 			[49] = { file = "Ep2_map1", container = "Zone5", spawnX = 62.0 },
 			[50] = { file = "Ep2_map1", container = "Zone6", spawnX = 77.5 },
 			[51] = { file = "Ep2_map1", container = "Zone7", spawnX = 93.0 },
@@ -383,6 +388,8 @@ script MapManager extends Logic
 		-- BeginGameplay()가 "게임 시작" 클릭 시점에 self.CurrentMapIndex(이미 갱신됨) 기준으로
 		-- ActivateMap을 다시 호출해준다. 여기서 조건 없이 켜버리면 타이틀 화면을 보는 동안 몬스터가
 		-- 먼저 쌓이기 시작하는 문제가 생긴다.
+		-- 시스템 리다이렉트(에피소드 시작 위치 보정)라 스트릭에는 반영하지 않고 시계만 리셋한다.
+		self:RegisterZoneArrival(targetIndex, false)
 		if _GameManager.GameStarted then
 			if targetIndex == 10 then
 				_MonsterSpawner:TryStartBonusStage()
@@ -548,7 +555,15 @@ script MapManager extends Logic
 		for i = 1, #monsters do
 			---@type MonsterAI
 			local ai = monsters[i]
-			if paused then ai:Pause() else ai:Resume() end
+			-- isvalid 가드 필수 — 죽어서 파괴 대기 중인(Entity:Destroy(delay)) 몬스터가 스냅샷에 섞여
+			-- 있으면 Pause/Resume 호출이 nil 메서드 에러([LEA-2011])로 죽는다. 이 루프가 죽으면
+			-- DoScrollMapChange 전체가 그 자리에서 중단돼 CurrentMapIndex 갱신도 못 하고 남아 —
+			-- 그 뒤로는 어느 존으로 이동해도 신규 스폰이 박제된 옛 존에 계속 떨어지고, 떠나온 존
+			-- 몬스터는 Pause가 안 걸려 화면 밖에서 계속 공격하는 버그로 이어진다(실측 확인 —
+			-- 존1→6 이동 재현 테스트 중 이 크래시가 실제로 발생).
+			if isvalid(ai) and isvalid(ai.Entity) then
+				if paused then ai:Pause() else ai:Resume() end
+			end
 		end
 	end
 
@@ -561,6 +576,68 @@ script MapManager extends Logic
 	-- 재현되는지 확인 필요, 재현되면 되돌릴 예정).
 	property number MoveCooldownDuration = 1.0
 	property boolean _moveLocked = false
+
+	-- 이스터에그/존 요소를 대충 훑고 지나가는 것 방지용 "빠른 이동" 안전장치(유저 요청: "이동 버튼
+	-- 눌러서 존나 빨리 이동해버리면 너무 허무하게 깨지는거 같다"). 한 존에 RushStayThreshold초 미만
+	-- 머물고 연속으로 이동하면 3단계로 escalate한다 — 방금 도착한(지금 머무는 존이 아니라 "다음" 존)
+	-- 존의 몬스터를 유저 쪽으로 당기고(1단계), 그 위에 스탯까지 강화하고(2단계), 마지막으로 절망의
+	-- 칼날(타임어택 오버타임 전용 몹)을 조기 소환한다(3단계, 2026-08-11 유저 지정).
+	property number _zoneEnterTime = 0
+	property integer _rushMoveStreak = 0
+	property number RushStayThreshold = 3.0
+	property integer RushStreakThreshold1 = 3
+	property integer RushStreakThreshold2 = 6
+	property integer RushStreakThreshold3 = 9
+	-- 토스트 스팸 방지용 — 이번 스트릭 동안 이미 안내한 최고 티어. 티어가 "새로 올라간" 순간에만
+	-- 토스트를 띄우고, 스트릭이 끊기면(0으로 리셋) 같이 리셋된다.
+	property integer _rushAnnouncedTier = 0
+
+	-- 존 도착마다 호출 — countsAsMove=false(SilentMoveToMap의 시스템 리다이렉트)는 시계만 리셋하고
+	-- 스트릭 판정은 건너뛴다. countsAsMove=true(실제 이동 버튼 결과, DoScrollMapChange/DoMapChange)만
+	-- "얼마나 빨리 다음 존으로 넘어갔는지"를 스트릭에 반영한다.
+	@ExecSpace("ServerOnly")
+	method void RegisterZoneArrival(integer targetIndex, boolean countsAsMove)
+		local now = _UtilLogic.ElapsedSeconds
+		local tier = 0
+		if countsAsMove and self._zoneEnterTime > 0 then
+			local stayed = now - self._zoneEnterTime
+			if stayed < self.RushStayThreshold then
+				self._rushMoveStreak = self._rushMoveStreak + 1
+			else
+				self._rushMoveStreak = 0
+			end
+
+			if self._rushMoveStreak >= self.RushStreakThreshold3 then
+				tier = 3
+			elseif self._rushMoveStreak >= self.RushStreakThreshold2 then
+				tier = 2
+			elseif self._rushMoveStreak >= self.RushStreakThreshold1 then
+				tier = 1
+			end
+
+			if tier == 0 then
+				self._rushAnnouncedTier = 0
+			elseif tier > self._rushAnnouncedTier then
+				-- 티어가 새로 올라간 순간에만 토스트/3단계 소환을 1회 트리거한다(매 이동마다 반복
+				-- 스팸 방지). 스폰 배치 보정(pendingRushPenalty, 아래)은 그와 별개로 매 이동마다 계속 적용.
+				if tier == 1 then
+					_UIToast:ShowMessage("빠른 이동으로 몬스터가 빨라집니다!")
+				elseif tier == 2 then
+					_UIToast:ShowMessage("빠른 이동으로 몬스터가 강해집니다!")
+				elseif tier == 3 then
+					_UIToast:ShowMessage("빠른 이동으로 「절망의 칼날」이 소환되었습니다.")
+					_GameManager:SpawnDespairBlade()
+				end
+				self._rushAnnouncedTier = tier
+				log("MapManager: rush move streak=" .. self._rushMoveStreak .. " -> tier " .. tier .. " applied to zone " .. targetIndex)
+			end
+		end
+		-- 매번 명시적으로 덮어쓴다(0 포함) — 안 그러면 트리거된 존이 존10(보너스 스테이지,
+		-- ActivateMap을 안 거치고 TryStartBonusStage로 감)이었을 때 플래그가 소비 안 된 채 남아
+		-- 엉뚱한 다음 존 스폰에 적용되는 누수가 생긴다. 3단계는 2단계(스탯 강화)를 포함한다.
+		_MonsterSpawner._pendingRushPenalty = (tier >= 2) and 2 or ((tier >= 1) and 1 or 0)
+		self._zoneEnterTime = now
+	end
 
 	@ExecSpace("ServerOnly")
 	method void MoveToMap(integer fromIndex, integer targetIndex)
@@ -669,6 +746,8 @@ script MapManager extends Logic
 		-- DoScrollMapChange엔 그룹D(맵11/12) 전용으로 작성될 당시엔 맵10이 관여하지 않아 빠져 있었다.
 		-- 그룹C 병합으로 존9→10 이동이 이제 이 스크롤 경로를 타게 되면서, 무조건 ActivateMap만 불러
 		-- 보너스 보스 대신 매번 일반 웨이브가 스폰되는 버그가 있었다(실측 확인).
+		-- 실제 이동 버튼 결과다(countsAsMove=true) — 빠른 이동 스트릭에 반영한다.
+		self:RegisterZoneArrival(targetIndex, true)
 		if targetIndex == 10 then
 			_MonsterSpawner:TryStartBonusStage()
 		else
@@ -775,6 +854,8 @@ script MapManager extends Logic
 		-- 처음 가보는 맵이면 여기서 스폰이 시작된다 (이미 활성화된 맵이면 아무 일도 안 함). 맵10(보너스
 		-- 스테이지)은 일반 웨이브 스폰 대신 매번 입장할 때마다 보너스 보스 등장 여부를 판정하는 별도
 		-- 진입점을 탄다.
+		-- 실제 이동 버튼 결과다(countsAsMove=true) — 빠른 이동 스트릭에 반영한다.
+		self:RegisterZoneArrival(targetIndex, true)
 		if targetIndex == 10 then
 			_MonsterSpawner:TryStartBonusStage()
 		else

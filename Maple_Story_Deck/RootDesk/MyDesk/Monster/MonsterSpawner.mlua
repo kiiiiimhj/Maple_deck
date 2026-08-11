@@ -43,6 +43,11 @@ script MonsterSpawner extends Logic
 	-- 2026-08-05(유저 지정): 이동해서 도착한 맵(이미 활성화됐던 맵 포함)에 몬스터가 너무 적으면 정기
 	-- 스폰 타이머를 기다리지 않고 즉시 최소 이만큼은 채운다.
 	property integer MinMonstersOnArrival = 6
+	-- 빠른 이동 안전장치(MapManager.RegisterZoneArrival이 세팅) — 0=없음, 1=접근 스케일만 당김,
+	-- 2=접근 스케일+스탯 강화(2026-08-11, 6연속 티어 추가). ActivateMap이 자기 SpawnBatchOnMap 호출
+	-- 직후 항상 0으로 되돌려서, 그 존에 머무는 동안의 정기 웨이브 스폰까지 계속 적용되지 않고
+	-- "도착 배치" 한 번에만 적용되게 한다.
+	property integer _pendingRushPenalty = 0
 
 	-- 2026-08-05(2차, 유저 지정): "적 없은지 2초 지나면 즉시 스폰"으로 변경 — 비는 순간 바로 채우면
 	-- 너무 민감해서(잠깐 다 잡은 순간에도 바로 다시 몰림) 2초 연속 비어있을 때만 발동하도록 디바운스.
@@ -402,19 +407,31 @@ script MonsterSpawner extends Logic
 		if self._activeMaps == nil then self._activeMaps = {} end
 		local wasActive = self._activeMaps[mapIndex]
 		self._activeMaps[mapIndex] = true
-		if self:IsNoMonsterZone(mapIndex) then return end
+		-- 빠른 이동 안전장치 플래그는 "이 ActivateMap 호출의 스폰 배치"에만 적용되고 반드시 여기서
+		-- 소비된다 — 아래 모든 리턴 경로에서 매번 명시적으로 0으로 되돌려서, 존10처럼 이 메서드
+		-- 자체를 안 타는 경우(TryStartBonusStage)나 스폰 자체가 없는 경우(안전지대/존 못 찾음)에
+		-- 플래그가 소비 안 된 채 남아 엉뚱한 나중 스폰에 새는 것을 막는다.
+		if self:IsNoMonsterZone(mapIndex) then
+			self._pendingRushPenalty = 0
+			return
+		end
 
 		local map = self:GetZoneEntity(mapIndex)
-		if map == nil then return end
+		if map == nil then
+			self._pendingRushPenalty = 0
+			return
+		end
 
 		if not wasActive then
 			self:SpawnBatchOnMap(map, _GameManager.Wave, false, true, mapIndex, false, 0)
+			self._pendingRushPenalty = 0
 			return
 		end
 
 		-- 2026-08-05(유저 지정): 이미 활성화됐던 맵으로 재이동(예: 다 잡고 지나갔다가 되돌아옴)해도
 		-- 몬스터가 너무 적으면 정기 스폰 타이머를 기다리지 않고 즉시 최소 MinMonstersOnArrival마리는 채운다.
 		self:SpawnBatchOnMap(map, _GameManager.Wave, false, true, mapIndex, false, self.MinMonstersOnArrival)
+		self._pendingRushPenalty = 0
 	end
 
 	-- 지정한 맵 하나에 몬스터 무리를 스폰. allowElite=true인 호출에서만 엘리트 승급 후보가 된다.
@@ -503,6 +520,11 @@ script MonsterSpawner extends Logic
 					if not isBoss and _UtilLogic:RandomDouble() < self.SmallVariantChance then
 						ai:ApplySmallVariant()
 					end
+					-- 빠른 이동 안전장치(유저 요청) — 방금 도착한 존의 스폰 배치에 한해 몬스터를 유저
+					-- 쪽으로 당기고(1단계), 6연속부터는 스탯까지 강화한다(2단계, 2026-08-11)
+					if not isBoss and self._pendingRushPenalty > 0 then
+						ai:ApplyRushPenalty(self._pendingRushPenalty)
+					end
 					if not isCurrentMap then ai:Pause() end
 				end
 				table.insert(spawned, entity)
@@ -566,26 +588,6 @@ script MonsterSpawner extends Logic
 		log("MonsterSpawner: random elite spawned on " .. map.Name)
 	end
 
-	-- MonsterAI.Die()가 네펜데스/다크 네펜데스 처치 시점에 호출 — 죽은 자리에 거대 네펜데스(고정형/공격안함)를
-	-- 별도로 소환한다. 어느 존에서 죽었든 항상 동일한 고정 스탯 개체이므로 존 몬스터 풀(RollSpeciesForMap
-	-- 등)을 거치지 않고 MonsterAI.InitializeGiantNepenthes()로 직접 초기화를 위임한다.
-	@ExecSpace("ServerOnly")
-	method void SpawnGiantNepenthesAt(integer zoneIndex, Vector3 worldPos)
-		local map = self:GetZoneEntity(zoneIndex)
-		if map == nil then return end
-		local entity = _SpawnService:SpawnByModelId(self.MonsterModelId, "Monster", self:ToLocalSpawnPos(map, worldPos), map)
-		if entity == nil then
-			log_error("MonsterSpawner: SpawnGiantNepenthesAt failed")
-			return
-		end
-		---@type MonsterAI
-		local ai = entity:GetComponent("script.MonsterAI")
-		if ai ~= nil then
-			ai:InitializeGiantNepenthes(zoneIndex, _GameManager.Wave)
-		end
-		log("MonsterSpawner: giant nepenthes spawned at zone " .. zoneIndex)
-	end
-
 	-- 맵 전용 몬스터 풀(zoneIndex>=7)에서 쓸 종 인덱스를 미리 뽑는다. 스폰 위치 결정(GetSpawnPosition)과
 	-- 외형 초기화(MonsterAI.InitializeStats)가 같은 종을 참조해야 해서 두 호출보다 먼저 실행한다.
 	-- 맵1~6은 풀 개념이 없으므로 0(= "위치 로직에서 무시") 반환.
@@ -614,9 +616,22 @@ script MonsterSpawner extends Logic
 	-- 발판 하나에 고정)을 재사용했었지만, "발판에는 다 몹이 나와야 한다"는 요구로 GetZonePlatformBands(31)/
 	-- (34)가 바닥+공중 발판 전부를 후보로 삼는 다중 밴드로 대체했다 — bands가 nil이 아니면 이 메서드를
 	-- 거치는 스폰 분기 자체를 안 타므로, 31/34 전용 분기는 여기 남겨두지 않는다(죽은 코드 방지).
+	-- 2026-08-11 버그 수정: 이 메서드는 이름과 주석("맵별로 분기")과 달리 실제로는 mapIndex를 완전히
+	-- 무시하고 존12(map11) 전용 절대 월드좌표(9.5~14.8)를 항상 반환하고 있었다. GetSpawnPosition의
+	-- 원거리 종 분기(bands==nil인 맵에서 mapIndex>=7이면 여기로 옴)가 이 값을 그대로 스폰 X로 써서,
+	-- 밴드가 없는 다른 원거리-종 맵(에피소드2 존2/6/9/10의 네펜데스/다크네펜데스)이 전부 자기 존
+	-- 오프셋과 무관하게 존12 좌표(≈존2 화면 범위와 우연히 겹침)에 스폰되는 버그였다(유저 리포트: "네펜데스가
+	-- 다 존2에서만 나오고 존6엔 안 보인다" — 실측: 존6 컨테이너 소속 다크네펜데스 3마리의 WorldPosition.x가
+	-- 전부 9.5~14.8, 존6의 실제 화면 위치(spawnX=77.5)와 62~68유닛 떨어져 카메라에 절대 안 잡힘). 존12만
+	-- 유저가 Maker에서 직접 깔아둔 진짜 "타일섬" 발판이라 그 절대좌표를 그대로 유지해야 하고, 그 외
+	-- 모든 맵은 GetZoneOffsetX 기준 그 존 자신의 화면-안전 범위(±5)로 스폰해야 한다.
 	@ExecSpace("ServerOnly")
 	method table GetRangedTileRange(integer mapIndex)
-		return { minX = self.RangedTileMinX, maxX = self.RangedTileMaxX }
+		if mapIndex == 12 then
+			return { minX = self.RangedTileMinX, maxX = self.RangedTileMaxX }
+		end
+		local offsetX = self:GetZoneOffsetX(mapIndex)
+		return { minX = offsetX - 5, maxX = offsetX + 5 }
 	end
 
 	-- speciesIdx가 가리키는 종이 이 맵(zoneIndex>=7) 풀에서 비행형 종인지 여부 (지금은 맵15의 박쥐만 해당)

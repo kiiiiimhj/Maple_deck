@@ -162,11 +162,11 @@ script TitleUI extends Logic
 		-- characterIndex: 캐릭터 선택 팝업에서 고른 캐릭터(0=아르카나, 1=실피드)
 		-- episode: 월드 선택(</> 캐러셀)에서 고른 월드 번호(1=에피소드1, 2=에피소드2)
 		log("TitleUI: Start clicked (unlimitedMode=" .. tostring(unlimitedMode) .. ", characterIndex=" .. characterIndex .. ", episode=" .. episode .. ")")
-		self.titleGroup.Enable = false
 		-- 로비 화면을 나가는 시점에 멈춰뒀던 맵 BGM을 재개한다
 		_SoundService:ResumeBGM()
 		-- GameManager 쪽 API는 timeAttack(=무제한 모드의 반대)을 받는다 — 여기서 극성을 뒤집는다
 		local timeAttack = not unlimitedMode
+		-- 요청을 먼저 보내서 서버가 곧바로 처리를 시작하게 한다(아래 화면 닫기 지연과 병렬로 진행됨).
 		-- 게임오버 팝업의 X(로비로 가기)를 거쳐 돌아온 경우, 런이 GameOver=true 상태로 멈춰있을 수 있다.
 		-- GameStarted는 최초 1회만 켜지는 플래그라 RequestStartGame()만으로는 죽은 런이 재개되지 않으므로,
 		-- 이 경우엔 다시하기와 동일하게 새 런으로 초기화한다
@@ -174,6 +174,21 @@ script TitleUI extends Logic
 			_GameManager:RequestRestart(timeAttack, characterIndex, episode)
 		else
 			_GameManager:RequestStartGame(timeAttack, characterIndex, episode)
+		end
+		-- 에피소드1은 월드 시작 직후(로비 화면 뒤에서) 이미 존1로 리다이렉트가 끝나있는 상태라 화면을
+		-- 즉시 닫아도 바로 그 자리가 정답이다 — 종전처럼 지연 없이 닫는다.
+		-- 에피소드2는 다르다: MapManager.OnUpdate의 최초 리다이렉트는 접속 즉시(에피소드를 고르기
+		-- 한참 전) 에피1 기본값(존1=map01)으로 이미 소비돼버려서, 여기서 서버가 SetEpisodeRange+
+		-- SilentMoveToMap으로 에피2 맵으로 한 번 더(서버 왕복이 필요한) 점프해야 한다. 화면을 같은
+		-- 프레임에 즉시 닫으면 그 왕복 시간 동안 에피1 맵이 잠깐 노출됐다가 에피2로 스냅되는 게
+		-- 그대로 보인다(유저 리포트: "EP1꺼가 떴다가 사라짐"). 서버가 실제로 맵을 옮길 시간을
+		-- 벌어주기 위해 화면을 닫는 시점만 짧게 늦춘다(와이프 커버 지속시간과 비슷한 여유값).
+		if episode == 2 then
+			_TimerService:SetTimerOnce(function()
+				if isvalid(self) then self.titleGroup.Enable = false end
+			end, 0.35)
+		else
+			self.titleGroup.Enable = false
 		end
 	end
 
