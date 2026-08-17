@@ -165,7 +165,11 @@ script MonsterAI extends Component
 	-- 쉬는 시간이 0.7초가 되도록 attackDuration + 0.7로 계산한다.
 	property number _customAttackInterval = 0
 	-- 빠른 이동 안전장치 2단계(6연속) 전용 — ApplyRushPenalty가 세팅. 1.0이면 평소와 동일(강화 없음).
+	-- 2026-08-17 유저 요청("6연속때 공격력 더 쎄게")으로 체력/공격력 배율을 분리했다. 원래는 둘 다
+	-- RushTier2StatMultiplier 하나를 공용으로 썼는데, 그대로 올리면 몬스터가 같이 탱키해져서
+	-- "빨리 죽이고 지나가기"가 더 어려워지는 역효과가 난다 — 체력은 1.2 유지, 공격력만 1.8로 올린다.
 	property number RushTier2StatMultiplier = 1.2
+	property number RushTier2DamageMultiplier = 1.8
 	property number _rushDamageMultiplier = 1.0
 	-- 접근(스케일 확대) 중 보여줄 이동 애니메이션. MonsterSprite는 "지금 화면에 보여야 할 정지 포즈"
 	-- 하나만 나타내던 프로퍼티였는데, 이제 접근 중엔 move, 도달(_reachedPlayer)하면 stand로 스스로 갈아끼운다 —
@@ -789,7 +793,8 @@ script MonsterAI extends Component
 		if tier >= 2 then
 			self.MaxHp = math.floor(self.MaxHp * self.RushTier2StatMultiplier)
 			self.CurrentHp = self.MaxHp
-			self._rushDamageMultiplier = self.RushTier2StatMultiplier
+			-- 공격력은 체력과 다른 배율을 쓴다(위 프로퍼티 주석 참고)
+			self._rushDamageMultiplier = self.RushTier2DamageMultiplier
 		end
 	end
 
@@ -1176,10 +1181,21 @@ script MonsterAI extends Component
 		end, duration)
 	end
 
+	-- 망토 에픽/레전더리 "엘리트/보스 몬스터에게 주는 피해량 증가" — 자기 자신이 엘리트/보스일 때만
+	-- 곱해진다. 일반 몬스터는 항상 1.0이라 계산에 영향 없음
+	@ExecSpace("ServerOnly")
+	method number GetGearEliteBossDamageMult()
+		if self._isElite or self._isBoss or self._isBonusBoss then
+			return _GearEffectLogic:GetEliteBossDamageMult()
+		end
+		return 1.0
+	end
+
 	@ExecSpace("ServerOnly")
 	method void TakeDamage(number damage)
 		-- 카드 공격 시 호출
 		if self._dead then return end
+		damage = damage * self:GetGearEliteBossDamageMult()
 		if self._isBonusBoss then
 			self:PlayDamageSkin(damage, false)
 			self:OnBonusBossHit()
@@ -1262,7 +1278,11 @@ script MonsterAI extends Component
 	@ExecSpace("ServerOnly")
 	method void TakeDamageCritWithOffset(number damage, Vector2 offset)
 		if self._dead then return end
-		damage = damage * (1.0 + _CardManager:GetCriticalShotBonus())
+		damage = damage * (1.0 + _CardManager:GetCriticalShotBonus() + _CardManager:GetKarmaBonus())
+		-- 장비 치명타 피해 보너스(자마다르 에픽 상시 / 레전더리 확률 버프) — 모든 크리티컬이
+		-- 이 두 진입점(TakeDamageCrit / TakeDamageCritWithOffset)만 거치므로 개별 스킬의
+		-- `damage * 2` 호출부를 전부 건드릴 필요가 없다
+		damage = damage * (1.0 + _GearEffectLogic:GetCritDamageBonus()) * self:GetGearEliteBossDamageMult()
 		if self._isBonusBoss then
 			self:PlayDamageSkinWithOffset(damage, true, offset)
 			self:OnBonusBossHit()
@@ -1285,8 +1305,13 @@ script MonsterAI extends Component
 	@ExecSpace("ServerOnly")
 	method void TakeDamageCrit(number damage)
 		if self._dead then return end
-		-- 크리티컬 샷(카드111, 실피드 전용 패시브) 보너스 — 모든 크리티컬 대미지에 추가 배율 적용
-		damage = damage * (1.0 + _CardManager:GetCriticalShotBonus())
+		-- 크리티컬 샷(카드111, 실피드 전용 패시브) + 카르마(카드182, 쉐이드 전용 패시브) 보너스 —
+		-- 모든 크리티컬 대미지에 추가 배율 적용(같은 런에서 둘 다 활성일 수 없어 가산해도 안전)
+		damage = damage * (1.0 + _CardManager:GetCriticalShotBonus() + _CardManager:GetKarmaBonus())
+		-- 장비 치명타 피해 보너스(자마다르 에픽 상시 / 레전더리 확률 버프) — 모든 크리티컬이
+		-- 이 두 진입점(TakeDamageCrit / TakeDamageCritWithOffset)만 거치므로 개별 스킬의
+		-- `damage * 2` 호출부를 전부 건드릴 필요가 없다
+		damage = damage * (1.0 + _GearEffectLogic:GetCritDamageBonus()) * self:GetGearEliteBossDamageMult()
 		if self._isBonusBoss then
 			self:PlayDamageSkin(damage, true)
 			self:OnBonusBossHit()
@@ -1314,8 +1339,8 @@ script MonsterAI extends Component
 	@ExecSpace("ServerOnly")
 	method void TakeDamageDelayedDeath(number damage, boolean isCrit, number deathDelay)
 		if self._dead then return end
-		-- 크리티컬 샷(카드111, 실피드 전용 패시브) 보너스 — 크리티컬 경로에서만 추가 배율 적용
-		if isCrit then damage = damage * (1.0 + _CardManager:GetCriticalShotBonus()) end
+		-- 크리티컬 샷(카드111)/카르마(카드182) 보너스 — 크리티컬 경로에서만 추가 배율 적용
+		if isCrit then damage = damage * (1.0 + _CardManager:GetCriticalShotBonus() + _CardManager:GetKarmaBonus()) end
 		if self._isBonusBoss then
 			self:PlayDamageSkin(damage, isCrit)
 			self:OnBonusBossHit()
@@ -2047,6 +2072,9 @@ script MonsterAI extends Component
 		_GameManager:TryDropWeaponItem(self.Entity.TransformComponent.WorldPosition, fallHeight, groundWorldY, dropScale)
 		-- 무기 스킬(레어 등급 100마리 처치 해금) 카운트 — 보스/엘리트 포함 모든 처치마다 누적
 		_CardManager:OnWeaponSkillKill()
+		-- 장비 등급 스킬의 처치 카운터(활 10마리 추가공격 / 양손검·슈트 회복 / 자마다르·망토 버프 /
+		-- 투구 쿨감 해금) — 무기 스킬과 동일하게 보스/엘리트 포함 모든 처치마다 누적
+		_GearEffectLogic:OnMonsterKilled()
 		if self._isElite then
 			_CardManager:OnEliteKilled(self.Entity.TransformComponent.WorldPosition, fallHeight, groundWorldY, dropScale)
 			_MonsterSpawner:OnEliteKilled()
@@ -2183,6 +2211,14 @@ script MonsterAI extends Component
 				log("Monster attack missed (smoke debuff " .. math.floor(missChance * 100) .. "%)")
 				return
 			end
+		end
+
+		-- 다크 사이트(카드184, 쉐이드 전용 패시브) — 영구 회피 확률. 연막탄 디버프와 별개 판정이고
+		-- 보스/엘리트도 감쇄 없이 그대로 적용된다(플레이어 자신의 고정 스탯이라 몬스터 등급과 무관).
+		local darkSightChance = _CardManager:GetDarkSightEvadeChance()
+		if darkSightChance > 0 and _UtilLogic:RandomDouble() < darkSightChance then
+			log("Monster attack missed (dark sight " .. math.floor(darkSightChance * 100) .. "%)")
+			return
 		end
 
 		-- 플레이어 HP 감소 (엘리트는 공격력 15% 추가, 보스는 BossAttackMultiplier 배)

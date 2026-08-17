@@ -34,16 +34,22 @@ script SkillUI extends Logic
 	property any _filterMagicHandler = nil
 	property any _filterRareHandler = nil
 
-	-- 캐릭터 필터 드롭다운 — 등급 필터 옆에 UI만 추가(유저 지정: "일단 UI만, 데이터 연결은 나중에").
-	-- 0=아르카나(기본) / 1=실피드 / 2=레이온. SelectedCharacter와 동일한 번호 체계를 맞춰뒀다.
+	-- 캐릭터 필터 드롭다운 — 실피드/레이온 스킬이 SkillInventory(인덱스 20~39/40~59)에 등록되면서
+	-- 데이터 연결까지 완료됨(OnCharacterOptionClicked -> ApplyGradeFilter가 등급과 함께 적용).
+	-- -1=전체(기본) / 0=아르카나 / 1=실피드 / 2=레이온. SelectedCharacter와 동일한 번호 체계를 맞춰뒀다.
+	-- 유저 지정(2026-08-18): "전체를 누르면 우리가 만든 모든 스킬이 나와야하는데" — 등급 필터의
+	-- "전체"만으로는 캐릭터 필터가 여전히 특정 캐릭터로 고정돼 있어 그 캐릭터 것만 보였다. 캐릭터
+	-- 필터에도 "전체" 옵션을 추가하고 기본값으로 삼는다.
 	-- 캐릭터 추가할 때마다 이 옵션 3곳(프로퍼티/버튼/ConnectCharacterFilterUI)에 새 캐릭터를 추가할 것.
-	property integer _characterFilter = 0
+	property integer _characterFilter = -1
 	property ButtonComponent characterFilterBtn = "a9b634da-9a7e-4597-9c12-18f3d73ee653"
 	property Entity characterFilterList = "449de229-75ef-4704-b533-fde0a53e85c8"
+	property ButtonComponent btnCharAll = "76a192ec-642e-4059-b993-647c8f4de1e9"
 	property ButtonComponent btnCharArcana = "ed898bec-e485-4358-80c4-b8efbcb5f2d6"
 	property ButtonComponent btnCharSylph = "3e3338a4-ce41-4c96-8d64-351a6535b68b"
 	property ButtonComponent btnCharReion = "d5f0ddb3-cffc-4f26-bc38-e7e6115915da"
 	property any _characterFilterBtnHandler = nil
+	property any _filterCharAllHandler = nil
 	property any _filterArcanaHandler = nil
 	property any _filterSylphHandler = nil
 	property any _filterReionHandler = nil
@@ -106,6 +112,7 @@ script SkillUI extends Logic
 	method void ConnectCharacterFilterUI()
 		-- 캐릭터 추가할 때마다 여기 핸들러 3개(btnCharArcana/Sylph/Reion 패턴)를 새 캐릭터만큼 늘릴 것
 		self._characterFilterBtnHandler = self.characterFilterBtn.Entity:ConnectEvent(ButtonClickEvent, self.OnCharacterFilterBtnClicked)
+		self._filterCharAllHandler = self.btnCharAll.Entity:ConnectEvent(ButtonClickEvent, function() self:OnCharacterOptionClicked(-1) end)
 		self._filterArcanaHandler = self.btnCharArcana.Entity:ConnectEvent(ButtonClickEvent, function() self:OnCharacterOptionClicked(0) end)
 		self._filterSylphHandler = self.btnCharSylph.Entity:ConnectEvent(ButtonClickEvent, function() self:OnCharacterOptionClicked(1) end)
 		self._filterReionHandler = self.btnCharReion.Entity:ConnectEvent(ButtonClickEvent, function() self:OnCharacterOptionClicked(2) end)
@@ -116,13 +123,13 @@ script SkillUI extends Logic
 		self.characterFilterList.Enable = not self.characterFilterList.Enable
 	end
 
-	-- 지금은 선택 상태만 기록하고 닫는다 — 실제로 이 값에 따라 스킬 그리드를 필터링하는 데이터 연결은
-	-- 아직이다(유저 지정: "일단 UI만 추가, 데이터 연결은 나중에"). 실피드/레이온 스킬은 아직
-	-- SkillInventory에 등록되어 있지 않다.
+	-- 실피드/레이온 스킬이 SkillInventory에 등록되면서(인덱스 20~39/40~59) 데이터 연결 완료 —
+	-- 등급 필터와 동일하게 실제로 그리드를 다시 그린다(유저 지정: "일단 UI만" 단계는 끝났다).
 	@ExecSpace("ClientOnly")
 	method void OnCharacterOptionClicked(integer character)
 		self.characterFilterList.Enable = false
 		self._characterFilter = character
+		self:ApplyGradeFilter(self._gradeFilter)
 		log("SkillUI: character filter selected = " .. tostring(character))
 	end
 
@@ -140,7 +147,8 @@ script SkillUI extends Logic
 	@ExecSpace("ClientOnly")
 	method void ApplyGradeFilter(integer grade)
 		-- 0=전체 / 1=일반 / 2=매직 / 3=레어. 슬롯은 ScrollLayoutGroupComponent(Grid)의 자식이라
-		-- Enable=false로 끈 슬롯은 레이아웃에서도 빠져서, 보이는 카드들이 자동으로 앞쪽 칸부터 다시 채워진다
+		-- Enable=false로 끈 슬롯은 레이아웃에서도 빠져서, 보이는 카드들이 자동으로 앞쪽 칸부터 다시 채워진다.
+		-- 캐릭터 필터(self._characterFilter, -1=전체/0=아르카나/1=실피드/2=레이온)와 AND로 결합해서 적용한다.
 		self._gradeFilter = grade
 		local list = self.skillScroll.Entity
 		if not isvalid(list) then return end
@@ -148,7 +156,10 @@ script SkillUI extends Logic
 			local slot = list:GetChildByName("SkillSlot_" .. tostring(i))
 			if isvalid(slot) then
 				local skillGrade = _SkillInventory:GetSkillGrade(i)
-				slot.Enable = (grade == 0) or (skillGrade == grade)
+				local skillChar = _SkillInventory:GetSkillCharacter(i)
+				local gradeOk = (grade == 0) or (skillGrade == grade)
+				local charOk = (self._characterFilter == -1) or (self._characterFilter == skillChar)
+				slot.Enable = gradeOk and charOk
 			end
 		end
 		self.skillScroll:SetScrollNormalizedPosition(UITransformAxis.Horizontal, 0)
@@ -271,6 +282,7 @@ script SkillUI extends Logic
 		if self._filterMagicHandler then self.btnGradeMagic.Entity:DisconnectEvent(ButtonClickEvent, self._filterMagicHandler) end
 		if self._filterRareHandler then self.btnGradeRare.Entity:DisconnectEvent(ButtonClickEvent, self._filterRareHandler) end
 		if self._characterFilterBtnHandler then self.characterFilterBtn.Entity:DisconnectEvent(ButtonClickEvent, self._characterFilterBtnHandler) end
+		if self._filterCharAllHandler then self.btnCharAll.Entity:DisconnectEvent(ButtonClickEvent, self._filterCharAllHandler) end
 		if self._filterArcanaHandler then self.btnCharArcana.Entity:DisconnectEvent(ButtonClickEvent, self._filterArcanaHandler) end
 		if self._filterSylphHandler then self.btnCharSylph.Entity:DisconnectEvent(ButtonClickEvent, self._filterSylphHandler) end
 		if self._filterReionHandler then self.btnCharReion.Entity:DisconnectEvent(ButtonClickEvent, self._filterReionHandler) end

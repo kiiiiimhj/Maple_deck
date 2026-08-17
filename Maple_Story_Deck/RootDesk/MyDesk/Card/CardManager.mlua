@@ -143,6 +143,18 @@ script CardManager extends Logic
 	property string EmptySlotRUID = "a4027817dbc84dbbba125a5e67464343"
 	-- 카드 획득 시 뒤집히는 연출의 절반(접히는 데 걸리는 시간) — 전체 연출은 이 값의 2배
 	property number SlotFlipHalfDuration = 0.15
+	-- 버그 수정(2026-08-13): 슬롯별로 PlaySlotFlip이 예약한 지연 타이머 id를 저장(클라 로컬 상태,
+	-- 동기화 불필요) — 같은 슬롯이 짧은 간격으로 다시 갱신되면 이전 타이머를 취소하기 위함
+	property any _slotFlipTimerIds = {}
+	-- 버그 수정(2026-08-14): 이 슬롯에 지금 진행 중인 flip이 "어느 카드"에 대한 것인지 저장(클라 로컬
+	-- 상태). Slot{n}Card 동기화(flip 시작 트리거)와 레벨 프로퍼티 동기화/NotifyCardLevelUpdated
+	-- 안전망(즉시 다시 그리기 트리거)이 같은 카드에 대해 짧은 간격으로 겹쳐 들어오면(레벨업 즉시 해금
+	-- 시 흔함), 두 번째 호출이 진행 중이던 flip을 취소하고 즉시 스냅해버려서 뒤집기 연출이 끝까지
+	-- 재생되지 못하거나(스냅으로 순간 대체) 심하면 스케일이 굳어버리는 문제가 있었다. "카드가 그대로면
+	-- 손대지 않는다" 규칙으로 막는다 — 같은 카드에 대한 중복 호출은 무시하고 진행 중인 flip이 자기
+	-- 타이머에서 최신 값으로 알아서 다시 그리게 둔다. 실제로 다른 카드로 바뀌었을 때만(재할당/비움)
+	-- 취소하고 새로 그린다.
+	property any _slotFlipCardIdx = {}
 	property TextComponent slotNum1 = "9dbf6804-7f8e-4469-9c8f-1711827c2f1f"
 	property TextComponent slotNum2 = "8aaccdf3-adb2-4fee-8979-85e289c1c5b6"
 	property TextComponent slotNum3 = "ea960b97-902a-4850-8d31-e5151c5071fa"
@@ -728,8 +740,13 @@ script CardManager extends Logic
 			else
 				capturedTarget:TakeDamage(appliedDamage)
 			end
-			if self.ComboAttackLevel > 0 and not capturedTarget._dead then
-				local chance = _CardRegistry:GetChance(151, self.ComboAttackLevel)
+			-- SkillInventory 콤보 어택(인덱스55) 레벨의 +3%/+6%/+9%가 카드 자체 레벨과 별개로 항상
+			-- 가산된다 — 카드가 미해금(ComboAttackLevel=0)이어도 SkillInventory만으로 스택 확률이
+			-- 생길 수 있어야 하므로(파이널 어택:활과 동일 패턴) 게이트도 SkillInventory 여부를 같이 본다.
+			if (self.ComboAttackLevel > 0 or self:GetSkillInvLevelByIndex(55) > 0) and not capturedTarget._dead then
+				local chance = 0
+				if self.ComboAttackLevel > 0 then chance = _CardRegistry:GetChance(151, self.ComboAttackLevel) end
+				chance = chance + self:GetSkillInvTierPercent(55, 0.03, 0.06, 0.09)
 				if _UtilLogic:RandomDouble() < chance then
 					capturedTarget:AddComboStack(appliedDamage)
 				end
@@ -760,6 +777,9 @@ script CardManager extends Logic
 		if fx ~= nil then fx:Destroy(1.0) end
 		self:PlayComboFinishSound()
 		local burstMult = self:GetComaBurstMult(self.ComaLevel)
+		-- SkillInventory 슬래시 스톰(인덱스51) Lv9: 콤보 폭발 대미지 15% 증가, 카드 자체 레벨과 별개로
+		-- 항상 가산(코마의 콤보 폭발 배율에 그대로 얹는다)
+		burstMult = burstMult + self:GetSkillInvTierPercent(51, 0, 0, 0.15)
 		if not target._dead then
 			target:TakeDamage(lastHitDamage * burstMult)
 		end
@@ -865,6 +885,7 @@ script CardManager extends Logic
 				target:TakeDamage(appliedDamage)
 			end
 			target:AddComboStack(appliedDamage)
+			self:TryExtraComboStack(152, target, appliedDamage)
 		end
 		log("SlashAttack: hit=" .. #targets .. "/" .. self:GetSlashTargetCount(self.SlashLevel))
 	end
@@ -962,6 +983,7 @@ script CardManager extends Logic
 				target:TakeDamage(appliedDamage)
 			end
 			target:AddComboStack(appliedDamage)
+			self:TryExtraComboStack(153, target, appliedDamage)
 		end
 		log("BrandishAttack: hit=" .. #targets .. "/" .. self:GetBrandishTargetCount(self.BrandishLevel))
 	end
@@ -1077,6 +1099,7 @@ script CardManager extends Logic
 								m:TakeDamage(finalDamage)
 							end
 							m:AddComboStack(finalDamage)
+							self:TryExtraComboStack(154, m, finalDamage)
 							local hp = m.Entity.TransformComponent.Position
 							local hfx = self:SpawnEffect(self.FlashSlashHitEffectRUID, Vector3(hp.x, hp.y, hp.z), 0, 1.0, self:GetEffectScaleRatio(m), 1.0)
 							if hfx ~= nil then hfx:Destroy(self.HitEffectLifetime) end
@@ -1141,12 +1164,14 @@ script CardManager extends Logic
 	end
 
 	-- 충돌 대상("타격 유닛") 대미지 비율 — 플레시 미라주와 완전히 동일한 표(30/30/40/50/60%)
+	-- SkillInventory 돌진(인덱스43) Lv9: 충돌 대미지 20% 증가, 카드 자체 레벨과 별개로 항상 가산
 	method number GetChargeCollisionPercent(integer level)
-		if level >= 5 then return 0.60
-		elseif level >= 4 then return 0.50
-		elseif level >= 3 then return 0.40
+		local base = 0.30
+		if level >= 5 then base = 0.60
+		elseif level >= 4 then base = 0.50
+		elseif level >= 3 then base = 0.40
 		end
-		return 0.30
+		return base + self:GetSkillInvTierPercent(43, 0, 0, 0.20)
 	end
 
 	-- FleshMirageAttack과 동일한 좌/우 최외곽 탐색 + 중앙 넉백 + 중앙근방 예외(양끝으로 밀어냄) 로직
@@ -1402,6 +1427,7 @@ script CardManager extends Logic
 					target:TakeDamage(appliedDamage)
 				end
 				target:AddComboStack(appliedDamage)
+				self:TryExtraComboStack(156, target, appliedDamage)
 			end
 
 			-- 유저 정정: 연출2는 플레이어 위치가 아니라 "연출1이 나간 자리"(=이 target의 위치)에서 개별로
@@ -1460,6 +1486,7 @@ script CardManager extends Logic
 							m:TakeDamage(finalDamage)
 						end
 						m:AddComboStack(finalDamage)
+						self:TryExtraComboStack(156, m, finalDamage)
 						local hp = m.Entity.TransformComponent.Position
 						local hfx = self:SpawnEffect(self.AuraBladeHitEffectRUID, Vector3(hp.x, hp.y, hp.z), 0, 1.0, self:GetEffectScaleRatio(m), 1.0)
 						if hfx ~= nil then hfx:Destroy(self.HitEffectLifetime) end
@@ -1632,9 +1659,11 @@ script CardManager extends Logic
 					if (dx * dx + dy * dy) <= (self.SolarBladeVerticalHitRadius * self.SolarBladeVerticalHitRadius) then
 						hitSet[m] = true
 						resolvedSet[m] = true
-						local finalDamage = damage
+						-- SkillInventory 솔라 블레이드(인덱스52) Lv9: 검기 대미지 15% 증가, 카드 자체 레벨과
+						-- 별개로 항상 가산(근접타가 아니라 이 "검기" 투사체 히트에만 추가로 곱연산)
+						local finalDamage = damage * (1.0 + self:GetSkillInvTierPercent(52, 0, 0, 0.15))
 						if isCrit then
-							finalDamage = damage * 2
+							finalDamage = finalDamage * 2
 							m:TakeDamageCrit(finalDamage)
 						else
 							m:TakeDamage(finalDamage)
@@ -1724,7 +1753,8 @@ script CardManager extends Logic
 		for _, target in ipairs(targets) do
 			local p = self:WorldToCurrentMapLocal(target.Entity.TransformComponent.WorldPosition)
 			local scaleRatio = self:GetEffectScaleRatio(target)
-			local isEnhanced = _UtilLogic:RandomDouble() < self.RagingBlowEnhanceChance
+			-- SkillInventory 레이징 블로우(인덱스45) Lv9: 강화 타격 확률 +10%, 카드 자체 레벨과 별개로 항상 가산
+			local isEnhanced = _UtilLogic:RandomDouble() < (self.RagingBlowEnhanceChance + self:GetSkillInvTierPercent(45, 0, 0, 0.10))
 
 			local attackRUID = self.RagingBlowNormalAttackRUID
 			local attackLifetime = self.RagingBlowNormalAttackLifetime
@@ -1828,11 +1858,13 @@ script CardManager extends Logic
 
 	-- 강화 타격 확률 — 레벨별 상승(유저 표: Lv1=15% / Lv2=20% / Lv3=30%, 레이징 블로우의 레벨 무관
 	-- 10% 고정과 다른 점)
+	-- SkillInventory 퓨리어스 블로우(인덱스54) Lv9: 강화 타격 확률 +10%, 카드 자체 레벨과 별개로 항상 가산
 	method number GetFuriousBlowEnhanceChance(integer level)
-		if level >= 3 then return 0.30
-		elseif level >= 2 then return 0.20
+		local base = 0.15
+		if level >= 3 then base = 0.30
+		elseif level >= 2 then base = 0.20
 		end
-		return 0.15
+		return base + self:GetSkillInvTierPercent(54, 0, 0, 0.10)
 	end
 
 	-- 일반 타격(2연타) 타수별 비율 — 70% / 50%(레벨 무관 고정, 레이징 블로우와 동일)
@@ -1965,8 +1997,14 @@ script CardManager extends Logic
 	end
 
 	@ExecSpace("ServerOnly")
-	method void DoubleStepAttack(number damage, boolean isCrit)
-		local targets = self:GetClosestTargets(self:GetDoubleStepTargetCount(self.DoubleStepLevel))
+	method void DoubleStepAttack(number damage, boolean isCrit, table forcedTargets)
+		-- 유저 지정(2026-08-13): 쉐도우 파트너가 대신 쓸 때는 forcedTargets(파트너가 서 있는 몬스터
+		-- 1명 고정)를 넘겨받아 카드 레벨의 타겟수 공식을 건너뛴다 — 플레이어 본인 시전(forcedTargets=nil)은
+		-- 기존 GetClosestTargets 그대로 유지.
+		local targets = forcedTargets
+		if targets == nil then
+			targets = self:GetClosestTargets(self:GetDoubleStepTargetCount(self.DoubleStepLevel))
+		end
 		-- 버그 수정(2026-08-12, 유저 지적: "공격은 하는데 몬스터 죽으면 연출 안나가냐?") — 쉐도우 파트너가
 		-- 대신 실행할 때는 걸어가는 시간(0.7초) 뒤에야 이 메서드가 불려서, 그 사이 겨냥했던 몬스터가
 		-- 죽으면 여기서 0마리가 나와 통째로 스킵됐다. 파트너 실행 중이면 원래 겨냥했던 타겟(죽었어도
@@ -2011,6 +2049,150 @@ script CardManager extends Logic
 		end
 
 		log("DoubleStepAttack: targets=" .. #targets)
+	end
+
+	-- ── 쉐이드 조합 스킬: 암살 (카드185) — 더블 스탭(171) Lv5 + 크리티컬 엣지(181) + 피지컬 트레이닝
+	-- (183, 둘 다 슬롯 없는 패시브) 보유 시 등장. 더블 스탭과 동일한 "즉시 1타 + HitInterval 뒤 2타"
+	-- 구조를 재사용하지만, 더블 스탭과 달리 1타/2타가 서로 다른 리소스팩 연출(유저 지정: "대미지는
+	-- 1타 2타 들어갈때 각각 연출 다르게할꺼고")을 쓴다 — 1타는 개별 지정 RUID, 2타는 "암살" 리소스팩의
+	-- effect(캐스트)/hit·0(타격)/audio·Hit(사운드)를 그대로 사용. 더블 스탭 슬롯을 그대로 넘겨받는다.
+	-- 3레벨까지만 존재(다른 조합 스킬과 동일).
+	@Sync property integer AssassinateLevel = 0
+	property number Card185Cooldown = 3.5  -- 레벨 무관 고정(유저 표)
+	property string Card185IconRUID = "dbaa15855ce9477faaf83b7ffa0f6ee2"
+
+	-- 1타 리소스(유저 지정 개별 RUID)
+	property string AssassinateHit1SoundRUID = "5b472e4debd945f3800189d1e02de2a7"
+	property string AssassinateHit1CastRUID = "15332c6f8dc94dc5a16206cc2bc4fd1e"
+	property string AssassinateHit1HitRUID = "feead72eccff47e398da17f5c11f4cc9"
+	-- 2타 리소스("암살" 리소스팩 — 유저 지정: "여기서 effect 쓰면됨 히트도 여기 hit쓰면되고 사운드도 여기꺼 hit")
+	property string AssassinateHit2SoundRUID = "d02ad2c1950846cc865dc2d041036564"
+	property string AssassinateHit2CastRUID = "ceba149628214e589b67b563a776544f"
+	property string AssassinateHit2HitRUID = "be55f2b4175c4d83a40d9d09a1520f2d"
+
+	-- 연출 타이밍/크기 — 네이티브 animationclip 직접 재생(리소스팩에 프레임 전체 목록이 없어 수동
+	-- 프레임 스왑 대신 이 방식 채택), 실측 전 추정치라 라이브 확인 후 조정 필요.
+	property number AssassinateCastLifetime = 0.5
+	property number AssassinateHitLifetime = 0.35
+	-- 유저 지적: "2타 연출 루프도니깐 조금만 짧게" — 2타만 실제 클립 길이보다 Destroy 타이밍이 길어서
+	-- 재생이 끝나기 전에 못 끊고 루프가 재시작되는 것으로 보임(1타는 별도 지적 없어 그대로 유지).
+	property number AssassinateHit2CastLifetime = 0.4
+	property number AssassinateHit2HitLifetime = 0.28
+	property number AssassinateEffectScale = 0.8  -- 유저 지정: 20% 축소
+	property number AssassinateEffectYOffset = 0.3  -- 더블 스탭과 동일 보정 기본 적용
+	property number AssassinateEffectXOffset = 0.7  -- 유저 지정: 오른쪽으로 0.5 → 추가 0.2 더 이동(0.7, 캐스트 연출 기준)
+	-- 유저 지적: "타격 연출이 몬스터한테 안붙어있는거 같다" — 캐스트와 같은 좌표를 공유하던 걸 분리해서
+	-- 히트 연출만 왼쪽으로 0.4 이동(0.7-0.4=0.3), 이어서 "0.15 더 옮기자"로 추가 이동(0.3-0.15=0.15).
+	-- 1타/2타 히트 연출 공통 적용.
+	property number AssassinateHitEffectXOffset = 0.15
+	property number AssassinateHitInterval = 0.3  -- 더블 스탭과 동일 관례(1타 후 0.3초 뒤 2타)
+	-- 유저 지정: "대미지 텍스트가 타이밍 상관없이 떨어져서, 1개 먼저 뜨고 나머지가 20 정도만 겹치는
+	-- 수준" — 더블 스탭의 수평 오프셋 해법(DoubleStepDamageNumberSpacing)과 동일 패턴, 겹침 폭은
+	-- 라이브로 눈으로 보고 조정 예정(추정치로 더블 스탭보다 살짝 크게 시작).
+	property number AssassinateDamageNumberSpacing = 0.35
+
+	-- 타당 기준 데미지(레벨별 고정값 — 유저 지정 표)
+	method number GetAssassinateDamage(integer level)
+		if level >= 3 then return 320
+		elseif level >= 2 then return 300
+		end
+		return 280
+	end
+
+	-- 타겟 수 — Lv1~2:3명 / Lv3:4명 (유저 지정 표)
+	method integer GetAssassinateTargetCount(integer level)
+		if level >= 3 then return 4 end
+		return 3
+	end
+
+	-- 2연타 타수별 비율 — 1타 120/130/140%, 2타 80/90/100% (유저 지정 표)
+	method number GetAssassinatePercent(integer level, integer hitIndex)
+		local lv = math.max(1, math.min(level, 3))
+		local pct
+		if lv == 1 then pct = {1.20, 0.80}
+		elseif lv == 2 then pct = {1.30, 0.90}
+		else pct = {1.40, 1.00}
+		end
+		return pct[hitIndex]
+	end
+
+	@ExecSpace("ServerOnly")
+	method void AssassinateAttack(number damage, boolean isCrit)
+		local targets = self:GetClosestTargets(self:GetAssassinateTargetCount(self.AssassinateLevel))
+		if #targets == 0 then
+			if self._shadowPartnerCopyActive and isvalid(self._shadowPartnerFallbackTarget) then
+				targets = { self._shadowPartnerFallbackTarget }
+			else
+				return
+			end
+		end
+
+		for _, target in ipairs(targets) do
+			if isvalid(target) and isvalid(target.Entity) then
+				local scaleRatio = self:GetEffectScaleRatio(target)
+
+				-- 1타: 즉시 캐스트+히트 연출 및 대미지
+				local p1 = self:WorldToCurrentMapLocal(target.Entity.TransformComponent.WorldPosition)
+				local pos1 = Vector3(p1.x + self.AssassinateEffectXOffset, p1.y + self.AssassinateEffectYOffset, p1.z - 0.1)
+				local fx1 = self:SpawnEffect(self.AssassinateHit1CastRUID, pos1, 0, 1.0, self.AssassinateEffectScale * scaleRatio, 1.0)
+				if fx1 ~= nil then fx1:Destroy(self.AssassinateCastLifetime) end
+				local hitPos1 = Vector3(p1.x + self.AssassinateHitEffectXOffset, p1.y + self.AssassinateEffectYOffset, p1.z - 0.1)
+				local hfx1 = self:SpawnEffect(self.AssassinateHit1HitRUID, hitPos1, 0, 1.0, self.AssassinateEffectScale * scaleRatio, 1.0)
+				if hfx1 ~= nil then hfx1:Destroy(self.AssassinateHitLifetime) end
+				self:PlayAssassinateHit1Sound()
+
+				if not target._dead then
+					local pct1 = self:GetAssassinatePercent(self.AssassinateLevel, 1)
+					local hitDamage1 = damage * pct1
+					local offsetX1 = (1 - 1.5) * self.AssassinateDamageNumberSpacing
+					if isCrit then
+						target:TakeDamageCritWithOffset(hitDamage1 * 2, Vector2(offsetX1, 0))
+					else
+						target:TakeDamageWithOffset(hitDamage1, Vector2(offsetX1, 0))
+					end
+					log("AssassinateAttack: hit 1/2 dmg=" .. math.floor(isCrit and hitDamage1 * 2 or hitDamage1))
+				end
+
+				-- 2타: HitInterval 뒤, 서로 다른(암살 리소스팩) 캐스트+히트 연출 및 대미지
+				_TimerService:SetTimerOnce(function()
+					if not isvalid(self) or not isvalid(target) or not isvalid(target.Entity) then return end
+					local p2 = self:WorldToCurrentMapLocal(target.Entity.TransformComponent.WorldPosition)
+					local pos2 = Vector3(p2.x + self.AssassinateEffectXOffset, p2.y + self.AssassinateEffectYOffset, p2.z - 0.1)
+					local fx2 = self:SpawnEffect(self.AssassinateHit2CastRUID, pos2, 0, 1.0, self.AssassinateEffectScale * scaleRatio, 1.0)
+					if fx2 ~= nil then fx2:Destroy(self.AssassinateHit2CastLifetime) end
+					local hitPos2 = Vector3(p2.x + self.AssassinateHitEffectXOffset, p2.y + self.AssassinateEffectYOffset, p2.z - 0.1)
+					local hfx2 = self:SpawnEffect(self.AssassinateHit2HitRUID, hitPos2, 0, 1.0, self.AssassinateEffectScale * scaleRatio, 1.0)
+					if hfx2 ~= nil then hfx2:Destroy(self.AssassinateHit2HitLifetime) end
+					self:PlayAssassinateHit2Sound()
+
+					if not target._dead then
+						local pct2 = self:GetAssassinatePercent(self.AssassinateLevel, 2)
+						local hitDamage2 = damage * pct2
+						local offsetX2 = (2 - 1.5) * self.AssassinateDamageNumberSpacing
+						if isCrit then
+							target:TakeDamageCritWithOffset(hitDamage2 * 2, Vector2(offsetX2, 0))
+						else
+							target:TakeDamageWithOffset(hitDamage2, Vector2(offsetX2, 0))
+						end
+						log("AssassinateAttack: hit 2/2 dmg=" .. math.floor(isCrit and hitDamage2 * 2 or hitDamage2))
+					end
+				end, self.AssassinateHitInterval)
+			end
+		end
+
+		log("AssassinateAttack: targets=" .. #targets)
+	end
+
+	@ExecSpace("Multicast")
+	method void PlayAssassinateHit1Sound()
+		if self:IsServer() then return end
+		_SoundService:PlaySound(self.AssassinateHit1SoundRUID, 1.0)
+	end
+
+	@ExecSpace("Multicast")
+	method void PlayAssassinateHit2Sound()
+		if self:IsServer() then return end
+		_SoundService:PlaySound(self.AssassinateHit2SoundRUID, 1.0)
 	end
 
 	-- ── 쉐이드 전용: 새비지 블로우 (카드173, 슬롯형 액티브 2호). GetClosestTargets로 뽑힌 각 타겟마다
@@ -2073,10 +2255,15 @@ script CardManager extends Logic
 	end
 
 	@ExecSpace("ServerOnly")
-	method void SavageBlowAttack(number damage, boolean isCrit)
+	method void SavageBlowAttack(number damage, boolean isCrit, table forcedTargets)
 		local map = self:GetCurrentMap()
 		if map == nil then return end
-		local targets = self:GetClosestTargets(self:GetSavageBlowTargetCount(self.SavageBlowLevel))
+		-- 유저 지정(2026-08-13): 쉐도우 파트너 전용 forcedTargets(파트너가 서 있는 몬스터 1명 고정) —
+		-- 세비지 블로우가 레벨2 이상에서 원래 2~3명을 때리더라도 파트너 대신 실행일 땐 그 1명만.
+		local targets = forcedTargets
+		if targets == nil then
+			targets = self:GetClosestTargets(self:GetSavageBlowTargetCount(self.SavageBlowLevel))
+		end
 		-- 버그 수정(2026-08-12) — DoubleStepAttack과 동일한 이유/패턴(쉐도우 파트너의 0.7초 이동 지연 중
 		-- 원 타겟이 죽으면 재선정이 0마리가 되는 문제).
 		if #targets == 0 then
@@ -2154,6 +2341,159 @@ script CardManager extends Logic
 		end
 
 		log("SavageBlowAttack: targets=" .. #targets)
+	end
+
+	-- ── 쉐이드 조합 스킬: 소닉 블로우 (카드186) — 새비지 블로우(173) Lv5 + 대거 액셀레이션(180) +
+	-- 카르마(182, 둘 다 슬롯 없는 패시브) 보유 시 등장. 새비지 블로우와 달리 반경 스플래시 없이
+	-- GetClosestTargets로 뽑힌 각 타겟마다 독립적으로 5연타(레벨 무관 동일 % 5회)를 꽂는다. 유저 지정:
+	-- "데미지 뜨는 텍스트 띠엄띠엄 나오게" — 더블 스탭/새비지 블로우와 동일한 순차 타이머 + 수평 오프셋
+	-- 해법 재사용. 새비지 블로우 슬롯을 그대로 넘겨받는다. 3레벨까지만 존재.
+	@Sync property integer SonicBlowLevel = 0
+	property number Card186Cooldown = 5.0  -- 레벨 무관 고정(유저 표)
+	property string Card186IconRUID = "ffecbd57b88f44d3991cb6738f739e09"
+
+	-- 리소스팩 "skill/400041039"
+	-- 유저 지정: keydownend0(공격 준비 모션)이 먼저, keydown(실질 공격 모션)이 그 다음 — 대미지는 keydown 타이밍
+	property string SonicBlowCastRUID = "25dc4e5a172d44e99af558b0540316c0"  -- keydownend0(준비)
+	property string SonicBlowHitRUID = "96c839fe34124843ad494094d1e7d2db"  -- keydown(실질 공격, 복구)
+	property string SonicBlowPreSoundRUID = "2aea2b5ac7784efc8f20592f56e1343b"  -- audio/Pre
+	property string SonicBlowHitSoundRUID = "0085b37ffaa0486fb9e9eec340e12b76"  -- audio/Hit
+	property string SonicBlowEndSoundRUID = "20e97d8987cc482ba2b6ed89f9700b49"  -- audio/End
+
+	-- 연출 타이밍/크기 — 실측 전 추정치, 라이브 확인 후 조정 필요
+	property number SonicBlowCastLifetime = 0.5
+	property number SonicBlowHitLifetime = 0.3
+	property number SonicBlowEffectScale = 0.72  -- 유저 지정: 기존 20% 축소(0.8)에서 추가로 10% 더 축소(0.8*0.9)
+	property number SonicBlowHitEffectScale = 0.5  -- 유저 지정: 타격 연출 절반 크기
+	property number SonicBlowEffectYOffset = 0.3  -- 더블 스탭/암살과 동일 보정 기본 적용
+	property number SonicBlowEffectXOffset = 0.3  -- 유저 지정: 첫 연출(캐스트) 오른쪽으로 0.3 이동
+	property number SonicBlowHitInterval = 0.15  -- 5연타 간격(총 0.6초 분량)
+	-- 유저 지정: 새비지 블로우(173) 업그레이드라 범위기여야 함 — 새비지 블로우와 동일한 반경 판정 패턴
+	-- (SavageBlowRadius=1.5와 동일 값으로 시작).
+	property number SonicBlowRadius = 1.5
+	-- 유저 지정: 수평 오프셋은 제거하고 엔진 기본 트윈(위로 뜨는 연출) 그대로 사용 — 대신 숫자끼리
+	-- 붙어서 겹쳐 보이지 않게 타수마다 시작 높이를 조금씩 띄운다(1타가 제일 아래, 5타가 제일 위).
+	property number SonicBlowDamageNumberSpacing = 0.4
+	property number SonicBlowDamageNumberYStep = 0.3
+
+	method number GetSonicBlowDamage(integer level)
+		if level >= 3 then return 340
+		elseif level >= 2 then return 290
+		end
+		return 260
+	end
+
+	-- 타겟 수 — 레벨 무관 4명 고정(유저 표)
+	method integer GetSonicBlowTargetCount(integer level)
+		return 4
+	end
+
+	-- 타당 비율 — 38/40/42%(유저 표, 레벨별 동일 비율로 5회 반복)
+	method number GetSonicBlowPercent(integer level)
+		if level >= 3 then return 0.42
+		elseif level >= 2 then return 0.40
+		end
+		return 0.38
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SonicBlowAttack(number damage, boolean isCrit)
+		local map = self:GetCurrentMap()
+		if map == nil then return end
+		local targets = self:GetClosestTargets(self:GetSonicBlowTargetCount(self.SonicBlowLevel))
+		if #targets == 0 then
+			if self._shadowPartnerCopyActive and isvalid(self._shadowPartnerFallbackTarget) then
+				targets = { self._shadowPartnerFallbackTarget }
+			else
+				return
+			end
+		end
+
+		self:PlaySonicBlowPreSound()
+
+		for _, target in ipairs(targets) do
+			if isvalid(target) and isvalid(target.Entity) then
+				local scaleRatio = self:GetEffectScaleRatio(target)
+				local p = self:WorldToCurrentMapLocal(target.Entity.TransformComponent.WorldPosition)
+				local castPos = Vector3(p.x + self.SonicBlowEffectXOffset, p.y + self.SonicBlowEffectYOffset, p.z - 0.1)
+				local fx = self:SpawnEffect(self.SonicBlowCastRUID, castPos, 0, 1.0, self.SonicBlowEffectScale * scaleRatio, 1.0)
+				if fx ~= nil then fx:Destroy(self.SonicBlowCastLifetime) end
+
+				local pct = self:GetSonicBlowPercent(self.SonicBlowLevel)
+				local hitDamage = damage * pct
+
+				-- 유저 지정: 새비지 블로우(173) 업그레이드라 범위기여야 함 — 겨냥 지점(centerPos) 반경
+				-- 안의 몬스터를 전부 타격(새비지 블로우와 동일 패턴). 판정 기준 좌표는 캐스트 시점에 고정.
+				local centerPos = target.Entity.TransformComponent.Position
+				local capturedMap = map
+				local capturedIsCrit = isCrit
+
+				local hitPos = Vector3(p.x, p.y + self.SonicBlowEffectYOffset, p.z - 0.1)
+				local hfx = self:SpawnEffect(self.SonicBlowHitRUID, hitPos, 0, 1.0, self.SonicBlowHitEffectScale * scaleRatio, 1.0)
+				local totalHitDuration = 4 * self.SonicBlowHitInterval + self.SonicBlowHitLifetime
+				if hfx ~= nil then hfx:Destroy(totalHitDuration) end
+
+				local applyDamageTick = function(hitIndex)
+					if not isvalid(self) then return end
+					self:PlaySonicBlowHitSound()
+
+					-- 유저 지정: 수평으로 퍼지지 말고 대미지 숫자는 엔진 기본 위로 뜨는 트윈 그대로 —
+					-- 대신 붙어서 겹쳐 보이지 않게 타수마다 시작 높이를 위로 조금씩 띄운다.
+					local offsetX = 0
+					local offsetY = (hitIndex - 1) * self.SonicBlowDamageNumberYStep
+					local monsters = capturedMap:GetChildComponentsByTypeName("script.MonsterAI", false)
+					local hitCount = 0
+					for _, mob in ipairs(monsters) do
+						---@type MonsterAI
+						local m = mob
+						if isvalid(m) and isvalid(m.Entity) and not m._dead then
+							local mp = m.Entity.TransformComponent.Position
+							local dx = mp.x - centerPos.x
+							local dy = mp.y - centerPos.y
+							if (dx * dx + dy * dy) <= (self.SonicBlowRadius * self.SonicBlowRadius) then
+								hitCount = hitCount + 1
+								if capturedIsCrit then
+									m:TakeDamageCritWithOffset(hitDamage * 2, Vector2(offsetX, offsetY))
+								else
+									m:TakeDamageWithOffset(hitDamage, Vector2(offsetX, offsetY))
+								end
+							end
+						end
+					end
+					log("SonicBlowAttack: hit " .. hitIndex .. "/5 dmg=" .. math.floor(capturedIsCrit and hitDamage * 2 or hitDamage) .. " hitCount=" .. hitCount)
+
+					if hitIndex == 5 then self:PlaySonicBlowEndSound() end
+				end
+
+				applyDamageTick(1)
+				for hitIndex = 2, 5 do
+					local delay = (hitIndex - 1) * self.SonicBlowHitInterval
+					_TimerService:SetTimerOnce(function()
+						applyDamageTick(hitIndex)
+					end, delay)
+				end
+			end
+		end
+
+		log("SonicBlowAttack: targets=" .. #targets)
+	end
+
+	@ExecSpace("Multicast")
+	method void PlaySonicBlowPreSound()
+		if self:IsServer() then return end
+		_SoundService:PlaySound(self.SonicBlowPreSoundRUID, 1.0)
+	end
+
+	@ExecSpace("Multicast")
+	method void PlaySonicBlowHitSound()
+		if self:IsServer() then return end
+		_SoundService:PlaySound(self.SonicBlowHitSoundRUID, 1.0)
+	end
+
+	@ExecSpace("Multicast")
+	method void PlaySonicBlowEndSound()
+		if self:IsServer() then return end
+		_SoundService:PlaySound(self.SonicBlowEndSoundRUID, 1.0)
 	end
 
 	@ExecSpace("Multicast")
@@ -2236,7 +2576,9 @@ script CardManager extends Logic
 	end
 
 	-- 기본 공격 메소 드랍 확률(카드177 보유 시) — Lv1:5% / Lv2:10% / Lv3:15% / Lv4:20% / Lv5:25% (유저 지정)
+	-- 메소 데토네이션(카드189) 보유 시에는 레벨식을 벗어나 고정 30%로 오른다(유저 지정 표).
 	method number GetMesoExplosionBasicAttackDropChance(integer level)
+		if self.MesoDetonationLevel > 0 then return 0.30 end
 		return level * 0.05
 	end
 
@@ -2261,6 +2603,8 @@ script CardManager extends Logic
 	property number SmokeGrenadeEffectYOffset = 0.0
 	property string SmokeGrenadeThrowRUID = "d703cc75584b4100af8a921f874b30b8"  -- effect(투척/폭발 연출, 1회)
 	property number SmokeGrenadeThrowLifetime = 0.6  -- 실측 전 보수적 추정치(루프 방지 우선)
+	-- 유저 지정(2026-08-13, 재조정): tile/0(8~16프레임) 자체 루프를 사라질 때까지 그대로 유지 —
+	-- special(8e5ca7e1) 전환 시도했으나 깜빡거림 발생해서 되돌림.
 	property string SmokeGrenadeCloudRUID = "d8017cb7a16c49a196425a03b29d52f8"  -- tile/0(지속되는 연막 구름, 반경 동안 루프)
 	property string SmokeGrenadeSoundRUID = "ad63f4c64f304b6c876fb68511addb87"
 	property number SmokeGrenadeFadeOutDuration = 0.4  -- 구름이 사라지기 이 시간 전부터 알파를 0으로 서서히 낮춘다(AquaSurge와 동일 패턴)
@@ -2379,8 +2723,10 @@ script CardManager extends Logic
 				local centerPos = target.Entity.TransformComponent.Position
 				local scaleRatio = self:GetEffectScaleRatio(target)
 
-				-- 투척/폭발 연출 1회, 끝까지 온전히 재생
-				local fx = self:SpawnEffectWithModel(self.SmokeGrenadeThrowRUID, capturedPos, 0, 1.0, self.SmokeGrenadeEffectScale * scaleRatio, 1.0, "skilleffectlong")
+				-- 투척/폭발 연출 1회, 끝까지 온전히 재생 (유저 지정: 연막난무 쪽에서 조정한 좌표를
+				-- 연막탄 본체에도 동일하게 적용 — SmokeRampageThrowXOffset/YOffset 재사용)
+				local throwPos = Vector3(capturedPos.x + self.SmokeRampageThrowXOffset, capturedPos.y + self.SmokeRampageThrowYOffset, capturedPos.z)
+				local fx = self:SpawnEffectWithModel(self.SmokeGrenadeThrowRUID, throwPos, 0, 1.0, self.SmokeGrenadeEffectScale * scaleRatio, 1.0, "skilleffectlong")
 				if fx ~= nil then fx:Destroy(self.SmokeGrenadeThrowLifetime) end
 
 				-- 지속되는 연막 구름 — 지속시간 동안 루프 재생(타일류 리소스라 루프 전제로 설계됨)
@@ -2390,6 +2736,8 @@ script CardManager extends Logic
 					cloud:Destroy(duration)
 					local cloudRenderer = cloud.SpriteRendererComponent
 					if cloudRenderer ~= nil then
+						-- 유저 지정(2026-08-13, 재조정): special로 전환하면 깜빡거림 발생 — tile/0(8~16프레임)
+						-- 자체 루프를 사라질 때까지 그대로 유지하는 것으로 되돌림(special 전환 제거).
 						local fadeDuration = math.min(self.SmokeGrenadeFadeOutDuration, duration)
 						local fadeDelay = duration - fadeDuration
 						_TimerService:SetTimerOnce(function()
@@ -2450,6 +2798,195 @@ script CardManager extends Logic
 	method void PlaySmokeGrenadeSound()
 		if self:IsServer() then return end
 		_SoundService:PlaySound(self.SmokeGrenadeSoundRUID, 1.0)
+	end
+
+	-- ── 쉐이드 조합 스킬: 연막난무 (카드187) — 연막탄(174) Lv5 + 다크 사이트(184) + 대거 액셀레이션
+	-- (180, 둘 다 슬롯 없는 패시브) 보유 시 등장. 연막탄의 투척/구름/초당 DoT(반경 안 전부)/명중디버프를
+	-- 그대로 재사용하고(SmokeGrenadeAttack과 동일 로직), 구름이 깔리고 0.5초 뒤 중앙에 문양이 새겨졌다가
+	-- 사라지면서 추가 타격 연출 + 보너스 대미지(120/140/160%, 반경 안 전부, 1회성)가 한 번 더 터진다.
+	-- 3레벨까지만 존재. 연막탄 슬롯을 그대로 넘겨받는다.
+	@Sync property integer SmokeRampageLevel = 0
+	property number Card187Cooldown = 8.0  -- 레벨 무관 고정(유저 표)
+	property string Card187IconRUID = "0a72fb25ab844cee8126b64b202cd7b9"
+
+	-- 리소스팩 "skill/4211011"
+	property string SmokeRampageSigilRUID = "c28f866bc99841a3baf48d997c3a77e7"  -- effect(중앙에 새겨지는 문양)
+	property string SmokeRampageBurstHitRUID = "5420f6979d1a4f0aa259a7268f67362b"  -- hit/0(문양이 사라질 때 타격 연출)
+	property string SmokeRampageBurstSoundRUID = "ae31d12c065d403fa2d9782460f787b0"  -- audio/hit
+
+	-- 유저 지정: "연막 깔리고 0.5초 있다가" — 보너스 시퀀스 시작 타이밍
+	property number SmokeRampageBonusDelay = 0.5
+	-- 컷오프 확인(슬로우모션+skilleffectlong 임시 스폰으로 라이브 검증): 자연스럽게 다단계로 이어지는
+	-- 연출이라 공용 "skilleffect" 모델의 내부 상한(0.8초)까지 꽉 채워서 끊기지 않게 한다 —
+	-- 그 이상 넣어도 내부 SkillEffectAI가 먼저 파괴하므로 0.8초가 사실상 최대치.
+	property number SmokeRampageSigilLifetime = 0.8
+	property number SmokeRampageBurstHitLifetime = 0.35  -- 실측 전 추정치
+	property number SmokeRampageSigilScaleMult = 1.15  -- 유저 지정: 문양 연출 15% 확대
+	property number SmokeRampageSigilDepthOffset = 0.1  -- 유저 지정: 연막탄 구름보다 위(앞)에 그려지도록 추가로 당김
+	property number SmokeRampageSigilXOffset = 0.8  -- 유저 지정: 문양 연출 오른쪽으로 1 이동 후 왼쪽으로 0.2 추가 조정(1.0-0.2)
+	property number SmokeRampageSigilYOffset = 0.7  -- 유저 지정: 문양 연출 위로 0.7 이동
+	-- 유저 지정: 투척/폭발 연출 오른쪽 0.4 / 위 1.0(0.6+0.4) 이동 — 연막난무뿐 아니라 연막탄(174)
+	-- 본체 SmokeGrenadeAttack에도 동일하게 재사용해서 좌표를 맞춘다(둘 다 같은 연출을 공유하므로).
+	property number SmokeRampageThrowXOffset = 0.4
+	property number SmokeRampageThrowYOffset = 1.0
+
+	-- 기준 데미지(초당 100% DoT 값) — 90/100/110 (유저 표, 연막탄 Lv5의 90과 동일하게 이어짐)
+	method number GetSmokeRampageDamage(integer level)
+		if level >= 3 then return 110
+		elseif level >= 2 then return 100
+		end
+		return 90
+	end
+
+	-- 보너스 대미지 비율 — 120/140/160% (유저 표)
+	method number GetSmokeRampageBonusPercent(integer level)
+		if level >= 3 then return 1.60
+		elseif level >= 2 then return 1.40
+		end
+		return 1.20
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SmokeRampageAttack(number damage, boolean isCrit)
+		local map = self:GetCurrentMap()
+		if map == nil then return end
+		-- 유저 지정: 연막난무 활성 중에도 연막탄(174)은 계속 Lv5로 남아있어 타겟수/명중하락/지속시간을
+		-- 그대로 재사용할 수 있다(소닉 블로우가 SavageBlowLevel을 그대로 쓰는 것과 동일한 패턴).
+		local targets = self:GetSmokeGrenadeTargets(self:GetSmokeGrenadeTargetCount(self.SmokeGrenadeLevel))
+		if #targets == 0 then
+			if self._shadowPartnerCopyActive and isvalid(self._shadowPartnerFallbackTarget) then
+				targets = { self._shadowPartnerFallbackTarget }
+			else
+				return
+			end
+		end
+
+		self:PlaySmokeGrenadeSound()
+
+		local duration = self:GetSmokeGrenadeDuration(self.SmokeGrenadeLevel)
+		local missChance = self:GetSmokeGrenadeMissChance(self.SmokeGrenadeLevel)
+		local bonusPct = self:GetSmokeRampageBonusPercent(self.SmokeRampageLevel)
+		local skipDebuff = self._shadowPartnerCopyActive
+
+		for _, target in ipairs(targets) do
+			if isvalid(target) and isvalid(target.Entity) then
+				local p = self:WorldToCurrentMapLocal(target.Entity.TransformComponent.WorldPosition)
+				local capturedPos = Vector3(p.x, p.y + self.SmokeGrenadeEffectYOffset, p.z - 0.1)
+				local centerPos = target.Entity.TransformComponent.Position
+				local scaleRatio = self:GetEffectScaleRatio(target)
+
+				-- 투척/폭발 연출 1회 (연막탄과 동일하되, 유저 지정으로 위로 0.6 추가 이동 — 연막난무 전용)
+				local throwPos = Vector3(capturedPos.x + self.SmokeRampageThrowXOffset, capturedPos.y + self.SmokeRampageThrowYOffset, capturedPos.z)
+				local fx = self:SpawnEffectWithModel(self.SmokeGrenadeThrowRUID, throwPos, 0, 1.0, self.SmokeGrenadeEffectScale * scaleRatio, 1.0, "skilleffectlong")
+				if fx ~= nil then fx:Destroy(self.SmokeGrenadeThrowLifetime) end
+
+				-- 지속되는 연막 구름 (연막탄과 동일)
+				local cloudScale = (self.SmokeGrenadeRadius / 1.2) * self.SmokeGrenadeEffectScale * scaleRatio
+				local cloud = self:SpawnEffectWithModel(self.SmokeGrenadeCloudRUID, capturedPos, 0, 1.0, cloudScale, 1.0, "skilleffectlong")
+				if cloud ~= nil then
+					cloud:Destroy(duration)
+					local cloudRenderer = cloud.SpriteRendererComponent
+					if cloudRenderer ~= nil then
+						-- 유저 지정(2026-08-13, 재조정): special로 전환하면 깜빡거림 발생 — tile/0(8~16프레임)
+						-- 자체 루프를 사라질 때까지 그대로 유지하는 것으로 되돌림(special 전환 제거).
+						local fadeDuration = math.min(self.SmokeGrenadeFadeOutDuration, duration)
+						local fadeDelay = duration - fadeDuration
+						_TimerService:SetTimerOnce(function()
+							if not isvalid(cloud) or not isvalid(cloudRenderer) then return end
+							_TweenLogic:PlayTween(1.0, 0.0, fadeDuration, EaseType.Linear, function(alpha)
+								if isvalid(cloudRenderer) then cloudRenderer:SetAlpha(alpha) end
+							end)
+						end, fadeDelay)
+					end
+				end
+
+				local capturedMap = map
+				local capturedDamage = damage
+				local capturedIsCrit = isCrit
+				local capturedRadius = self.SmokeGrenadeRadius
+
+				-- 1초마다(지속시간 동안) 반경 안의 몬스터 전부에게 DoT + 명중 하락 디버프 재적용 (연막탄과 동일)
+				local applyTick = function()
+					local monsters = capturedMap:GetChildComponentsByTypeName("script.MonsterAI", false)
+					local hitCount = 0
+					for _, mob in ipairs(monsters) do
+						---@type MonsterAI
+						local m = mob
+						if isvalid(m) and isvalid(m.Entity) and not m._dead then
+							local mp = m.Entity.TransformComponent.Position
+							local dx = mp.x - centerPos.x
+							local dy = mp.y - centerPos.y
+							if (dx * dx + dy * dy) <= (capturedRadius * capturedRadius) then
+								hitCount = hitCount + 1
+								if capturedIsCrit then
+									m:TakeDamageCrit(capturedDamage * 2)
+								else
+									m:TakeDamage(capturedDamage)
+								end
+								if not skipDebuff then m:ApplyAccuracyDebuff(missChance, 1.1) end
+							end
+						end
+					end
+					log("SmokeRampageAttack: tick dmg=" .. math.floor(capturedDamage) .. " hitCount=" .. hitCount)
+				end
+
+				applyTick()
+				for tickIdx = 1, duration - 1 do
+					local delay = tickIdx * 1.0
+					_TimerService:SetTimerOnce(function()
+						if not isvalid(self) then return end
+						applyTick()
+					end, delay)
+				end
+
+				-- 유저 지정: 연막 깔리고 0.5초 뒤 — 중앙에 문양이 새겨졌다가 사라지면서 타격 연출 +
+				-- 보너스 대미지(반경 안 전부, 1회성)가 터진다.
+				_TimerService:SetTimerOnce(function()
+					if not isvalid(self) then return end
+					-- 유저 지정: 연막탄 구름보다 위(앞)에 보이도록 z를 추가로 당기고, 오른쪽 1/위로 0.7 이동.
+					local sigilPos = Vector3(capturedPos.x + self.SmokeRampageSigilXOffset, capturedPos.y + self.SmokeRampageSigilYOffset, capturedPos.z - self.SmokeRampageSigilDepthOffset)
+					local sigil = self:SpawnEffect(self.SmokeRampageSigilRUID, sigilPos, 0, 1.0, self.SmokeGrenadeEffectScale * self.SmokeRampageSigilScaleMult * scaleRatio, 1.0)
+					if sigil ~= nil then sigil:Destroy(self.SmokeRampageSigilLifetime) end
+
+					_TimerService:SetTimerOnce(function()
+						if not isvalid(self) then return end
+						local hfx = self:SpawnEffect(self.SmokeRampageBurstHitRUID, capturedPos, 0, 1.0, self.SmokeGrenadeEffectScale * scaleRatio, 1.0)
+						if hfx ~= nil then hfx:Destroy(self.SmokeRampageBurstHitLifetime) end
+						self:PlaySmokeRampageBurstSound()
+
+						local bonusDamage = capturedDamage * bonusPct
+						local monsters = capturedMap:GetChildComponentsByTypeName("script.MonsterAI", false)
+						local hitCount = 0
+						for _, mob in ipairs(monsters) do
+							---@type MonsterAI
+							local m = mob
+							if isvalid(m) and isvalid(m.Entity) and not m._dead then
+								local mp = m.Entity.TransformComponent.Position
+								local dx = mp.x - centerPos.x
+								local dy = mp.y - centerPos.y
+								if (dx * dx + dy * dy) <= (capturedRadius * capturedRadius) then
+									hitCount = hitCount + 1
+									if capturedIsCrit then
+										m:TakeDamageCrit(bonusDamage * 2)
+									else
+										m:TakeDamage(bonusDamage)
+									end
+								end
+							end
+						end
+						log("SmokeRampageAttack: bonus dmg=" .. math.floor(bonusDamage) .. " hitCount=" .. hitCount)
+					end, self.SmokeRampageSigilLifetime)
+				end, self.SmokeRampageBonusDelay)
+			end
+		end
+
+		log("SmokeRampageAttack: targets=" .. #targets)
+	end
+
+	@ExecSpace("Multicast")
+	method void PlaySmokeRampageBurstSound()
+		if self:IsServer() then return end
+		_SoundService:PlaySound(self.SmokeRampageBurstSoundRUID, 1.0)
 	end
 
 	-- ── 쉐이드 전용: 무스펠하임 (카드175, 슬롯형 액티브 4호). 플레시 미라주(Card108)/플래시 봄버
@@ -2742,6 +3279,10 @@ script CardManager extends Logic
 	property string Card176CastGlowMaterialId = "75a11168-cf7e-4d53-8b54-3bf882df30af"  -- RootDesk/MyDesk/Materials/StealCastGlow.material
 	-- 표에 별도 메소 수량이 없어 킬 보상(GameManager.GoldPerKill)과 동일한 기본값 사용 — 조정 가능
 	property integer Card176MesoAmount = 5
+	-- 유저 지정(2026-08-14): "메소가 너무 과하게 나오는 거 같은 케이스가 있으니 스틸이랑 아주르 엣지
+	-- 메소 드랍 확률 60%로" — 플레이어 본인이 직접 쓴 스틸/아주르 엣지의 메소 드랍 확률(TriggerStealDrop
+	-- 참고). 쉐도우 파트너 대리 실행 시의 20%는 별도로 그대로 유지.
+	property number Card176MesoDropChance = 0.6
 	-- (구) Card176ItemSlotIconRUID는 제거됨 — 실제로는 메소 계열 아이콘이라 잡템인데 코인처럼 보이는
 	-- 버그의 원인이었다. 이제 잡템은 GrantLootItemDrop으로 실제 아이템 고유 아이콘을 그대로 쓴다.
 
@@ -2762,8 +3303,13 @@ script CardManager extends Logic
 	end
 
 	@ExecSpace("ServerOnly")
-	method void StealAttack(number damage, boolean isCrit)
-		local targets = self:GetClosestTargets(self:GetStealTargetCount(self.StealLevel))
+	method void StealAttack(number damage, boolean isCrit, table forcedTargets)
+		-- 유저 지정(2026-08-13): 쉐도우 파트너 전용 forcedTargets(파트너가 서 있는 몬스터 1명 고정) —
+		-- 스틸이 레벨에 따라 2~4명을 때리더라도 파트너 대신 실행일 땐 그 1명만.
+		local targets = forcedTargets
+		if targets == nil then
+			targets = self:GetClosestTargets(self:GetStealTargetCount(self.StealLevel))
+		end
 		-- 버그 수정(2026-08-12) — DoubleStepAttack과 동일한 이유/패턴.
 		if #targets == 0 then
 			if self._shadowPartnerCopyActive and isvalid(self._shadowPartnerFallbackTarget) then
@@ -2811,9 +3357,11 @@ script CardManager extends Logic
 		local fallParams = target:GetLootDropFallParams()
 
 		-- 유저 지정(2026-08-12: "메소 드랍확률만 50%" → 같은 날 "코인 드랍 확률 20%로 바꾸고(쉐도우
-		-- 얘기하는거다)"로 재조정) — 플레이어 본인이 직접 쓴 스틸은 원래대로 100% 고정, 쉐도우 파트너가
-		-- 대신 실행한 경우(self._shadowPartnerCopyActive)만 20%로 낮춘다.
-		if not self._shadowPartnerCopyActive or _UtilLogic:RandomDouble() < 0.2 then
+		-- 얘기하는거다)"로 재조정, 2026-08-14: "메소가 너무 과하게 나오는 거 같은 케이스가 있으니 스틸이랑
+		-- 아주르 엣지 메소 드랍 확률 60%로" — 플레이어 본인이 직접 쓴 스틸/아주르 엣지는 100%→60%로,
+		-- 쉐도우 파트너가 대신 실행한 경우(self._shadowPartnerCopyActive)는 그대로 20%.
+		local mesoDropChance = self._shadowPartnerCopyActive and 0.2 or self.Card176MesoDropChance
+		if _UtilLogic:RandomDouble() < mesoDropChance then
 			_GameManager:ScheduleMesoDrop(worldPos, fallParams.fallHeight, fallParams.groundWorldY, self.Card176MesoAmount, fallParams.dropScale)
 		end
 
@@ -2848,6 +3396,298 @@ script CardManager extends Logic
 	method void PlayStealSound()
 		if self:IsServer() then return end
 		_SoundService:PlaySound(self.Card176SoundRUID, 1.0)
+	end
+
+	-- ── 쉐이드 조합 스킬: 아주르 엣지 (카드188) — 무스펠하임(175) Lv5 + 스틸(176) Lv5(둘 다 슬롯형
+	-- 액티브) 보유 시 등장. 더블 커터/브레이브 슬래시와 동일한 "액티브 2개 병합" 패턴 — 무스펠하임
+	-- 슬롯을 그대로 넘겨받고 스틸 슬롯은 비운다. 무스펠하임의 좌/우 탐색+넉백+범위폭발 메커니즘을 그대로
+	-- 재사용하되(캐스트/폭발 연출·반경·병합배율 등 Card175 프로퍼티 재사용), 폭발 대미지 비율을
+	-- 100%→110/120/130%로 올리고, 착지(충돌) 시 스틸의 드랍(메소100%+아이템50%, TriggerStealDrop 그대로
+	-- 재사용)을 함께 터뜨린다. 신규 연출: 강화 보조연출(effect0, Card175Cast2 자리를 대체), 발사 직후
+	-- 붙는 추진 프레임(hit/0의 4~5), 날아가는 동안 몬스터에 업히는 라이드 연출, 충돌 시 스틸 플래시.
+	@Sync property integer AzureEdgeLevel = 0
+	property number Card188Cooldown = 4.5  -- 레벨 무관 고정(유저 표)
+	property string Card188IconRUID = "3beb3be542084574b48da2da0e7fde46"
+
+	-- 리소스팩 "무스펠 하임 강화" — 신규 요소만(캐스트/폭발 연출은 무스펠하임 Card175* 그대로 재사용)
+	property string AzureEdgeUseSoundRUID = "638873b2bce949febbbf41cfb5e1347a"  -- audio/Use(스킬 발동)
+	property string AzureEdgeHitSoundRUID = "47437cd74d964d7488c2ddc30b551756"  -- audio/Hit(폭발 순간)
+	property string AzureEdgeEnhanceCastRUID = "7983a42382984638aeba75e285f08894"  -- effect0("강화" 보조 연출, Card175Cast2RUID 대체)
+	property string AzureEdgePropulsionRUID4 = "436c337c6da14cd79edbcc7c936eda64"  -- hit/0/4
+	property string AzureEdgePropulsionRUID5 = "fd2a19a211e044a6b51facd133265d3a"  -- hit/0/5
+	property string AzureEdgeRideRUID = "29ab2868e672445b8af3659f9fe31d93"  -- 날아가는 몬스터한테 업히는 연출(유저 제공)
+	property string AzureEdgeStealFlashRUID = "f713b8efdada4fd2ab5235331d510a7d"  -- 충돌 시 훔치는 연출(유저 제공)
+
+	property number AzureEdgeEnhanceCastLifetime = 0.5  -- 실측 전 추정치(Card175Cast2Lifetime과 동일값)
+	property number AzureEdgePropulsionFrameDuration = 0.08  -- 실측 전 추정치 — 프레임 4→5 전환 간격
+	property number AzureEdgePropulsionScale = 0.9  -- 실측 전 추정치
+	-- 유저 지정: "살짝 몬스터보다 겹치긴 하는데 윗쪽에 업힌 것처럼" — 몬스터 위치보다 살짝 위, z도
+	-- 살짝 당겨서 몬스터 스프라이트 위에 그려지게 한다.
+	property number AzureEdgeRideYOffset = 0.5
+	property number AzureEdgeRideZOffset = 0.15
+	property number AzureEdgeRideUpdateInterval = 0.05  -- 라이드 연출이 몬스터 위치를 따라가는 갱신 주기
+	property number AzureEdgeStealFlashLifetime = 0.4  -- 실측 전 추정치
+
+	-- 유저 표: "넉백 2개 충돌시 범위 타격 증가" — 무스펠하임과 동일 배율(1.7배)
+	property number AzureEdgeMergedExplosionMultiplier = 1.7
+
+	method number GetAzureEdgeDamage(integer level)
+		if level >= 3 then return 360
+		elseif level >= 2 then return 340
+		end
+		return 320
+	end
+
+	-- 범위 폭발 비율 — 110/120/130% (유저 표, 무스펠하임의 고정 100%를 대체)
+	method number GetAzureEdgeExplosionPercent(integer level)
+		if level >= 3 then return 1.30
+		elseif level >= 2 then return 1.20
+		end
+		return 1.10
+	end
+
+	-- 자체 크리티컬 확률 보너스 — 30/35/40% (유저 표, 무스펠하임의 GetMuspelheimCritChance와 동일 훅)
+	method number GetAzureEdgeCritChance(integer level)
+		if level >= 3 then return 0.40
+		elseif level >= 2 then return 0.35
+		end
+		return 0.30
+	end
+
+	-- 무스펠하임과 동일한 좌/우 최외곽 탐색 + 중앙근방 예외 로직(항상 2명 병렬 넉백 — 유저 표
+	-- "타겟 수 2" 고정, 무스펠하임 Lv3~5의 targetCount>=2 분기와 동일).
+	@ExecSpace("ServerOnly")
+	method void AzureEdgeAttack(number damage, boolean isCrit)
+		local map = self:GetCurrentMap()
+		if map == nil then return end
+		local monsters = map:GetChildComponentsByTypeName("script.MonsterAI", false)
+		local centerX = self:GetZoneCenterX()
+
+		local leftExtreme, rightExtreme = nil, nil
+		local centerCluster = {}
+		for _, mob in ipairs(monsters) do
+			---@type MonsterAI
+			local m = mob
+			if isvalid(m) and not m._dead and isvalid(m.Entity) then
+				local x = m.Entity.TransformComponent.Position.x
+				if x < centerX - self.Card175CenterRadius and (leftExtreme == nil or x < leftExtreme.Entity.TransformComponent.Position.x) then
+					leftExtreme = m
+				elseif x > centerX + self.Card175CenterRadius and (rightExtreme == nil or x > rightExtreme.Entity.TransformComponent.Position.x) then
+					rightExtreme = m
+				elseif x >= centerX - self.Card175CenterRadius and x <= centerX + self.Card175CenterRadius then
+					table.insert(centerCluster, m)
+				end
+			end
+		end
+		if leftExtreme == nil and rightExtreme == nil and #centerCluster == 0 then return end
+
+		self:PlayAzureEdgeUseSound()
+
+		if leftExtreme ~= nil and rightExtreme ~= nil then
+			self:FireAzureEdgeShovePaired(map, monsters, leftExtreme, rightExtreme, centerX, damage, isCrit)
+		else
+			if leftExtreme ~= nil then
+				self:FireAzureEdgeShove(map, monsters, leftExtreme, centerX, damage, isCrit)
+			elseif #centerCluster > 0 then
+				local pick = centerCluster[_UtilLogic:RandomIntegerRange(1, #centerCluster)]
+				self:FireAzureEdgeShove(map, monsters, pick, centerX - self.Card175OutwardOvershoot, damage, isCrit)
+			end
+			if rightExtreme ~= nil then
+				self:FireAzureEdgeShove(map, monsters, rightExtreme, centerX, damage, isCrit)
+			elseif #centerCluster > 0 then
+				local pick = centerCluster[_UtilLogic:RandomIntegerRange(1, #centerCluster)]
+				self:FireAzureEdgeShove(map, monsters, pick, centerX + self.Card175OutwardOvershoot, damage, isCrit)
+			end
+		end
+	end
+
+	-- 캐스트(+강화 보조연출+추진 프레임) 재생 → 넉백 시작(라이드 연출 부착) → 착지 시 onLanded(stopPos).
+	-- 무스펠하임의 LaunchMuspelheimKnockback과 동일 골격 + 신규 연출만 추가.
+	-- 유저 지정(2026-08-14): 넉백당한 primary가 중앙까지 날아가는 경로에 다른 몬스터가 서 있으면, 그
+	-- 몬스터도 스틸(TriggerStealDrop)이 굴러가야 한다 — 지금까지는 착지한 primary(들)에게만 적용됐다.
+	-- 플레시 미라주의 "경로상 충돌" 판정(FireFleshMirageShove 참고: 같은 뎁스 밴드 + primaryX~destX
+	-- 사이에 있는 몬스터, 거리 비례 지연으로 타이밍 맞춤)을 그대로 재사용하되, 대미지는 추가하지 않는다
+	-- (아주르 엣지는 원래 "경로상 충돌 대미지 없음"이 설계 의도라 그건 유지 — 유저 요청은 스틸만).
+	@ExecSpace("ServerOnly")
+	method void LaunchAzureEdgeKnockback(table monsters, MonsterAI primary, number destX, any onLanded)
+		if not isvalid(primary) or not isvalid(primary.Entity) or not isvalid(primary.Entity.TransformComponent) then return end
+		destX = self:ClampKnockbackDestX(primary, destX)
+		local pp = primary.Entity.TransformComponent.Position
+		local scaleRatio = self:GetEffectScaleRatio(primary)
+		-- 무스펠하임과 동일한 반전 기준(FlipX=false가 오른쪽 방향) — 왼쪽으로 보낼 때만 반전
+		local dirRight = destX > pp.x
+		local flipped = not dirRight
+		local thrustSign = dirRight and 1 or -1
+		local castOrigin = Vector3(pp.x, pp.y + self.Card175EffectYOffset, pp.z)
+
+		local castFx = self:SpawnEffectWithModel(self.Card175CastRUID, castOrigin, 0, 1.0, self.Card175CastScale * scaleRatio, 1.0, "skilleffectlong")
+		if castFx ~= nil then
+			castFx:Destroy(self.Card175CastLifetime)
+			local castR = castFx.SpriteRendererComponent
+			if castR ~= nil then castR.FlipX = not flipped end
+			_TweenLogic:PlayTween(0.0, self.Card175ThrustDistance, self.Card175ThrustDuration, EaseType.QuadEaseOut, function(t)
+				if not isvalid(castFx) then return end
+				castFx.TransformComponent.Position = Vector3(castOrigin.x + thrustSign * t, castOrigin.y, castOrigin.z)
+			end)
+		end
+
+		-- 유저 지정: "effect 다음 연출이 강화 연출이거든 그거 쓰면된다" — 보조 연출을 effect0로
+		-- 교체(원본 무스펠하임의 Card175Cast2 자리를 대신 차지, 위치/반전 로직은 동일)
+		local cast2Pos = Vector3(castOrigin.x - thrustSign * self.Card175Cast2OffsetX, castOrigin.y, castOrigin.z)
+		local cast2Fx = self:SpawnEffectWithModel(self.AzureEdgeEnhanceCastRUID, cast2Pos, 0, 1.0, self.Card175Cast2Scale * scaleRatio, 1.0, "skilleffectlong")
+		if cast2Fx ~= nil then
+			cast2Fx:Destroy(self.AzureEdgeEnhanceCastLifetime)
+			local cast2R = cast2Fx.SpriteRendererComponent
+			if cast2R ~= nil then cast2R.FlipX = flipped end
+		end
+
+		-- 유저 지정: "히트 연출에서 4~5는 스킬 나갈때 뒤에 붙여추면되 추진력같은 느낌" — 발사 지점에
+		-- 정지-프레임 수동 스왑으로 두 프레임(4→5)을 짧게 이어붙여 추진 꼬리처럼 보이게 한다.
+		local propulsionFx = self:SpawnEffect(self.AzureEdgePropulsionRUID4, castOrigin, 0, 1.0, self.AzureEdgePropulsionScale * scaleRatio, 1.0)
+		if propulsionFx ~= nil then
+			local propR = propulsionFx.SpriteRendererComponent
+			if propR ~= nil then propR.FlipX = not flipped end
+			_TimerService:SetTimerOnce(function()
+				if isvalid(propulsionFx) and isvalid(propR) then propR.SpriteRUID = self.AzureEdgePropulsionRUID5 end
+			end, self.AzureEdgePropulsionFrameDuration)
+			propulsionFx:Destroy(self.AzureEdgePropulsionFrameDuration * 2)
+		end
+
+		-- 넉백이 멈추는 자리(stopPos) — 캐스트 시점에 미리 고정(다른 스킬과 동일한 정책)
+		local stopPos = Vector3(destX, pp.y, pp.z)
+
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) or not isvalid(primary) or not isvalid(primary.Entity) or primary._dead then return end
+			local primaryX = primary.Entity.TransformComponent.Position.x
+			primary:ApplyLateralShove(destX, self.Card175KnockbackDuration)
+
+			-- 경로상 충돌 스틸 — primaryX~destX 사이(같은 뎁스 밴드)에 있는 다른 몬스터에게, primary가
+			-- 실제로 그 몬스터의 X를 지나가는 시점(거리 비례 지연)에 맞춰 TriggerStealDrop만 적용한다
+			-- (대미지는 없음 — FireFleshMirageShove의 충돌 판정과 동일한 틀, 목적만 스틸로 교체).
+			local totalDist = math.abs(destX - primaryX)
+			if monsters ~= nil and totalDist > 0 then
+				local travelRight = destX > primaryX
+				for _, mob in ipairs(monsters) do
+					---@type MonsterAI
+					local m = mob
+					if isvalid(m) and m ~= primary and not m._dead and isvalid(m.Entity) and self:IsSameDepthBand(primary, m) then
+						local mx = m.Entity.TransformComponent.Position.x
+						local inPath = (travelRight and mx >= primaryX and mx <= destX)
+							or ((not travelRight) and mx <= primaryX and mx >= destX)
+						if inPath then
+							local hitDelay = self.Card175KnockbackDuration * (math.abs(mx - primaryX) / totalDist)
+							_TimerService:SetTimerOnce(function()
+								if not isvalid(self) or not isvalid(m) or m._dead or not isvalid(m.Entity) then return end
+								self:TriggerStealDrop(m)
+								log("AzureEdgePathSteal: passed monster at x=" .. string.format("%.2f", mx))
+							end, hitDelay)
+						end
+					end
+				end
+			end
+
+			-- 유저 지정: "날아가는(넉백되는) 몬스터한테 붙이고 살짝 겹치긴 하는데 윗쪽에 업힌 것처럼" —
+			-- 넉백 이동 내내 몬스터 위치를 따라가는 라이드 연출.
+			local rideFx = self:SpawnEffect(self.AzureEdgeRideRUID, Vector3(pp.x, pp.y + self.AzureEdgeRideYOffset, pp.z - self.AzureEdgeRideZOffset), 0, 1.0, scaleRatio, 1.0)
+			local rideTickId = 0
+			if rideFx ~= nil then
+				rideTickId = _TimerService:SetTimerRepeat(function()
+					if not isvalid(self) or not isvalid(rideFx) or not isvalid(primary) or not isvalid(primary.Entity) then
+						if rideTickId ~= 0 then _TimerService:ClearTimer(rideTickId) end
+						return
+					end
+					local cp = primary.Entity.TransformComponent.Position
+					rideFx.TransformComponent.Position = Vector3(cp.x, cp.y + self.AzureEdgeRideYOffset, cp.z - self.AzureEdgeRideZOffset)
+				end, self.AzureEdgeRideUpdateInterval)
+			end
+
+			_TimerService:SetTimerOnce(function()
+				if not isvalid(self) then return end
+				if rideTickId ~= 0 then _TimerService:ClearTimer(rideTickId) end
+				if isvalid(rideFx) then rideFx:Destroy() end
+				if onLanded ~= nil then onLanded(stopPos) end
+			end, self.Card175KnockbackDuration)
+		end, self.Card175KnockbackStartDelay)
+	end
+
+	-- 단일 타겟용 — 넉백이 끝나면 그 자리에서 기본 크기(1.0배)로 폭발 + 스틸 드랍(그 몬스터에게만).
+	@ExecSpace("ServerOnly")
+	method void FireAzureEdgeShove(Entity map, table monsters, MonsterAI primary, number destX, number damage, boolean isCrit)
+		self:LaunchAzureEdgeKnockback(monsters, primary, destX, function(stopPos)
+			self:ResolveAzureEdgeExplosion(map, stopPos, damage, isCrit, 1.0, { primary })
+		end)
+	end
+
+	-- 좌우 실제 몬스터가 둘 다 있어 중앙에서 충돌하는 경우 — 무스펠하임과 동일하게 폭발은 평균 위치에서
+	-- 1.7배로 1번만, 스틸 드랍은 충돌한 두 몬스터 모두에게 각각 적용.
+	@ExecSpace("ServerOnly")
+	method void FireAzureEdgeShovePaired(Entity map, table monsters, MonsterAI a, MonsterAI b, number destX, number damage, boolean isCrit)
+		local landedPositions = {}
+		local onLand = function(stopPos)
+			table.insert(landedPositions, stopPos)
+			if #landedPositions >= 2 then
+				local p1 = landedPositions[1]
+				local p2 = landedPositions[2]
+				local mergedPos = Vector3((p1.x + p2.x) / 2, (p1.y + p2.y) / 2, p1.z)
+				self:ResolveAzureEdgeExplosion(map, mergedPos, damage, isCrit, self.AzureEdgeMergedExplosionMultiplier, { a, b })
+			end
+		end
+		self:LaunchAzureEdgeKnockback(monsters, a, destX, onLand)
+		self:LaunchAzureEdgeKnockback(monsters, b, destX, onLand)
+	end
+
+	-- 폭발 연출(+스틸 플래시) 재생 + 반경 안의 모든 몬스터에게 기준값의 110/120/130% 대미지, 그리고
+	-- 넉백되어 충돌(착지)한 몬스터에게만 스틸의 드랍(메소100%+아이템50%, TriggerStealDrop 재사용)을 적용.
+	@ExecSpace("ServerOnly")
+	method void ResolveAzureEdgeExplosion(Entity map, Vector3 stopPos, number damage, boolean isCrit, number sizeMultiplier, table stealTargets)
+		local fxPos = Vector3(stopPos.x, stopPos.y + self.Card175EffectYOffset, stopPos.z)
+		local fx = self:SpawnEffectWithModel(self.Card175ExplosionRUID, fxPos, 0, 1.0, self.Card175ExplosionScale * sizeMultiplier, 1.0, "skilleffectlong")
+		if fx ~= nil then fx:Destroy(self.Card175ExplosionLifetime) end
+
+		-- 유저 지정: "몬스터랑 부딪히면 이 연출, 훔치는 연출" — 폭발과 같이 스틸 플래시도 터진다.
+		local stealFx = self:SpawnEffect(self.AzureEdgeStealFlashRUID, fxPos, 0, 1.0, sizeMultiplier, 1.0)
+		if stealFx ~= nil then stealFx:Destroy(self.AzureEdgeStealFlashLifetime) end
+		self:PlayAzureEdgeHitSound()
+
+		local explosionRadius = self.Card175ExplosionRadius * sizeMultiplier
+		local explosionDamage = damage * self:GetAzureEdgeExplosionPercent(self.AzureEdgeLevel)
+
+		local monsters = map:GetChildComponentsByTypeName("script.MonsterAI", false)
+		local hitCount = 0
+		for _, mob in ipairs(monsters) do
+			---@type MonsterAI
+			local m = mob
+			if isvalid(m) and not m._dead and isvalid(m.Entity) then
+				local mp = m.Entity.TransformComponent.Position
+				local dx = mp.x - stopPos.x
+				local dy = mp.y - stopPos.y
+				if (dx * dx + dy * dy) <= (explosionRadius * explosionRadius) then
+					hitCount = hitCount + 1
+					if isCrit then m:TakeDamageCrit(explosionDamage * 2)
+					else m:TakeDamage(explosionDamage) end
+				end
+			end
+		end
+
+		if stealTargets ~= nil then
+			for _, t in ipairs(stealTargets) do
+				if isvalid(t) then self:TriggerStealDrop(t) end
+			end
+		end
+
+		log("AzureEdgeExplosion: hit=" .. hitCount .. " dmg=" .. math.floor(isCrit and explosionDamage * 2 or explosionDamage))
+	end
+
+	@ExecSpace("Multicast")
+	method void PlayAzureEdgeUseSound()
+		if self:IsServer() then return end
+		_SoundService:PlaySound(self.AzureEdgeUseSoundRUID, 1.0)
+	end
+
+	@ExecSpace("Multicast")
+	method void PlayAzureEdgeHitSound()
+		if self:IsServer() then return end
+		_SoundService:PlaySound(self.AzureEdgeHitSoundRUID, 1.0)
 	end
 
 	-- ── 쉐이드 전용: 메소 익스플로젼 (카드177, 슬롯형 액티브 6호). 스틸이 떨어뜨린 메소(GameManager의
@@ -3056,6 +3896,174 @@ script CardManager extends Logic
 		_SoundService:PlaySound(self.Card177SoundRUID, 1.0)
 	end
 
+	-- ── 쉐이드 조합 스킬: 메소 데토네이션 (카드189) — 메소 익스플로젼(177) Lv5 + 카르마(182) + 다크
+	-- 사이트(184) + 피지컬 트레이닝(183, 셋 다 슬롯 없는 패시브) 보유 시 등장. 메소 익스플로젼의 "필드에
+	-- 착지한 메소 전부 동시 폭발, 없으면 대기" 구조를 그대로 재사용하되, 신규 리소스팩("메소 익스플로젼
+	-- VI")의 animationclip 3종(effect0=차지/effect=폭발/effect1=타격)을 네이티브 직접 재생(수동 프레임
+	-- 스왑 대신 SpriteRUID에 animationclip RUID를 바로 지정)으로 교체하고, 몬스터 피격마다 스턴이 새로
+	-- 추가된다(유저 표: 50/60/70%, 지속 1/1/2초). 기본 공격 메소 드랍 확률도 레벨식(최대 25%)을 벗어나
+	-- 고정 30%로 오른다(GetMesoExplosionBasicAttackDropChance 참고). 메소 익스플로젼 슬롯을 그대로
+	-- 넘겨받는다. 3레벨까지만 존재(다른 조합 스킬과 동일). 리소스팩에 전용 사운드가 없어 메소 익스플로젼과
+	-- 동일한 사운드(Card177SoundRUID)를 재사용한다.
+	@Sync property integer MesoDetonationLevel = 0
+	property number Card189Cooldown = 7.0  -- 레벨 무관 고정(유저 표, 메소 익스플로젼과 동일)
+	property string Card189IconRUID = "def5b9aea9dc4bd5b93940df791f0cec"
+
+	-- "메소 익스플로젼 VI" 리소스팩 animationclip 직접 재생용 RUID
+	property string Card189ChargeRUID = "538c9a0b06d44519a0d5c8d0e2e61e1f"     -- effect0(차지)
+	property string Card189ExplosionRUID = "486883a76bae45e3b7c3d55a08265ea9" -- effect(폭발)
+	property string Card189HitRUID = "3d510fa2fdbf4cdb9b106b83808e3d22"       -- effect1(타격)
+
+	-- 연출 타이밍 — 실측(_ResourceService:LoadAnimationClipAndWait, effect0/effect/effect1 전부
+	-- 19~12프레임/0.87초로 확인)보다 살짝 짧게 잡는다(루프 재시작 깜빡임 방지 컨벤션). 라이브 확인 후 조정 필요.
+	property number Card189ChargeDuration = 0.82
+	property number Card189ExplosionLifetime = 0.82
+	property number Card189HitEffectLifetime = 0.82
+	-- 차지가 끝나기 이 시간 전에 폭발+피해가 겹쳐 시작한다(메소 익스플로젼 Card177Effect2LeadTime과 동일 관례)
+	property number Card189LeadTime = 0.15
+	-- 유저 지적(라이브 확인, 2026-08-17): 폭발 연출이 자체적으로 2번 도는 것처럼 보인다("루프도는듯")
+	-- — 루프를 억지로 억제하는 대신 그 자체를 메커니즘으로 채택, 폭발당 대미지를 50%/50%로 나눠 2번
+	-- 적용한다(총 데미지는 동일). 연출 크기는 20%로 축소했다가, 유저가 "메소 익스플로젼이랑 범위·연출
+	-- 크기 같으면 좋겠다"고 정정해서 1.0(메소 익스플로젼과 동일)으로 되돌림 — 판정 범위(Card189Explosion
+	-- HalfWidth/HalfHeight)는 처음부터 메소 익스플로젼과 같은 값이라 이제 연출·판정 둘 다 일치한다.
+	-- 유저 지정(2026-08-17): "너무 크다" — 메소 익스플로젼과 동일 크기(1.0)에서 다시 10% 축소.
+	property number Card189EffectScale = 0.9
+	property number Card189HitPercent = 0.5  -- 1/2타 동일 비율(유저 지정: 50%,50%)
+	-- 폭발 연출이 자체적으로 한 번 더 도는 시점(추정치 — 실측 전, 라이브 확인 후 조정 필요)
+	property number Card189SecondHitDelay = 0.41
+
+	-- 폭발 판정 타원(가로/세로 반경) — 메소 익스플로젼(Card177)의 시각 배치를 그대로 재사용한 추정치.
+	-- 신규 연출 크기가 다를 수 있어 라이브 확인 후 조정 필요.
+	property number Card189ExplosionXOffset = 0.2
+	property number Card189ExplosionYOffset = 0.1
+	-- 유저 지정(2026-08-17): 연출과 함께 판정 범위도 10% 축소(메소 익스플로젼 기준값 1.05/0.57의 90%)
+	property number Card189ExplosionHalfWidth = 0.945
+	property number Card189ExplosionHalfHeight = 0.513
+	property number Card189ExplosionCenterYOffset = 0.64
+	property number Card189ExplosionCenterXOffset = 0.2
+
+	-- 타당 기준 데미지(레벨별 고정값 — 유저 지정 표)
+	method number GetMesoDetonationDamage(integer level)
+		if level >= 3 then return 340
+		elseif level >= 2 then return 320
+		end
+		return 300
+	end
+
+	-- 스턴 확률 — Lv1:50% / Lv2:60% / Lv3:70% (유저 지정 표)
+	method number GetMesoDetonationStunChance(integer level)
+		if level >= 3 then return 0.70
+		elseif level >= 2 then return 0.60
+		end
+		return 0.50
+	end
+
+	-- 스턴 지속시간 — Lv1~2:1초 / Lv3:2초 (유저 지정 표)
+	method number GetMesoDetonationStunDuration(integer level)
+		if level >= 3 then return 2.0 end
+		return 1.0
+	end
+
+	-- 반환값(boolean) 의미는 MesoExplosionAttack과 동일 — false면 TickCard가 쿨타임을 소모하지 않고 대기 상태로 둔다.
+	@ExecSpace("ServerOnly")
+	method boolean MesoDetonationAttack(number damage, boolean isCrit)
+		local drops = _GameManager:PopLandedMesoDrops(999999)
+		if #drops == 0 then return false end
+
+		local map = self:GetCurrentMap()
+		for _, drop in ipairs(drops) do
+			_GameManager:AddGold(drop.amount)
+			_GameManager:ClearMesoIconByDropId(drop.id)
+			if map ~= nil then
+				local localPos = self:WorldToCurrentMapLocal(drop.worldPos)
+				self:ResolveMesoDetonation(map, localPos, damage, isCrit)
+			end
+		end
+		return true
+	end
+
+	-- 1단계: effect0(차지) animationclip 직접 재생. 끝나기 Card189LeadTime초 전에 2단계(폭발 연출 +
+	-- 대미지 + 스턴)를 예약한다(메소 익스플로젼과 동일 순서 관례).
+	@ExecSpace("ServerOnly")
+	method void ResolveMesoDetonation(Entity map, Vector3 localPos, number damage, boolean isCrit)
+		local fxPos = Vector3(localPos.x + self.Card189ExplosionXOffset, localPos.y + self.Card189ExplosionYOffset, localPos.z - 0.1)
+		local fx = self:SpawnEffect(self.Card189ChargeRUID, fxPos, 0, 1.0, self.Card189EffectScale, 1.0)
+		if fx ~= nil then fx:Destroy(self.Card189ChargeDuration) end
+
+		local delay = math.max(0, self.Card189ChargeDuration - self.Card189LeadTime)
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) or not isvalid(map) then return end
+			self:ResolveMesoDetonationImpact(map, localPos, damage, isCrit)
+		end, delay)
+	end
+
+	-- 2단계: effect(폭발) 연출 스폰(자체적으로 2번 도는 것처럼 보이는 그 연출) + 대미지 판정을 2번(즉시 +
+	-- Card189SecondHitDelay초 뒤) 실행 — 각각 ResolveMesoDetonationHit이 전체 데미지의 50%씩 적용한다.
+	@ExecSpace("ServerOnly")
+	method void ResolveMesoDetonationImpact(Entity map, Vector3 localPos, number damage, boolean isCrit)
+		self:PlayMesoDetonationSound()
+		local fxPos = Vector3(localPos.x + self.Card189ExplosionXOffset, localPos.y + self.Card189ExplosionYOffset, localPos.z - 0.1)
+		local fx = self:SpawnEffect(self.Card189ExplosionRUID, fxPos, 0, 1.0, self.Card189EffectScale, 1.0)
+		if fx ~= nil then fx:Destroy(self.Card189ExplosionLifetime) end
+
+		self:ResolveMesoDetonationHit(map, localPos, damage, isCrit)
+		-- 유저 지적(2026-08-17): "2타 때 새 연출이 전혀 안 뜨는 게 문제" — 1타의 폭발(effect)이 아직
+		-- 살아있는(Card189ExplosionLifetime=0.82초 뒤 소멸, 즉 t=Card189SecondHitDelay+0.82초까지 생존)
+		-- 동안 차지(effect0)를 새로 겹쳐 스폰해서 "폭발→차지 겹침→2타"로 자연스럽게 이어지게 한다.
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) or not isvalid(map) then return end
+			self:PlayMesoDetonationSound()
+			local fxPos2 = Vector3(localPos.x + self.Card189ExplosionXOffset, localPos.y + self.Card189ExplosionYOffset, localPos.z - 0.1)
+			local fx2 = self:SpawnEffect(self.Card189ChargeRUID, fxPos2, 0, 1.0, self.Card189EffectScale, 1.0)
+			if fx2 ~= nil then fx2:Destroy(self.Card189ChargeDuration) end
+			self:ResolveMesoDetonationHit(map, localPos, damage, isCrit)
+		end, self.Card189SecondHitDelay)
+	end
+
+	-- 실제 범위 대미지(전체의 Card189HitPercent=50%) + 몬스터마다 확률 스턴 적용 1회분. 크리티컬 여부는
+	-- 캐스트 시점 값을 두 번 다 그대로 쓰지만, 스턴 확률/타격 연출은 매번 독립적으로 판정한다.
+	@ExecSpace("ServerOnly")
+	method void ResolveMesoDetonationHit(Entity map, Vector3 localPos, number damage, boolean isCrit)
+		local halfWidth = self.Card189ExplosionHalfWidth
+		local halfHeight = self.Card189ExplosionHalfHeight
+		local centerX = localPos.x + self.Card189ExplosionCenterXOffset
+		local centerY = localPos.y + self.Card189ExplosionCenterYOffset
+
+		local stunChance = self:GetMesoDetonationStunChance(self.MesoDetonationLevel)
+		local stunDuration = self:GetMesoDetonationStunDuration(self.MesoDetonationLevel)
+		local hitDamage = damage * self.Card189HitPercent
+
+		local monsters = map:GetChildComponentsByTypeName("script.MonsterAI", false)
+		local hitCount = 0
+		for _, mob in ipairs(monsters) do
+			---@type MonsterAI
+			local m = mob
+			if isvalid(m) and not m._dead and isvalid(m.Entity) then
+				local mp = m.Entity.TransformComponent.Position
+				local nx = (mp.x - centerX) / halfWidth
+				local ny = (mp.y - centerY) / halfHeight
+				if (nx * nx + ny * ny) <= 1.0 then
+					hitCount = hitCount + 1
+					local scaleRatio = self:GetEffectScaleRatio(m)
+					local hitFx = self:SpawnEffect(self.Card189HitRUID, Vector3(mp.x, mp.y, mp.z - 0.1), 0, 1.0, self.Card189EffectScale * scaleRatio, 1.0)
+					if hitFx ~= nil then hitFx:Destroy(self.Card189HitEffectLifetime) end
+					if isCrit then m:TakeDamageCrit(hitDamage * 2)
+					else m:TakeDamage(hitDamage) end
+					if _UtilLogic:RandomDouble() < stunChance then
+						m:ApplyStun(stunDuration, true)
+					end
+				end
+			end
+		end
+		log("MesoDetonation: hit=" .. hitCount .. " dmg=" .. math.floor(isCrit and hitDamage * 2 or hitDamage))
+	end
+
+	@ExecSpace("Multicast")
+	method void PlayMesoDetonationSound()
+		if self:IsServer() then return end
+		_SoundService:PlaySound(self.Card177SoundRUID, 1.0)
+	end
+
 	-- ── 쉐이드 전용: 쉐도우 파트너 (카드178, 슬롯형 액티브 7호). 피닉스처럼 지속시간 동안 소환수를
 	-- 유지하는 스킬이지만, 자체 공격 타이머 대신 "플레이어가 이번 프레임에 실제로 발동한 액션(기본
 	-- 공격 172 또는 슬롯 스킬)을 그대로 따라 한다"(유저 지정) — 데미지는 레벨별 비율로 너프. 같은
@@ -3103,7 +4111,8 @@ script CardManager extends Logic
 	-- 할 수 있게, 저 상태에서는 제자리에 멈춰있음 될듯"으로 확장 — 공격 직후 파트너 머리 위에 이
 	-- 아이콘을 띄운 채 제자리에 서서 대기하는 시간(=이동 없음, 다음 행동도 막힘). 복제 전체가 끝날
 	-- 때까지 다음 복제를 막는 "바쁨" 판정은 이동(RepositionDuration)+이 값으로 계산한다.
-	property number Card178PostAttackDuration = 2.0
+	-- 유저 지정(2026-08-13): 스턴(어지러움 아이콘 유지) 시간 2.0→1.0초로 단축 — 파트너가 더 자주 움직임.
+	property number Card178PostAttackDuration = 1.0
 	property string Card178PostAttackIconRUID = "aff31eceba614575ab4959a4bbb43806"
 	property number Card178PostAttackIconYOffset = 0.8
 	-- 유저 지적(2026-08-12): "쉐도우 스턴 걸리는거 0.2s 정도 늦추고" + "공격하고 스턴걸릴때 연출이
@@ -3438,8 +4447,13 @@ script CardManager extends Logic
 					-- 0마리가 나오면(파트너가 원래 겨냥한 이 hit.target이 그 사이 죽은 경우 포함) 대체용으로
 					-- 쓸 수 있게 미리 담아둔다 — 각 메서드 쪽 수정과 짝이다.
 					self._shadowPartnerFallbackTarget = hit.target
-					if cardIdx == 171 then self:DoubleStepAttack(baseDamage, isCrit)
-					elseif cardIdx == 173 then self:SavageBlowAttack(baseDamage, isCrit)
+					-- 유저 지정(2026-08-13): "타겟된 애들한테만 1개씩, 카드 레벨이 2 이상이라도 1개만" —
+					-- 더블스텝/새비지블로우/스틸/다크플레어는 카드 레벨의 타겟수 공식(GetXTargetCount)을
+					-- 무시하고, 파트너가 실제로 서 있는 그 몬스터 1명(hit.target)에게만 고정 적용한다
+					-- (forcedTargets를 넘기면 각 메서드가 자체 GetClosestTargets 재선정을 건너뛴다).
+					local partnerForcedTargets = (isvalid(hit.target) and isvalid(hit.target.Entity)) and { hit.target } or {}
+					if cardIdx == 171 then self:DoubleStepAttack(baseDamage, isCrit, partnerForcedTargets)
+					elseif cardIdx == 173 then self:SavageBlowAttack(baseDamage, isCrit, partnerForcedTargets)
 					elseif cardIdx == 174 then self:SmokeGrenadeAttack(baseDamage, isCrit)
 					elseif cardIdx == 175 then
 						-- 유저 지적(2026-08-12): "쉐도우 파트너가 중앙 방향을 바라보게 쏠순 없나? 타겟이
@@ -3462,9 +4476,11 @@ script CardManager extends Logic
 							local shortDestX = tx + partnerFacingSign * self.Card178MuspelheimKnockbackDistance
 							self:FireMuspelheimShove(map, t, shortDestX, baseDamage, isCrit)
 						end
-					elseif cardIdx == 176 then self:StealAttack(baseDamage, isCrit)
+					elseif cardIdx == 176 then self:StealAttack(baseDamage, isCrit, partnerForcedTargets)
 					elseif cardIdx == 177 then self:MesoExplosionAttack(baseDamage, isCrit)
-					elseif cardIdx == 179 then self:DarkFlareAttack(baseDamage, isCrit)
+					elseif cardIdx == 179 then self:DarkFlareAttack(baseDamage, isCrit, partnerForcedTargets)
+					elseif cardIdx == 189 then self:MesoDetonationAttack(baseDamage, isCrit)
+					elseif cardIdx == 191 then self:AbyssalFlareAttack(baseDamage, isCrit, partnerForcedTargets)
 					end
 					hitCount = hitCount + 1
 				end
@@ -3540,6 +4556,273 @@ script CardManager extends Logic
 		end
 	end
 
+	-- ── 쉐이드 조합 스킬: 듀얼 쉐도우 파트너 (카드190) — 쉐도우 파트너(178) Lv5 + 다크 사이트(184) +
+	-- 크리티컬 엣지(181, 둘 다 슬롯 없는 패시브) 보유 시 등장. 기존 쉐도우 파트너는 소환된 1체가 매번
+	-- "기본공격이거나 슬롯 스킬 중 무작위"를 섞어서 썼는데, 이걸 역할이 고정된 2체로 분리한다 — 1체는
+	-- 슬롯 스킬만 무작위로 복사(기본공격 172 제외, 110/120/130%), 다른 1체는 기본공격만(110/130/150%).
+	-- 두 분신은 서로 완전히 독립적인 행동 주기/바쁨 상태를 가진다(같은 스킬을 동시에 쓸 필요가 없으므로
+	-- 별개 타이머로 굴린다 — 기존 ShadowPartnerAttack/ExecuteShadowPartnerCopy의 "전원 동기화" 구조와
+	-- 다름, 그래서 별도 상태(_dualPartnerA/B*)로 관리하고 기존 _shadowPartnerEntities/_shadowPartnerBusy는
+	-- 건드리지 않는다). 시각 연출/이동/공격 모션/사후 아이콘 등은 쉐도우 파트너의 리소스(Card178*)를 그대로
+	-- 재사용, 아이콘도 동일(a1a46c99..., 유저가 명시적으로 같은 RUID 지정). 쉐도우 파트너 슬롯을 그대로
+	-- 넘겨받는다. 3레벨까지만 존재(다른 조합 스킬과 동일).
+	@Sync property integer DualShadowPartnerLevel = 0
+	property number Card190Cooldown = 10.0  -- 레벨 무관 고정(쉐도우 파트너와 동일, 유저 표)
+	property number Card190Duration = 6.0  -- 레벨 무관 고정(쉐도우 파트너 Lv5 기준과 동일, 유저 표: "6")
+	-- 유저 지정(2026-08-17): 기본 공격 전담 분신(역할 B)만 크기 10% 축소(Card178Scale 기준 곱연산).
+	-- 스킬 복사 분신(역할 A)은 원래 크기 그대로.
+	property number Card190BasicPartnerScale = 0.9
+
+	property Entity _dualPartnerAEntity = nil  -- 슬롯 스킬 복사 담당
+	property boolean _dualPartnerABusy = false
+	property Entity _dualPartnerBEntity = nil  -- 기본 공격 전용
+	property boolean _dualPartnerBBusy = false
+	property Entity _dualPartnerMap = nil
+
+	-- 슬롯 스킬 복사 분신 대미지 비율 — Lv1:110% / Lv2:120% / Lv3:130% (유저 지정 표)
+	method number GetDualShadowPartnerSkillPercent(integer level)
+		if level >= 3 then return 1.30
+		elseif level >= 2 then return 1.20
+		end
+		return 1.10
+	end
+
+	-- 기본 공격 전용 분신 대미지 비율 — Lv1:110% / Lv2:130% / Lv3:150% (유저 지정 표)
+	method number GetDualShadowPartnerBasicPercent(integer level)
+		if level >= 3 then return 1.50
+		elseif level >= 2 then return 1.30
+		end
+		return 1.10
+	end
+
+	-- 슬롯 스킬 복사 분신 전용 후보 풀 — 슬롯에 배치된 카드만 모은다(기본공격 172는 애초에 슬롯 카드가
+	-- 아니라서 자동 제외되고, 자기 자신(190)과 쉐도우 파트너 원본(178)도 명시적으로 뺀다).
+	@ExecSpace("ServerOnly")
+	method table GetDualShadowPartnerSkillCandidateIndices()
+		local pool = {}
+		local slots = { self.Slot1Card, self.Slot2Card, self.Slot3Card, self.Slot4Card, self.Slot5Card, self.Slot6Card }
+		for _, c in ipairs(slots) do
+			if c ~= 0 and c ~= 178 and c ~= 190 then table.insert(pool, c) end
+		end
+		return pool
+	end
+
+	@ExecSpace("ServerOnly")
+	method void DualShadowPartnerAttack(number damage, boolean isCrit)
+		local map = self:GetCurrentMap()
+		if map == nil then return end
+
+		if isvalid(self._dualPartnerAEntity) then self._dualPartnerAEntity:Destroy() end
+		if isvalid(self._dualPartnerBEntity) then self._dualPartnerBEntity:Destroy() end
+		self._dualPartnerAEntity = nil
+		self._dualPartnerBEntity = nil
+		self._dualPartnerABusy = false
+		self._dualPartnerBBusy = false
+
+		local firstTarget = self:FindClosestInMap(map)
+		local basePos = self.Card178SpawnPosition
+		if firstTarget ~= nil and isvalid(firstTarget) and isvalid(firstTarget.Entity) then
+			local tp = firstTarget.Entity.TransformComponent.Position
+			basePos = Vector3(tp.x, tp.y + self.Card178HoverYOffset, self.Card178DepthZ)
+		end
+
+		self:PlayShadowPartnerCastEffect(basePos)
+
+		local posA = Vector3(basePos.x - self.Card178MultiSpawnSpacing / 2.0, basePos.y, basePos.z)
+		local posB = Vector3(basePos.x + self.Card178MultiSpawnSpacing / 2.0, basePos.y, basePos.z)
+		self._dualPartnerAEntity = self:SpawnDualPartnerBody(posA, self.Card178Scale)
+		self._dualPartnerBEntity = self:SpawnDualPartnerBody(posB, self.Card178Scale * self.Card190BasicPartnerScale)
+		self._dualPartnerMap = map
+
+		local interval = self.Card178ActionInterval
+		local actionCount = math.floor(self.Card190Duration / interval)
+		for i = 0, actionCount - 1 do
+			local delay = self.Card178FirstActionDelay + i * interval
+			_TimerService:SetTimerOnce(function() self:DualPartnerARandomAction() end, delay)
+			_TimerService:SetTimerOnce(function() self:DualPartnerBBasicAction() end, delay)
+		end
+
+		_TimerService:SetTimerOnce(function()
+			self:TryEndDualShadowPartnerLife()
+		end, self.Card190Duration)
+
+		log("DualShadowPartnerAttack: duration=" .. self.Card190Duration .. " skillPct=" .. math.floor(self:GetDualShadowPartnerSkillPercent(self.DualShadowPartnerLevel) * 100) .. " basicPct=" .. math.floor(self:GetDualShadowPartnerBasicPercent(self.DualShadowPartnerLevel) * 100))
+	end
+
+	@ExecSpace("ServerOnly")
+	method Entity SpawnDualPartnerBody(Vector3 pos, number scale)
+		local partner = self:SpawnEffectWithModel(self.Card178IdleRUID, pos, 0, 1.0, scale, 1.0, "persistenteffect")
+		if partner ~= nil and partner.SpriteRendererComponent ~= nil then
+			partner.SpriteRendererComponent:ChangeMaterial(self.Card178GlowMaterialId)
+		end
+		return partner
+	end
+
+	-- 유지시간이 다 됐을 때 호출 — 둘 중 하나라도 복제 동작이 재생 중이면(바쁨) 그게 끝날 때까지
+	-- 소환 해제를 미룬다(쉐도우 파트너 TryEndShadowPartnerLife와 동일한 패턴).
+	@ExecSpace("ServerOnly")
+	method void TryEndDualShadowPartnerLife()
+		if not isvalid(self) then return end
+		if self._dualPartnerABusy or self._dualPartnerBBusy then
+			_TimerService:SetTimerOnce(function()
+				self:TryEndDualShadowPartnerLife()
+			end, 0.1)
+			return
+		end
+		if isvalid(self._dualPartnerAEntity) then
+			local r = self._dualPartnerAEntity.SpriteRendererComponent
+			if r ~= nil then r.SpriteRUID = self.Card178DieRUID end
+			self._dualPartnerAEntity:Destroy(self.Card178DieDuration)
+		end
+		if isvalid(self._dualPartnerBEntity) then
+			local r = self._dualPartnerBEntity.SpriteRendererComponent
+			if r ~= nil then r.SpriteRUID = self.Card178DieRUID end
+			self._dualPartnerBEntity:Destroy(self.Card178DieDuration)
+		end
+		self._dualPartnerAEntity = nil
+		self._dualPartnerBEntity = nil
+		self._dualPartnerMap = nil
+	end
+
+	@ExecSpace("ServerOnly")
+	method void DualPartnerARandomAction()
+		if self.DualShadowPartnerLevel == 0 or self._dualPartnerABusy or not isvalid(self._dualPartnerAEntity) then return end
+		local pool = self:GetDualShadowPartnerSkillCandidateIndices()
+		if #pool == 0 then return end
+		local cardIdx = pool[_UtilLogic:RandomIntegerRange(1, #pool)]
+		self:ExecuteDualPartnerAction(1, cardIdx)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void DualPartnerBBasicAction()
+		if self.DualShadowPartnerLevel == 0 or self._dualPartnerBBusy or not isvalid(self._dualPartnerBEntity) then return end
+		self:ExecuteDualPartnerAction(2, 172)
+	end
+
+	method Entity GetDualPartnerEntity(integer role)
+		if role == 1 then return self._dualPartnerAEntity end
+		return self._dualPartnerBEntity
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SetDualPartnerBusy(integer role, boolean busy)
+		if role == 1 then self._dualPartnerABusy = busy
+		else self._dualPartnerBBusy = busy end
+	end
+
+	-- ExecuteShadowPartnerCopy의 단일 분신 버전 — 이동(걷기)→도착 즉시 공격 모션+실제 스킬 실행→대기
+	-- 포즈+쿨다운 아이콘→바쁨 해제까지 동일한 흐름이지만 분신 1체·역할별 배율 기준으로 단순화했다.
+	-- cardIdx별 실제 실행 분기는 ExecuteShadowPartnerCopy와 동일 목록을 유지한다(새 쉐이드 액티브 스킬
+	-- 추가 시 반드시 여기도 같이 추가할 것 — ExecuteShadowPartnerCopy 쪽 주석과 동일한 경고).
+	@ExecSpace("ServerOnly")
+	method void ExecuteDualPartnerAction(integer role, integer cardIdx)
+		local partner = self:GetDualPartnerEntity(role)
+		if not isvalid(partner) then return end
+		local liveMap = self:GetCurrentMap()
+		if liveMap == nil then return end
+		self._dualPartnerMap = liveMap
+
+		local targets = self:GetClosestTargetsFromPosition(liveMap, partner.TransformComponent.Position, 1)
+		if #targets == 0 then return end
+		local target = targets[1]
+
+		self:SetDualPartnerBusy(role, true)
+
+		local renderer = partner.SpriteRendererComponent
+		local startPos = partner.TransformComponent.Position
+		local targetPos = target.Entity.TransformComponent.Position
+		local facingRight = targetPos.x >= startPos.x
+		local facingSign = facingRight and 1 or -1
+		local destZ = startPos.z
+
+		if renderer ~= nil then
+			renderer.FlipX = facingRight
+			renderer.SpriteRUID = self.Card178WalkRUID
+		end
+
+		_TweenLogic:PlayTween(0.0, 1.0, self.Card178RepositionDuration, EaseType.Linear, function(t)
+			if not isvalid(partner) then return end
+			local curTargetX = targetPos.x
+			local curTargetY = targetPos.y
+			if isvalid(target) and isvalid(target.Entity) then
+				local ctp = target.Entity.TransformComponent.Position
+				curTargetX = ctp.x
+				curTargetY = ctp.y
+			end
+			local curDestY = curTargetY
+			if isvalid(target) and target._isFlying then curDestY = startPos.y end
+			local curDestX = curTargetX - facingSign * self.Card178AttackForwardOffset
+			local x = startPos.x + (curDestX - startPos.x) * t
+			local y = startPos.y + (curDestY - startPos.y) * t
+			partner.TransformComponent.Position = Vector3(x, y, destZ)
+		end)
+
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) or not isvalid(partner) then return end
+			if renderer ~= nil then renderer.SpriteRUID = self.Card178AttackRUID end
+
+			local percent = self:GetDualShadowPartnerBasicPercent(self.DualShadowPartnerLevel)
+			if role == 1 then percent = self:GetDualShadowPartnerSkillPercent(self.DualShadowPartnerLevel) end
+			local baseDamage = self:GetCardDamage(cardIdx) * percent
+			local isCrit = self:RollCrit(cardIdx)
+
+			if cardIdx == 172 then
+				if isvalid(target) and isvalid(target.Entity) then
+					self:ShadeBasicAttack(baseDamage, isCrit, target)
+				end
+			else
+				self._shadowPartnerCopyActive = true
+				self._shadowPartnerFallbackTarget = target
+				local forcedTargets = (isvalid(target) and isvalid(target.Entity)) and { target } or {}
+				if cardIdx == 171 then self:DoubleStepAttack(baseDamage, isCrit, forcedTargets)
+				elseif cardIdx == 173 then self:SavageBlowAttack(baseDamage, isCrit, forcedTargets)
+				elseif cardIdx == 174 then self:SmokeGrenadeAttack(baseDamage, isCrit)
+				elseif cardIdx == 175 then
+					if isvalid(target) and isvalid(target.Entity) then
+						local tx = target.Entity.TransformComponent.Position.x
+						local shortDestX = tx + facingSign * self.Card178MuspelheimKnockbackDistance
+						self:FireMuspelheimShove(liveMap, target, shortDestX, baseDamage, isCrit)
+					end
+				elseif cardIdx == 176 then self:StealAttack(baseDamage, isCrit, forcedTargets)
+				elseif cardIdx == 177 then self:MesoExplosionAttack(baseDamage, isCrit)
+				elseif cardIdx == 179 then self:DarkFlareAttack(baseDamage, isCrit, forcedTargets)
+				elseif cardIdx == 189 then self:MesoDetonationAttack(baseDamage, isCrit)
+				elseif cardIdx == 191 then self:AbyssalFlareAttack(baseDamage, isCrit, forcedTargets)
+				end
+				self._shadowPartnerCopyActive = false
+			end
+			log("DualPartnerAction: role=" .. role .. " card=" .. cardIdx .. " dmg=" .. math.floor(isCrit and baseDamage * 2 or baseDamage))
+
+			_TimerService:SetTimerOnce(function()
+				if not isvalid(self) or not isvalid(partner) then return end
+				if renderer ~= nil then renderer.SpriteRUID = self.Card178IdleRUID end
+			end, self.Card178AttackMotionDuration)
+
+			-- 유저 지정(2026-08-17): "기본 공격하는애는(role 2) 스턴없이 이동하자" — 어지러움(쿨다운)
+			-- 아이콘을 띄운 채 제자리에 서 있는 사후 대기 단계를 건너뛰고, 공격 모션이 끝나자마자 바로
+			-- 바쁨 상태를 풀어 다음 행동 틱에 곧장 다시 걸어다닐 수 있게 한다. 스킬 복사 분신(role 1)은
+			-- 기존 그대로(아이콘 표시+대기).
+			if role == 1 then
+				_TimerService:SetTimerOnce(function()
+					if not isvalid(self) or not isvalid(partner) then return end
+					local pos = partner.TransformComponent.Position
+					local icon = self:SpawnEffectWithModel(self.Card178PostAttackIconRUID, Vector3(pos.x, pos.y + self.Card178PostAttackIconYOffset, pos.z - 0.1), 0, 1.0, 1.0, 1.0, "persistenteffect")
+					if icon ~= nil then icon:Destroy(self.Card178PostAttackDuration) end
+				end, self.Card178AttackMotionDuration + self.Card178StunDelay)
+
+				_TimerService:SetTimerOnce(function()
+					if not isvalid(self) then return end
+					self:SetDualPartnerBusy(role, false)
+				end, self.Card178AttackMotionDuration + self.Card178StunDelay + self.Card178PostAttackDuration)
+			else
+				_TimerService:SetTimerOnce(function()
+					if not isvalid(self) then return end
+					self:SetDualPartnerBusy(role, false)
+				end, self.Card178AttackMotionDuration)
+			end
+		end, self.Card178RepositionDuration)
+	end
+
 	-- ── 쉐이드 전용: 다크 플레어 (카드179, 슬롯형 액티브 8호). GetClosestTargets로 뽑힌 타겟마다 캐스트
 	-- 연출(Card179CastRUID, 16프레임 실측 기준 1.65초 추정)을 재생하고, 그 연출이 끝나기
 	-- Card179HitLeadTime(0.4초, 유저 지정) 전 시점에 타격 연출(hit/0/4~7 수동 프레임 스왑)+사운드+
@@ -3593,8 +4876,13 @@ script CardManager extends Logic
 	end
 
 	@ExecSpace("ServerOnly")
-	method void DarkFlareAttack(number damage, boolean isCrit)
-		local targets = self:GetClosestTargets(self:GetDarkFlareTargetCount(self.DarkFlareLevel))
+	method void DarkFlareAttack(number damage, boolean isCrit, table forcedTargets)
+		-- 유저 지정(2026-08-13): 쉐도우 파트너 전용 forcedTargets(파트너가 서 있는 몬스터 1명 고정) —
+		-- 다크 플레어가 레벨3 이상에서 원래 2명을 때리더라도 파트너 대신 실행일 땐 그 1명만.
+		local targets = forcedTargets
+		if targets == nil then
+			targets = self:GetClosestTargets(self:GetDarkFlareTargetCount(self.DarkFlareLevel))
+		end
 		-- 버그 수정(2026-08-12) — DoubleStepAttack과 동일한 이유/패턴.
 		if #targets == 0 then
 			if self._shadowPartnerCopyActive and isvalid(self._shadowPartnerFallbackTarget) then
@@ -3696,6 +4984,195 @@ script CardManager extends Logic
 		_SoundService:PlaySound(self.Card179HitSoundRUID, 1.0)
 	end
 
+	-- ── 쉐이드 조합 스킬: 어비설 플레어 (카드191) — 다크 플레어(179) Lv5 + 대거 액셀레이션(180) +
+	-- 피지컬 트레이닝(183, 둘 다 슬롯 없는 패시브) 보유 시 등장. 캐스트 연출은 다크 플레어와 완전히
+	-- 동일(Card179CastRUID/CastDuration/HitLeadTime 그대로 재사용, 신규 리소스팩에도 같은 RUID가
+	-- "effect"로 들어있음). 다크 플레어의 "타격+스턴" 대신, 같은 타이밍에 새 프레임(summon/stand/12~15,
+	-- 다크 플레어의 hit/0/4~7과 동일한 수동 프레임 스왑 기법)으로 "칼이 꼽히는" 연출을 재생하고, 그
+	-- 타이밍에 연무(안개)를 발생시킨다 — 연무는 지속시간(레벨별 2/3/4초) 동안 끊기지 않고 유지되며 그
+	-- 범위 안의 몬스터 전부에게 매초 틱 대미지(기준 데미지의 30/40/50%)를 입힌다. 스턴은 없음(유저
+	-- 표: 특수효과/확률 칸이 비어있고 틱데미지만 명시). 다크 플레어 슬롯을 그대로 넘겨받는다. 3레벨까지만 존재.
+	@Sync property integer AbyssalFlareLevel = 0
+	property number Card191Cooldown = 6.0  -- 레벨 무관 고정(다크 플레어와 동일, 유저 표)
+	property string Card191IconRUID = "b210de14b51f41608a208b1a0764697f"
+
+	-- "다크 플레어" 리소스팩(신규 요소) — "칼이 꼽히는" 연출용 4프레임(summon/stand/12~15)
+	property any Card191StabFrameRUIDs = {
+		"bc62499c10fd4f018c821178b8245dfc",  -- summon/stand/12
+		"7d2133b723854e96a68726f619b8039f",  -- summon/stand/13
+		"9f832c36252849f89abe91a1b2c06055",  -- summon/stand/14
+		"552cd33d30cc4427b42d45a4071e1c06",  -- summon/stand/15
+	}
+	property number Card191StabFrameStepDuration = 0.1  -- 다크 플레어 히트프레임(Card179HitFrameStepDuration)과 동일 간격 재사용
+	property string Card191StabSoundRUID = "540f3ba45a2c41f2b50029718093041e"  -- audio/Use(다크 플레어 히트사운드와 동일 RUID)
+	property string Card191FogAppearSoundRUID = "7b93fc6f8ec3479bbfb1311058b3d983"  -- audio/Attack1(연무 발생 전용, 신규)
+
+	-- 유저 재지정(2026-08-17): "연무 연출(summon/repeat) 빼줘, 그냥 칼꼽히고 12~15 거기 부분만
+	-- 필요한거야, 12~15가 n초동안 지속되어야해" — 별도 연무 스폰 없이, 칼이 꽂히는 4프레임을 지속시간
+	-- (duration) 내내 루프 재생한다. 틱 판정은 타원(가로/세로 반경 개별)으로 유지.
+	-- 유저 지정(2026-08-18): "범위가 좌우로 0.3 정도 더 길어야하고" — 세로는 기존 1.5 유지, 가로만 1.8로.
+	property number Card191FogHalfWidth = 1.8
+	property number Card191FogHalfHeight = 1.5
+	-- 유저 지정(2026-08-18): "사라질땐 알파 빠지면서 자연스럽게" — 연막탄(SmokeGrenadeFadeOutDuration=0.4)과
+	-- 동일 패턴으로 지속시간 끝나기 이 시간 전부터 알파를 0으로 낮춘다.
+	property number Card191FogFadeOutDuration = 0.4
+
+	-- 타당 기준 데미지(레벨별 고정값 — 유저 지정 표, 틱 대미지 계산의 기준값)
+	method number GetAbyssalFlareDamage(integer level)
+		if level >= 3 then return 300
+		elseif level >= 2 then return 280
+		end
+		return 260
+	end
+
+	-- 틱 대미지 비율 — Lv1:30% / Lv2:40% / Lv3:50% (유저 지정 표, 초당 기준 데미지에 곱)
+	method number GetAbyssalFlareTickPercent(integer level)
+		if level >= 3 then return 0.50
+		elseif level >= 2 then return 0.40
+		end
+		return 0.30
+	end
+
+	-- 연무 지속시간(=틱 횟수) — Lv1:2초 / Lv2:3초 / Lv3:4초 (유저 지정 표)
+	method integer GetAbyssalFlareDuration(integer level)
+		if level >= 3 then return 4
+		elseif level >= 2 then return 3
+		end
+		return 2
+	end
+
+	-- 1단계: 캐스트(다크 플레어와 동일 연출/타이밍). 타겟 수는 레벨 무관 항상 1명(유저 표).
+	@ExecSpace("ServerOnly")
+	method void AbyssalFlareAttack(number damage, boolean isCrit, table forcedTargets)
+		local targets = forcedTargets
+		if targets == nil then
+			targets = self:GetClosestTargets(1)
+		end
+		if #targets == 0 then
+			if self._shadowPartnerCopyActive and isvalid(self._shadowPartnerFallbackTarget) then
+				targets = { self._shadowPartnerFallbackTarget }
+			else
+				return
+			end
+		end
+		local map = self:GetCurrentMap()
+		if map == nil then return end
+		local target = targets[1]
+		if not isvalid(target) or not isvalid(target.Entity) then return end
+
+		local p = self:WorldToCurrentMapLocal(target.Entity.TransformComponent.WorldPosition)
+		local capturedPos = Vector3(p.x, p.y + self.Card179CastYOffset, p.z - 0.1)
+		-- 버그 수정(2026-08-17, 유저 지적: "연무 범위는 틱대미지 들어가야하는데 안들어가는듯") — 틱
+		-- 판정용 중심좌표는 다른 몬스터의 mp(Entity.TransformComponent.Position, 로컬)와 같은 좌표계여야
+		-- 하는데, WorldToCurrentMapLocal로 변환한 capturedPos(연출 배치용)를 그대로 재사용해서 좌표계가
+		-- 어긋나 있었다(연막탄의 centerPos와 동일하게 분리) — 틱 판정은 target 자신의 로컬 Position을 쓴다.
+		local centerPos = target.Entity.TransformComponent.Position
+		local scaleRatio = self:GetEffectScaleRatio(target)
+
+		local fx = self:SpawnEffectWithModel(self.Card179CastRUID, capturedPos, 0, 1.0, self.Card179CastScale * scaleRatio, 1.0, "skilleffectlong")
+		if fx ~= nil then fx:Destroy(self.Card179CastDuration) end
+
+		local capturedMap = map
+		local capturedDamage = damage
+		local capturedIsCrit = isCrit
+		local capturedScaleRatio = scaleRatio
+		local hitDelay = math.max(0, self.Card179CastDuration - self.Card179HitLeadTime)
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) then return end
+			self:ResolveAbyssalFlareStab(capturedPos, centerPos, capturedScaleRatio, capturedDamage, capturedIsCrit, capturedMap)
+		end, hitDelay)
+
+		log("AbyssalFlareAttack: target=1")
+	end
+
+	-- 2단계: "칼이 꼽히는" 연출(수동 프레임 스왑, 다크 플레어와 동일 기법) + 사운드. 유저 지정:
+	-- "12~15는 지속시간동안 루프되야지" — 4프레임(12→13→14→15)을 한 번만 재생하고 멈추는 게 아니라
+	-- 지속시간(duration) 내내 그 사이클을 계속 반복 재생한다. 그동안 매초(첫 틱은 즉시) centerPos
+	-- 반경 안 몬스터 전부에게 틱 대미지를 적용한다.
+	@ExecSpace("ServerOnly")
+	method void ResolveAbyssalFlareStab(Vector3 pos, Vector3 centerPos, number scaleRatio, number damage, boolean isCrit, Entity map)
+		self:PlayAbyssalFlareStabSound()
+		self:PlayAbyssalFogAppearSound()
+		local duration = self:GetAbyssalFlareDuration(self.AbyssalFlareLevel)
+		local frames = self.Card191StabFrameRUIDs
+		local frameCount = #frames
+		local fx = self:SpawnEffectWithModel(frames[1], pos, 0, 1.0, self.Card179CastScale * scaleRatio, 1.0, "persistenteffect")
+		if fx ~= nil then
+			local totalSteps = math.floor(duration / self.Card191StabFrameStepDuration)
+			for i = 1, totalSteps - 1 do
+				local frameRUID = frames[(i % frameCount) + 1]
+				local delay = i * self.Card191StabFrameStepDuration
+				_TimerService:SetTimerOnce(function()
+					if isvalid(fx) then
+						local r = fx.SpriteRendererComponent
+						if r ~= nil then r.SpriteRUID = frameRUID end
+					end
+				end, delay)
+			end
+			-- 유저 지정(2026-08-18): "사라질땐 알파 빠지면서 자연스럽게" — Destroy 직전 FadeOutDuration
+			-- 동안 알파를 1.0→0.0으로 선형 트윈(연막탄과 동일 패턴).
+			local fadeDuration = math.min(self.Card191FogFadeOutDuration, duration)
+			local fadeDelay = duration - fadeDuration
+			_TimerService:SetTimerOnce(function()
+				if not isvalid(fx) then return end
+				local renderer = fx.SpriteRendererComponent
+				if renderer == nil then return end
+				_TweenLogic:PlayTween(1.0, 0.0, fadeDuration, EaseType.Linear, function(alpha)
+					if isvalid(renderer) then renderer:SetAlpha(alpha) end
+				end)
+			end, fadeDelay)
+			fx:Destroy(duration)
+		end
+
+		local tickDamage = damage * self:GetAbyssalFlareTickPercent(self.AbyssalFlareLevel)
+		-- 유저 지정(2026-08-18): "범위가 좌우로 0.3 정도 더 길어야하고" — 원형 반경 대신 가로/세로
+		-- 반경이 다른 타원 판정(메소익스플로전/메소데토네이션과 동일 공식)으로 전환.
+		local halfWidth = self.Card191FogHalfWidth
+		local halfHeight = self.Card191FogHalfHeight
+		local capturedMap = map
+		local applyTick = function()
+			if not isvalid(capturedMap) then return end
+			local monsters = capturedMap:GetChildComponentsByTypeName("script.MonsterAI", false)
+			local hitCount = 0
+			for _, mob in ipairs(monsters) do
+				---@type MonsterAI
+				local m = mob
+				if isvalid(m) and isvalid(m.Entity) and not m._dead then
+					local mp = m.Entity.TransformComponent.Position
+					local nx = (mp.x - centerPos.x) / halfWidth
+					local ny = (mp.y - centerPos.y) / halfHeight
+					if (nx * nx + ny * ny) <= 1.0 then
+						hitCount = hitCount + 1
+						if isCrit then m:TakeDamageCrit(tickDamage * 2)
+						else m:TakeDamage(tickDamage) end
+					end
+				end
+			end
+			log("AbyssalFlare: tick dmg=" .. math.floor(tickDamage) .. " hit=" .. hitCount)
+		end
+
+		applyTick()
+		for tickIdx = 1, duration - 1 do
+			local delay = tickIdx * 1.0
+			_TimerService:SetTimerOnce(function()
+				if not isvalid(self) then return end
+				applyTick()
+			end, delay)
+		end
+	end
+
+	@ExecSpace("Multicast")
+	method void PlayAbyssalFlareStabSound()
+		if self:IsServer() then return end
+		_SoundService:PlaySound(self.Card191StabSoundRUID, 1.0)
+	end
+
+	@ExecSpace("Multicast")
+	method void PlayAbyssalFogAppearSound()
+		if self:IsServer() then return end
+		_SoundService:PlaySound(self.Card191FogAppearSoundRUID, 1.0)
+	end
+
 	-- 주어진 좌표에서 실제 거리로 가장 가까운 살아있는 몬스터 최대 count명을 반환(피닉스의
 	-- FindClosestByPosition을 다중 타겟으로 확장한 버전 — 쉐도우 파트너 Lv5 전용 2타겟에 필요)
 	@ExecSpace("ServerOnly")
@@ -3792,6 +5269,7 @@ script CardManager extends Logic
 				target:TakeDamage(appliedDamage)
 			end
 			target:AddComboStack(appliedDamage)
+			self:TryExtraComboStack(158, target, appliedDamage)
 			target:ApplyStun(self.LeapAttackRootDuration, false)
 			target:ApplyLevitate(self.LeapAttackRootDuration)
 		end
@@ -3862,7 +5340,8 @@ script CardManager extends Logic
 			end
 			target:AddComboStack(appliedDamage)
 			target:AddComboStack(appliedDamage)
-			target:ApplyStun(self.BraveSlashStunDuration, true)
+			-- SkillInventory 브레이브 슬래시(인덱스48) Lv9: 스턴 지속시간 +1초, 카드 자체 레벨과 별개로 항상 가산
+			target:ApplyStun(self.BraveSlashStunDuration + self:GetSkillInvTierPercent(48, 0, 0, 1.0), true)
 		end
 
 		log("BraveSlashAttack: hit=" .. #targets .. "/" .. self:GetBraveSlashTargetCount(self.BraveSlashLevel))
@@ -4078,7 +5557,9 @@ script CardManager extends Logic
 		end)
 
 		local scaleRatio = self:GetEffectScaleRatio(target)
-		local hitDamage = damage * 0.5
+		-- SkillInventory 스카링 소드(인덱스47) Lv9: 소환수 대미지 10% 증가, 카드 자체 레벨과 별개로
+		-- 항상 가산(대미지%/쿨타임% 일반 보너스와 별개로 소환수 타격에만 추가로 곱연산)
+		local hitDamage = damage * 0.5 * (1.0 + self:GetSkillInvTierPercent(47, 0, 0, 0.10))
 
 		_TimerService:SetTimerOnce(function()
 			if not isvalid(self) or not isvalid(sword) then return end
@@ -4320,7 +5801,9 @@ script CardManager extends Logic
 		end)
 
 		local scaleRatio = self:GetEffectScaleRatio(target)
-		local hitDamage = damage * 0.5
+		-- SkillInventory 스카링 블레이드(인덱스53) Lv9: 소환수 대미지 15% 증가, 카드 자체 레벨과 별개로
+		-- 항상 가산(대미지%/쿨타임% 일반 보너스와 별개로 소환수 타격에만 추가로 곱연산)
+		local hitDamage = damage * 0.5 * (1.0 + self:GetSkillInvTierPercent(53, 0, 0, 0.15))
 
 		_TimerService:SetTimerOnce(function()
 			if not isvalid(self) or not isvalid(blade) then return end
@@ -4428,9 +5911,12 @@ script CardManager extends Logic
 	property string Card101ExtraHitEffectRUID = "0126e565039e48acbc22b5029a75ef3e"
 	-- 타격 이펙트(1.3배 * scaleRatio)보다 5% 더 크게(유저 요청) — 최종 스케일은 아래서 1.3*1.05로 계산
 
+	-- SkillInventory 바람의 시(인덱스20) Lv9: "추가 타격 +1"을 추가타 확률 100%(사실상 보장)로 해석해
+	-- 적용한다 — 카드 자체 레벨과 별개로 항상 가산.
 	method number GetWindPoemExtraHitChance()
-		if self.WindPoemLevel >= 2 then return 0.07 end
-		return 0
+		local base = 0
+		if self.WindPoemLevel >= 2 then base = 0.07 end
+		return base + self:GetSkillInvTierPercent(20, 0, 0, 1.0)
 	end
 
 	method number GetWindPoemExtraHitPercent()
@@ -4517,11 +6003,13 @@ script CardManager extends Logic
 	end
 
 	-- 화살 발사 수(=바람의 시처럼 타겟 수만큼 순환 분산) — Lv1:5 / Lv2:6 / Lv3:7
+	-- SkillInventory 폭풍의 시(인덱스30) Lv9: 추가 타격 +2, 카드 자체 레벨과 별개로 항상 가산
 	method integer GetStormPoemHitCount(integer level)
-		if level >= 3 then return 7
-		elseif level >= 2 then return 6
+		local base = 5
+		if level >= 3 then base = 7
+		elseif level >= 2 then base = 6
 		end
-		return 5
+		return base + math.floor(self:GetSkillInvTierPercent(30, 0, 0, 2))
 	end
 
 	-- 추가 타격 확률(화살마다 독립 판정) — Lv1:15% / Lv2:15% / Lv3:20%
@@ -4692,9 +6180,12 @@ script CardManager extends Logic
 		return 120
 	end
 
+	-- SkillInventory 애로우 블로우(인덱스21) Lv9: "추가 타격 +1"을 강화 화살 확률 100%(사실상 보장)로
+	-- 해석해 적용한다 — 카드 자체 레벨과 별개로 항상 가산.
 	method number GetArrowBlowEnhanceChance()
-		if self.ArrowBlowLevel >= 2 then return 0.20 end
-		return 0
+		local base = 0
+		if self.ArrowBlowLevel >= 2 then base = 0.20 end
+		return base + self:GetSkillInvTierPercent(21, 0, 0, 1.0)
 	end
 
 	method number GetArrowBlowEnhanceMultiplier()
@@ -4843,9 +6334,11 @@ script CardManager extends Logic
 
 	-- 캐스트당 발사하는 화살 수 — 유저 요청: "화살 1개 쏘는걸 늘리라는건데" — 레벨별 2/2/3발
 	-- 연사(각 화살은 독립적으로 강화 여부를 판정하고, 강화면 고정 3연타가 들어간다)
+	-- SkillInventory 강화 애로우 블로우(인덱스31) Lv9: 추가 타격 +2, 카드 자체 레벨과 별개로 항상 가산
 	method integer GetEnhancedArrowBlowArrowCount(integer level)
-		if level >= 3 then return 3 end
-		return 2
+		local base = 2
+		if level >= 3 then base = 3 end
+		return base + math.floor(self:GetSkillInvTierPercent(31, 0, 0, 2))
 	end
 
 	-- 쏘는 연출(32eff4d4e0fe4abb92415cbafac88463) 17프레임
@@ -5041,11 +6534,13 @@ script CardManager extends Logic
 		return 1
 	end
 
+	-- SkillInventory 아이스 퀴버(인덱스22) Lv9: 슬로우 확률 +10%, 카드 자체 레벨과 별개로 항상 가산
 	method number GetIceQuiverSlowChance()
-		if self.IceQuiverLevel >= 5 then return 0.60
-		elseif self.IceQuiverLevel >= 3 then return 0.50
+		local base = 0.40
+		if self.IceQuiverLevel >= 5 then base = 0.60
+		elseif self.IceQuiverLevel >= 3 then base = 0.50
 		end
-		return 0.40
+		return base + self:GetSkillInvTierPercent(22, 0, 0, 0.10)
 	end
 
 	method number GetIceQuiverSlowDuration()
@@ -5161,13 +6656,16 @@ script CardManager extends Logic
 	end
 
 	-- 슬로우 상태인 대상에게 추가로 들어가는 데미지 배율(1.4~2.2 = +40%~+120%)
+	-- SkillInventory 파이어 퀴버(인덱스23) Lv9: 슬로우 상태 적 추가 대미지 +10%, 카드 자체 레벨과
+	-- 별개로 항상 가산(배율에 그대로 +0.10)
 	method number GetFireQuiverSlowedBonusMult()
-		if self.FireQuiverLevel >= 5 then return 2.2
-		elseif self.FireQuiverLevel >= 4 then return 2.0
-		elseif self.FireQuiverLevel >= 3 then return 1.8
-		elseif self.FireQuiverLevel >= 2 then return 1.6
+		local base = 1.4
+		if self.FireQuiverLevel >= 5 then base = 2.2
+		elseif self.FireQuiverLevel >= 4 then base = 2.0
+		elseif self.FireQuiverLevel >= 3 then base = 1.8
+		elseif self.FireQuiverLevel >= 2 then base = 1.6
 		end
-		return 1.4
+		return base + self:GetSkillInvTierPercent(23, 0, 0, 0.10)
 	end
 
 	-- 아이스 퀴버(IceQuiverAttack)와 동일한 구조 — 지상 우선으로 착탄 지점을 고르고, 각 착탄
@@ -5341,11 +6839,13 @@ script CardManager extends Logic
 	end
 
 	-- 슬로우+스턴 동시 적용 지속시간(초) — Lv1:2 / Lv2:3 / Lv3:4
+	-- SkillInventory 에로우 일루전(인덱스28) Lv9: 스턴 시간 +1초, 카드 자체 레벨과 별개로 항상 가산
 	method number GetArrowIllusionStatusDuration(integer level)
-		if level >= 3 then return 4
-		elseif level >= 2 then return 3
+		local base = 2
+		if level >= 3 then base = 4
+		elseif level >= 2 then base = 3
 		end
-		return 2
+		return base + self:GetSkillInvTierPercent(28, 0, 0, 1.0)
 	end
 
 	-- 이미 슬로우 상태인 대상에게 추가로 들어가는 대미지 비율(기본 대미지 대비) — Lv1:120% / Lv2:140% / Lv3:160%
@@ -5503,8 +7003,9 @@ script CardManager extends Logic
 	end
 
 	-- 레벨별 유지시간 3/4/5/6/7초
+	-- SkillInventory 피닉스(인덱스24) Lv9: 유지시간 +1초, 카드 자체 레벨과 별개로 항상 가산
 	method number GetPhoenixDuration()
-		return self.PhoenixLevel + 2
+		return self.PhoenixLevel + 2 + self:GetSkillInvTierPercent(24, 0, 0, 1.0)
 	end
 
 	-- Lv2에서 반경 +10%, Lv5에서 다시 +10%(누적 +20%)
@@ -5882,11 +7383,13 @@ script CardManager extends Logic
 	end
 
 	-- 유지시간 — Lv1:5 / Lv2:6 / Lv3:7초(피닉스 Lv5의 7초에서 이어짐)
+	-- SkillInventory 이볼브(인덱스29) Lv9: 유지시간 +1초, 카드 자체 레벨과 별개로 항상 가산
 	method number GetEvolveDuration(integer level)
-		if level >= 3 then return 7
-		elseif level >= 2 then return 6
+		local base = 5
+		if level >= 3 then base = 7
+		elseif level >= 2 then base = 6
 		end
-		return 5
+		return base + self:GetSkillInvTierPercent(29, 0, 0, 1.0)
 	end
 
 	-- 쿨타임 — Lv1:10 / Lv2:9 / Lv3:8초
@@ -6566,11 +8069,13 @@ script CardManager extends Logic
 	end
 
 	-- 이 스킬 전용 크리티컬 확률 보너스 — RollCrit(cardIdx==118)에서 합산된다
+	-- SkillInventory 에로우 플레터(인덱스32) Lv9: 크리티컬 확률 +8%, 카드 자체 레벨과 별개로 항상 가산
 	method number GetArrowFletterCritChance(integer level)
-		if level >= 3 then return 0.20
-		elseif level >= 2 then return 0.15
+		local base = 0.10
+		if level >= 3 then base = 0.20
+		elseif level >= 2 then base = 0.15
 		end
-		return 0.10
+		return base + self:GetSkillInvTierPercent(32, 0, 0, 0.08)
 	end
 
 	-- 관통 대미지 비율 — 레벨 무관 고정: 1번째 관통 60%, 2번째 70%, 3번째 80%, 4번째 90%
@@ -6997,11 +8502,13 @@ script CardManager extends Logic
 	end
 
 	-- 이 스킬 전용 크리티컬 확률 보너스 — RollCrit(cardIdx==119)에서 합산된다
+	-- SkillInventory 언카운트에로우V(인덱스33) Lv9: 크리티컬 확률 +8%, 카드 자체 레벨과 별개로 항상 가산
 	method number GetUncounterArrowVCritChance(integer level)
-		if level >= 3 then return 0.20
-		elseif level >= 2 then return 0.15
+		local base = 0.10
+		if level >= 3 then base = 0.20
+		elseif level >= 2 then base = 0.15
 		end
-		return 0.10
+		return base + self:GetSkillInvTierPercent(33, 0, 0, 0.08)
 	end
 
 	@ExecSpace("ServerOnly")
@@ -7151,12 +8658,14 @@ script CardManager extends Logic
 
 	-- 충돌 대상 대미지 비율 — Lv1:60% / Lv2:70% / Lv3:80% / Lv4:90% / Lv5:100%
 	-- 유저 요청으로 너프: 60/70/80/90/100% → 30/30/40/50/60%
+	-- SkillInventory 플레시 미라주(인덱스27) Lv9: 충돌 대미지 +15%, 카드 자체 레벨과 별개로 항상 가산
 	method number GetFleshMirageCollisionPercent()
-		if self.FleshMirageLevel >= 5 then return 0.60
-		elseif self.FleshMirageLevel >= 4 then return 0.50
-		elseif self.FleshMirageLevel >= 3 then return 0.40
+		local base = 0.30
+		if self.FleshMirageLevel >= 5 then base = 0.60
+		elseif self.FleshMirageLevel >= 4 then base = 0.50
+		elseif self.FleshMirageLevel >= 3 then base = 0.40
 		end
-		return 0.30
+		return base + self:GetSkillInvTierPercent(27, 0, 0, 0.15)
 	end
 
 	-- 화면에 살아있는 몬스터 중 좌/우(중앙 x=0 기준) 각각 가장 바깥쪽 몬스터를 찾는다. 모든 레벨에서
@@ -7689,48 +9198,56 @@ script CardManager extends Logic
 	property string Card113IconRUID = "883decec81c74de3ae0b4301fd6b8add"
 
 	-- 보우 액셀레이션 — 쿨타임 감소, Lv1:5%/Lv2:7%/Lv3:10%/Lv4:12%/Lv5:15% (매직 부스터와 동일 수치)
+	-- SkillInventory 보우 액셀레이션(인덱스35) 레벨의 -2%/-4%/-6%가 카드 자체 레벨과 별개로 항상 가산된다.
 	method number GetBowAccelerationReduction()
-		if self.BowAccelerationLevel >= 5 then return 0.15
-		elseif self.BowAccelerationLevel >= 4 then return 0.12
-		elseif self.BowAccelerationLevel >= 3 then return 0.10
-		elseif self.BowAccelerationLevel >= 2 then return 0.07
-		elseif self.BowAccelerationLevel >= 1 then return 0.05
+		local base = 0
+		if self.BowAccelerationLevel >= 5 then base = 0.15
+		elseif self.BowAccelerationLevel >= 4 then base = 0.12
+		elseif self.BowAccelerationLevel >= 3 then base = 0.10
+		elseif self.BowAccelerationLevel >= 2 then base = 0.07
+		elseif self.BowAccelerationLevel >= 1 then base = 0.05
 		end
-		return 0
+		return base + self:GetSkillInvTierPercent(35, 0.02, 0.04, 0.06)
 	end
 
 	-- 꿰뚫는 의지 — 크리티컬 확률, Lv1:10%/Lv2:12%/Lv3:15%/Lv4:17%/Lv5:20% (매직 크리티컬과 동일 수치)
+	-- SkillInventory 꿰뚫는 의지(인덱스36) 레벨의 +2%/+4%/+6%가 카드 자체 레벨과 별개로 항상 가산된다.
 	method number GetPiercingWillChance()
-		if self.PiercingWillLevel >= 5 then return 0.20
-		elseif self.PiercingWillLevel >= 4 then return 0.17
-		elseif self.PiercingWillLevel >= 3 then return 0.15
-		elseif self.PiercingWillLevel >= 2 then return 0.12
-		elseif self.PiercingWillLevel >= 1 then return 0.10
+		local base = 0
+		if self.PiercingWillLevel >= 5 then base = 0.20
+		elseif self.PiercingWillLevel >= 4 then base = 0.17
+		elseif self.PiercingWillLevel >= 3 then base = 0.15
+		elseif self.PiercingWillLevel >= 2 then base = 0.12
+		elseif self.PiercingWillLevel >= 1 then base = 0.10
 		end
-		return 0
+		return base + self:GetSkillInvTierPercent(36, 0.02, 0.04, 0.06)
 	end
 
 	-- 크리티컬 샷 — 크리티컬 대미지 추가 배율, Lv1:10%/Lv2:20%/Lv3:30%/Lv4:40%/Lv5:50% 추가
 	-- (기본 크리티컬 배율 ×2에 곱연산으로 더해짐 — MonsterAI:TakeDamageCrit/TakeDamageDelayedDeath에서 적용)
+	-- SkillInventory 크리티컬 샷(인덱스37) 레벨의 +3%/+6%/+9%가 카드 자체 레벨과 별개로 항상 가산된다.
 	method number GetCriticalShotBonus()
-		if self.CriticalShotLevel >= 5 then return 0.50
-		elseif self.CriticalShotLevel >= 4 then return 0.40
-		elseif self.CriticalShotLevel >= 3 then return 0.30
-		elseif self.CriticalShotLevel >= 2 then return 0.20
-		elseif self.CriticalShotLevel >= 1 then return 0.10
+		local base = 0
+		if self.CriticalShotLevel >= 5 then base = 0.50
+		elseif self.CriticalShotLevel >= 4 then base = 0.40
+		elseif self.CriticalShotLevel >= 3 then base = 0.30
+		elseif self.CriticalShotLevel >= 2 then base = 0.20
+		elseif self.CriticalShotLevel >= 1 then base = 0.10
 		end
-		return 0
+		return base + self:GetSkillInvTierPercent(37, 0.03, 0.06, 0.09)
 	end
 
 	-- 파이널 어택 : 활 — 기본 공격(애로우샷) 적중 시 확률로 추가 공격
+	-- SkillInventory 파이널 어택:활(인덱스38) 레벨의 +3%/+6%/+9%가 카드 자체 레벨과 별개로 항상 가산된다.
 	method number GetFinalAttackBowChance()
-		if self.FinalAttackBowLevel >= 5 then return 0.30
-		elseif self.FinalAttackBowLevel >= 4 then return 0.25
-		elseif self.FinalAttackBowLevel >= 3 then return 0.20
-		elseif self.FinalAttackBowLevel >= 2 then return 0.15
-		elseif self.FinalAttackBowLevel >= 1 then return 0.10
+		local base = 0
+		if self.FinalAttackBowLevel >= 5 then base = 0.30
+		elseif self.FinalAttackBowLevel >= 4 then base = 0.25
+		elseif self.FinalAttackBowLevel >= 3 then base = 0.20
+		elseif self.FinalAttackBowLevel >= 2 then base = 0.15
+		elseif self.FinalAttackBowLevel >= 1 then base = 0.10
 		end
-		return 0
+		return base + self:GetSkillInvTierPercent(38, 0.03, 0.06, 0.09)
 	end
 
 	method number GetFinalAttackBowMultiplier()
@@ -7753,15 +9270,18 @@ script CardManager extends Logic
 		return 0
 	end
 
+	-- SkillInventory 연속 사격(인덱스39) 레벨의 +2%/+4%/+6%가 카드 자체 레벨과 별개로 항상 가산된다.
 	method number GetRapidFireMult()
-		return 1.0 + (self:GetRapidFirePercent() / 100.0)
+		return 1.0 + (self:GetRapidFirePercent() / 100.0) + self:GetSkillInvTierPercent(39, 0.02, 0.04, 0.06)
 	end
 
 	-- 파이널 어택 : 활 발동 판정 — 애로우샷(카드25) 적중 직후 호출. 원본 공격과 동일한 비주얼
 	-- (FlyArrowShot)을 재사용하되 0.2초 지연을 둬서 두 발이 이어지는 느낌을 낸다.
+	-- 카드 자체가 미해금(FinalAttackBowLevel=0)이어도 SkillInventory(인덱스38)만 Lv9에 도달하면
+	-- GetFinalAttackBowChance()가 0보다 커지므로 발동할 수 있어야 한다(썬더볼트 스턴과 동일 패턴).
 	@ExecSpace("ServerOnly")
 	method void TryFinalAttackBow(MonsterAI target)
-		if self.FinalAttackBowLevel <= 0 then return end
+		if self.FinalAttackBowLevel <= 0 and self:GetSkillInvLevelByIndex(38) < 9 then return end
 		if _UtilLogic:RandomDouble() >= self:GetFinalAttackBowChance() then return end
 		_TimerService:SetTimerOnce(function()
 			if not isvalid(self) or not isvalid(target) or not isvalid(target.Entity) or target._dead then return end
@@ -8017,6 +9537,16 @@ script CardManager extends Logic
 	property SpriteGUIRendererComponent selfRecoveryFill = "a8d5703c-5977-4518-b37e-5cdcc3a8edc3"
 	property Entity warriorMasteryBuff = "1e3634cb-b193-4bb4-a50e-278a491f5113"
 	property SpriteGUIRendererComponent warriorMasteryFill = "d2a4e044-21d4-4c3c-b588-ce96296221ed"
+	property Entity daggerAccelBuff = "90557fbe-dde0-4450-bb63-f3735f3af85a"
+	property SpriteGUIRendererComponent daggerAccelFill = "6e715b74-5107-49e6-854a-4711eea1ee6b"
+	property Entity criticalEdgeBuff = "730270f4-e69a-4f36-b238-2f2e91bd01e3"
+	property SpriteGUIRendererComponent criticalEdgeFill = "591f5b95-17e6-42bf-bc99-883e9145f56d"
+	property Entity karmaBuff = "48246c9f-acc4-4a48-ad91-4ed9c2cfa310"
+	property SpriteGUIRendererComponent karmaFill = "07fd5e21-2bce-481c-a982-4585ab34e971"
+	property Entity physicalTrainingBuff = "da37a3aa-dc2f-46b3-993d-41fc91810690"
+	property SpriteGUIRendererComponent physicalTrainingFill = "35fc2734-80d5-4fca-b3a3-9da554b64407"
+	property Entity darkSightBuff = "8a1c7267-b3db-4ae2-8237-c0cfba6130ca"
+	property SpriteGUIRendererComponent darkSightFill = "c17c3709-5725-401e-8475-a7a3c0689faf"
 
 	-- 활성 버프 순서 추적 (획득 순으로 왼쪽부터)
 	property any _activeBuffOrder = nil
@@ -8112,6 +9642,39 @@ script CardManager extends Logic
 	@Sync property integer SelfRecoveryLevel = 0
 	@Sync property integer WarriorMasteryLevel = 0
 
+	-- ── 쉐이드 전용 패시브 5종(카드180~184) — 실피드/레이온의 동종 패시브와 동일 패턴(슬롯 없음, 해금
+	-- 즉시 영구 적용). 이름/아이콘/태그/레벨별 수치(chancePerLevel)는 CardRegistry(180~184)에서 관리,
+	-- 실제 게임 로직 적용부만 여기(GetEffectiveCooldown/RollCrit/GetCardDamage) + MonsterAI
+	-- (TakeDamageCrit*/OnReachPlayer)에서 CardRegistry.GetChance(cardIdx, level)로 조회한다.
+	@Sync property integer DaggerAccelLevel = 0
+	@Sync property integer CriticalEdgeLevel = 0
+	@Sync property integer KarmaLevel = 0
+	@Sync property integer PhysicalTrainingLevel = 0
+	@Sync property integer DarkSightLevel = 0
+
+	-- 대거 액셀레이션(180) 쿨타임 감소율 — GetEffectiveCooldown에서 매직 부스터/보우 액셀레이션과
+	-- 동일한 방식으로 곱연산 적용.
+	method number GetDaggerAccelReduction()
+		return _CardRegistry:GetChance(180, self.DaggerAccelLevel)
+	end
+
+	-- 카르마(182) 크리티컬 대미지 보너스 — 크리티컬 샷(111)과 동일한 패턴으로
+	-- MonsterAI.TakeDamageCrit/TakeDamageCritWithOffset/TakeDamageDelayedDeath에서 가산 적용.
+	method number GetKarmaBonus()
+		return _CardRegistry:GetChance(182, self.KarmaLevel)
+	end
+
+	-- 피지컬 트레이닝(183) 피해량 배율 — 워리어 마스터리와 동일한 패턴으로 GetCardDamage 전역 곱연산.
+	method number GetPhysicalTrainingMult()
+		return 1.0 + _CardRegistry:GetChance(183, self.PhysicalTrainingLevel)
+	end
+
+	-- 다크 사이트(184) 공격 회피 확률 — MonsterAI.OnReachPlayer에서 몬스터 공격 도달 시 이 확률로
+	-- 완전히 회피(대미지 0). 연막탄의 몬스터별 명중하락 디버프와는 별개 판정.
+	method number GetDarkSightEvadeChance()
+		return _CardRegistry:GetChance(184, self.DarkSightLevel)
+	end
+
 	-- 코마 — 5스택 콤보 폭발(PlayComboFinishBurst)의 데미지 배율(기본 200%)을 레벨별로 강화하고,
 	-- 미해금 시 일반 연출/해금 시 강화 연출로 교체한다(유저 지정 — 이전엔 finish/1~10 중 무작위
 	-- 재생이었음).
@@ -8131,8 +9694,9 @@ script CardManager extends Logic
 		return 200
 	end
 
+	-- SkillInventory 코마(인덱스57) 레벨의 +5%/+10%/+15%가 카드 자체 레벨과 별개로 항상 가산된다.
 	method number GetComaBurstMult(integer level)
-		return self:GetComaBurstPercent(level) / 100.0
+		return (self:GetComaBurstPercent(level) / 100.0) + self:GetSkillInvTierPercent(57, 0.05, 0.10, 0.15)
 	end
 
 	-- 셀프 리커버리 — SelfRecoveryInterval초마다 최대 체력의 % 회복, Lv1:3%/Lv2:4%/Lv3:5%/Lv4:6%/Lv5:7%
@@ -8160,8 +9724,9 @@ script CardManager extends Logic
 		return 0
 	end
 
+	-- SkillInventory 워리어 마스터리(인덱스59) 레벨의 +2%/+4%/+6%가 카드 자체 레벨과 별개로 항상 가산된다.
 	method number GetWarriorMasteryMult()
-		return 1.0 + (self:GetWarriorMasteryPercent() / 100.0)
+		return 1.0 + (self:GetWarriorMasteryPercent() / 100.0) + self:GetSkillInvTierPercent(59, 0.02, 0.04, 0.06)
 	end
 
 	-- ── 레이온 전용 조합 스킬: 스피릿 블레이드 (카드 165) — 플래시 슬래시(154) Lv5 + 찬스 어택(161,
@@ -8211,11 +9776,13 @@ script CardManager extends Logic
 	end
 
 	-- 2타 데미지 비율 — 50%/60%/70% (유저 지정 표. 확률이 아니라 항상 발동하는 2번째 타격의 데미지 배율)
+	-- SkillInventory 스피릿 블레이드(인덱스49) Lv9: 2타 대미지 +10%, 카드 자체 레벨과 별개로 항상 가산
 	method number GetSpiritBladeSecondHitPercent(integer level)
-		if level >= 3 then return 0.70
-		elseif level >= 2 then return 0.60
+		local base = 0.50
+		if level >= 3 then base = 0.70
+		elseif level >= 2 then base = 0.60
 		end
-		return 0.50
+		return base + self:GetSkillInvTierPercent(49, 0, 0, 0.10)
 	end
 
 	-- "찌르는" 연출 — frame12로 스폰 후 13→14→15→16을 SpiritBladeFrameStepDuration 간격으로 스왑하며
@@ -8371,11 +9938,13 @@ script CardManager extends Logic
 
 	-- "타격 유닛"(충돌 대미지) 비율이자 "날아간 유닛 주변 대미지"(착지 범위 대미지) 비율 — 유저 표에서
 	-- 두 항목이 레벨별로 동일한 수치(60/70/80%)라 하나의 함수로 공용 사용한다
+	-- SkillInventory 버닝 러시(인덱스50) Lv9: 충돌·착지 대미지 15% 증가, 카드 자체 레벨과 별개로 항상 가산
 	method number GetBurningRushPercent(integer level)
-		if level >= 3 then return 0.80
-		elseif level >= 2 then return 0.70
+		local base = 0.60
+		if level >= 3 then base = 0.80
+		elseif level >= 2 then base = 0.70
 		end
-		return 0.60
+		return base + self:GetSkillInvTierPercent(50, 0, 0, 0.15)
 	end
 
 	-- 돌진(ChargeAttack)과 완전히 동일한 좌/우 최외곽 탐색 + 중앙 넉백 + 중앙근방 예외 로직
@@ -8858,6 +10427,18 @@ script CardManager extends Logic
 		if cardIdx == 177 then return self.MesoExplosionLevel > 0 end
 		if cardIdx == 178 then return self.ShadowPartnerLevel > 0 end
 		if cardIdx == 179 then return self.DarkFlareLevel > 0 end
+		if cardIdx == 180 then return self.DaggerAccelLevel > 0 end
+		if cardIdx == 181 then return self.CriticalEdgeLevel > 0 end
+		if cardIdx == 182 then return self.KarmaLevel > 0 end
+		if cardIdx == 183 then return self.PhysicalTrainingLevel > 0 end
+		if cardIdx == 184 then return self.DarkSightLevel > 0 end
+		if cardIdx == 185 then return self.AssassinateLevel > 0 end
+		if cardIdx == 186 then return self.SonicBlowLevel > 0 end
+		if cardIdx == 187 then return self.SmokeRampageLevel > 0 end
+		if cardIdx == 188 then return self.AzureEdgeLevel > 0 end
+		if cardIdx == 189 then return self.MesoDetonationLevel > 0 end
+		if cardIdx == 190 then return self.DualShadowPartnerLevel > 0 end
+		if cardIdx == 191 then return self.AbyssalFlareLevel > 0 end
 		return self.Slot1Card == cardIdx or self.Slot2Card == cardIdx or self.Slot3Card == cardIdx
 			or self.Slot4Card == cardIdx or self.Slot5Card == cardIdx or self.Slot6Card == cardIdx
 	end
@@ -8945,6 +10526,23 @@ script CardManager extends Logic
 	-- 썬더볼트만 예외로 SkillInventory 쿨타임 감소 줄이 없다(대신 스턴 지속시간/확률 2줄)
 	property any _skillInvNoCooldownBonus = { [4] = true }
 
+	-- 레이온/실피드 스킬탭 확장(인덱스 20~59) — cardIdx -> {idx=SkillInventory 인덱스, grade=카드등급}.
+	-- 기존 아르카나 20개(_skillInvCardIdxMap, 등급 무관 항상 10%/5%)와 별도 맵으로 관리해서 기존 동작을
+	-- 건드리지 않는다. 등급별로 Lv3/Lv6 보너스 폭이 다르다(일반/매직=대미지10%·쿨타임5%, 레어=대미지
+	-- 15%·쿨타임8%, 유저 확정표) — GetSkillInvDamageMult/GetSkillInvCooldownMult에서 grade로 분기한다.
+	property any _skillInvCardIdxMap2 = {
+		[101] = { idx = 20, grade = 1 }, [102] = { idx = 21, grade = 1 }, [103] = { idx = 22, grade = 1 },
+		[104] = { idx = 23, grade = 1 }, [105] = { idx = 24, grade = 2 }, [106] = { idx = 25, grade = 2 },
+		[107] = { idx = 26, grade = 2 }, [108] = { idx = 27, grade = 1 }, [114] = { idx = 28, grade = 3 },
+		[115] = { idx = 29, grade = 3 }, [116] = { idx = 30, grade = 3 }, [117] = { idx = 31, grade = 3 },
+		[118] = { idx = 32, grade = 3 }, [119] = { idx = 33, grade = 3 }, [120] = { idx = 34, grade = 3 },
+		[152] = { idx = 40, grade = 1 }, [153] = { idx = 41, grade = 1 }, [154] = { idx = 42, grade = 1 },
+		[155] = { idx = 43, grade = 2 }, [156] = { idx = 44, grade = 1 }, [157] = { idx = 45, grade = 2 },
+		[158] = { idx = 46, grade = 1 }, [159] = { idx = 47, grade = 2 }, [160] = { idx = 48, grade = 3 },
+		[165] = { idx = 49, grade = 3 }, [166] = { idx = 50, grade = 3 }, [167] = { idx = 51, grade = 3 },
+		[168] = { idx = 52, grade = 3 }, [169] = { idx = 53, grade = 3 }, [170] = { idx = 54, grade = 3 },
+	}
+
 	@ExecSpace("ServerOnly")
 	method integer GetSkillInvLevel(integer cardIdx)
 		local skillIdx = self._skillInvCardIdxMap[cardIdx]
@@ -8952,6 +10550,28 @@ script CardManager extends Logic
 		local key = tostring(skillIdx)
 		if _SkillInventory.Levels[key] ~= nil then return _SkillInventory.Levels[key] end
 		return 0
+	end
+
+	-- _skillInvCardIdxMap2(레이온/실피드) 전용 조회 — GetSkillInvLevel과 동일 동작이지만 map2를 본다.
+	@ExecSpace("ServerOnly")
+	method integer GetSkillInvLevel2(integer cardIdx)
+		local def = self._skillInvCardIdxMap2[cardIdx]
+		if def == nil then return 0 end
+		return self:GetSkillInvLevelByIndex(def.idx)
+	end
+
+	-- 슬래시/브랜디쉬/플래시 슬래시/오라 블레이드/리프 어택(카드152/153/154/156/158) 공통: 이 5개
+	-- 스킬은 원래 적중마다 100% 확률로 콤보 스택 1개를 이미 보장한다(AddComboStack 무조건 호출).
+	-- SkillInventory 해당 스킬 Lv9의 "추가 콤보 발동 확률 +50%"는 그 위에 "50% 확률로 추가 스택 1개를
+	-- 더" 얹는 것으로 해석했다(유저 확인 필요 — 이미 100%인 확률에 +50%는 의미가 없어 "추가" 스택으로
+	-- 정규화). 카드 자체 레벨과 별개로 항상 가산.
+	@ExecSpace("ServerOnly")
+	method void TryExtraComboStack(integer cardIdx, MonsterAI target, number appliedDamage)
+		if self:GetSkillInvLevel2(cardIdx) >= 9 and isvalid(target) and not target._dead then
+			if _UtilLogic:RandomDouble() < 0.50 then
+				target:AddComboStack(appliedDamage)
+			end
+		end
 	end
 
 	-- 패시브(매직부스터/매직아머/매직크리티컬/프리징이펙트)는 카드 인덱스가 아니라 SkillInventory
@@ -8964,17 +10584,29 @@ script CardManager extends Logic
 	end
 
 	-- 액티브 14개 스킬 공통 Lv3 보너스: 대미지 +10% (Lv1,2는 효과 없음)
+	-- 레이온/실피드 30개(_skillInvCardIdxMap2)는 등급별로 10%(일반/매직) / 15%(레어) — 유저 확정표
 	@ExecSpace("ServerOnly")
 	method number GetSkillInvDamageMult(integer cardIdx)
 		if self:GetSkillInvLevel(cardIdx) >= 3 then return 1.10 end
+		local def2 = self._skillInvCardIdxMap2[cardIdx]
+		if def2 ~= nil and self:GetSkillInvLevel2(cardIdx) >= 3 then
+			if def2.grade >= 3 then return 1.15 end
+			return 1.10
+		end
 		return 1.0
 	end
 
 	-- 액티브 14개 스킬 공통 Lv6 보너스: 쿨타임 -5% (썬더볼트 제외, Lv4,5는 효과 없음)
+	-- 레이온/실피드 30개는 등급별로 -5%(일반/매직) / -8%(레어) — 유저 확정표
 	@ExecSpace("ServerOnly")
 	method number GetSkillInvCooldownMult(integer cardIdx)
 		if self._skillInvNoCooldownBonus[cardIdx] then return 1.0 end
 		if self:GetSkillInvLevel(cardIdx) >= 6 then return 0.95 end
+		local def2 = self._skillInvCardIdxMap2[cardIdx]
+		if def2 ~= nil and self:GetSkillInvLevel2(cardIdx) >= 6 then
+			if def2.grade >= 3 then return 0.92 end
+			return 0.95
+		end
 		return 1.0
 	end
 
@@ -9040,8 +10672,21 @@ script CardManager extends Logic
 		elseif cardIdx == 177 then base = self:GetMesoExplosionDamage(self.MesoExplosionLevel)
 		elseif cardIdx == 178 then base = 100  -- 유저 표 고정값(실제 복제 데미지는 원본 카드 기준, 여기는 툴팁 표시용)
 		elseif cardIdx == 179 then base = self:GetDarkFlareDamage(self.DarkFlareLevel)
+		elseif cardIdx == 185 then base = self:GetAssassinateDamage(self.AssassinateLevel)
+		elseif cardIdx == 186 then base = self:GetSonicBlowDamage(self.SonicBlowLevel)
+		elseif cardIdx == 187 then base = self:GetSmokeRampageDamage(self.SmokeRampageLevel)
+		elseif cardIdx == 188 then base = self:GetAzureEdgeDamage(self.AzureEdgeLevel)
+		elseif cardIdx == 189 then base = self:GetMesoDetonationDamage(self.MesoDetonationLevel)
+		elseif cardIdx == 190 then base = 100  -- 유저 표 고정값(실제 복제 대미지는 원본 카드 기준, 여기는 툴팁 표시용)
+		elseif cardIdx == 191 then base = self:GetAbyssalFlareDamage(self.AbyssalFlareLevel)
 		end
-		return base * self:GetMeditationMult() * self:GetSkillInvDamageMult(cardIdx) * self:GetRapidFireMult() * self:GetWarriorMasteryMult()
+		-- 장착 무기의 ATK는 유저 지정대로 "고정값 가산" — 배율들보다 먼저 더해서 공격력% 보너스가
+		-- 무기 ATK에도 함께 걸리게 한다(가산 → 배율 순서)
+		base = base + _GearEffectLogic:GetFlatAtk()
+
+		-- 장비 등급 스킬의 상시 대미지 보너스(양손검/투구 공격력%, 망토 피해량% 등)도 메디테이션과
+		-- 동일하게 모든 스킬이 거쳐가는 이 한 곳에서만 곱한다(GearEffectLogic 참고)
+		return base * self:GetMeditationMult() * self:GetSkillInvDamageMult(cardIdx) * self:GetRapidFireMult() * self:GetWarriorMasteryMult() * self:GetPhysicalTrainingMult() * _GearEffectLogic:GetDamageMult()
 	end
 
 	-- 2026-08-03: 몬스터 체력을 플레이어 화력에 비례시키던 GetBasicAttackCardIdx/GetStrongestActiveDamage는
@@ -9241,6 +10886,13 @@ script CardManager extends Logic
 		elseif cardIdx == 169 then return self.Card169Cooldown
 		elseif cardIdx == 170 then return self.Card170Cooldown
 		elseif cardIdx == 171 then return self.Card171Cooldown
+		elseif cardIdx == 185 then return self.Card185Cooldown
+		elseif cardIdx == 186 then return self.Card186Cooldown
+		elseif cardIdx == 187 then return self.Card187Cooldown
+		elseif cardIdx == 188 then return self.Card188Cooldown
+		elseif cardIdx == 189 then return self.Card189Cooldown
+		elseif cardIdx == 190 then return self.Card190Cooldown
+		elseif cardIdx == 191 then return self.Card191Cooldown
 		end
 		return 1.0
 	end
@@ -9530,6 +11182,18 @@ script CardManager extends Logic
 		elseif cardIdx == 177 then return self.MesoExplosionLevel
 		elseif cardIdx == 178 then return self.ShadowPartnerLevel
 		elseif cardIdx == 179 then return self.DarkFlareLevel
+		elseif cardIdx == 180 then return self.DaggerAccelLevel
+		elseif cardIdx == 181 then return self.CriticalEdgeLevel
+		elseif cardIdx == 182 then return self.KarmaLevel
+		elseif cardIdx == 183 then return self.PhysicalTrainingLevel
+		elseif cardIdx == 184 then return self.DarkSightLevel
+		elseif cardIdx == 185 then return self.AssassinateLevel
+		elseif cardIdx == 186 then return self.SonicBlowLevel
+		elseif cardIdx == 187 then return self.SmokeRampageLevel
+		elseif cardIdx == 188 then return self.AzureEdgeLevel
+		elseif cardIdx == 189 then return self.MesoDetonationLevel
+		elseif cardIdx == 190 then return self.DualShadowPartnerLevel
+		elseif cardIdx == 191 then return self.AbyssalFlareLevel
 		end
 		return 0
 	end
@@ -9580,8 +11244,16 @@ script CardManager extends Logic
 		if self.MagicBoosterLevel > 0 or self:GetSkillInvLevelByIndex(0) > 0 then
 			base = base * (1.0 - self:GetMagicBoosterReduction())
 		end
-		if self.BowAccelerationLevel > 0 then
+		if self.BowAccelerationLevel > 0 or self:GetSkillInvLevelByIndex(35) > 0 then
 			base = base * (1.0 - self:GetBowAccelerationReduction())
+		end
+		if self.DaggerAccelLevel > 0 then
+			base = base * (1.0 - self:GetDaggerAccelReduction())
+		end
+		-- 장비 쿨타임 감소(활 유니크 상시 + 투구 레어 50마리 처치 해금)
+		local gearCooldownReduction = _GearEffectLogic:GetCooldownReduction()
+		if gearCooldownReduction > 0 then
+			base = base * (1.0 - gearCooldownReduction)
 		end
 		return base
 	end
@@ -9616,7 +11288,10 @@ script CardManager extends Logic
 	@ExecSpace("ServerOnly")
 	method boolean RollCrit(integer cardIdx)
 		local chance = self:GetMagicCriticalChance() + self:GetSkillInvCardCritBonus(cardIdx) + self:GetPiercingWillChance()
-			+ _CardRegistry:GetChance(161, self.ChanceAttackLevel)
+			+ _CardRegistry:GetChance(161, self.ChanceAttackLevel) + _CardRegistry:GetChance(181, self.CriticalEdgeLevel)
+			+ _GearEffectLogic:GetCritChanceBonus()
+			-- SkillInventory 찬스 어택(인덱스56) 레벨의 +2%/+4%/+6%가 카드 자체 레벨과 별개로 항상 가산된다.
+			+ self:GetSkillInvTierPercent(56, 0.02, 0.04, 0.06)
 		-- 이볼브(카드115) 전용 자체 크리티컬 확률(유저 요청 — 레벨업이 범위 대신 이걸로 감)
 		if cardIdx == 115 then chance = chance + self:GetEvolveCritChance(self.EvolveLevel) end
 		-- 에로우 플레터(카드118) 전용 자체 크리티컬 확률 보너스(유저 지정: 10%/15%/20%)
@@ -9625,6 +11300,13 @@ script CardManager extends Logic
 		if cardIdx == 119 then chance = chance + self:GetUncounterArrowVCritChance(self.UncounterArrowVLevel) end
 		-- 무스펠하임(카드175) 전용 자체 크리티컬 확률 보너스(유저 지정: 10/15/20/25/30%)
 		if cardIdx == 175 then chance = chance + self:GetMuspelheimCritChance(self.MuspelheimLevel) end
+		-- 아주르 엣지(카드188) 전용 자체 크리티컬 확률 보너스(유저 지정: 30/35/40%)
+		if cardIdx == 188 then chance = chance + self:GetAzureEdgeCritChance(self.AzureEdgeLevel) end
+		-- SkillInventory 리트리트 샷(인덱스25)/언카운터 에로우(인덱스26) Lv9: 크리티컬 확률 +5%,
+		-- 플레시 봄버(인덱스34) Lv9: 크리티컬 확률 +8% — 카드 자체 레벨과 별개로 항상 가산
+		if cardIdx == 106 then chance = chance + self:GetSkillInvTierPercent(25, 0, 0, 0.05) end
+		if cardIdx == 107 then chance = chance + self:GetSkillInvTierPercent(26, 0, 0, 0.05) end
+		if cardIdx == 120 then chance = chance + self:GetSkillInvTierPercent(34, 0, 0, 0.08) end
 		if chance <= 0 then return false end
 		return _UtilLogic:RandomDouble() < chance
 	end
@@ -9807,6 +11489,23 @@ script CardManager extends Logic
 		-- Lv4로 남음 — 서버 값은 실제로 Lv5까지 정확히 올라갔음을 라이브로 확인, 클라 표시만 누락).
 		elseif name == "ShadowPartnerLevel" then self:RefreshSlotIfHoldsCard(178)
 		elseif name == "DarkFlareLevel" then self:RefreshSlotIfHoldsCard(179)
+		elseif name == "DaggerAccelLevel" then
+			if self.DaggerAccelLevel > 0 then self:NotifyDaggerAccelOnPermanent() end
+		elseif name == "CriticalEdgeLevel" then
+			if self.CriticalEdgeLevel > 0 then self:NotifyCriticalEdgeOnPermanent() end
+		elseif name == "KarmaLevel" then
+			if self.KarmaLevel > 0 then self:NotifyKarmaOnPermanent() end
+		elseif name == "PhysicalTrainingLevel" then
+			if self.PhysicalTrainingLevel > 0 then self:NotifyPhysicalTrainingOnPermanent() end
+		elseif name == "DarkSightLevel" then
+			if self.DarkSightLevel > 0 then self:NotifyDarkSightOnPermanent() end
+		elseif name == "AssassinateLevel" then self:RefreshSlotIfHoldsCard(185)
+		elseif name == "SonicBlowLevel" then self:RefreshSlotIfHoldsCard(186)
+		elseif name == "SmokeRampageLevel" then self:RefreshSlotIfHoldsCard(187)
+		elseif name == "AzureEdgeLevel" then self:RefreshSlotIfHoldsCard(188)
+		elseif name == "MesoDetonationLevel" then self:RefreshSlotIfHoldsCard(189)
+		elseif name == "DualShadowPartnerLevel" then self:RefreshSlotIfHoldsCard(190)
+		elseif name == "AbyssalFlareLevel" then self:RefreshSlotIfHoldsCard(191)
 		end
 	end
 
@@ -9845,12 +11544,35 @@ script CardManager extends Logic
 		end
 
 		local cardIdx = self:GetSlotCard(slotIdx)
+
+		-- 버그 수정(2026-08-14): Slot{n}Card 동기화(flip 시작 트리거)와 레벨 프로퍼티 동기화/
+		-- NotifyCardLevelUpdated 안전망(즉시 다시 그리기 트리거)이 같은 카드에 대해 짧은 간격으로 겹쳐
+		-- 들어올 수 있다(레벨업 즉시 해금 시 흔함). 겹치는 두 번째 호출이 "여전히 같은 카드"를 그리라는
+		-- 요청이면 아무것도 하지 않고 그냥 넘어간다 — 진행 중인 flip이 자기 타이머에서 실행 시점 기준
+		-- 최신 값으로 어차피 다시 그린다(PlaySlotFlip 참고). 여기서 즉시 취소하고 스냅해버리면 뒤집기
+		-- 연출이 끝까지 재생되지 못하고, 취소 타이밍에 따라 스케일이 굳어버릴 수도 있었다. 실제로 다른
+		-- 카드로 재할당되거나 비워진 경우(카드가 달라진 경우)에만 진행 중이던 flip을 취소하고 새로 그린다.
+		local prevFlipTimerId = self._slotFlipTimerIds[slotIdx]
+		local flipInProgress = (prevFlipTimerId ~= nil and prevFlipTimerId ~= 0)
+		if flipInProgress and self._slotFlipCardIdx[slotIdx] == cardIdx then
+			return
+		end
+		if flipInProgress then
+			_TimerService:ClearTimer(prevFlipTimerId)
+			self._slotFlipTimerIds[slotIdx] = 0
+			-- 진행 중이던 flip을 여기서 끊는 것이므로, 그 flip이 접어놓았을 수 있는 폭을 다시 1로
+			-- 되돌려서 굳어버리지 않게 한다.
+			local cutTransform = slot.Entity.UITransformComponent
+			local cutScale = cutTransform.UIScale
+			cutTransform.UIScale = Vector3(1, cutScale.y, cutScale.z)
+		end
+
 		if cardIdx > 0 then
 			if animate then
 				-- 뒤집기 연출 도중(딜레이 구간) 레벨 등 다른 @Sync 프로퍼티가 뒤늦게 도착해도 낡은 값으로
 				-- 덮어쓰지 않도록, 문자열을 지금 미리 캡처하지 않고 cardIdx만 넘겨서 연출이 실제로
 				-- 뒤집히는 시점에 다시 계산하게 한다 (PlaySlotFlip 참고)
-				self:PlaySlotFlip(slot, icon, levelText, nameText, effectText, labelBg, levelBadgeBg, cardIdx)
+				self:PlaySlotFlip(slotIdx, slot, icon, levelText, nameText, effectText, labelBg, levelBadgeBg, cardIdx)
 			else
 				slot.ImageRUID = self.CardFrameRUID
 				slot.Color = Color(1, 1, 1, 1)
@@ -9889,7 +11611,7 @@ script CardManager extends Logic
 	-- 프레임/아이콘/레벨·이름·효과 텍스트를 한꺼번에 새 카드로 바꾼 뒤 다시 0→1로 펼친다 — 종이를 세로축으로
 	-- 뒤집는 느낌. Icon/LevelLabel 등은 slot(Card{n})의 자식이라 부모 UIScale을 그대로 따라가며 같이 접힌다
 	@ExecSpace("ClientOnly")
-	method void PlaySlotFlip(SpriteGUIRendererComponent slot, SpriteGUIRendererComponent icon, TextComponent levelText, TextComponent nameText, TextComponent effectText, SpriteGUIRendererComponent labelBg, SpriteGUIRendererComponent levelBadgeBg, integer cardIdx)
+	method void PlaySlotFlip(integer slotIdx, SpriteGUIRendererComponent slot, SpriteGUIRendererComponent icon, TextComponent levelText, TextComponent nameText, TextComponent effectText, SpriteGUIRendererComponent labelBg, SpriteGUIRendererComponent levelBadgeBg, integer cardIdx)
 		local transform = slot.Entity.UITransformComponent
 		_TweenLogic:PlayTween(1.0, 0.0, self.SlotFlipHalfDuration, EaseType.QuadEaseIn, function(value)
 			if isvalid(transform) then
@@ -9897,7 +11619,13 @@ script CardManager extends Logic
 				transform.UIScale = Vector3(value, s.y, s.z)
 			end
 		end)
-		_TimerService:SetTimerOnce(function()
+		-- 이 flip이 지금 "어느 카드"에 대한 것인지 기록해둔다 — UpdateSlotVisual이 같은 카드에 대해
+		-- 다시 불려도(레벨 동기화/안전망 중복 호출) 이 값과 비교해서 조용히 넘어갈 수 있게 한다.
+		self._slotFlipCardIdx[slotIdx] = cardIdx
+		local flipTimerId = _TimerService:SetTimerOnce(function()
+			-- 타이머 id를 여기서 0으로 되돌려야, 이 flip이 자연 완료된 뒤 같은 슬롯에 대한 다음 호출이
+			-- (실제로 카드가 바뀐 경우) "아직 진행 중"이라고 착각해 취소 로직을 잘못 타지 않는다.
+			self._slotFlipTimerIds[slotIdx] = 0
 			if not isvalid(slot) then return end
 			-- 문자열은 지금(연출이 실제로 뒤집히는 시점) 다시 계산한다 — 딜레이 동안 레벨 등의 동기화가
 			-- 뒤늦게 도착했더라도 항상 그 시점 기준 최신 값을 그린다
@@ -9922,6 +11650,7 @@ script CardManager extends Logic
 				end)
 			end
 		end, self.SlotFlipHalfDuration)
+		self._slotFlipTimerIds[slotIdx] = flipTimerId
 	end
 
 	@ExecSpace("ClientOnly")
@@ -10073,6 +11802,36 @@ script CardManager extends Logic
 		self:ShowBuffIconPermanent(self.warriorMasteryBuff, self.warriorMasteryFill)
 	end
 
+	@ExecSpace("Multicast")
+	method void NotifyDaggerAccelOnPermanent()
+		if self:IsServer() then return end
+		self:ShowBuffIconPermanent(self.daggerAccelBuff, self.daggerAccelFill)
+	end
+
+	@ExecSpace("Multicast")
+	method void NotifyCriticalEdgeOnPermanent()
+		if self:IsServer() then return end
+		self:ShowBuffIconPermanent(self.criticalEdgeBuff, self.criticalEdgeFill)
+	end
+
+	@ExecSpace("Multicast")
+	method void NotifyKarmaOnPermanent()
+		if self:IsServer() then return end
+		self:ShowBuffIconPermanent(self.karmaBuff, self.karmaFill)
+	end
+
+	@ExecSpace("Multicast")
+	method void NotifyPhysicalTrainingOnPermanent()
+		if self:IsServer() then return end
+		self:ShowBuffIconPermanent(self.physicalTrainingBuff, self.physicalTrainingFill)
+	end
+
+	@ExecSpace("Multicast")
+	method void NotifyDarkSightOnPermanent()
+		if self:IsServer() then return end
+		self:ShowBuffIconPermanent(self.darkSightBuff, self.darkSightFill)
+	end
+
 	-- 버프 아이콘 패널 Entity ↔ 내부 buffName 키 매핑. 신규 패시브 추가 시 이 두 함수(과 그 역함수
 	-- GetBuffPanelForKey)에만 한 줄씩 추가하면 Show/Hide/Reposition 전부에 반영된다 — 예전에는 아래
 	-- 4개 함수(ShowBuffIconPermanent/ShowBuffIcon/HideBuffIcon/RepositionBuffIcons) 각각에 동일한
@@ -10093,6 +11852,11 @@ script CardManager extends Logic
 		elseif panel == self.comaBuff then return "coma"
 		elseif panel == self.selfRecoveryBuff then return "selfrecovery"
 		elseif panel == self.warriorMasteryBuff then return "warriormastery"
+		elseif panel == self.daggerAccelBuff then return "daggeraccel"
+		elseif panel == self.criticalEdgeBuff then return "criticaledge"
+		elseif panel == self.karmaBuff then return "karma"
+		elseif panel == self.physicalTrainingBuff then return "physicaltraining"
+		elseif panel == self.darkSightBuff then return "darksight"
 		end
 		return ""
 	end
@@ -10113,6 +11877,11 @@ script CardManager extends Logic
 		elseif buffName == "coma" then return self.comaBuff
 		elseif buffName == "selfrecovery" then return self.selfRecoveryBuff
 		elseif buffName == "warriormastery" then return self.warriorMasteryBuff
+		elseif buffName == "daggeraccel" then return self.daggerAccelBuff
+		elseif buffName == "criticaledge" then return self.criticalEdgeBuff
+		elseif buffName == "karma" then return self.karmaBuff
+		elseif buffName == "physicaltraining" then return self.physicalTrainingBuff
+		elseif buffName == "darksight" then return self.darkSightBuff
 		end
 		return nil
 	end
@@ -10136,6 +11905,11 @@ script CardManager extends Logic
 		self:HideBuffIcon(self.comaBuff, self.comaFill)
 		self:HideBuffIcon(self.selfRecoveryBuff, self.selfRecoveryFill)
 		self:HideBuffIcon(self.warriorMasteryBuff, self.warriorMasteryFill)
+		self:HideBuffIcon(self.daggerAccelBuff, self.daggerAccelFill)
+		self:HideBuffIcon(self.criticalEdgeBuff, self.criticalEdgeFill)
+		self:HideBuffIcon(self.karmaBuff, self.karmaFill)
+		self:HideBuffIcon(self.physicalTrainingBuff, self.physicalTrainingFill)
+		self:HideBuffIcon(self.darkSightBuff, self.darkSightFill)
 	end
 
 	@ExecSpace("ClientOnly")
@@ -10409,6 +12183,16 @@ script CardManager extends Logic
 			dmg = string.format("%.0f", self.SelfRecoveryInterval) .. "초마다 체력 " .. self:GetSelfRecoveryPercent() .. "% 회복  (영구)"
 		elseif cardIdx == 164 then
 			dmg = "피해량 증가 : +" .. self:GetWarriorMasteryPercent() .. "%  (영구)"
+		elseif cardIdx == 180 then
+			dmg = "쿨타임 -" .. math.floor(_CardRegistry:GetChance(180, self.DaggerAccelLevel) * 100) .. "%  (영구)"
+		elseif cardIdx == 181 then
+			dmg = "크리티컬 " .. math.floor(_CardRegistry:GetChance(181, self.CriticalEdgeLevel) * 100) .. "%  (영구)"
+		elseif cardIdx == 182 then
+			dmg = "크리티컬 대미지 +" .. math.floor(_CardRegistry:GetChance(182, self.KarmaLevel) * 100) .. "%  (영구)"
+		elseif cardIdx == 183 then
+			dmg = "피해량 증가 : +" .. math.floor(_CardRegistry:GetChance(183, self.PhysicalTrainingLevel) * 100) .. "%  (영구)"
+		elseif cardIdx == 184 then
+			dmg = "공격 회피 " .. math.floor(_CardRegistry:GetChance(184, self.DarkSightLevel) * 100) .. "%  (영구)"
 		elseif cardIdx == 165 then
 			dmg = "1타 : " .. math.floor(self:GetCardDamage(cardIdx)) .. "  |  2타 : " .. math.floor(self:GetCardDamage(cardIdx) * self:GetSpiritBladeSecondHitPercent(self.SpiritBladeLevel))
 		elseif cardIdx == 166 then
@@ -10423,6 +12207,24 @@ script CardManager extends Logic
 			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
 		elseif cardIdx == 171 then
 			dmg = "1타 : " .. math.floor(self:GetCardDamage(cardIdx) * self:GetDoubleStepPercent(self.DoubleStepLevel, 1)) .. "  |  2타 : " .. math.floor(self:GetCardDamage(cardIdx) * self:GetDoubleStepPercent(self.DoubleStepLevel, 2))
+		elseif cardIdx == 185 then
+			dmg = "1타 : " .. math.floor(self:GetCardDamage(cardIdx) * self:GetAssassinatePercent(self.AssassinateLevel, 1)) .. "  |  2타 : " .. math.floor(self:GetCardDamage(cardIdx) * self:GetAssassinatePercent(self.AssassinateLevel, 2))
+		elseif cardIdx == 186 then
+			dmg = "타당 : " .. math.floor(self:GetCardDamage(cardIdx) * self:GetSonicBlowPercent(self.SonicBlowLevel))
+		elseif cardIdx == 187 then
+			local base187 = self:GetCardDamage(cardIdx)
+			dmg = "초당 : " .. math.floor(base187) .. "  (DoT)  |  보너스 : " .. math.floor(base187 * self:GetSmokeRampageBonusPercent(self.SmokeRampageLevel)) .. "  (" .. math.floor(self:GetSmokeRampageBonusPercent(self.SmokeRampageLevel) * 100) .. "%)"
+		elseif cardIdx == 188 then
+			local base188 = self:GetCardDamage(cardIdx)
+			dmg = "범위 타격 : " .. math.floor(base188 * self:GetAzureEdgeExplosionPercent(self.AzureEdgeLevel)) .. "  (" .. math.floor(self:GetAzureEdgeExplosionPercent(self.AzureEdgeLevel) * 100) .. "%)"
+		elseif cardIdx == 189 then
+			local base189 = self:GetCardDamage(cardIdx) * self.Card189HitPercent
+			dmg = "메소 1개당 1타 : " .. math.floor(base189) .. "  |  2타 : " .. math.floor(base189)
+		elseif cardIdx == 190 then
+			dmg = "스킬 복사 " .. math.floor(self:GetDualShadowPartnerSkillPercent(self.DualShadowPartnerLevel) * 100) .. "%  |  기본공격 복사 " .. math.floor(self:GetDualShadowPartnerBasicPercent(self.DualShadowPartnerLevel) * 100) .. "%  (원본 카드 데미지 기준)"
+		elseif cardIdx == 191 then
+			local lv191 = self.AbyssalFlareLevel
+			dmg = "초당 틱 : " .. math.floor(self:GetCardDamage(cardIdx) * self:GetAbyssalFlareTickPercent(lv191)) .. "  (" .. math.floor(self:GetAbyssalFlareTickPercent(lv191) * 100) .. "%)"
 		elseif cardIdx == 173 then
 			local lv173 = self.SavageBlowLevel
 			local base173 = self:GetCardDamage(cardIdx)
@@ -10440,6 +12242,7 @@ script CardManager extends Logic
 		local isPassiveCard = cardIdx == 10 or cardIdx == 18 or cardIdx == 22
 			or cardIdx == 109 or cardIdx == 110 or cardIdx == 111 or cardIdx == 112 or cardIdx == 113
 			or cardIdx == 151 or cardIdx == 161 or cardIdx == 162 or cardIdx == 163 or cardIdx == 164
+			or cardIdx == 180 or cardIdx == 181 or cardIdx == 182 or cardIdx == 183 or cardIdx == 184
 		local cdStr = isPassiveCard and "패시브 스킬" or ("쿨타임 : " .. string.format("%.1f", cd) .. "s")
 		local boosterOn = false
 		if self._activeBuffOrder ~= nil then
@@ -10621,6 +12424,26 @@ script CardManager extends Logic
 		elseif cardIdx == 171 then
 			local lv = self.DoubleStepLevel
 			extraStr = "타겟 " .. self:GetDoubleStepTargetCount(lv) .. "명  |  2연타(" .. math.floor(self:GetDoubleStepPercent(lv, 1) * 100) .. "/" .. math.floor(self:GetDoubleStepPercent(lv, 2) * 100) .. "%)  |  " .. self.DoubleStepHitInterval .. "초 간격"
+		elseif cardIdx == 185 then
+			local lv185 = self.AssassinateLevel
+			extraStr = "타겟 " .. self:GetAssassinateTargetCount(lv185) .. "명  |  2연타(" .. math.floor(self:GetAssassinatePercent(lv185, 1) * 100) .. "/" .. math.floor(self:GetAssassinatePercent(lv185, 2) * 100) .. "%)  |  " .. self.AssassinateHitInterval .. "초 간격"
+		elseif cardIdx == 186 then
+			local lv186 = self.SonicBlowLevel
+			extraStr = "타겟 " .. self:GetSonicBlowTargetCount(lv186) .. "명  |  5연타(각 " .. math.floor(self:GetSonicBlowPercent(lv186) * 100) .. "%)  |  " .. self.SonicBlowHitInterval .. "초 간격  |  범위 " .. string.format("%.1f", self.SonicBlowRadius)
+		elseif cardIdx == 187 then
+			local lv187e = self.SmokeRampageLevel
+			extraStr = "타겟 " .. self:GetSmokeGrenadeTargetCount(self.SmokeGrenadeLevel) .. "명  |  명중 -" .. math.floor(self:GetSmokeGrenadeMissChance(self.SmokeGrenadeLevel) * 100) .. "%(보스/엘리트 절반)  |  지속 " .. self:GetSmokeGrenadeDuration(self.SmokeGrenadeLevel) .. "초  |  반경 " .. string.format("%.1f", self.SmokeGrenadeRadius) .. "  |  0.5초 뒤 보너스 " .. math.floor(self:GetSmokeRampageBonusPercent(lv187e) * 100) .. "%"
+		elseif cardIdx == 188 then
+			local lv188e = self.AzureEdgeLevel
+			extraStr = "타겟 2명(넉백)  |  크리티컬 확률 +" .. math.floor(self:GetAzureEdgeCritChance(lv188e) * 100) .. "%  |  범위 " .. string.format("%.1f", self.Card175ExplosionRadius) .. "  |  충돌시 " .. string.format("%.1f", self.AzureEdgeMergedExplosionMultiplier) .. "배  |  메소 100%/아이템 50%"
+		elseif cardIdx == 189 then
+			local lv189e = self.MesoDetonationLevel
+			extraStr = "타겟 : 필드의 메소 전부(없으면 대기)  |  2연타(50/50%, " .. string.format("%.2f", self.Card189SecondHitDelay) .. "초 간격)  |  스턴 " .. math.floor(self:GetMesoDetonationStunChance(lv189e) * 100) .. "% 확률로 " .. string.format("%.0f", self:GetMesoDetonationStunDuration(lv189e)) .. "초  |  기본 공격 시 30% 확률로 메소 드랍"
+		elseif cardIdx == 190 then
+			extraStr = "지속 " .. string.format("%.0f", self.Card190Duration) .. "초  |  분신 2체(스킬 복사 1 + 기본공격 전용 1, 서로 독립 행동)"
+		elseif cardIdx == 191 then
+			local lv191e = self.AbyssalFlareLevel
+			extraStr = "타겟 1명  |  연무 지속 " .. self:GetAbyssalFlareDuration(lv191e) .. "초  |  반경 " .. string.format("%.1f", self.Card191FogRadius) .. "  |  스턴 없음(대신 매초 틱)"
 		elseif cardIdx == 173 then
 			local lv173e = self.SavageBlowLevel
 			extraStr = "타겟 " .. self:GetSavageBlowTargetCount(lv173e) .. "명  |  3연타(" .. math.floor(self:GetSavageBlowPercent(lv173e, 1) * 100) .. "/" .. math.floor(self:GetSavageBlowPercent(lv173e, 2) * 100) .. "/" .. math.floor(self:GetSavageBlowPercent(lv173e, 3) * 100) .. "%)  |  " .. string.format("%.2f", self.SavageBlowHitLifetime / 3) .. "초 간격"
@@ -10728,13 +12551,56 @@ script CardManager extends Logic
 		if self.SelfRecoveryLevel > 0 then
 			self._selfRecoveryTimer = self._selfRecoveryTimer - delta
 			if self._selfRecoveryTimer <= 0 then
-				local healAmount = math.floor(_GameManager.PlayerMaxHp * (self:GetSelfRecoveryPercent() / 100.0))
+				-- SkillInventory 셀프 리커버리(인덱스58) 레벨의 +5%/+7%/+9%가 회복량에 곱연산으로 추가 가산된다.
+				local healAmount = math.floor(_GameManager.PlayerMaxHp * (self:GetSelfRecoveryPercent() / 100.0) * (1.0 + self:GetSkillInvTierPercent(58, 0.05, 0.07, 0.09)))
 				_GameManager:HealPlayer(healAmount)
 				self._selfRecoveryTimer = self.SelfRecoveryInterval
 			end
 		end
 
 		-- 매직 부스터/크리티컬은 영구 패시브 — 타이머 카운트다운 없음
+
+		-- 장비 등급 스킬의 지속시간 버프(치명타/피해량/다음타격 강화)도 여기서 함께 감쇠시킨다
+		_GearEffectLogic:Tick(delta)
+	end
+
+	-- 장비 등급 스킬이 요구하는 "추가 기본 공격"(활 레어 10마리 처치/활 레전더리 확률/장갑 레전더리
+	-- 10회마다 200% 강화 공격) 전용 — 슬롯 쿨타임과 완전히 무관하게 즉시 1회만 때린다.
+	-- damageMult는 기본 공격 대미지 대비 배율(1.0 = 동일, 2.0 = 강화 공격)
+	@ExecSpace("ServerOnly")
+	method void TriggerExtraBasicAttack(number damageMult)
+		local cardIdx = self:GetBasicAttackCardIndex()
+		local targets = self:GetClosestTargets(1)
+		local target = targets[1]
+		if target == nil or target._dead then return end
+
+		local damage = self:GetCardDamage(cardIdx) * damageMult
+		local isCrit = self:RollCrit(cardIdx)
+
+		-- 레이온/쉐이드는 기본 공격이 전용 메서드(연출 포함)라 그대로 재사용하고, 아르카나(파이어샷)/
+		-- 실피드(애로우샷)는 TickCard의 else 분기에서 인라인 처리되는 구조라 여기선 대미지만 적용한다
+		-- (추가 발동분까지 발사 연출을 겹치면 화면이 지저분해진다는 판단 — 필요하면 후속 조정)
+		if cardIdx == 150 then
+			self:LeionBasicAttack(damage, isCrit, target)
+		elseif cardIdx == 172 then
+			self:ShadeBasicAttack(damage, isCrit, target)
+		else
+			if isCrit then target:TakeDamageCrit(damage * 2)
+			else target:TakeDamage(damage) end
+		end
+
+		log("TriggerExtraBasicAttack: card=" .. cardIdx .. " mult=" .. damageMult .. " dmg=" .. math.floor(damage))
+	end
+
+	-- 현재 선택된 캐릭터의 기본 공격 카드 인덱스 — 아르카나=1(파이어샷) / 실피드=25(애로우샷) /
+	-- 레이온=150(콤보어택) / 쉐이드=172. TriggerExtraBasicAttack이 어느 공격을 복제할지 판단할 때 쓴다
+	@ExecSpace("ServerOnly")
+	method integer GetBasicAttackCardIndex()
+		local ch = _GameManager.SelectedCharacter
+		if ch == 1 then return 25 end
+		if ch == 2 then return 150 end
+		if ch == 3 then return 172 end
+		return 1
 	end
 
 	@ExecSpace("ServerOnly")
@@ -10757,8 +12623,24 @@ script CardManager extends Logic
 				-- 레전더리 무기 스킬 확률 발동만 별개로 체크한다(유저 지정)
 				if slotIndex == 0 then
 					self:TryProcWeaponSkill()
+					-- 장비 등급 스킬의 기본 공격 트리거(장갑 20/30/10회 주기, 활·자마다르 레전더리 확률).
+					-- 대미지 배율을 소비하기 "전"에 불러야 이번 타격에 예약분이 반영된다
+					_GearEffectLogic:OnBasicAttack()
+					damage = damage * _GearEffectLogic:ConsumeBasicAttackMult()
+				else
+					-- 액티브 스킬: 투구 레전더리의 "다음 스킬 강화"를 이번 스킬에 소비하고, 동시에
+					-- 다음 스킬/기본공격용 강화를 새로 예약한다
+					damage = damage * _GearEffectLogic:ConsumeSkillChainMult()
+					_GearEffectLogic:OnSkillUsed()
 				end
 				local isCrit = self:RollCrit(cardIndex)
+				-- 장갑 레어: 기본 공격 20회마다 예약된 치명타 확률 보너스(소모형)는 기본 공격에만 얹는다
+				if slotIndex == 0 and not isCrit then
+					local gearBasicCritBonus = _GearEffectLogic:ConsumeBasicAttackCritBonus()
+					if gearBasicCritBonus > 0 and _UtilLogic:RandomDouble() < gearBasicCritBonus then
+						isCrit = true
+					end
+				end
 				-- 메소 익스플로젼(카드177) 전용 — 터뜨릴 메소가 없으면 이번 틱은 아예 "발동 안 한 것"으로
 				-- 쳐서 쿨타임을 채우지 않고 계속 대기시킨다(유저 지정: "메소가 없으면 스킬 쿨 돌지말고
 				-- 대기상태로 있어야함" — 적이 없을 때와 동일한 대기 취급). 다른 모든 카드는 항상 true.
@@ -10860,23 +12742,37 @@ script CardManager extends Logic
 				elseif cardIndex == 170 then
 					self:FuriousBlowAttack(damage, isCrit)
 				elseif cardIndex == 171 then
-					self:DoubleStepAttack(damage, isCrit)
+					self:DoubleStepAttack(damage, isCrit, nil)
 				elseif cardIndex == 172 then
 					self:ShadeBasicAttack(damage, isCrit, target)
 				elseif cardIndex == 173 then
-					self:SavageBlowAttack(damage, isCrit)
+					self:SavageBlowAttack(damage, isCrit, nil)
 				elseif cardIndex == 174 then
 					self:SmokeGrenadeAttack(damage, isCrit)
 				elseif cardIndex == 175 then
 					self:MuspelheimAttack(damage, isCrit)
 				elseif cardIndex == 176 then
-					self:StealAttack(damage, isCrit)
+					self:StealAttack(damage, isCrit, nil)
 				elseif cardIndex == 177 then
 					if not self:MesoExplosionAttack(damage, isCrit) then skipCooldownReset = true end
 				elseif cardIndex == 178 then
 					self:ShadowPartnerAttack(damage, isCrit)
 				elseif cardIndex == 179 then
-					self:DarkFlareAttack(damage, isCrit)
+					self:DarkFlareAttack(damage, isCrit, nil)
+				elseif cardIndex == 185 then
+					self:AssassinateAttack(damage, isCrit)
+				elseif cardIndex == 186 then
+					self:SonicBlowAttack(damage, isCrit)
+				elseif cardIndex == 187 then
+					self:SmokeRampageAttack(damage, isCrit)
+				elseif cardIndex == 188 then
+					self:AzureEdgeAttack(damage, isCrit)
+				elseif cardIndex == 189 then
+					if not self:MesoDetonationAttack(damage, isCrit) then skipCooldownReset = true end
+				elseif cardIndex == 190 then
+					self:DualShadowPartnerAttack(damage, isCrit)
+				elseif cardIndex == 191 then
+					self:AbyssalFlareAttack(damage, isCrit, nil)
 				else
 					if isCrit then target:TakeDamageCrit(damage * 2)
 					else target:TakeDamage(damage) end
@@ -10916,6 +12812,12 @@ script CardManager extends Logic
 						end, 0.16)
 					end
 				end
+				-- 장갑 유니크: 기본 공격으로 적을 처치했으면 다음 기본 공격 1회를 강화한다. 이 시점의
+				-- target._dead가 곧 "이번 기본 공격이 처치했는가"이므로 별도 배선 없이 판정된다
+				if slotIndex == 0 and target ~= nil and target._dead then
+					_GearEffectLogic:OnBasicAttackKill()
+				end
+
 				-- 적을 맞췄을 때만 쿨타임 연출을 새로 재생하고 다시 채운다
 				if not skipCooldownReset then
 					self:PlayCooldownVisual(slotIndex, cooldown)
@@ -13246,38 +15148,85 @@ script CardManager extends Logic
 
 		if isShade then
 			-- 더블 스탭(Card171, 슬롯형 액티브 1호 — 쉐이드의 첫 스킬) — 미해금이면 슬롯 여유 있을 때만 해금
-			if self.DoubleStepLevel == 0 then
-				if hasEmptySlot then table.insert(pool, { card = 171, type = "unlock" }) end
-			elseif self.DoubleStepLevel < 5 then
-				table.insert(pool, { card = 171, type = "doublestep_up" })
+			-- (암살로 이미 조합된 뒤에는 더 이상 등장하지 않음 — 그 슬롯을 이미 떠났으므로)
+			if self.AssassinateLevel == 0 then
+				if self.DoubleStepLevel == 0 then
+					if hasEmptySlot then table.insert(pool, { card = 171, type = "unlock" }) end
+				elseif self.DoubleStepLevel < 5 then
+					table.insert(pool, { card = 171, type = "doublestep_up" })
+				end
+			end
+
+			-- 암살(Card185, 조합 스킬 — 더블 스탭 슬롯을 그대로 넘겨받는다. 크리티컬 엣지/피지컬
+			-- 트레이닝은 둘 다 슬롯 없는 패시브라 비울 슬롯이 없음)
+			if self.DoubleStepLevel >= 5 and self:IsCardUnlocked(181) and self:IsCardUnlocked(183) and self.AssassinateLevel == 0 then
+				table.insert(pool, { card = 185, type = "unlock" })
+			elseif self.AssassinateLevel > 0 and self.AssassinateLevel < 3 then
+				table.insert(pool, { card = 185, type = "assassinate_up" })
 			end
 
 			-- 새비지 블로우(Card173, 슬롯형 액티브 2호) — 미해금이면 슬롯 여유 있을 때만 해금
-			if self.SavageBlowLevel == 0 then
-				if hasEmptySlot then table.insert(pool, { card = 173, type = "unlock" }) end
-			elseif self.SavageBlowLevel < 5 then
-				table.insert(pool, { card = 173, type = "savageblow_up" })
+			-- (소닉 블로우로 이미 조합된 뒤에는 더 이상 등장하지 않음 — 그 슬롯을 이미 떠났으므로)
+			if self.SonicBlowLevel == 0 then
+				if self.SavageBlowLevel == 0 then
+					if hasEmptySlot then table.insert(pool, { card = 173, type = "unlock" }) end
+				elseif self.SavageBlowLevel < 5 then
+					table.insert(pool, { card = 173, type = "savageblow_up" })
+				end
+			end
+
+			-- 소닉 블로우(Card186, 조합 스킬 — 새비지 블로우 슬롯을 그대로 넘겨받는다. 대거 액셀레이션/
+			-- 카르마는 둘 다 슬롯 없는 패시브라 비울 슬롯이 없음)
+			if self.SavageBlowLevel >= 5 and self:IsCardUnlocked(180) and self:IsCardUnlocked(182) and self.SonicBlowLevel == 0 then
+				table.insert(pool, { card = 186, type = "unlock" })
+			elseif self.SonicBlowLevel > 0 and self.SonicBlowLevel < 3 then
+				table.insert(pool, { card = 186, type = "sonicblow_up" })
 			end
 
 			-- 연막탄(Card174, 슬롯형 액티브 3호) — 미해금이면 슬롯 여유 있을 때만 해금
-			if self.SmokeGrenadeLevel == 0 then
-				if hasEmptySlot then table.insert(pool, { card = 174, type = "unlock" }) end
-			elseif self.SmokeGrenadeLevel < 5 then
-				table.insert(pool, { card = 174, type = "smokegrenade_up" })
+			-- (연막난무로 이미 조합된 뒤에는 더 이상 등장하지 않음 — 그 슬롯을 이미 떠났으므로)
+			if self.SmokeRampageLevel == 0 then
+				if self.SmokeGrenadeLevel == 0 then
+					if hasEmptySlot then table.insert(pool, { card = 174, type = "unlock" }) end
+				elseif self.SmokeGrenadeLevel < 5 then
+					table.insert(pool, { card = 174, type = "smokegrenade_up" })
+				end
+			end
+
+			-- 연막난무(Card187, 조합 스킬 — 연막탄 슬롯을 그대로 넘겨받는다. 다크 사이트/대거
+			-- 액셀레이션은 둘 다 슬롯 없는 패시브라 비울 슬롯이 없음)
+			if self.SmokeGrenadeLevel >= 5 and self:IsCardUnlocked(184) and self:IsCardUnlocked(180) and self.SmokeRampageLevel == 0 then
+				table.insert(pool, { card = 187, type = "unlock" })
+			elseif self.SmokeRampageLevel > 0 and self.SmokeRampageLevel < 3 then
+				table.insert(pool, { card = 187, type = "smokerampage_up" })
 			end
 
 			-- 무스펠하임(Card175, 슬롯형 액티브 4호) — 미해금이면 슬롯 여유 있을 때만 해금
-			if self.MuspelheimLevel == 0 then
-				if hasEmptySlot then table.insert(pool, { card = 175, type = "unlock" }) end
-			elseif self.MuspelheimLevel < 5 then
-				table.insert(pool, { card = 175, type = "muspelheim_up" })
+			-- (아주르 엣지로 이미 조합된 뒤에는 더 이상 등장하지 않음 — 그 슬롯을 이미 떠났으므로)
+			if self.AzureEdgeLevel == 0 then
+				if self.MuspelheimLevel == 0 then
+					if hasEmptySlot then table.insert(pool, { card = 175, type = "unlock" }) end
+				elseif self.MuspelheimLevel < 5 then
+					table.insert(pool, { card = 175, type = "muspelheim_up" })
+				end
 			end
 
 			-- 스틸(Card176, 슬롯형 액티브 5호) — 미해금이면 슬롯 여유 있을 때만 해금
-			if self.StealLevel == 0 then
-				if hasEmptySlot then table.insert(pool, { card = 176, type = "unlock" }) end
-			elseif self.StealLevel < 5 then
-				table.insert(pool, { card = 176, type = "steal_up" })
+			-- (아주르 엣지로 이미 조합된 뒤에는 더 이상 등장하지 않음 — 그 슬롯을 이미 떠났으므로)
+			if self.AzureEdgeLevel == 0 then
+				if self.StealLevel == 0 then
+					if hasEmptySlot then table.insert(pool, { card = 176, type = "unlock" }) end
+				elseif self.StealLevel < 5 then
+					table.insert(pool, { card = 176, type = "steal_up" })
+				end
+			end
+
+			-- 아주르 엣지(Card188, 조합 스킬 — 무스펠하임 슬롯을 그대로 넘겨받고, 스틸 슬롯은 완전히
+			-- 비운다. 더블 커터/브레이브 슬래시와 동일한 "액티브 2개 병합" 패턴, 슬롯 여유 불필요)
+			if self.MuspelheimLevel >= 5 and self.StealLevel >= 5 and self.AzureEdgeLevel == 0 then
+				table.insert(pool, { card = 188, type = "unlock" })
+			elseif self.AzureEdgeLevel > 0 and self.AzureEdgeLevel < 3 then
+				table.insert(pool, { card = 188, type = "azureedge_up" })
 			end
 
 			-- 메소 익스플로젼(Card177, 슬롯형 액티브 6호) — 미해금이면 슬롯 여유 있을 때만 해금
@@ -13287,6 +15236,14 @@ script CardManager extends Logic
 				table.insert(pool, { card = 177, type = "mesoexplosion_up" })
 			end
 
+			-- 메소 데토네이션(Card189, 조합 스킬 — 메소 익스플로젼 슬롯을 그대로 넘겨받는다). 카르마(182)
+			-- +다크 사이트(184)+피지컬 트레이닝(183, 셋 다 슬롯 없는 패시브) 보유 필요(유저 지정 표).
+			if self.MesoExplosionLevel >= 5 and self:IsCardUnlocked(182) and self:IsCardUnlocked(184) and self:IsCardUnlocked(183) and self.MesoDetonationLevel == 0 then
+				table.insert(pool, { card = 189, type = "unlock" })
+			elseif self.MesoDetonationLevel > 0 and self.MesoDetonationLevel < 3 then
+				table.insert(pool, { card = 189, type = "mesodetonation_up" })
+			end
+
 			-- 쉐도우 파트너(Card178, 슬롯형 액티브 7호) — 미해금이면 슬롯 여유 있을 때만 해금
 			if self.ShadowPartnerLevel == 0 then
 				if hasEmptySlot then table.insert(pool, { card = 178, type = "unlock" }) end
@@ -13294,11 +15251,62 @@ script CardManager extends Logic
 				table.insert(pool, { card = 178, type = "shadowpartner_up" })
 			end
 
+			-- 듀얼 쉐도우 파트너(Card190, 조합 스킬 — 쉐도우 파트너 슬롯을 그대로 넘겨받는다). 다크
+			-- 사이트(184)+크리티컬 엣지(181, 둘 다 슬롯 없는 패시브) 보유 필요(유저 지정 표).
+			if self.ShadowPartnerLevel >= 5 and self:IsCardUnlocked(184) and self:IsCardUnlocked(181) and self.DualShadowPartnerLevel == 0 then
+				table.insert(pool, { card = 190, type = "unlock" })
+			elseif self.DualShadowPartnerLevel > 0 and self.DualShadowPartnerLevel < 3 then
+				table.insert(pool, { card = 190, type = "dualshadowpartner_up" })
+			end
+
 			-- 다크 플레어(Card179, 슬롯형 액티브 8호) — 미해금이면 슬롯 여유 있을 때만 해금
 			if self.DarkFlareLevel == 0 then
 				if hasEmptySlot then table.insert(pool, { card = 179, type = "unlock" }) end
 			elseif self.DarkFlareLevel < 5 then
 				table.insert(pool, { card = 179, type = "darkflare_up" })
+			end
+
+			-- 어비설 플레어(Card191, 조합 스킬 — 다크 플레어 슬롯을 그대로 넘겨받는다). 대거 액셀레이션
+			-- (180)+피지컬 트레이닝(183, 둘 다 슬롯 없는 패시브) 보유 필요(유저 지정 표).
+			if self.DarkFlareLevel >= 5 and self:IsCardUnlocked(180) and self:IsCardUnlocked(183) and self.AbyssalFlareLevel == 0 then
+				table.insert(pool, { card = 191, type = "unlock" })
+			elseif self.AbyssalFlareLevel > 0 and self.AbyssalFlareLevel < 3 then
+				table.insert(pool, { card = 191, type = "abyssalflare_up" })
+			end
+
+			-- 대거 액셀레이션(Card180, 패시브 — 슬롯 없이 레벨만 증가)
+			if self.DaggerAccelLevel == 0 then
+				table.insert(pool, { card = 180, type = "unlock" })
+			elseif self.DaggerAccelLevel < 5 then
+				table.insert(pool, { card = 180, type = "daggeraccel_up" })
+			end
+
+			-- 크리티컬 엣지(Card181, 패시브 — 슬롯 없이 레벨만 증가)
+			if self.CriticalEdgeLevel == 0 then
+				table.insert(pool, { card = 181, type = "unlock" })
+			elseif self.CriticalEdgeLevel < 5 then
+				table.insert(pool, { card = 181, type = "criticaledge_up" })
+			end
+
+			-- 카르마(Card182, 패시브 — 슬롯 없이 레벨만 증가)
+			if self.KarmaLevel == 0 then
+				table.insert(pool, { card = 182, type = "unlock" })
+			elseif self.KarmaLevel < 5 then
+				table.insert(pool, { card = 182, type = "karma_up" })
+			end
+
+			-- 피지컬 트레이닝(Card183, 패시브 — 슬롯 없이 레벨만 증가)
+			if self.PhysicalTrainingLevel == 0 then
+				table.insert(pool, { card = 183, type = "unlock" })
+			elseif self.PhysicalTrainingLevel < 5 then
+				table.insert(pool, { card = 183, type = "physicaltraining_up" })
+			end
+
+			-- 다크 사이트(Card184, 패시브 — 슬롯 없이 레벨만 증가)
+			if self.DarkSightLevel == 0 then
+				table.insert(pool, { card = 184, type = "unlock" })
+			elseif self.DarkSightLevel < 5 then
+				table.insert(pool, { card = 184, type = "darksight_up" })
 			end
 		end
 
@@ -13840,6 +15848,102 @@ script CardManager extends Logic
 			icon.ImageRUID = _CardRegistry:GetIcon(179)
 			title.Text = "Lv" .. nextLevel
 			name.Text  = _CardRegistry:GetName(179)
+			return
+		end
+
+		if cardIdx == 180 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.DaggerAccelLevel + 1)
+			icon.ImageRUID = _CardRegistry:GetIcon(180)
+			title.Text = "Lv" .. nextLevel
+			name.Text  = _CardRegistry:GetName(180)
+			return
+		end
+
+		if cardIdx == 181 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.CriticalEdgeLevel + 1)
+			icon.ImageRUID = _CardRegistry:GetIcon(181)
+			title.Text = "Lv" .. nextLevel
+			name.Text  = _CardRegistry:GetName(181)
+			return
+		end
+
+		if cardIdx == 182 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.KarmaLevel + 1)
+			icon.ImageRUID = _CardRegistry:GetIcon(182)
+			title.Text = "Lv" .. nextLevel
+			name.Text  = _CardRegistry:GetName(182)
+			return
+		end
+
+		if cardIdx == 183 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.PhysicalTrainingLevel + 1)
+			icon.ImageRUID = _CardRegistry:GetIcon(183)
+			title.Text = "Lv" .. nextLevel
+			name.Text  = _CardRegistry:GetName(183)
+			return
+		end
+
+		if cardIdx == 184 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.DarkSightLevel + 1)
+			icon.ImageRUID = _CardRegistry:GetIcon(184)
+			title.Text = "Lv" .. nextLevel
+			name.Text  = _CardRegistry:GetName(184)
+			return
+		end
+
+		if cardIdx == 185 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.AssassinateLevel + 1)
+			icon.ImageRUID = _CardRegistry:GetIcon(185)
+			title.Text = "Lv" .. nextLevel
+			name.Text  = _CardRegistry:GetName(185)
+			return
+		end
+
+		if cardIdx == 186 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.SonicBlowLevel + 1)
+			icon.ImageRUID = _CardRegistry:GetIcon(186)
+			title.Text = "Lv" .. nextLevel
+			name.Text  = _CardRegistry:GetName(186)
+			return
+		end
+
+		if cardIdx == 187 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.SmokeRampageLevel + 1)
+			icon.ImageRUID = _CardRegistry:GetIcon(187)
+			title.Text = "Lv" .. nextLevel
+			name.Text  = _CardRegistry:GetName(187)
+			return
+		end
+
+		if cardIdx == 188 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.AzureEdgeLevel + 1)
+			icon.ImageRUID = _CardRegistry:GetIcon(188)
+			title.Text = "Lv" .. nextLevel
+			name.Text  = _CardRegistry:GetName(188)
+			return
+		end
+
+		if cardIdx == 189 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.MesoDetonationLevel + 1)
+			icon.ImageRUID = _CardRegistry:GetIcon(189)
+			title.Text = "Lv" .. nextLevel
+			name.Text  = _CardRegistry:GetName(189)
+			return
+		end
+
+		if cardIdx == 190 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.DualShadowPartnerLevel + 1)
+			icon.ImageRUID = _CardRegistry:GetIcon(190)
+			title.Text = "Lv" .. nextLevel
+			name.Text  = _CardRegistry:GetName(190)
+			return
+		end
+
+		if cardIdx == 191 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.AbyssalFlareLevel + 1)
+			icon.ImageRUID = _CardRegistry:GetIcon(191)
+			title.Text = "Lv" .. nextLevel
+			name.Text  = _CardRegistry:GetName(191)
 			return
 		end
 
@@ -15225,6 +17329,26 @@ script CardManager extends Logic
 			return
 		end
 
+		-- 메소 데토네이션(조합 스킬 — 메소 익스플로젼 슬롯을 그대로 넘겨받는다)
+		if cardIdx == 189 then
+			if upgradeType == "unlock" then
+				self.MesoDetonationLevel = 1
+				local mesoExplosionSlot = self:GetSlotForCard(177)
+				if mesoExplosionSlot > 0 then
+					self:AssignCardToSlot(mesoExplosionSlot, 189)
+					self:ResetSlotTimer(mesoExplosionSlot)
+					self:PlayThunderStormFusionEffect(mesoExplosionSlot)
+					log("Card189(MesoDetonation) fused into Slot" .. mesoExplosionSlot .. " (was MesoExplosion)")
+				else
+					log_warning("MesoDetonation: MesoExplosion not found in any slot — fusion could not place the card")
+				end
+			elseif upgradeType == "mesodetonation_up" and self.MesoDetonationLevel < 3 then
+				self.MesoDetonationLevel = self.MesoDetonationLevel + 1
+			end
+			log("MesoDetonation L" .. self.MesoDetonationLevel .. " (dmg=" .. math.floor(self:GetMesoDetonationDamage(self.MesoDetonationLevel)) .. " stun%=" .. math.floor(self:GetMesoDetonationStunChance(self.MesoDetonationLevel) * 100) .. ")")
+			return
+		end
+
 		-- 쉐도우 파트너(쉐이드 전용, 슬롯형 액티브)
 		if cardIdx == 178 then
 			if upgradeType == "unlock" then
@@ -15242,6 +17366,26 @@ script CardManager extends Logic
 			return
 		end
 
+		-- 듀얼 쉐도우 파트너(조합 스킬 — 쉐도우 파트너 슬롯을 그대로 넘겨받는다)
+		if cardIdx == 190 then
+			if upgradeType == "unlock" then
+				self.DualShadowPartnerLevel = 1
+				local shadowPartnerSlot = self:GetSlotForCard(178)
+				if shadowPartnerSlot > 0 then
+					self:AssignCardToSlot(shadowPartnerSlot, 190)
+					self:ResetSlotTimer(shadowPartnerSlot)
+					self:PlayThunderStormFusionEffect(shadowPartnerSlot)
+					log("Card190(DualShadowPartner) fused into Slot" .. shadowPartnerSlot .. " (was ShadowPartner)")
+				else
+					log_warning("DualShadowPartner: ShadowPartner not found in any slot — fusion could not place the card")
+				end
+			elseif upgradeType == "dualshadowpartner_up" and self.DualShadowPartnerLevel < 3 then
+				self.DualShadowPartnerLevel = self.DualShadowPartnerLevel + 1
+			end
+			log("DualShadowPartner L" .. self.DualShadowPartnerLevel .. " (skillPct=" .. math.floor(self:GetDualShadowPartnerSkillPercent(self.DualShadowPartnerLevel) * 100) .. "% basicPct=" .. math.floor(self:GetDualShadowPartnerBasicPercent(self.DualShadowPartnerLevel) * 100) .. "%)")
+			return
+		end
+
 		-- 다크 플레어(쉐이드 전용, 슬롯형 액티브)
 		if cardIdx == 179 then
 			if upgradeType == "unlock" then
@@ -15256,6 +17400,172 @@ script CardManager extends Logic
 				self.DarkFlareLevel = self.DarkFlareLevel + 1
 			end
 			log("DarkFlare L" .. self.DarkFlareLevel .. " (dmg=" .. math.floor(self:GetDarkFlareDamage(self.DarkFlareLevel)) .. " targets=" .. self:GetDarkFlareTargetCount(self.DarkFlareLevel) .. ")")
+			return
+		end
+
+		-- 어비설 플레어(조합 스킬 — 다크 플레어 슬롯을 그대로 넘겨받는다)
+		if cardIdx == 191 then
+			if upgradeType == "unlock" then
+				self.AbyssalFlareLevel = 1
+				local darkFlareSlot = self:GetSlotForCard(179)
+				if darkFlareSlot > 0 then
+					self:AssignCardToSlot(darkFlareSlot, 191)
+					self:ResetSlotTimer(darkFlareSlot)
+					self:PlayThunderStormFusionEffect(darkFlareSlot)
+					log("Card191(AbyssalFlare) fused into Slot" .. darkFlareSlot .. " (was DarkFlare)")
+				else
+					log_warning("AbyssalFlare: DarkFlare not found in any slot — fusion could not place the card")
+				end
+			elseif upgradeType == "abyssalflare_up" and self.AbyssalFlareLevel < 3 then
+				self.AbyssalFlareLevel = self.AbyssalFlareLevel + 1
+			end
+			log("AbyssalFlare L" .. self.AbyssalFlareLevel .. " (dmg=" .. math.floor(self:GetAbyssalFlareDamage(self.AbyssalFlareLevel)) .. " tick%=" .. math.floor(self:GetAbyssalFlareTickPercent(self.AbyssalFlareLevel) * 100) .. " duration=" .. self:GetAbyssalFlareDuration(self.AbyssalFlareLevel) .. ")")
+			return
+		end
+
+		-- 대거 액셀레이션(패시브 — 슬롯 없이 레벨만 증가)
+		if cardIdx == 180 then
+			if upgradeType == "unlock" then
+				self.DaggerAccelLevel = 1
+			elseif upgradeType == "daggeraccel_up" and self.DaggerAccelLevel < 5 then
+				self.DaggerAccelLevel = self.DaggerAccelLevel + 1
+			end
+			self:NotifyDaggerAccelOnPermanent()
+			log("DaggerAccel L" .. self.DaggerAccelLevel .. " (쿨타임 -" .. math.floor(self:GetDaggerAccelReduction() * 100) .. "%)")
+			return
+		end
+
+		-- 크리티컬 엣지(패시브 — 슬롯 없이 레벨만 증가)
+		if cardIdx == 181 then
+			if upgradeType == "unlock" then
+				self.CriticalEdgeLevel = 1
+			elseif upgradeType == "criticaledge_up" and self.CriticalEdgeLevel < 5 then
+				self.CriticalEdgeLevel = self.CriticalEdgeLevel + 1
+			end
+			self:NotifyCriticalEdgeOnPermanent()
+			log("CriticalEdge L" .. self.CriticalEdgeLevel .. " (크리티컬 " .. math.floor(_CardRegistry:GetChance(181, self.CriticalEdgeLevel) * 100) .. "%)")
+			return
+		end
+
+		-- 카르마(패시브 — 슬롯 없이 레벨만 증가)
+		if cardIdx == 182 then
+			if upgradeType == "unlock" then
+				self.KarmaLevel = 1
+			elseif upgradeType == "karma_up" and self.KarmaLevel < 5 then
+				self.KarmaLevel = self.KarmaLevel + 1
+			end
+			self:NotifyKarmaOnPermanent()
+			log("Karma L" .. self.KarmaLevel .. " (크리티컬 대미지 +" .. math.floor(self:GetKarmaBonus() * 100) .. "%)")
+			return
+		end
+
+		-- 피지컬 트레이닝(패시브 — 슬롯 없이 레벨만 증가)
+		if cardIdx == 183 then
+			if upgradeType == "unlock" then
+				self.PhysicalTrainingLevel = 1
+			elseif upgradeType == "physicaltraining_up" and self.PhysicalTrainingLevel < 5 then
+				self.PhysicalTrainingLevel = self.PhysicalTrainingLevel + 1
+			end
+			self:NotifyPhysicalTrainingOnPermanent()
+			log("PhysicalTraining L" .. self.PhysicalTrainingLevel .. " (피해량 +" .. math.floor(_CardRegistry:GetChance(183, self.PhysicalTrainingLevel) * 100) .. "%)")
+			return
+		end
+
+		-- 다크 사이트(패시브 — 슬롯 없이 레벨만 증가)
+		if cardIdx == 184 then
+			if upgradeType == "unlock" then
+				self.DarkSightLevel = 1
+			elseif upgradeType == "darksight_up" and self.DarkSightLevel < 5 then
+				self.DarkSightLevel = self.DarkSightLevel + 1
+			end
+			self:NotifyDarkSightOnPermanent()
+			log("DarkSight L" .. self.DarkSightLevel .. " (회피 " .. math.floor(self:GetDarkSightEvadeChance() * 100) .. "%)")
+			return
+		end
+
+		-- 암살(조합 스킬 — 더블 스탭 슬롯을 그대로 넘겨받는다)
+		if cardIdx == 185 then
+			if upgradeType == "unlock" then
+				self.AssassinateLevel = 1
+				local doubleStepSlot = self:GetSlotForCard(171)
+				if doubleStepSlot > 0 then
+					self:AssignCardToSlot(doubleStepSlot, 185)
+					self:ResetSlotTimer(doubleStepSlot)
+					self:PlayThunderStormFusionEffect(doubleStepSlot)
+					log("Card185(Assassinate) fused into Slot" .. doubleStepSlot .. " (was DoubleStep)")
+				else
+					log_warning("Assassinate: DoubleStep not found in any slot — fusion could not place the card")
+				end
+			elseif upgradeType == "assassinate_up" and self.AssassinateLevel < 3 then
+				self.AssassinateLevel = self.AssassinateLevel + 1
+			end
+			log("Assassinate L" .. self.AssassinateLevel .. " (dmg=" .. math.floor(self:GetAssassinateDamage(self.AssassinateLevel)) .. " targets=" .. self:GetAssassinateTargetCount(self.AssassinateLevel) .. ")")
+			return
+		end
+
+		-- 소닉 블로우(조합 스킬 — 새비지 블로우 슬롯을 그대로 넘겨받는다)
+		if cardIdx == 186 then
+			if upgradeType == "unlock" then
+				self.SonicBlowLevel = 1
+				local savageBlowSlot = self:GetSlotForCard(173)
+				if savageBlowSlot > 0 then
+					self:AssignCardToSlot(savageBlowSlot, 186)
+					self:ResetSlotTimer(savageBlowSlot)
+					self:PlayThunderStormFusionEffect(savageBlowSlot)
+					log("Card186(SonicBlow) fused into Slot" .. savageBlowSlot .. " (was SavageBlow)")
+				else
+					log_warning("SonicBlow: SavageBlow not found in any slot — fusion could not place the card")
+				end
+			elseif upgradeType == "sonicblow_up" and self.SonicBlowLevel < 3 then
+				self.SonicBlowLevel = self.SonicBlowLevel + 1
+			end
+			log("SonicBlow L" .. self.SonicBlowLevel .. " (dmg=" .. math.floor(self:GetSonicBlowDamage(self.SonicBlowLevel)) .. " targets=" .. self:GetSonicBlowTargetCount(self.SonicBlowLevel) .. ")")
+			return
+		end
+
+		-- 연막난무(조합 스킬 — 연막탄 슬롯을 그대로 넘겨받는다)
+		if cardIdx == 187 then
+			if upgradeType == "unlock" then
+				self.SmokeRampageLevel = 1
+				local smokeGrenadeSlot = self:GetSlotForCard(174)
+				if smokeGrenadeSlot > 0 then
+					self:AssignCardToSlot(smokeGrenadeSlot, 187)
+					self:ResetSlotTimer(smokeGrenadeSlot)
+					self:PlayThunderStormFusionEffect(smokeGrenadeSlot)
+					log("Card187(SmokeRampage) fused into Slot" .. smokeGrenadeSlot .. " (was SmokeGrenade)")
+				else
+					log_warning("SmokeRampage: SmokeGrenade not found in any slot — fusion could not place the card")
+				end
+			elseif upgradeType == "smokerampage_up" and self.SmokeRampageLevel < 3 then
+				self.SmokeRampageLevel = self.SmokeRampageLevel + 1
+			end
+			log("SmokeRampage L" .. self.SmokeRampageLevel .. " (dmg=" .. math.floor(self:GetSmokeRampageDamage(self.SmokeRampageLevel)) .. " bonus=" .. math.floor(self:GetSmokeRampageBonusPercent(self.SmokeRampageLevel) * 100) .. "%)")
+			return
+		end
+
+		-- 아주르 엣지 (조합 스킬 — 무스펠하임 슬롯을 그대로 넘겨받고, 스틸 슬롯은 완전히 비운다.
+		-- 더블 커터/브레이브 슬래시와 동일한 패턴)
+		if cardIdx == 188 then
+			if upgradeType == "unlock" then
+				self.AzureEdgeLevel = 1
+				local muspelheimSlot = self:GetSlotForCard(175)
+				local stealSlot = self:GetSlotForCard(176)
+				if muspelheimSlot > 0 then
+					self:AssignCardToSlot(muspelheimSlot, 188)
+					self:ResetSlotTimer(muspelheimSlot)
+					self:PlayThunderStormFusionEffect(muspelheimSlot)
+					log("Card188(AzureEdge) fused into Slot" .. muspelheimSlot .. " (was Muspelheim)")
+				else
+					log_warning("AzureEdge: Muspelheim not found in any slot — fusion could not place the card")
+				end
+				if stealSlot > 0 then
+					self:AssignCardToSlot(stealSlot, 0)
+					log("AzureEdge: Steal's Slot" .. stealSlot .. " emptied")
+				end
+			elseif upgradeType == "azureedge_up" and self.AzureEdgeLevel < 3 then
+				self.AzureEdgeLevel = self.AzureEdgeLevel + 1
+			end
+			log("AzureEdge L" .. self.AzureEdgeLevel .. " (dmg=" .. math.floor(self:GetAzureEdgeDamage(self.AzureEdgeLevel)) .. " explosion%=" .. math.floor(self:GetAzureEdgeExplosionPercent(self.AzureEdgeLevel) * 100) .. ")")
 			return
 		end
 
@@ -15419,7 +17729,9 @@ script CardManager extends Logic
 		local playerInventory = playerEntity.PkgPlayerInventory
 		local weaponStruct = playerInventory:GetAttachedGearItemStruct(playerInventory.CurrentJob, _GearCategoryEnum.OneHandedWeapon)
 		if weaponStruct == nil then return end
-		if not _WeaponTierDataLogic:IsWeaponItem(weaponStruct.ItemId) then return end
+		-- 등급 스킬 프록(SkillVariant→실제 스킬카드)은 레거시 스태프 라인만 갖고 있다 — 2026-08-17에 추가된
+		-- 신규 8개 라인은 텍스트 효과라 여기서 걸러내야 한다(IsWeaponItem은 9개 라인 전부 true)
+		if not _WeaponTierDataLogic:IsLegacyWeapon(weaponStruct.ItemId) then return end
 
 		local gearStruct = weaponStruct:GetGearStruct()
 		if gearStruct == nil then return end
@@ -15590,6 +17902,33 @@ script CardManager extends Logic
 		self.ShadeAttackUpgradeCount = 0
 		self._timerBasicShade = self.ShadeAttackCooldown
 		self.DoubleStepLevel = 0
+		self.DaggerAccelLevel = 0
+		self.CriticalEdgeLevel = 0
+		self.KarmaLevel = 0
+		self.PhysicalTrainingLevel = 0
+		self.DarkSightLevel = 0
+		-- 버그 수정(2026-08-13, 유저 지적: "Reset() 리셋 누락도 같이 고쳐줘") — 173~179(새비지블로우~
+		-- 다크플레어)가 여기서 전부 빠져있어서 "다시하기"해도 레벨이 그대로 남아있었다(레이온에서 이미
+		-- 한 번 터졌던 것과 동일한 클래스 버그). 쉐도우 파트너(178)는 소환된 파트너가 있어도 Phoenix
+		-- (105)와 동일하게 별도 Destroy 호출 없이 레벨만 0으로 되돌린다 — 기존 패턴과 동일.
+		self.SavageBlowLevel = 0
+		self.SmokeGrenadeLevel = 0
+		self.MuspelheimLevel = 0
+		self.StealLevel = 0
+		self.MesoExplosionLevel = 0
+		self.ShadowPartnerLevel = 0
+		self.DarkFlareLevel = 0
+		self.AssassinateLevel = 0
+		self.SonicBlowLevel = 0
+		self.SmokeRampageLevel = 0
+		self.AzureEdgeLevel = 0
+		self.MesoDetonationLevel = 0
+		self.DualShadowPartnerLevel = 0
+		self.AbyssalFlareLevel = 0
+		self._dualPartnerAEntity = nil
+		self._dualPartnerBEntity = nil
+		self._dualPartnerABusy = false
+		self._dualPartnerBBusy = false
 		self.SlashLevel = 0
 		self.BrandishLevel = 0
 		self.FlashSlashLevel = 0
@@ -15809,6 +18148,18 @@ script CardManager extends Logic
 		elseif cardIdx == 177 then return "mesoexplosion_up"
 		elseif cardIdx == 178 then return "shadowpartner_up"
 		elseif cardIdx == 179 then return "darkflare_up"
+		elseif cardIdx == 180 then return "daggeraccel_up"
+		elseif cardIdx == 181 then return "criticaledge_up"
+		elseif cardIdx == 182 then return "karma_up"
+		elseif cardIdx == 183 then return "physicaltraining_up"
+		elseif cardIdx == 184 then return "darksight_up"
+		elseif cardIdx == 185 then return "assassinate_up"
+		elseif cardIdx == 186 then return "sonicblow_up"
+		elseif cardIdx == 187 then return "smokerampage_up"
+		elseif cardIdx == 188 then return "azureedge_up"
+		elseif cardIdx == 189 then return "mesodetonation_up"
+		elseif cardIdx == 190 then return "dualshadowpartner_up"
+		elseif cardIdx == 191 then return "abyssalflare_up"
 		end
 		return (_UtilLogic:RandomDouble() < 0.5) and "dmg" or "cd"
 	end

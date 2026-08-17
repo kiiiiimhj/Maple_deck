@@ -1,0 +1,635 @@
+-- 장비 등급 스킬 효과의 실제 전투 연결(2026-08-17 신설).
+--
+-- WeaponTierDataLogic이 "무슨 효과인지(이름/수치/표시 텍스트)"를 담는 데이터 레이어라면, 이 로직은
+-- 그 효과가 "실전에서 실제로 어떻게 작동하는지"를 담는 런타임 레이어다. 런 시작 시 로비 장비
+-- 인벤토리에서 장착 중인 5부위(무기/상의/모자/장갑/망토)를 한 번 읽어 캐시하고(런 중에는 장비를
+-- 바꿀 수 없다 — CardManager.InitWeaponSkillForRun과 동일한 전제), 이후 전투 코드가 이 로직의
+-- getter만 호출해서 보너스를 반영한다.
+--
+-- 소비 지점(전부 단일 관문):
+--   CardManager.GetCardDamage        → 공격력%/피해량% (전체 스킬)
+--   CardManager.GetEffectiveCooldown → 쿨타임 감소%
+--   CardManager.RollCrit             → 치명타 확률%
+--   MonsterAI.TakeDamageCrit         → 치명타 피해%
+--   GameManager.OnMonsterReached     → 받는 피해 감소% / 무효화 / 보호막 / 무적
+--   MonsterAI.Die                    → 처치 카운터(회복·버프·추가공격 트리거)
+@Logic
+script GearEffectLogic extends Logic
+
+	-- 장착 중인 라인의 등급(GearGradeEnum). 미장착이면 -1 — 노말(0)과 반드시 구분해야 한다
+	property integer WeaponGrade = -1
+	property integer WeaponItemId = 0
+	property integer SuitGrade = -1
+	property integer SuitItemId = 0
+	property integer HelmGrade = -1
+	property integer CapeGrade = -1
+	property integer GloveGrade = -1
+
+	-- 장착 중인 무기의 ATK(고정값) — 유저 지정: 배율이 아니라 모든 공격 대미지에 그대로 더한다.
+	-- 미장착이면 0. 방어구 라인은 ATK가 0이라 자연히 영향 없음
+	property integer WeaponAtk = 0
+
+	-- 각 부위의 확정 보너스 수치(비율, 0.05 = 5%) — 아이템에 드롭 시 고정된 BonusPercentPerMille를 환산
+	property number WeaponBonus = 0
+	property number SuitBonus = 0
+	property number HelmBonus = 0
+	property number CapeBonus = 0
+	property number GloveBonus = 0
+
+	-- 자마다르 레전더리의 "{C}% 확률" 부분(ProcChancePerMille 환산) / 활 레전더리의 추가공격 확률
+	property number WeaponProcChance = 0
+
+	-- ── 런 중 누적 카운터 ────────────────────────────────────────────────
+	property integer KillCount = 0
+	property integer BasicAttackCount = 0
+
+	-- ── 지속시간 있는 버프(남은 초). 유저 표에 "지속시간동안 갱신X"라고 명시된 것들은
+	-- 남은 시간이 있으면 재발동해도 갱신하지 않는다 ──────────────────────
+	property number CritChanceBuffTimer = 0
+	property number CritChanceBuffValue = 0
+	property number CritDamageBuffTimer = 0
+	property number CritDamageBuffValue = 0
+	property number DamageBuffTimer = 0
+	property number DamageBuffValue = 0
+	property number NextSkillDamageBuffTimer = 0
+	property number NextBasicAttackDamageBuffTimer = 0
+	property number NextBasicAttackCritBuffTimer = 0
+
+	-- ── 1회성/영구 플래그 ────────────────────────────────────────────────
+	-- 투구 레어: 50마리 처치 시 쿨타임 감소가 해금되면 런 끝까지 유지(유저 표에 지속시간 없음)
+	property boolean HelmCooldownUnlocked = false
+	-- 슈트A 레전더리(치명적 피해 시 5초 무적) / 슈트B 레전더리(HP 20% 이하 즉시 회복) — 전투당 1회
+	property boolean SuitLastStandUsed = false
+	property boolean SuitEmergencyHealUsed = false
+	property number InvincibleTimer = 0
+	-- 슈트 매직: 전투 시작 시 얻는 보호막 잔량(피해를 먼저 흡수하고 0이 되면 소멸)
+	property integer ShieldRemain = 0
+	-- 장갑 유니크: 기본 공격으로 적을 처치하면 다음 기본 공격 1회가 강화된다(지속시간 없음, 소모형)
+	property boolean GloveKillBuffReady = false
+	-- 장갑 에픽: 기본 공격 30회마다 다음 1회 강화(소모형)
+	property boolean GlovePowerAttackReady = false
+
+	method void Init()
+		-- 다른 @Logic들과 달리 별도 카탈로그가 없어 초기화할 테이블이 없다 — 런별 상태는
+		-- InitForRun에서 전부 리셋하므로 여기서는 아무것도 하지 않는다(DataLoadLogic 등록용 훅).
+		self:ResetRunState()
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetRunState()
+		-- 런 사이에 남으면 안 되는 누적 상태를 전부 초기화한다(최초 시작/다시하기 공통).
+		self.WeaponGrade = -1
+		self.WeaponItemId = 0
+		self.WeaponAtk = 0
+		self.SuitGrade = -1
+		self.SuitItemId = 0
+		self.HelmGrade = -1
+		self.CapeGrade = -1
+		self.GloveGrade = -1
+		self.WeaponBonus = 0
+		self.SuitBonus = 0
+		self.HelmBonus = 0
+		self.CapeBonus = 0
+		self.GloveBonus = 0
+		self.WeaponProcChance = 0
+		self.KillCount = 0
+		self.BasicAttackCount = 0
+		self.CritChanceBuffTimer = 0
+		self.CritChanceBuffValue = 0
+		self.CritDamageBuffTimer = 0
+		self.CritDamageBuffValue = 0
+		self.DamageBuffTimer = 0
+		self.DamageBuffValue = 0
+		self.NextSkillDamageBuffTimer = 0
+		self.NextBasicAttackDamageBuffTimer = 0
+		self.NextBasicAttackCritBuffTimer = 0
+		self.HelmCooldownUnlocked = false
+		self.SuitLastStandUsed = false
+		self.SuitEmergencyHealUsed = false
+		self.InvincibleTimer = 0
+		self.ShieldRemain = 0
+		self.GloveKillBuffReady = false
+		self.GlovePowerAttackReady = false
+	end
+
+	-- 런 시작 시 1회 — 장착 중인 5부위를 읽어 이번 런 동안 고정한다. userId는 CardManager
+	-- .InitWeaponSkillForRun과 동일하게 호출부가 흘려보낸 senderUserId(서버에서 LocalPlayer 금지)
+	@ExecSpace("ServerOnly")
+	method void InitForRun(string userId)
+		self:ResetRunState()
+
+		local playerEntity = _UserService:GetUserEntityByUserId(userId)
+		if not isvalid(playerEntity) then
+			log_error("GearEffectLogic.InitForRun: invalid userId " .. tostring(userId))
+			return
+		end
+
+		local inventory = playerEntity.PkgPlayerInventory
+		local job = inventory.CurrentJob
+
+		local weapon = inventory:GetAttachedGearItemStruct(job, _GearCategoryEnum.OneHandedWeapon)
+		if weapon ~= nil and _WeaponTierDataLogic:IsWeaponItem(weapon.ItemId) then
+			local s = weapon:GetGearStruct()
+			if s ~= nil then
+				self.WeaponItemId = weapon.ItemId
+				self.WeaponGrade = s.Grade
+				self.WeaponAtk = s.Atk
+				self.WeaponBonus = s.BonusPercentPerMille / 1000.0
+				self.WeaponProcChance = s.ProcChancePerMille / 1000.0
+			end
+		end
+
+		local suit = inventory:GetAttachedGearItemStruct(job, _GearCategoryEnum.Longcoat)
+		if suit ~= nil and _WeaponTierDataLogic:IsWeaponItem(suit.ItemId) then
+			local s = suit:GetGearStruct()
+			if s ~= nil then
+				self.SuitItemId = suit.ItemId
+				self.SuitGrade = s.Grade
+				self.SuitBonus = s.BonusPercentPerMille / 1000.0
+			end
+		end
+
+		local helm = inventory:GetAttachedGearItemStruct(job, _GearCategoryEnum.Cap)
+		if helm ~= nil and helm.ItemId == _WeaponTierDataLogic.HelmItemId then
+			local s = helm:GetGearStruct()
+			if s ~= nil then
+				self.HelmGrade = s.Grade
+				self.HelmBonus = s.BonusPercentPerMille / 1000.0
+			end
+		end
+
+		local glove = inventory:GetAttachedGearItemStruct(job, _GearCategoryEnum.Glove)
+		if glove ~= nil and glove.ItemId == _WeaponTierDataLogic.GloveItemId then
+			local s = glove:GetGearStruct()
+			if s ~= nil then
+				self.GloveGrade = s.Grade
+				self.GloveBonus = s.BonusPercentPerMille / 1000.0
+			end
+		end
+
+		local cape = inventory:GetAttachedGearItemStruct(job, _GearCategoryEnum.Cape)
+		if cape ~= nil and cape.ItemId == _WeaponTierDataLogic.CapeItemId then
+			local s = cape:GetGearStruct()
+			if s ~= nil then
+				self.CapeGrade = s.Grade
+				self.CapeBonus = s.BonusPercentPerMille / 1000.0
+			end
+		end
+
+		-- 슈트의 HP 스탯(고정값) — 유저 지정: 공격력과 동일하게 런 시작 시 최대 체력에 그대로 더한다.
+		-- 망토 유니크의 체력 %는 이 가산이 끝난 뒤에 곱해야 "장비로 올린 체력에도 %가 붙는" 자연스러운
+		-- 순서가 된다(가산 → 배율 순).
+		local suitHp = 0
+		local suitStruct = inventory:GetAttachedGearItemStruct(job, _GearCategoryEnum.Longcoat)
+		if suitStruct ~= nil and _WeaponTierDataLogic:IsWeaponItem(suitStruct.ItemId) then
+			local ss = suitStruct:GetGearStruct()
+			if ss ~= nil then suitHp = ss.Hp end
+		end
+		if suitHp > 0 then
+			_GameManager.PlayerMaxHp = _GameManager.PlayerMaxHp + suitHp
+		end
+
+		-- 망토 유니크: 최대 체력 % 증가 — 보호막 계산보다 먼저 적용해야 보호막도 늘어난 최대 체력
+		-- 기준으로 잡힌다. 런 시작 직후라 현재 체력도 같이 꽉 채워준다
+		local maxHpMult = self:GetMaxHpMult()
+		if maxHpMult > 1.0 then
+			_GameManager.PlayerMaxHp = math.floor(_GameManager.PlayerMaxHp * maxHpMult)
+		end
+		if suitHp > 0 or maxHpMult > 1.0 then
+			_GameManager.PlayerHp = _GameManager.PlayerMaxHp
+		end
+
+		-- 슈트 매직: 전투 시작 시 최대 HP의 X% 보호막
+		if self:IsSuit(_GearGradeEnum.Magic) then
+			self.ShieldRemain = math.floor(_GameManager.PlayerMaxHp * self.SuitBonus)
+		end
+
+		log("GearEffectLogic.InitForRun: weapon=" .. self.WeaponItemId .. "/g" .. self.WeaponGrade
+			.. " suit=" .. self.SuitItemId .. "/g" .. self.SuitGrade
+			.. " helm=g" .. self.HelmGrade .. " glove=g" .. self.GloveGrade .. " cape=g" .. self.CapeGrade
+			.. " shield=" .. self.ShieldRemain)
+	end
+
+	-- ── 장착 판정 헬퍼 ───────────────────────────────────────────────────
+	-- "그 부위에 그 라인이, 정확히 그 등급으로 장착돼 있는가". 등급 스킬은 상위 등급이 하위 등급
+	-- 효과를 포함하지 않고 등급마다 완전히 교체되므로(유저 표) 전부 정확히 일치 비교다.
+
+	method boolean IsWeapon(integer itemId, integer grade)
+		return self.WeaponItemId == itemId and self.WeaponGrade == grade
+	end
+
+	method boolean IsBow(integer grade)
+		return self:IsWeapon(_WeaponTierDataLogic.BowItemId, grade)
+	end
+
+	method boolean IsSword(integer grade)
+		return self:IsWeapon(_WeaponTierDataLogic.TwoHandSwordItemId, grade)
+	end
+
+	method boolean IsJamadar(integer grade)
+		return self:IsWeapon(_WeaponTierDataLogic.JamadarItemId, grade)
+	end
+
+	-- 슈트A/B는 같은 부위의 다른 시리즈 — 등급 효과가 같은 칸(매직 보호막/레어 회복/유니크 피해감소)은
+	-- 시리즈 구분 없이 동작해야 해서 "둘 중 아무거나"를 묻는 헬퍼를 따로 둔다
+	method boolean IsSuit(integer grade)
+		return self.SuitGrade == grade and (self.SuitItemId == _WeaponTierDataLogic.SuitAItemId or self.SuitItemId == _WeaponTierDataLogic.SuitBItemId)
+	end
+
+	method boolean IsSuitA(integer grade)
+		return self.SuitItemId == _WeaponTierDataLogic.SuitAItemId and self.SuitGrade == grade
+	end
+
+	method boolean IsSuitB(integer grade)
+		return self.SuitItemId == _WeaponTierDataLogic.SuitBItemId and self.SuitGrade == grade
+	end
+
+	method boolean IsHelm(integer grade)
+		return self.HelmGrade == grade
+	end
+
+	method boolean IsGlove(integer grade)
+		return self.GloveGrade == grade
+	end
+
+	method boolean IsCape(integer grade)
+		return self.CapeGrade == grade
+	end
+
+	-- ── 매 프레임 타이머 감소(CardManager.OnUpdate가 호출) ───────────────
+
+	@ExecSpace("ServerOnly")
+	method void Tick(number delta)
+		-- 지속시간 있는 버프들을 한 곳에서 감쇠시킨다. 소모형(다음 1회) 버프는 여기서 만료만 처리하고
+		-- 실제 소비는 각 Consume* 메서드가 한다.
+		if self.CritChanceBuffTimer > 0 then
+			self.CritChanceBuffTimer = self.CritChanceBuffTimer - delta
+			if self.CritChanceBuffTimer <= 0 then
+				self.CritChanceBuffTimer = 0
+				self.CritChanceBuffValue = 0
+			end
+		end
+		if self.CritDamageBuffTimer > 0 then
+			self.CritDamageBuffTimer = self.CritDamageBuffTimer - delta
+			if self.CritDamageBuffTimer <= 0 then
+				self.CritDamageBuffTimer = 0
+				self.CritDamageBuffValue = 0
+			end
+		end
+		if self.DamageBuffTimer > 0 then
+			self.DamageBuffTimer = self.DamageBuffTimer - delta
+			if self.DamageBuffTimer <= 0 then
+				self.DamageBuffTimer = 0
+				self.DamageBuffValue = 0
+			end
+		end
+		if self.NextSkillDamageBuffTimer > 0 then
+			self.NextSkillDamageBuffTimer = math.max(0, self.NextSkillDamageBuffTimer - delta)
+		end
+		if self.NextBasicAttackDamageBuffTimer > 0 then
+			self.NextBasicAttackDamageBuffTimer = math.max(0, self.NextBasicAttackDamageBuffTimer - delta)
+		end
+		if self.NextBasicAttackCritBuffTimer > 0 then
+			self.NextBasicAttackCritBuffTimer = math.max(0, self.NextBasicAttackCritBuffTimer - delta)
+		end
+		if self.InvincibleTimer > 0 then
+			self.InvincibleTimer = math.max(0, self.InvincibleTimer - delta)
+		end
+	end
+
+	-- ── 대미지 가산/배율(CardManager.GetCardDamage에서 소비) ─────────────
+
+	-- 장착 무기 ATK — 유저 지정: 배율이 아니라 고정값 가산. 배율(GetDamageMult)보다 "먼저" 더해야
+	-- 공격력% 보너스가 무기 ATK에도 걸리는 자연스러운 순서가 된다(가산 → 배율)
+	@ExecSpace("ServerOnly")
+	method number GetFlatAtk()
+		return self.WeaponAtk
+	end
+
+	@ExecSpace("ServerOnly")
+	method number GetDamageMult()
+		-- 전체 스킬에 적용되는 상시 대미지 보너스 — 양손검 매직/에픽(공격력), 투구 매직/에픽(공격력),
+		-- 망토 매직(피해량), 양손검 레전더리(HP 30% 이하 조건부), 망토 레어(처치 트리거 10초 버프)
+		local mult = 1.0
+
+		if self:IsSword(_GearGradeEnum.Magic) or self:IsSword(_GearGradeEnum.Epic) then
+			mult = mult * (1.0 + self.WeaponBonus)
+		end
+		if self:IsSword(_GearGradeEnum.Legendary) then
+			if _GameManager.PlayerMaxHp > 0 and (_GameManager.PlayerHp / _GameManager.PlayerMaxHp) <= 0.3 then
+				mult = mult * (1.0 + self.WeaponBonus)
+			end
+		end
+		if self:IsHelm(_GearGradeEnum.Magic) or self:IsHelm(_GearGradeEnum.Epic) then
+			mult = mult * (1.0 + self.HelmBonus)
+		end
+		if self:IsCape(_GearGradeEnum.Magic) then
+			mult = mult * (1.0 + self.CapeBonus)
+		end
+		if self.DamageBuffTimer > 0 then
+			mult = mult * (1.0 + self.DamageBuffValue)
+		end
+
+		return mult
+	end
+
+	-- 기본 공격에만 추가로 곱해지는 배율 — 활 매직/에픽, 장갑 매직, 그리고 소모형 버프
+	-- (투구 유니크 "스킬 사용 시 다음 기본 공격", 장갑 에픽 "30회마다", 장갑 유니크 "처치 시").
+	-- ⚠ 소모형 버프를 실제로 소모하므로 기본 공격 1회당 정확히 한 번만 호출해야 한다.
+	@ExecSpace("ServerOnly")
+	method number ConsumeBasicAttackMult()
+		local mult = 1.0
+
+		if self:IsBow(_GearGradeEnum.Magic) or self:IsBow(_GearGradeEnum.Epic) then
+			mult = mult * (1.0 + self.WeaponBonus)
+		end
+		if self:IsGlove(_GearGradeEnum.Magic) then
+			mult = mult * (1.0 + self.GloveBonus)
+		end
+
+		-- 투구 유니크: 스킬 사용 시 걸린 "다음 기본 공격 강화"(10초 내 1회)
+		if self.NextBasicAttackDamageBuffTimer > 0 then
+			mult = mult * (1.0 + self.HelmBonus)
+			self.NextBasicAttackDamageBuffTimer = 0
+		end
+		-- 장갑 에픽: 30회마다 예약된 강화 1회
+		if self.GlovePowerAttackReady then
+			mult = mult * (1.0 + self.GloveBonus)
+			self.GlovePowerAttackReady = false
+		end
+		-- 장갑 유니크: 기본 공격으로 처치한 직후 1회
+		if self.GloveKillBuffReady then
+			mult = mult * (1.0 + self.GloveBonus)
+			self.GloveKillBuffReady = false
+		end
+
+		return mult
+	end
+
+	-- 투구 레전더리 "스킬 사용 후 다음 스킬 대미지 증가"(10초) — 액티브 스킬에만 곱한다.
+	-- ⚠ 소모형이라 스킬 1회당 한 번만 호출할 것
+	@ExecSpace("ServerOnly")
+	method number ConsumeSkillChainMult()
+		if self.NextSkillDamageBuffTimer <= 0 then
+			return 1.0
+		end
+		self.NextSkillDamageBuffTimer = 0
+		return 1.0 + self.HelmBonus
+	end
+
+	-- 망토 에픽/레전더리: 엘리트·보스에게 주는 피해량 증가(MonsterAI가 자기 자신이 엘리트/보스일 때만 곱한다)
+	@ExecSpace("ServerOnly")
+	method number GetEliteBossDamageMult()
+		if self:IsCape(_GearGradeEnum.Epic) or self:IsCape(_GearGradeEnum.Legendary) then
+			return 1.0 + self.CapeBonus
+		end
+		return 1.0
+	end
+
+	-- ── 쿨타임 / 치명타 ──────────────────────────────────────────────────
+
+	@ExecSpace("ServerOnly")
+	method number GetCooldownReduction()
+		-- 활 유니크(상시) + 투구 레어(50마리 처치로 해금된 뒤 상시). 둘 다 있으면 가산 후 90%로 클램프
+		local reduction = 0
+		if self:IsBow(_GearGradeEnum.Unique) then
+			reduction = reduction + self.WeaponBonus
+		end
+		if self.HelmCooldownUnlocked then
+			reduction = reduction + self.HelmBonus
+		end
+		if reduction > 0.9 then reduction = 0.9 end
+		return reduction
+	end
+
+	@ExecSpace("ServerOnly")
+	method number GetCritChanceBonus()
+		-- 자마다르 매직/유니크(상시) + 자마다르 레어(처치 트리거 10초 버프)
+		local bonus = 0
+		if self:IsJamadar(_GearGradeEnum.Magic) or self:IsJamadar(_GearGradeEnum.Unique) then
+			bonus = bonus + self.WeaponBonus
+		end
+		if self.CritChanceBuffTimer > 0 then
+			bonus = bonus + self.CritChanceBuffValue
+		end
+		return bonus
+	end
+
+	-- 장갑 레어 "기본 공격 20회마다 다음 기본 공격의 치명타 확률 증가(5초)" — 기본 공격 판정에만
+	-- 추가로 얹히는 몫이라 상시 보너스(GetCritChanceBonus)와 분리한다. ⚠ 소모형
+	@ExecSpace("ServerOnly")
+	method number ConsumeBasicAttackCritBonus()
+		if self.NextBasicAttackCritBuffTimer <= 0 then
+			return 0
+		end
+		self.NextBasicAttackCritBuffTimer = 0
+		return self.GloveBonus
+	end
+
+	@ExecSpace("ServerOnly")
+	method number GetCritDamageBonus()
+		-- 자마다르 에픽(상시) + 자마다르 레전더리(기본공격 확률 발동 10초 버프)
+		local bonus = 0
+		if self:IsJamadar(_GearGradeEnum.Epic) then
+			bonus = bonus + self.WeaponBonus
+		end
+		if self.CritDamageBuffTimer > 0 then
+			bonus = bonus + self.CritDamageBuffValue
+		end
+		return bonus
+	end
+
+	-- ── 방어 ─────────────────────────────────────────────────────────────
+
+	@ExecSpace("ServerOnly")
+	method number GetDamageTakenReduction()
+		-- 양손검 유니크(상시) + 슈트 에픽(상시) + 슈트 유니크(HP 30% 이하 조건부). 가산 후 90% 클램프
+		local reduction = 0
+		if self:IsSword(_GearGradeEnum.Unique) then
+			reduction = reduction + self.WeaponBonus
+		end
+		if self:IsSuit(_GearGradeEnum.Epic) and self.SuitItemId == _WeaponTierDataLogic.SuitAItemId then
+			reduction = reduction + self.SuitBonus
+		end
+		if self:IsSuit(_GearGradeEnum.Unique) then
+			if _GameManager.PlayerMaxHp > 0 and (_GameManager.PlayerHp / _GameManager.PlayerMaxHp) <= 0.3 then
+				reduction = reduction + self.SuitBonus
+			end
+		end
+		if reduction > 0.9 then reduction = 0.9 end
+		return reduction
+	end
+
+	-- 슈트B 에픽: 피격 시 확률로 피해 완전 무효화. 슈트A 레전더리: 치명적 피해 시 5초 무적(전투당 1회)로
+	-- 이미 무적 중이면 무조건 무효. 무적 부여 자체는 AbsorbDamage가 처리한다
+	@ExecSpace("ServerOnly")
+	method boolean ShouldNullifyDamage()
+		if self.InvincibleTimer > 0 then
+			return true
+		end
+		if self:IsSuitB(_GearGradeEnum.Epic) then
+			if _UtilLogic:RandomDouble() < self.SuitBonus then
+				log("GearEffect: 슈트B 에픽 피해 무효화 발동")
+				return true
+			end
+		end
+		return false
+	end
+
+	-- 감소가 끝난 최종 대미지에서 보호막 잔량을 먼저 깎고, 남은 실피해만 돌려준다(슈트 매직).
+	-- 이어서 슈트A 레전더리(치사 피해 → 5초 무적 + 그 피해 무효)와 슈트B 레전더리(HP 20% 이하 →
+	-- 즉시 회복)를 판정한다. 전투당 1회 제한이 있는 둘은 각각 플래그로 관리한다.
+	@ExecSpace("ServerOnly")
+	method integer AbsorbDamage(integer damage)
+		local remain = damage
+
+		if self.ShieldRemain > 0 then
+			if self.ShieldRemain >= remain then
+				self.ShieldRemain = self.ShieldRemain - remain
+				log("GearEffect: 보호막이 " .. remain .. " 흡수 (잔량 " .. self.ShieldRemain .. ")")
+				return 0
+			end
+			remain = remain - self.ShieldRemain
+			log("GearEffect: 보호막 " .. self.ShieldRemain .. " 소진")
+			self.ShieldRemain = 0
+		end
+
+		-- 슈트A 레전더리 — 이 피해로 죽는 상황이면 그 피해를 없애고 5초 무적을 준다(전투당 1회)
+		if self:IsSuitA(_GearGradeEnum.Legendary) and not self.SuitLastStandUsed then
+			if _GameManager.PlayerHp - remain <= 0 then
+				self.SuitLastStandUsed = true
+				self.InvincibleTimer = 5.0
+				log("GearEffect: 얼티밋 슈트 5초 무적 발동")
+				return 0
+			end
+		end
+
+		return remain
+	end
+
+	-- 피해 적용 "후"에 호출 — 슈트B 레전더리(HP 20% 이하가 되면 즉시 회복, 전투당 1회)
+	@ExecSpace("ServerOnly")
+	method void OnAfterDamaged()
+		if not self:IsSuitB(_GearGradeEnum.Legendary) then return end
+		if self.SuitEmergencyHealUsed then return end
+		if _GameManager.PlayerMaxHp <= 0 then return end
+		if _GameManager.PlayerHp <= 0 then return end
+		if (_GameManager.PlayerHp / _GameManager.PlayerMaxHp) > 0.2 then return end
+
+		self.SuitEmergencyHealUsed = true
+		local heal = math.floor(_GameManager.PlayerMaxHp * self.SuitBonus)
+		_GameManager:HealPlayer(heal)
+		log("GearEffect: 10주년 블랙 슈트 긴급 회복 " .. heal)
+	end
+
+	-- 망토 유니크: 최대 체력 % 증가 — GameManager가 최대 체력을 계산할 때 곱한다
+	@ExecSpace("ServerOnly")
+	method number GetMaxHpMult()
+		if self:IsCape(_GearGradeEnum.Unique) then
+			return 1.0 + self.CapeBonus
+		end
+		return 1.0
+	end
+
+	-- ── 트리거(처치 / 기본 공격) ─────────────────────────────────────────
+
+	-- 몬스터 처치마다 MonsterAI.Die()가 호출 — 처치 수 기반 등급 스킬 4종을 여기서 전부 처리한다.
+	-- 각 효과의 발동 주기가 다르므로(10/30/50마리) 나머지 연산으로 판정한다.
+	@ExecSpace("ServerOnly")
+	method void OnMonsterKilled()
+		self.KillCount = self.KillCount + 1
+
+		-- 활 레어: 적 10마리 처치 시 추가 기본 공격
+		if self:IsBow(_GearGradeEnum.Rare) and self.KillCount % 10 == 0 then
+			_CardManager:TriggerExtraBasicAttack(1.0)
+		end
+
+		-- 양손검 레어: 적 30마리 처치 시 HP 회복
+		if self:IsSword(_GearGradeEnum.Rare) and self.KillCount % 30 == 0 then
+			local heal = math.floor(_GameManager.PlayerMaxHp * self.WeaponBonus)
+			if heal > 0 then _GameManager:HealPlayer(heal) end
+		end
+
+		-- 자마다르 레어: 30마리 처치 시 치명타 확률 증가(10초). "지속시간동안 갱신X" — 남아있으면 무시
+		if self:IsJamadar(_GearGradeEnum.Rare) and self.KillCount % 30 == 0 then
+			if self.CritChanceBuffTimer <= 0 then
+				self.CritChanceBuffValue = self.WeaponBonus
+				self.CritChanceBuffTimer = 10.0
+			end
+		end
+
+		-- 슈트 레어: 50마리 처치 시 HP 회복
+		if self:IsSuit(_GearGradeEnum.Rare) and self.KillCount % 50 == 0 then
+			local heal = math.floor(_GameManager.PlayerMaxHp * self.SuitBonus)
+			if heal > 0 then _GameManager:HealPlayer(heal) end
+		end
+
+		-- 투구 레어: 50마리 처치 시 모든 스킬 쿨타임 감소(유저 표에 지속시간 없음 → 런 끝까지 유지)
+		if self:IsHelm(_GearGradeEnum.Rare) and not self.HelmCooldownUnlocked and self.KillCount >= 50 then
+			self.HelmCooldownUnlocked = true
+			log("GearEffect: 자쿰의 투구 쿨타임 감소 해금")
+		end
+
+		-- 망토 레어: 50마리 처치 시 피해량 증가(10초)
+		if self:IsCape(_GearGradeEnum.Rare) and self.KillCount % 50 == 0 then
+			self.DamageBuffValue = self.CapeBonus
+			self.DamageBuffTimer = 10.0
+		end
+	end
+
+	-- 기본 공격이 몬스터를 타격할 때마다 CardManager가 호출(대미지 계산 "전"). 횟수 기반 장갑 효과와
+	-- 확률 기반 활/자마다르 레전더리 효과를 여기서 예약한다 — 실제 소비는 Consume* 쪽에서 일어난다
+	@ExecSpace("ServerOnly")
+	method void OnBasicAttack()
+		self.BasicAttackCount = self.BasicAttackCount + 1
+
+		-- 장갑 레어: 20회마다 다음 기본 공격 치명타 확률 증가(5초)
+		if self:IsGlove(_GearGradeEnum.Rare) and self.BasicAttackCount % 20 == 0 then
+			self.NextBasicAttackCritBuffTimer = 5.0
+		end
+
+		-- 장갑 에픽: 30회마다 다음 기본 공격 대미지 증가(지속시간 없음 — 다음 1회에 무조건 적용)
+		if self:IsGlove(_GearGradeEnum.Epic) and self.BasicAttackCount % 30 == 0 then
+			self.GlovePowerAttackReady = true
+		end
+
+		-- 장갑 레전더리: 10회마다 강화 공격(기본 공격 대미지의 200%) 1회 추가 발동
+		if self:IsGlove(_GearGradeEnum.Legendary) and self.BasicAttackCount % 10 == 0 then
+			_CardManager:TriggerExtraBasicAttack(2.0)
+		end
+
+		-- 활 레전더리: 확률로 추가 공격 1회
+		if self:IsBow(_GearGradeEnum.Legendary) and _UtilLogic:RandomDouble() < self.WeaponBonus then
+			_CardManager:TriggerExtraBasicAttack(1.0)
+		end
+
+		-- 자마다르 레전더리: 확률로 치명타 피해 증가(10초). "지속시간동안 갱신X"
+		if self:IsJamadar(_GearGradeEnum.Legendary) and self.CritDamageBuffTimer <= 0 then
+			if _UtilLogic:RandomDouble() < self.WeaponProcChance then
+				self.CritDamageBuffValue = self.WeaponBonus
+				self.CritDamageBuffTimer = 10.0
+			end
+		end
+	end
+
+	-- 기본 공격으로 몬스터를 처치한 순간 MonsterAI가 호출 — 장갑 유니크의 "다음 기본 공격 강화" 예약
+	@ExecSpace("ServerOnly")
+	method void OnBasicAttackKill()
+		if self:IsGlove(_GearGradeEnum.Unique) then
+			self.GloveKillBuffReady = true
+		end
+	end
+
+	-- 액티브 스킬(기본 공격 제외)이 발동될 때마다 CardManager가 호출 — 투구 유니크/레전더리의
+	-- "다음 기본 공격 / 다음 스킬" 강화를 예약한다(둘 다 10초)
+	@ExecSpace("ServerOnly")
+	method void OnSkillUsed()
+		if self:IsHelm(_GearGradeEnum.Unique) then
+			self.NextBasicAttackDamageBuffTimer = 10.0
+		end
+		if self:IsHelm(_GearGradeEnum.Legendary) then
+			self.NextSkillDamageBuffTimer = 10.0
+		end
+	end
+
+end

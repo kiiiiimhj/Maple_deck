@@ -1,18 +1,91 @@
--- 무기 티어(GearGradeEnum 6단계) ↔ 실제 무기 데이터(이름/아이콘/스탯) 매핑(유저 지정).
--- 무기 아이템은 전부 같은 ItemId(하나의 GUID)를 유지하고, Grade(티어)에 따라 이름/아이콘이
--- 동적으로 바뀐다 — 헬멧처럼 이름 고정+등급값만 내부 변화하는 기존 합성 시스템을 그대로 재사용하면서,
--- 표시(이름/아이콘)만 이 테이블을 거쳐 동적으로 결정한다.
+-- 장비 티어(GearGradeEnum 6단계) ↔ 실제 장비 데이터(이름/아이콘/스탯/등급 스킬) 매핑(유저 지정).
+-- 각 장비 "라인"(스태프/활/양손검/자마다르/슈트A/슈트B/투구/장갑/망토)은 전부 같은 ItemId(하나의
+-- GUID)를 유지하고, Grade(티어)에 따라 이름/아이콘/스탯/텍스트가 동적으로 바뀐다.
+--
+-- 2026-08-17 확장: 원래 스태프(ItemId 60002) 하나만 관리하던 구조를 여러 장비 라인으로 일반화했다.
+-- 스태프는 기존 검증된 데이터(SkillVariant 4종 + 실제 스킬카드 프록, ProcChancePerMille)를 한 글자도
+-- 안 건드리고 LegacyTierDataTable에 그대로 남겨뒀고, 새로 추가된 8개 라인(전부 공용 아이템, 캐릭터
+-- 구분 없음)은 NewItemTierDataTable에 훨씬 단순한 스키마로 들어간다 — 등급 스킬은 실제 스킬카드를
+-- 프록시키지 않고, "{P}"/"{C}" 플레이스홀더가 있는 텍스트 템플릿에 롤한 값을 끼워넣기만 한다.
+-- ⚠ 등급 스킬 효과(치명타%, 회복, 무적 등)의 실제 전투 로직 연결은 이번 패스 범위 밖 — 데이터/UI만 완성.
 @Logic
 script WeaponTierDataLogic extends Logic
 
-	-- 무기 카테고리 아이템의 고정 ItemId — 드롭/합성 전 과정에서 이 하나의 ItemId만 쓰인다
+	-- 레거시 무기(스태프) 전용 — SkillVariant 기반 실제 스킬카드 프록(TryProcWeaponSkill, CardManager)이
+	-- 걸려있는 유일한 아이템. IsWeaponItem은 신규 라인까지 전부 포함하도록 넓어졌으므로, "진짜 스킬 프록
+	-- 대상인지"를 구분해야 하는 호출부(CardManager.InitWeaponSkillForRun)는 이 프로퍼티와 직접 비교할 것.
 	property integer WeaponItemId = 60002
 
-	property table TierDataTable = {}
+	-- 신규 8개 라인의 ItemId(전부 공용 아이템)
+	property integer BowItemId = 60003
+
+	property integer TwoHandSwordItemId = 60004
+
+	property integer JamadarItemId = 60005
+
+	property integer SuitAItemId = 20002
+
+	property integer SuitBItemId = 20003
+
+	property integer HelmItemId = 10002
+
+	property integer GloveItemId = 30002
+
+	property integer CapeItemId = 50002
+
+	-- 이 로직이 관리하는 전체 ItemId 집합(멤버십 체크 + GameManager 드롭 랜덤픽에 사용)
+	property table GearItemIds = {}
+
+	-- itemId -> "Atk" | "Hp" | nil(스탯 없음, 등급 스킬 텍스트만 있는 아이템)
+	property table StatFieldTable = {}
+
+	-- itemId -> 그 라인 아바타 아이템의 실제 카테고리(GearCategoryEnum 값). 인벤토리 슬롯 배치용
+	-- GearCategory와 별개다 — 유저 지정으로 무기 4종을 전부 한 슬롯(OneHandedWeapon)에서 경쟁시키지만,
+	-- 아바타 리소스상 활/양손검은 twohandweapon이라 SetEquip에 OneHandedWeapon을 넘기면
+	-- "[LEA-3005] 유효한 아이템 카테고리가 아닙니다"로 거부당한다(실측 확인).
+	property table AvatarCategoryTable = {}
+
+	-- 레거시 스태프 전용 데이터(기존 그대로, 절대 수정 금지)
+	property table LegacyTierDataTable = {}
+
+	-- 신규 8개 라인 데이터
+	property table NewItemTierDataTable = {}
 
 	method void Init()
+		local gearItemIds = { self.WeaponItemId, self.BowItemId, self.TwoHandSwordItemId, self.JamadarItemId,
+			self.SuitAItemId, self.SuitBItemId, self.HelmItemId, self.GloveItemId, self.CapeItemId }
+		self.GearItemIds = gearItemIds
+
+		local statFieldTable = {}
+		self.StatFieldTable = statFieldTable
+		statFieldTable[self.WeaponItemId] = "Atk"
+		statFieldTable[self.BowItemId] = "Atk"
+		statFieldTable[self.TwoHandSwordItemId] = "Atk"
+		statFieldTable[self.JamadarItemId] = "Atk"
+		statFieldTable[self.SuitAItemId] = "Hp"
+		statFieldTable[self.SuitBItemId] = "Hp"
+		-- 투구/장갑/망토는 stat 없음(nil) — 초기화 안 해도 nil
+
+		-- 아바타 리소스 실측(2026-08-17 batch 조회)으로 확정한 라인별 실제 카테고리
+		local avatarCategoryTable = {}
+		self.AvatarCategoryTable = avatarCategoryTable
+		avatarCategoryTable[self.WeaponItemId] = _GearCategoryEnum.OneHandedWeapon      -- 스태프: weapon
+		avatarCategoryTable[self.JamadarItemId] = _GearCategoryEnum.OneHandedWeapon     -- 자마다르: weapon
+		avatarCategoryTable[self.BowItemId] = _GearCategoryEnum.TwoHandedWeapon         -- 활: twohandweapon
+		avatarCategoryTable[self.TwoHandSwordItemId] = _GearCategoryEnum.TwoHandedWeapon -- 양손검: twohandweapon
+		avatarCategoryTable[self.SuitAItemId] = _GearCategoryEnum.Longcoat
+		avatarCategoryTable[self.SuitBItemId] = _GearCategoryEnum.Longcoat
+		avatarCategoryTable[self.HelmItemId] = _GearCategoryEnum.Cap
+		avatarCategoryTable[self.GloveItemId] = _GearCategoryEnum.Glove
+		avatarCategoryTable[self.CapeItemId] = _GearCategoryEnum.Cape
+
+		self:InitLegacyTierData()
+		self:InitNewItemTierData()
+	end
+
+	method void InitLegacyTierData()
 		local t = {}
-		self.TierDataTable = t
+		self.LegacyTierDataTable = t
 
 		-- 각 티어: Name, RUID(avataritem이라 thumbnail:// 접두사 필요),
 		-- QualityStats[QualityEnum] = {AtkMin,AtkMax, [BonusPercentMin,BonusPercentMax]},
@@ -128,75 +201,314 @@ script WeaponTierDataLogic extends Logic
 		}
 	end
 
+	-- 신규 8개 라인 — 등급당: Name, RUID, StatMin/StatMax(스탯 있는 라인만),
+	-- Template(등급 스킬 텍스트, "{P}"=BonusPercentPerMille 자리·"{C}"=ProcChancePerMille 자리),
+	-- PercentMin/Max({P} 굴림 구간, %), Percent2Min/Max({C} 굴림 구간, % — 자마다르 레전더리만 사용)
+	--
+	-- RUID는 전부 avataritem이라 렌더러에 넣을 땐 "thumbnail://" 접두사가 필요하다(스태프와 동일).
+	-- 48개 전부 실존 리소스로 확인 완료 — 초안 이름 중 리소스에 없던 것들은 유저가 실존 아이템명으로
+	-- 재지정했다(장갑/망토 라인 전체, 슈트A 매직·에픽·유니크, 투구 유니크).
+	method void InitNewItemTierData()
+		local t = {}
+		self.NewItemTierDataTable = t
+
+		-- 활 (StatField=Atk, 5~10/10~15/15~30/30~60/60~100/100~150)
+		t[self.BowItemId] = {
+			[_GearGradeEnum.None] = { Name = "워 보우", RUID = "thumbnail://3ffe515570ad435caa397ca0f2e2f83b", StatMin = 5, StatMax = 10, Template = "-" },
+			[_GearGradeEnum.Magic] = { Name = "레드 바이퍼", RUID = "thumbnail://d1df8ca59a99400c97a98668c183b283", StatMin = 10, StatMax = 15, Template = "기본 공격 피해량 {P}% 증가", PercentMin = 5, PercentMax = 10 },
+			[_GearGradeEnum.Rare] = { Name = "봉황위궁", RUID = "thumbnail://9103f26880c84f6d992a23fd107ce2f5", StatMin = 15, StatMax = 30, Template = "적 10마리 처치 시 추가 기본 공격" },
+			[_GearGradeEnum.Epic] = { Name = "골든 아룬드", RUID = "thumbnail://80189221bcab4dc8b94a6be6795fc2c3", StatMin = 30, StatMax = 60, Template = "기본 공격 피해량 {P}% 증가", PercentMin = 10, PercentMax = 20 },
+			[_GearGradeEnum.Unique] = { Name = "메투스", RUID = "thumbnail://1a66da6b342e4440a5d15bea3a971a2e", StatMin = 60, StatMax = 100, Template = "스킬 쿨타임 {P}% 감소", PercentMin = 1, PercentMax = 5 },
+			[_GearGradeEnum.Legendary] = { Name = "골든 니스록", RUID = "thumbnail://16a13f8c973941de93db1b7e93448e15", StatMin = 100, StatMax = 150, Template = "기본 공격 시 {P}% 확률로 추가 공격 1회 발동", PercentMin = 5, PercentMax = 10 },
+		}
+
+		-- 양손검 (StatField=Atk, 동일 스탯 진행)
+		t[self.TwoHandSwordItemId] = {
+			[_GearGradeEnum.None] = { Name = "양손검", RUID = "thumbnail://88e6d4f9c00b407fa2be9d6aaafab276", StatMin = 5, StatMax = 10, Template = "-" },
+			[_GearGradeEnum.Magic] = { Name = "하이랜더", RUID = "thumbnail://0cdc0913dc1a447a9d946b13accbb37c", StatMin = 10, StatMax = 15, Template = "공격력 {P}%", PercentMin = 2, PercentMax = 5 },
+			[_GearGradeEnum.Rare] = { Name = "그리스", RUID = "thumbnail://f1e3be5010a5490e808caef77f8e3e45", StatMin = 15, StatMax = 30, Template = "적 30마리 처치 시 HP {P}% 회복", PercentMin = 1, PercentMax = 3 },
+			[_GearGradeEnum.Epic] = { Name = "그륜힐", RUID = "thumbnail://40f7a7d1e55c417f8c2ecbddcea536d2", StatMin = 30, StatMax = 60, Template = "공격력 {P}%", PercentMin = 5, PercentMax = 10 },
+			[_GearGradeEnum.Unique] = { Name = "청운검", RUID = "thumbnail://29459cbfc27c4c6a84d626b5ffa71ad4", StatMin = 60, StatMax = 100, Template = "받는 피해 {P}% 감소", PercentMin = 1, PercentMax = 5 },
+			[_GearGradeEnum.Legendary] = { Name = "참화도", RUID = "thumbnail://13df07e1868a4d0db34ab0ba183e7867", StatMin = 100, StatMax = 150, Template = "HP 30% 이하 시 공격력 {P}% 증가", PercentMin = 5, PercentMax = 15 },
+		}
+
+		-- 자마다르 (StatField=Atk, 동일 스탯 진행, 레전더리만 {P}+{C} 동시 사용)
+		t[self.JamadarItemId] = {
+			[_GearGradeEnum.None] = { Name = "삼각 자마다르", RUID = "thumbnail://810f17a2db174e10b3299c40055d693e", StatMin = 5, StatMax = 10, Template = "-" },
+			[_GearGradeEnum.Magic] = { Name = "태극부채", RUID = "thumbnail://6e20c1137d674fb0a51789d2a5b0acce", StatMin = 10, StatMax = 15, Template = "치명타 확률 {P}% 증가", PercentMin = 2, PercentMax = 5 },
+			[_GearGradeEnum.Rare] = { Name = "게타", RUID = "thumbnail://2185a27cb3e34a85854252b18c53751f", StatMin = 15, StatMax = 30, Template = "몬스터 30마리 처치 시 치명타 확률 {P}% 증가(10초), 지속시간동안 갱신X", PercentMin = 10, PercentMax = 20 },
+			[_GearGradeEnum.Epic] = { Name = "용천권", RUID = "thumbnail://7ad42b76b1334fa1a13b6b616cc48905", StatMin = 30, StatMax = 60, Template = "치명타 피해 {P}% 증가", PercentMin = 5, PercentMax = 10 },
+			[_GearGradeEnum.Unique] = { Name = "바키트", RUID = "thumbnail://5b471081f04c4251a0e55c087433d3c8", StatMin = 60, StatMax = 100, Template = "치명타 확률 {P}% 증가", PercentMin = 2, PercentMax = 5 },
+			[_GearGradeEnum.Legendary] = { Name = "블러드 대거", RUID = "thumbnail://1965573dd25047c9a6ec6f6f42a298dd", StatMin = 100, StatMax = 150, Template = "기본 공격시 {C}% 확률 치명타 피해 {P}% 증가(10초), 지속시간동안 갱신X", PercentMin = 20, PercentMax = 30, Percent2Min = 1, Percent2Max = 5 },
+		}
+
+		-- 슈트A(드라카즈 제복 시리즈, StatField=Hp, 5~10/10~15/15~25/25~50/50~70/70~100)
+		t[self.SuitAItemId] = {
+			[_GearGradeEnum.None] = { Name = "드라카즈 제복", RUID = "thumbnail://26781cb2549249afaba297cff4aac2f6", StatMin = 5, StatMax = 10, Template = "-" },
+			[_GearGradeEnum.Magic] = { Name = "다크 오로라 로브", RUID = "thumbnail://847e5509451e4f2bab348948b76441f1", StatMin = 10, StatMax = 15, Template = "전투 시작 시 최대 HP의 {P}% 보호막 획득", PercentMin = 5, PercentMax = 10 },
+			[_GearGradeEnum.Rare] = { Name = "빛의 수련기사 로브", RUID = "thumbnail://ff3e6f57b6d043aa9db7ba3fc88694b3", StatMin = 15, StatMax = 25, Template = "몬스터 50마리 처치 시 HP {P}% 회복", PercentMin = 5, PercentMax = 10 },
+			-- 유저 지정 "프리미엄 메이플 이올렛 슈트"는 리소스에 없고, 유사한 "메이플 이올렛 슈트"는
+			-- 이미 슈트B 유니크가 쓰고 있어 중복이라 유저가 "여제의 쓸만한 로브"로 확정
+			[_GearGradeEnum.Epic] = { Name = "여제의 쓸만한 로브", RUID = "thumbnail://df192ea86c5143649a6675e84b2f71bb", StatMin = 25, StatMax = 50, Template = "받는 피해 {P}% 감소", PercentMin = 7, PercentMax = 12 },
+			[_GearGradeEnum.Unique] = { Name = "템페스트 후드로브", RUID = "thumbnail://6583dc437b234b5c9ea0fd620a3ba4d6", StatMin = 50, StatMax = 70, Template = "HP 30% 이하일 때 받는 피해 {P}% 감소", PercentMin = 10, PercentMax = 20 },
+			[_GearGradeEnum.Legendary] = { Name = "얼티밋 슈트", RUID = "thumbnail://7c6cd9b3d5dd48beaa8b9c952296e35e", StatMin = 70, StatMax = 100, Template = "치명적인 피해를 받을 때 5초 무적(전투당 1회)" },
+		}
+
+		-- 슈트B(기사단 제복 시리즈, StatField=Hp, 동일 스탯 진행 — 슈트A와 같은 부위 다른 시리즈)
+		t[self.SuitBItemId] = {
+			[_GearGradeEnum.None] = { Name = "기사단 제복", RUID = "thumbnail://2f720404483a49b49cc0babe96be7c9b", StatMin = 5, StatMax = 10, Template = "-" },
+			[_GearGradeEnum.Magic] = { Name = "10주년 화이트 슈트", RUID = "thumbnail://513dec4015774cd48625d461ed8b9005", StatMin = 10, StatMax = 15, Template = "전투 시작 시 최대 HP의 {P}% 보호막 획득", PercentMin = 5, PercentMax = 10 },
+			[_GearGradeEnum.Rare] = { Name = "메이플 베릴 리센느", RUID = "thumbnail://2d7d875ce4994997acffd1e1a0ef491f", StatMin = 15, StatMax = 25, Template = "몬스터 50마리 처치 시 HP {P}% 회복", PercentMin = 5, PercentMax = 10 },
+			[_GearGradeEnum.Epic] = { Name = "메이플 래티넘 리센느", RUID = "thumbnail://559cec8600e547f8a1ba63eeff84865e", StatMin = 25, StatMax = 50, Template = "피격 시 {P}% 확률로 피해 무효화", PercentMin = 3, PercentMax = 8 },
+			[_GearGradeEnum.Unique] = { Name = "메이플 이올렛 슈트", RUID = "thumbnail://3fdea50e952849c686ac0e8cadf81f98", StatMin = 50, StatMax = 70, Template = "HP 30% 이하일 때 받는 피해 {P}% 감소", PercentMin = 10, PercentMax = 20 },
+			[_GearGradeEnum.Legendary] = { Name = "10주년 블랙 슈트", RUID = "thumbnail://6a151fb5c6a84f21b4b2343cb422fdee", StatMin = 70, StatMax = 100, Template = "HP가 20% 이하가 되면 즉시 HP {P}% 회복(전투당 1회)", PercentMin = 10, PercentMax = 20 },
+		}
+
+		-- 투구 (StatField 없음, 순수 등급 스킬 텍스트만)
+		t[self.HelmItemId] = {
+			[_GearGradeEnum.None] = { Name = "신문지 투구", RUID = "thumbnail://ba6bbb0fc8ea4dcfa6ca1a2f1b721c29", Template = "-" },
+			[_GearGradeEnum.Magic] = { Name = "본 헬름", RUID = "thumbnail://25d29fc9b06f401f8070e9ec955cb1e2", Template = "공격력 +{P}%", PercentMin = 2, PercentMax = 5 },
+			[_GearGradeEnum.Rare] = { Name = "자쿰의 투구", RUID = "thumbnail://81c8cb83df334a599bc6ef68b63a894b", Template = "몬스터 50마리 처치 시 모든 스킬 쿨타임 {P}% 감소", PercentMin = 5, PercentMax = 10 },
+			[_GearGradeEnum.Epic] = { Name = "데비존의 모자", RUID = "thumbnail://fe7967e786724b73bb88cf93ff2155f0", Template = "공격력 +{P}%", PercentMin = 5, PercentMax = 10 },
+			-- 유저 지정 "스텔라 깃털모자"는 리소스에 없어 유저가 "템페스트 깃털모자"로 확정
+			-- (슈트A 유니크 "템페스트 후드로브"와 세트로 맞아떨어짐)
+			[_GearGradeEnum.Unique] = { Name = "템페스트 깃털모자", RUID = "thumbnail://5034d2241eda466abd7bcdd09902255e", Template = "스킬 사용 시 다음 기본 공격의 대미지 {P}% 증가 (10초)", PercentMin = 20, PercentMax = 30 },
+			[_GearGradeEnum.Legendary] = { Name = "벨룸의 헬름", RUID = "thumbnail://9e9832cc20c641ee908caa6807424ea6", Template = "스킬 사용 후 다음 스킬의 대미지 {P}% 증가 (10초)", PercentMin = 10, PercentMax = 15 },
+		}
+
+		-- 장갑 (StatField 없음) — 2026-08-17 유저가 전 등급 이름을 실존 리소스 기준으로 재지정
+		t[self.GloveItemId] = {
+			[_GearGradeEnum.None] = { Name = "노가다 목장갑", RUID = "thumbnail://2e58683f2f094f099a0813c36e278dd5", Template = "-" },
+			[_GearGradeEnum.Magic] = { Name = "알타이르 글러브", RUID = "thumbnail://dedb98a28ff443aa80fdb9bdcf33945b", Template = "기본 공격 대미지 +{P}%", PercentMin = 5, PercentMax = 10 },
+			-- 유저 지정 "레더 글로브"는 정확히 일치하는 리소스가 없어 유저가 "하드레더 글로브"로 확정
+			[_GearGradeEnum.Rare] = { Name = "하드레더 글로브", RUID = "thumbnail://1654e3e6f2a54baba7e067711ecf0a70", Template = "기본 공격 20회마다 다음 기본 공격의 치명타 확률 +{P}% 증가 (5초)", PercentMin = 5, PercentMax = 10 },
+			[_GearGradeEnum.Epic] = { Name = "해군 함장의 장갑", RUID = "thumbnail://b70d4bf316f741ecadb538ebc1782a1f", Template = "기본 공격 30회마다 다음 기본 공격의 대미지 {P}% 증가", PercentMin = 20, PercentMax = 30 },
+			[_GearGradeEnum.Unique] = { Name = "무공의 장갑", RUID = "thumbnail://305e305aa56e43e6b07de250be8a4091", Template = "기본 공격으로 적 처치 시 다음 기본 공격의 대미지 {P}% 증가", PercentMin = 20, PercentMax = 30 },
+			[_GearGradeEnum.Legendary] = { Name = "소공의 장갑", RUID = "thumbnail://540a33b4ed2842848f2469e5abc3451c", Template = "기본 공격 10회마다 강화 공격 발동 (기본 공격 대미지의 200%)" },
+		}
+
+		-- 망토 (StatField 없음) — 2026-08-17 유저가 전 등급 이름을 실존 리소스 기준으로 재지정
+		t[self.CapeItemId] = {
+			[_GearGradeEnum.None] = { Name = "허름한 망토", RUID = "thumbnail://c33def64db8b48f39b7b125fab1092e1", Template = "-" },
+			[_GearGradeEnum.Magic] = { Name = "온화의 망토", RUID = "thumbnail://a50a3a381d52464084baa2de3b256b32", Template = "피해량 +{P}%", PercentMin = 3, PercentMax = 5 },
+			-- 리소스상 정식명은 "이카루스의 망토"(조사 차이) — 동일 아이템으로 판단해 사용
+			[_GearGradeEnum.Rare] = { Name = "이카루스 망토", RUID = "thumbnail://06f3692b69e24e98b3a267cfb3a7ffa6", Template = "몬스터 50마리 처치 시 피해량 +{P}% (10초)", PercentMin = 5, PercentMax = 10 },
+			[_GearGradeEnum.Epic] = { Name = "검은색 가이아의 망토", RUID = "thumbnail://ce304b7a79fd4a848c1a8a077cc7c7f2", Template = "엘리트/보스 몬스터에게 주는 피해량 +{P}%", PercentMin = 5, PercentMax = 10 },
+			[_GearGradeEnum.Unique] = { Name = "빨간색 세라프의 망토", RUID = "thumbnail://4bec629a08ea405ab4c70dec185a66b4", Template = "체력 +{P}%", PercentMin = 3, PercentMax = 8 },
+			[_GearGradeEnum.Legendary] = { Name = "파란색 자일즈의 망토", RUID = "thumbnail://e63d1cda980b4f6d897b38bbd54d02f8", Template = "엘리트/보스 몬스터에게 주는 피해량 +{P}%", PercentMin = 10, PercentMax = 15 },
+		}
+	end
+
+	-- ── 공용 조회 ──────────────────────────────────────────────────────────
+
 	method boolean IsWeaponItem(integer itemId)
+		if self.GearItemIds == nil then
+			return false
+		end
+		for i, id in ipairs(self.GearItemIds) do
+			if id == itemId then
+				return true
+			end
+		end
+		return false
+	end
+
+	method boolean IsLegacyWeapon(integer itemId)
 		return itemId == self.WeaponItemId
 	end
 
-	method table GetTierData(integer gradeEnum)
-		return self.TierDataTable[gradeEnum]
+	-- "Atk" | "Hp" | nil
+	method string GetStatField(integer itemId)
+		return self.StatFieldTable[itemId]
 	end
 
-	method string GetDisplayName(integer gradeEnum)
-		local data = self.TierDataTable[gradeEnum]
+	-- 아바타 착용 시 SetEquip에 넘겨야 하는 카테고리(GearCategoryEnum 값). 인벤토리 슬롯 배치용
+	-- GearCategory와 다를 수 있다(활/양손검) — 반드시 이걸 거쳐서 MapleAvatarItemCategory로 변환할 것.
+	-- 등록되지 않은 아이템이면 -1
+	method integer GetAvatarGearCategory(integer itemId)
+		local c = self.AvatarCategoryTable[itemId]
+		if c == nil then
+			return -1
+		end
+		return c
+	end
+
+	method table GetTierData(integer itemId, integer gradeEnum)
+		if self:IsLegacyWeapon(itemId) then
+			return self.LegacyTierDataTable[gradeEnum]
+		end
+		local line = self.NewItemTierDataTable[itemId]
+		if line == nil then
+			return nil
+		end
+		return line[gradeEnum]
+	end
+
+	method string GetDisplayName(integer itemId, integer gradeEnum)
+		local data = self:GetTierData(itemId, gradeEnum)
 		if data == nil then
 			return "?"
 		end
 		return data.Name
 	end
 
-	method string GetDisplayRUID(integer gradeEnum)
-		local data = self.TierDataTable[gradeEnum]
+	method string GetDisplayRUID(integer itemId, integer gradeEnum)
+		local data = self:GetTierData(itemId, gradeEnum)
 		if data == nil then
 			return ""
 		end
 		return data.RUID
 	end
 
-	-- 해당 티어+품질에서 ATK를 그 품질 구간 내 정수로 무작위 굴린다
-	method integer RollAtk(integer gradeEnum, integer qualityEnum)
-		local data = self.TierDataTable[gradeEnum]
+	-- 아바타 착용(CostumeManagerComponent.SetEquip)용 RUID — UI 아이콘용 GetDisplayRUID와 달리
+	-- "thumbnail://" 접두사를 반드시 떼야 한다. Custom*Equip 슬롯은 접두사가 붙은 값을 조용히
+	-- 거부해서(에러/경고 없이 미착용) 아바타에 아무것도 안 입혀지는 무증상 실패가 난다.
+	-- 등급마다 실제 외형이 다르므로 UI 아이콘과 동일하게 등급별 RUID를 그대로 쓴다.
+	method string GetAvatarRUID(integer itemId, integer gradeEnum)
+		local ruid = self:GetDisplayRUID(itemId, gradeEnum)
+		if ruid == nil or ruid == "" then
+			return ""
+		end
+		if string.sub(ruid, 1, 12) == "thumbnail://" then
+			return string.sub(ruid, 13)
+		end
+		return ruid
+	end
+
+	-- ── 품질 구간 분배(신규 라인 전용) ────────────────────────────────────
+	-- 기존 스태프 QualityStats는 손으로 튜닝한 값을 그대로 유지하고, 신규 라인은 등급의 [min,max]
+	-- 구간을 F~S 7단계로 균등 분배해서(경계가 이어지는 방식, 기존 스태프 수작업 곡선과 동일 스타일)
+	-- 계산으로 산출한다 — 라인 9개 x 등급 6개 x 품질 7단계 숫자를 일일이 손으로 안 채워도 된다.
+	method table SplitQualityBands(number min, number max)
+		local order = { _QualityEnum.F, _QualityEnum.E, _QualityEnum.D, _QualityEnum.C, _QualityEnum.B, _QualityEnum.A, _QualityEnum.S }
+		local bands = {}
+		local span = max - min
+		local prevMax = min
+		for i = 1, 7 do
+			local bandMax = min + math.floor(span * i / 7 + 0.5)
+			if i == 7 then
+				bandMax = max
+			end
+			bands[order[i]] = { Min = prevMax, Max = bandMax }
+			prevMax = bandMax
+		end
+		return bands
+	end
+
+	method integer RollInBand(number min, number max, integer qualityEnum)
+		if min == nil or max == nil then
+			return 0
+		end
+		local bands = self:SplitQualityBands(min, max)
+		local band = bands[qualityEnum]
+		if band == nil then
+			return math.floor(min)
+		end
+		if band.Min >= band.Max then
+			return math.floor(band.Min)
+		end
+		return math.random(math.floor(band.Min), math.floor(band.Max))
+	end
+
+	-- ── ATK ────────────────────────────────────────────────────────────────
+
+	method integer RollAtk(integer itemId, integer gradeEnum, integer qualityEnum)
+		if self:IsLegacyWeapon(itemId) then
+			local data = self.LegacyTierDataTable[gradeEnum]
+			if data == nil then
+				return 0
+			end
+			local stat = data.QualityStats[qualityEnum]
+			if stat == nil or stat.AtkMin == nil then
+				return 0
+			end
+			if stat.AtkMin >= stat.AtkMax then
+				return stat.AtkMin
+			end
+			return math.random(stat.AtkMin, stat.AtkMax)
+		end
+
+		if self:GetStatField(itemId) ~= "Atk" then
+			return 0
+		end
+		local data = self:GetTierData(itemId, gradeEnum)
 		if data == nil then
 			return 0
 		end
-		local stat = data.QualityStats[qualityEnum]
-		if stat == nil then
+		return self:RollInBand(data.StatMin, data.StatMax, qualityEnum)
+	end
+
+	method table RollAtkByGrade(integer itemId, integer qualityEnum)
+		local result = {}
+		for grade = _GearGradeEnum.None, _GearGradeEnum.Legendary do
+			result[grade] = self:RollAtk(itemId, grade, qualityEnum)
+		end
+		return result
+	end
+
+	-- ── HP(신규 라인 전용) ───────────────────────────────────────────────
+
+	method integer RollHp(integer itemId, integer gradeEnum, integer qualityEnum)
+		if self:GetStatField(itemId) ~= "Hp" then
 			return 0
 		end
-		if stat.AtkMin >= stat.AtkMax then
-			return stat.AtkMin
+		local data = self:GetTierData(itemId, gradeEnum)
+		if data == nil then
+			return 0
 		end
-		return math.random(stat.AtkMin, stat.AtkMax)
+		return self:RollInBand(data.StatMin, data.StatMax, qualityEnum)
 	end
 
-	-- None/Rare 전용 — 이 두 등급은 수치형 보너스가 없어서 항상 빈 문자열이다(수치형 보너스가 있는
-	-- 매직/에픽/유니크/레전더리는 GetActualBonusText를 쓸 것 — 범위가 아니라 그 아이템의 확정값을 보여줌)
-	method string GetBonusText(integer gradeEnum, integer qualityEnum)
-		return ""
+	method table RollHpByGrade(integer itemId, integer qualityEnum)
+		local result = {}
+		for grade = _GearGradeEnum.None, _GearGradeEnum.Legendary do
+			result[grade] = self:RollHp(itemId, grade, qualityEnum)
+		end
+		return result
 	end
 
-	method string GetBonusLabel(integer gradeEnum)
-		local data = self.TierDataTable[gradeEnum]
+	-- ── 보너스 %(BonusPercentPerMille = "{P}" 자리) ─────────────────────
+
+	method string GetBonusLabel(integer itemId, integer gradeEnum)
+		if not self:IsLegacyWeapon(itemId) then
+			return nil
+		end
+		local data = self.LegacyTierDataTable[gradeEnum]
 		if data == nil then
 			return nil
 		end
 		return data.BonusLabel
 	end
 
-	-- 해당 티어+품질에서 "공격력/쿨타임 X%" 보너스를 그 품질 구간 내 1000분율로 무작위 굴린다
-	-- (ATK/ProcChancePerMille와 동일 패턴 — 드롭/등급업 시 1회 굴려서 아이템에 영구 저장)
-	method integer RollBonusPercentPerMille(integer gradeEnum, integer qualityEnum)
-		local data = self.TierDataTable[gradeEnum]
-		if data == nil then
+	method integer RollBonusPercentPerMille(integer itemId, integer gradeEnum, integer qualityEnum)
+		if self:IsLegacyWeapon(itemId) then
+			local data = self.LegacyTierDataTable[gradeEnum]
+			if data == nil then
+				return 0
+			end
+			local stat = data.QualityStats[qualityEnum]
+			if stat == nil or stat.BonusPercentMin == nil then
+				return 0
+			end
+			if stat.BonusPercentMin >= stat.BonusPercentMax then
+				return stat.BonusPercentMin
+			end
+			return math.random(stat.BonusPercentMin, stat.BonusPercentMax)
+		end
+
+		local data = self:GetTierData(itemId, gradeEnum)
+		if data == nil or data.PercentMin == nil then
 			return 0
 		end
-		local stat = data.QualityStats[qualityEnum]
-		if stat == nil or stat.BonusPercentMin == nil then
-			return 0
+		return self:RollInBand(data.PercentMin * 10, data.PercentMax * 10, qualityEnum)
+	end
+
+	method table RollBonusPercentPerMilleByGrade(integer itemId, integer qualityEnum)
+		local result = {}
+		for grade = _GearGradeEnum.None, _GearGradeEnum.Legendary do
+			result[grade] = self:RollBonusPercentPerMille(itemId, grade, qualityEnum)
 		end
-		if stat.BonusPercentMin >= stat.BonusPercentMax then
-			return stat.BonusPercentMin
-		end
-		return math.random(stat.BonusPercentMin, stat.BonusPercentMax)
+		return result
 	end
 
 	-- 1000분율 정수를 퍼센트 문자열로 변환(예: 35 -> "3.5", 50 -> "5") — 정수면 소수점을 떼고 보여준다
@@ -208,36 +520,52 @@ script WeaponTierDataLogic extends Logic
 		return string.format("%.1f", percent)
 	end
 
-	-- 등급 스킬 박스/설명에 보여줄 "이 아이템이 실제로 갖는" 확정 텍스트(범위 아님).
-	-- bonusPercentPerMille/procChancePerMille는 그 아이템(또는 미리보기 굴림)의 실제 롤 값을 그대로 받는다
-	method string GetActualBonusText(integer gradeEnum, integer skillVariant, integer bonusPercentPerMille, integer procChancePerMille)
-		if gradeEnum == _GearGradeEnum.Rare then
-			return self:GetSkillText(gradeEnum, skillVariant)
+	-- ── 프록 확률 %(ProcChancePerMille = 레거시 스태프 레전더리 전용 / 신규 라인 "{C}" 자리) ────
+
+	-- 레거시 스태프 레전더리 전용 "기본공격 확률발동" 수치(1000분율) — BonusText 표(품질별
+	-- "확률 X~Y%")의 구간 안에서 ATK와 동일하게 드롭 시 1회 확정 롤
+	method integer RollProcChancePerMille(integer itemId, integer qualityEnum)
+		if self:IsLegacyWeapon(itemId) then
+			local ranges = {
+				[_QualityEnum.F] = { 10, 20 },
+				[_QualityEnum.E] = { 10, 20 },
+				[_QualityEnum.D] = { 20, 30 },
+				[_QualityEnum.C] = { 30, 40 },
+				[_QualityEnum.B] = { 30, 40 },
+				[_QualityEnum.A] = { 40, 50 },
+				[_QualityEnum.S] = { 50, 50 },
+			}
+			local r = ranges[qualityEnum]
+			if r == nil then return 10 end
+			if r[1] >= r[2] then return r[1] end
+			return math.random(r[1], r[2])
 		end
 
-		if gradeEnum == _GearGradeEnum.Legendary then
-			local skillName = self:GetSkillText(gradeEnum, skillVariant)
-			return string.format("기본 공격시 %s%% 확률 %s", self:FormatPercentPerMille(procChancePerMille), skillName)
+		-- 신규 라인은 자마다르 레전더리처럼 "{C}" 자리를 쓰는 딱 한 등급에서만 의미가 있다 — 레전더리
+		-- 고정 조회(다른 등급은 항상 0)
+		local data = self:GetTierData(itemId, _GearGradeEnum.Legendary)
+		if data == nil or data.Percent2Min == nil then
+			return 0
 		end
-
-		local label = self:GetBonusLabel(gradeEnum)
-		if label == nil then
-			return ""
-		end
-		return label .. " " .. self:FormatPercentPerMille(bonusPercentPerMille) .. "%"
+		return self:RollInBand(data.Percent2Min * 10, data.Percent2Max * 10, qualityEnum)
 	end
 
-	method table GetSkillTexts(integer gradeEnum)
-		local data = self.TierDataTable[gradeEnum]
+	-- ── 등급 스킬 텍스트(표시용, 확정값) ────────────────────────────────
+
+	method table GetSkillTexts(integer itemId, integer gradeEnum)
+		if not self:IsLegacyWeapon(itemId) then
+			return { "-", "-", "-", "-" }
+		end
+		local data = self.LegacyTierDataTable[gradeEnum]
 		if data == nil then
 			return { "-", "-", "-", "-" }
 		end
 		return data.SkillTexts
 	end
 
-	-- 이 아이템 인스턴스가 실제로 부여하는 등급 스킬 텍스트 1개(4개 중 SkillVariant번째) — 표시용
-	method string GetSkillText(integer gradeEnum, integer skillVariant)
-		local texts = self:GetSkillTexts(gradeEnum)
+	-- 이 아이템 인스턴스가 실제로 부여하는 등급 스킬 텍스트 1개(4개 중 SkillVariant번째, 레거시 전용) — 표시용
+	method string GetSkillText(integer itemId, integer gradeEnum, integer skillVariant)
+		local texts = self:GetSkillTexts(itemId, gradeEnum)
 		local text = texts[skillVariant]
 		if text == nil then
 			return "-"
@@ -245,57 +573,59 @@ script WeaponTierDataLogic extends Logic
 		return text
 	end
 
-	-- 레어/레전더리만 등급 스킬 1~4가 서로 다른 실제 스킬(썬더볼트/썬더커터/에너지볼트/페페)이라
-	-- SkillVariant가 게임플레이에 의미를 가진다. 그 외 등급(매직/에픽/유니크)은 4칸이 전부 동일한
-	-- 수치형 보너스(공격력%/쿨타임%)라 어느 변형이 걸리든 결과가 같다.
-	method boolean IsSkillVariantMeaningful(integer gradeEnum)
-		return gradeEnum == _GearGradeEnum.Rare or gradeEnum == _GearGradeEnum.Legendary
+	-- 레거시 스태프의 레어/레전더리만 등급 스킬 1~4가 서로 다른 실제 스킬이라 SkillVariant가 의미를
+	-- 가진다. 신규 라인은 전부 SkillVariant 무관(항상 1개 텍스트)
+	method boolean IsSkillVariantMeaningful(integer itemId, integer gradeEnum)
+		return self:IsLegacyWeapon(itemId) and (gradeEnum == _GearGradeEnum.Rare or gradeEnum == _GearGradeEnum.Legendary)
 	end
 
-	-- 무기 드롭 시 등급 스킬 변형(1~4)을 균등 랜덤으로 굴린다(유저 지정)
+	-- 레거시 스태프 드롭 시 등급 스킬 변형(1~4)을 균등 랜덤으로 굴린다(유저 지정). 신규 라인은 항상 1
 	method integer RollSkillVariant()
 		return _UtilLogic:RandomIntegerRange(1, 4)
 	end
 
-	-- 레전더리 전용 "기본공격 확률발동" 수치(1000분율) — BonusText 표(품질별 "확률 X~Y%")의 구간 안에서
-	-- ATK와 동일하게 드롭 시 1회 확정 롤(중앙값 고정 아님, 유저 지정: 아이템마다 실제 값이 달라야 함).
-	-- S는 구간이 아니라 "5%" 고정 텍스트라 그대로 50 고정
-	method integer RollProcChancePerMille(integer qualityEnum)
-		local ranges = {
-			[_QualityEnum.F] = { 10, 20 },
-			[_QualityEnum.E] = { 10, 20 },
-			[_QualityEnum.D] = { 20, 30 },
-			[_QualityEnum.C] = { 30, 40 },
-			[_QualityEnum.B] = { 30, 40 },
-			[_QualityEnum.A] = { 40, 50 },
-			[_QualityEnum.S] = { 50, 50 },
-		}
-		local r = ranges[qualityEnum]
-		if r == nil then return 10 end
-		if r[1] >= r[2] then return r[1] end
-		return math.random(r[1], r[2])
-	end
+	-- 등급 스킬 박스/설명에 보여줄 "이 아이템이 실제로 갖는" 확정 텍스트(범위 아님).
+	-- bonusPercentPerMille/procChancePerMille는 그 아이템(또는 미리보기 굴림)의 실제 롤 값을 그대로 받는다
+	method string GetActualBonusText(integer itemId, integer gradeEnum, integer skillVariant, integer bonusPercentPerMille, integer procChancePerMille)
+		if self:IsLegacyWeapon(itemId) then
+			if gradeEnum == _GearGradeEnum.Rare then
+				return self:GetSkillText(itemId, gradeEnum, skillVariant)
+			end
 
-	-- 유저 강한 정정: 등급업 때마다 새로 굴리면 미리보기(등급 스킬 박스)에서 본 값과 실제로 그 등급에
-	-- 도달했을 때 받는 값이 달라질 수 있다 — "F품질이면 F품질에 해당하는 값을 승계받아야지, 등급업했다고
-	-- 갑자기 엉뚱한 값이 나오면 안 된다"는 요구. 그래서 드롭 시 이 아이템의 Quality로 None~레전더리
-	-- "모든" 등급의 ATK/보너스를 한 번에 굴려서 영구 저장해두고(ItemGearStruct.AtkByGrade /
-	-- BonusPercentPerMilleByGrade), 등급업은 그중 이미 정해진 값을 꺼내 쓰기만 한다(재굴림 없음).
-	-- 미리보기(등급 스킬 박스)도 이 표를 그대로 읽으므로 "미리 본 값 = 실제로 받는 값"이 항상 보장된다.
-	method table RollAtkByGrade(integer qualityEnum)
-		local result = {}
-		for grade = _GearGradeEnum.None, _GearGradeEnum.Legendary do
-			result[grade] = self:RollAtk(grade, qualityEnum)
+			if gradeEnum == _GearGradeEnum.Legendary then
+				local skillName = self:GetSkillText(itemId, gradeEnum, skillVariant)
+				return string.format("기본 공격시 %s%% 확률 %s", self:FormatPercentPerMille(procChancePerMille), skillName)
+			end
+
+			local label = self:GetBonusLabel(itemId, gradeEnum)
+			if label == nil then
+				return ""
+			end
+			return label .. " " .. self:FormatPercentPerMille(bonusPercentPerMille) .. "%"
 		end
+
+		-- 신규 라인: 템플릿에 "{P}"/"{C}"가 있으면 롤값으로 치환, 없으면 그대로(문자열 고정 효과 or "-")
+		local data = self:GetTierData(itemId, gradeEnum)
+		if data == nil or data.Template == nil then
+			return "-"
+		end
+		-- ⚠ 템플릿 문자열이 이미 "{P}%" 형태로 퍼센트 기호를 갖고 있다 — 치환값에 "%"를 또 붙이면
+		-- 화면에 "5.4%%"로 이중 출력된다(라이브 검증에서 실제로 발견). 숫자만 넣을 것
+		local result = data.Template
+		result = self:ReplacePlaceholder(result, "{P}", self:FormatPercentPerMille(bonusPercentPerMille))
+		result = self:ReplacePlaceholder(result, "{C}", self:FormatPercentPerMille(procChancePerMille))
 		return result
 	end
 
-	method table RollBonusPercentPerMilleByGrade(integer qualityEnum)
-		local result = {}
-		for grade = _GearGradeEnum.None, _GearGradeEnum.Legendary do
-			result[grade] = self:RollBonusPercentPerMille(grade, qualityEnum)
+	-- string.gsub은 (문자열, 치환횟수) 2개를 반환해서 그대로 대입하면 LSP 경고가 뜬다 — 여기서 한 번만
+	-- 받아 문자열만 돌려준다. 치환값에 %가 들어가므로 패턴 치환 대신 find+sub로 직접 잘라 붙인다
+	method string ReplacePlaceholder(string source, string token, string value)
+		-- 템플릿 문자열의 토큰("{P}"/"{C}") 첫 등장을 value로 바꿔 돌려준다(패턴 해석 없는 평문 치환).
+		local startIdx, endIdx = string.find(source, token, 1, true)
+		if startIdx == nil then
+			return source
 		end
-		return result
+		return string.sub(source, 1, startIdx - 1) .. value .. string.sub(source, endIdx + 1)
 	end
 
 end

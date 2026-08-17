@@ -927,8 +927,9 @@ script PkgPlayerInventory extends Component
 		-- "미리 본 값 = 실제 받는 값"을 이 경우에도 유지하려면 품질이 바뀌는 순간 표 자체를 다시 만드는
 		-- 수밖에 없음. 등급업 미리보기는 이 새 표를 기준으로 다시 계산됨)
 		if qualityChanged and _WeaponTierDataLogic:IsWeaponItem(baseItem.ItemId) then
-			gearStruct.AtkByGrade = _WeaponTierDataLogic:RollAtkByGrade(gearStruct.Quality)
-			gearStruct.BonusPercentPerMilleByGrade = _WeaponTierDataLogic:RollBonusPercentPerMilleByGrade(gearStruct.Quality)
+			gearStruct.AtkByGrade = _WeaponTierDataLogic:RollAtkByGrade(baseItem.ItemId, gearStruct.Quality)
+			gearStruct.HpByGrade = _WeaponTierDataLogic:RollHpByGrade(baseItem.ItemId, gearStruct.Quality)
+			gearStruct.BonusPercentPerMilleByGrade = _WeaponTierDataLogic:RollBonusPercentPerMilleByGrade(baseItem.ItemId, gearStruct.Quality)
 		end
 
 		-- 등급이 실제로 올랐으면(또는 품질이 바뀌어 표가 새로 갱신됐으면) ATK/BonusPercentPerMille을
@@ -937,19 +938,26 @@ script PkgPlayerInventory extends Component
 		if (gearStruct.Grade ~= grade or qualityChanged) and _WeaponTierDataLogic:IsWeaponItem(baseItem.ItemId) then
 			local newAtk = gearStruct.AtkByGrade[gearStruct.Grade]
 			if newAtk == nil then
-				newAtk = _WeaponTierDataLogic:RollAtk(gearStruct.Grade, gearStruct.Quality)
+				newAtk = _WeaponTierDataLogic:RollAtk(baseItem.ItemId, gearStruct.Grade, gearStruct.Quality)
 			end
 			gearStruct.Atk = newAtk
 
+			-- HP 계열(슈트류) 라인도 ATK와 동일하게 표에서 꺼내 갱신한다
+			local newHp = gearStruct.HpByGrade[gearStruct.Grade]
+			if newHp == nil then
+				newHp = _WeaponTierDataLogic:RollHp(baseItem.ItemId, gearStruct.Grade, gearStruct.Quality)
+			end
+			gearStruct.Hp = newHp
+
 			local newBonusPercentPerMille = gearStruct.BonusPercentPerMilleByGrade[gearStruct.Grade]
 			if newBonusPercentPerMille == nil then
-				newBonusPercentPerMille = _WeaponTierDataLogic:RollBonusPercentPerMille(gearStruct.Grade, gearStruct.Quality)
+				newBonusPercentPerMille = _WeaponTierDataLogic:RollBonusPercentPerMille(baseItem.ItemId, gearStruct.Grade, gearStruct.Quality)
 			end
 			gearStruct.BonusPercentPerMille = newBonusPercentPerMille
 		end
 
 		self.IsSaveDB = true
-		self:SyncComposeResultToClient(baseGUID, gearStruct.Grade, gearStruct.ComposeCount, gearStruct.Atk, gearStruct.BonusPercentPerMille, gearStruct.Quality, gearStruct.AtkByGrade, gearStruct.BonusPercentPerMilleByGrade, userId)
+		self:SyncComposeResultToClient(baseGUID, gearStruct.Grade, gearStruct.ComposeCount, gearStruct.Atk, gearStruct.BonusPercentPerMille, gearStruct.Quality, gearStruct.AtkByGrade, gearStruct.BonusPercentPerMilleByGrade, gearStruct.Hp, gearStruct.HpByGrade, userId)
 
 		return _ErrorCodeEnum.Success
 	end
@@ -1033,7 +1041,7 @@ script PkgPlayerInventory extends Component
 	end
 
 	@ExecSpace("Client")
-	method void SyncComposeResultToClient(string baseGUID, integer grade, integer composeCount, integer atk, integer bonusPercentPerMille, integer quality, table atkByGrade, table bonusPercentPerMilleByGrade)
+	method void SyncComposeResultToClient(string baseGUID, integer grade, integer composeCount, integer atk, integer bonusPercentPerMille, integer quality, table atkByGrade, table bonusPercentPerMilleByGrade, integer hp, table hpByGrade)
 		---@type ItemStruct
 		local itemStruct = self.Items[baseGUID]
 		if itemStruct == nil then
@@ -1054,6 +1062,8 @@ script PkgPlayerInventory extends Component
 		gearStruct.Quality = quality
 		gearStruct.AtkByGrade = atkByGrade
 		gearStruct.BonusPercentPerMilleByGrade = bonusPercentPerMilleByGrade
+		gearStruct.Hp = hp
+		gearStruct.HpByGrade = hpByGrade
 
 		local evt = InvenItemModifiedEvent()
 		evt.GUIDs = {baseGUID}

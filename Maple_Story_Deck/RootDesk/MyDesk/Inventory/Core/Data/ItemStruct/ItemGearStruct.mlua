@@ -18,6 +18,10 @@ script ItemGearStruct
 	-- Grade+Quality 구간에서 드롭 시점에 굴린 값을 그대로 들고 다닌다. 방어구는 항상 0로 무시
 	property integer Atk = 0
 
+	-- 방어구(HP 스탯 계열, 슈트류) 전용 — Atk와 완전히 동일한 패턴(드롭 시 1회 확정 롤, 영구 저장).
+	-- ATK 계열 아이템(스태프/활/양손검/자마다르)은 항상 0으로 무시
+	property integer Hp = 0
+
 	-- 무기 전용 등급 스킬 변형(1~4, 유저 지정: 레어/레전더리는 등급 스킬1~4가 서로 다른 스킬 — 예:
 	-- 이블윙즈 변형1=썬더볼트/변형2=썬더커터/변형3=에너지볼트/변형4=페페). 드롭 시 1회 균등 랜덤(1~4) 후
 	-- 영구 저장, 합성(티어업/품질합성 둘 다)에도 그대로 승계된다. 품질과 마찬가지로 합성 재료 자격에는
@@ -45,12 +49,16 @@ script ItemGearStruct
 
 	property table BonusPercentPerMilleByGrade = {}
 
+	-- Hp 버전(AtkByGrade와 동일 패턴) — HP 스탯 계열 아이템만 채워진다
+	property table HpByGrade = {}
+
 	method void CopyFrom(ItemGearStruct other)
 		self.IsAttached = other.IsAttached
 		self.Grade = other.Grade
 		self.ComposeCount = other.ComposeCount
 		self.Quality = other.Quality
 		self.Atk = other.Atk
+		self.Hp = other.Hp
 		self.SkillVariant = other.SkillVariant
 		self.ProcChancePerMille = other.ProcChancePerMille
 		self.BonusPercentPerMille = other.BonusPercentPerMille
@@ -60,6 +68,12 @@ script ItemGearStruct
 			atkByGrade[grade] = v
 		end
 		self.AtkByGrade = atkByGrade
+
+		local hpByGrade = {}
+		for grade, v in pairs(other.HpByGrade) do
+			hpByGrade[grade] = v
+		end
+		self.HpByGrade = hpByGrade
 
 		local bonusByGrade = {}
 		for grade, v in pairs(other.BonusPercentPerMilleByGrade) do
@@ -127,6 +141,13 @@ script ItemGearStruct
 			self.AtkByGrade = self:DeserializeByGradeTable(strs[8])
 			self.BonusPercentPerMilleByGrade = self:DeserializeByGradeTable(strs[9])
 
+			-- strs[10](Hp)/strs[11](HpByGrade) — 이 필드 추가 이전 저장 데이터엔 없을 수 있어 하위호환 처리
+			self.Hp = math.tointeger(tonumber(strs[10]))
+			if self.Hp == nil then
+				self.Hp = 0
+			end
+			self.HpByGrade = self:DeserializeByGradeTable(strs[11])
+
 			hasDeserializedData = true
 		end
 
@@ -167,7 +188,7 @@ script ItemGearStruct
 	end
 
 	method boolean Serialize(table dbItem)
-		if self.Grade ~= 0 or self.ComposeCount ~= 0 or self.Quality ~= 0 or self.Atk ~= 0 or self.SkillVariant ~= 1 or self.ProcChancePerMille ~= 0 or self.BonusPercentPerMille ~= 0 then
+		if self.Grade ~= 0 or self.ComposeCount ~= 0 or self.Quality ~= 0 or self.Atk ~= 0 or self.Hp ~= 0 or self.SkillVariant ~= 1 or self.ProcChancePerMille ~= 0 or self.BonusPercentPerMille ~= 0 then
 			local strs = {}
 			table.insert(strs, tostring(self.Grade))
 			table.insert(strs, tostring(self.ComposeCount))
@@ -178,6 +199,8 @@ script ItemGearStruct
 			table.insert(strs, tostring(self.BonusPercentPerMille))
 			table.insert(strs, self:SerializeByGradeTable(self.AtkByGrade))
 			table.insert(strs, self:SerializeByGradeTable(self.BonusPercentPerMilleByGrade))
+			table.insert(strs, tostring(self.Hp))
+			table.insert(strs, self:SerializeByGradeTable(self.HpByGrade))
 
 			local str = table.concat(strs, ',')
 			dbItem['G'] = str
