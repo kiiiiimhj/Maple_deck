@@ -947,6 +947,32 @@ script MonsterSpawner extends Logic
 		return runs
 	end
 
+	-- (worldX, worldY) 지점이 속한 평평한 발판 구간의 xMin/xMax를 찾는다. MonsterAI.InitializeStats가
+	-- 지그재그 스폰 직후 호출해서, 진폭(ZigzagAmplitude)이 실제 발판 폭을 넘어 타일 밖으로 흔들리지
+	-- 않도록 클램프하는 데 쓴다(유저 리포트: "지그재그 움직일 때 타일 아닌 부분도 밟는 것 같다" —
+	-- 에피소드2 map2 존7~10의 좁은 공중타일에서 기본 진폭 0.5가 타일 경계를 넘어가는 문제).
+	-- Y는 완전히 같은 층에만 매칭되도록 좁은 오차(0.1)만 허용하고, X는 발판 끝점 근처(부동소수점 오차)도
+	-- 포함하도록 약간의 여유(0.05)를 둔다. 매칭되는 run이 없으면(밴드/타일섬처럼 발판 위가 아닌 스폰)
+	-- nil을 반환해 호출측이 기본 진폭을 그대로 쓰게 한다.
+	@ExecSpace("ServerOnly")
+	method table GetContainingRunBounds(integer mapIndex, number worldX, number worldY)
+		local mapName = _MapManager:GetMapName(mapIndex)
+		local rootMap = _EntityService:GetEntityByPath("/maps/" .. mapName)
+		if rootMap == nil then return nil end
+		---@type FootholdComponent
+		local footholdComp = rootMap:GetComponent("FootholdComponent")
+		if footholdComp == nil then return nil end
+
+		local runs = self:GetFlatRuns(footholdComp)
+		for i = 1, #runs do
+			local run = runs[i]
+			if worldX >= run.xMin - 0.05 and worldX <= run.xMax + 0.05 and math.abs(run.y - worldY) <= 0.1 then
+				return { xMin = run.xMin, xMax = run.xMax }
+			end
+		end
+		return nil
+	end
+
 	-- hit이 속한 발판이 앞뒤로 같은 높이(수평)인 이웃과 계속 이어지는 만큼을 따라가서, 실제로 연결된
 	-- 평평한 구간 전체의 xMin/xMax를 구한다. 개별 발판 조각(예: 길이 0.9) 하나만으로는 "좁다"고 오판하기
 	-- 쉬워서(바닥도 여러 조각이 이어붙어 만들어짐), 이어진 전체 폭을 기준으로 좁은지 판단해야 한다.
@@ -1158,7 +1184,15 @@ script MonsterSpawner extends Logic
 		-- 레이캐스트가 아니라 발판 데이터 자체를 순회하므로 가려진 중간 발판도 정상적으로 잡히고, 기둥
 		-- 자체(수직에 가까운 조각, dy=0.41~0.6)는 IsFlatSegment가 자동으로 걸러 스폰 후보에서 빠진다.
 		-- 존30은 같은 구간(x38~55)을 실측했을 때 기둥/공중타일 구조가 없어 대상에서 제외했다.
-		if (mapIndex >= 13 and mapIndex <= 15) or mapIndex == 8 or mapIndex == 27 or mapIndex == 28 or mapIndex == 29 then
+		-- 에피소드2 map2 존7~10(mapIndex61~64)도 같은 이유로 추가(2026-08-19) — 라이오너/그류핀류
+		-- (지상형)와 지그재그 종(루이넬류)이 여신 탑 컨셉 공중타일(폭 1.7~4.4 정도의 좁은 발판들, 존8은
+		-- 기둥 구조까지 있음) 위에 등장해야 하는데, 기존 단일 랜덤X+아래방향 레이캐스트 방식은 발판 경계
+		-- 여유(EdgeMargin) 없이 무작위 X를 그대로 쓰다 보니 타일 끝에 바짝 붙어 스폰되는 경우가 있었다
+		-- (유저 리포트: "지그재그 움직일 때 타일 아닌 부분도 밟는 것 같다"). GetFlatRuns 기반 방식은
+		-- 발판별로 EdgeMarginAerial 여유를 두고 폭 비례 확률로 고르므로 더 안전하다(지그재그 진폭 자체의
+		-- 클램프는 MonsterAI.GetContainingRunBounds 별도 처리 — 아래 참고).
+		if (mapIndex >= 13 and mapIndex <= 15) or mapIndex == 8 or mapIndex == 27 or mapIndex == 28 or mapIndex == 29
+			or (mapIndex >= 61 and mapIndex <= 64) then
 			return self:GetSpawnPositionFromFootholds(mapIndex, isBoss, map)
 		end
 

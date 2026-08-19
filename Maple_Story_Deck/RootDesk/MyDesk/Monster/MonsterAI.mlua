@@ -251,11 +251,18 @@ script MonsterAI extends Component
 	-- 기존과 동일하게 _currentScale로 표현, 좌우 흔들림만 별도 X 오프셋으로 분리해서 서로 간섭하지 않는다).
 	-- 흔들리는 동안 잔상(반투명 스프라이트 복제)을 주기적으로 남겨 "휙" 하는 느낌을 보탠다.
 	property boolean _isZigzag = false
-	property number ZigzagAmplitude = 0.5  -- 좌우 진폭(월드 단위)
+	property number ZigzagAmplitude = 0.5  -- 좌우 진폭(월드 단위) 기본값 — 발판이 이보다 좁으면 실제로는
+	-- _zigzagAmplitudeActual로 줄여서 쓴다(아래 참고)
 	property number ZigzagFrequency = 3.0  -- 좌우 흔들림 각속도
 	property number _zigzagTime = 0
 	property number _zigzagPhase = 0
 	property number _zigzagBaseX = 0  -- 지그재그 중심(스폰 X)
+	-- 실제로 이번 흔들림에 쓸 진폭 — InitializeStats가 스폰된 발판의 실제 xMin/xMax(MonsterSpawner.
+	-- GetContainingRunBounds)를 조회해 ZigzagAmplitude를 발판 폭 안으로 클램프한 값. 좁은 공중타일(예:
+	-- 에피소드2 map2 존7~10)에서 기본 진폭(0.5)이 타일 경계를 넘어가 "타일 아닌 부분을 밟는 것처럼
+	-- 보인다"는 유저 리포트로 추가(2026-08-19). 발판을 못 찾으면(밴드/타일섬 스폰 등) ZigzagAmplitude
+	-- 그대로 폴백.
+	property number _zigzagAmplitudeActual = 0.5
 	-- 재규어(존32/33, 정글 컨셉)도 접근 중 지그재그를 켜지만, 닌자 전용이던 잔상 연출은 같이 얹지 않는다
 	-- (유저 요청 — "살짝 지그재그"만, 잔상은 그대로 존27~30 전용). _isZigzag는 공유하되 잔상 여부만 분리.
 	property boolean _hasZigzagAfterimage = false
@@ -265,6 +272,20 @@ script MonsterAI extends Component
 	property number AfterimageAlpha = 0.35
 
 	-- 이어하기 밀려나는 중 OnUpdate 스킵 플래그
+	-- 돌진형 종(맘무트/골든맘무트/트라고스) — 스폰 후 GetMapChargeShakeDuration만큼 제자리에서 위아래로
+	-- 떨다가(wind-up), 뒤에 먼지 이펙트를 남기며 ApproachSpeed를 크게 부스트해서 빠르게 접근한다. wind-up이
+	-- 끝나고 나면(_chargeDashActive=true) 일반 몬스터의 스케일 접근 로직(OnUpdate 하단)을 그대로 재사용한다 —
+	-- 부스트된 ApproachSpeed 하나로 "빠른 접근"이 표현되므로 별도 이동 코드가 필요 없다.
+	property boolean _isCharge = false
+	property number _chargeWindupTimer = 0
+	property boolean _chargeDashActive = false
+	property number _chargeSpawnX = 0
+	property number _chargeSpawnY = 0
+	property number ChargeShakeAmplitude = 0.06     -- 떨림 진폭(월드 단위)
+	property number ChargeDashSpeedMultiplier = 7.0 -- wind-up 종료 시 ApproachSpeed에 곱해지는 배수
+	property string ChargeDustSortingLayer = "MapLayer0"
+	property integer ChargeDustOrderInLayer = 1  -- 몬스터 본체(OrderInLayer=2, platform.md 기본값)보다 낮게 둬서 몬스터가 먼지 위에 그려지게 한다
+
 	property boolean _isPushingBack = false
 
 	-- 플레이어가 이 몬스터가 있는 맵을 떠났을 때 true — 접근/공격 로직을 멈춘다 (MapManager가 제어)
@@ -454,18 +475,44 @@ script MonsterAI extends Component
 				self._flySpeedMultY = 0.8 + _UtilLogic:RandomDouble() * 0.4
 				self._attackTimer = self.FlyAttackInterval
 			end
+			-- 돌진형 종(맘무트/골든맘무트/트라고스) — 스폰 위치를 떨림 중심으로 저장하고 wind-up 타이머를 시작한다.
+			-- 비행형과는 동시에 성립하지 않는다(현재 종 구성상 겹치지 않음).
+			self._isCharge = _GameManager:GetMapIsCharge(appearanceZone, speciesIdx)
+			if self._isCharge and not self._isFlying then
+				self._chargeWindupTimer = _GameManager:GetMapChargeShakeDuration(appearanceZone, speciesIdx)
+				self._chargeDashActive = false
+				local chargePos = self.Entity.TransformComponent.Position
+				self._chargeSpawnX = chargePos.x
+				self._chargeSpawnY = chargePos.y
+			else
+				self._isCharge = false
+			end
 			-- 그룹I(존27~30, 닌자 컨셉) 지상형만 접근 중 좌우 지그재그 흔들림을 켠다 — 비행형(스티지)은
 			-- 이미 자체 리사주 비행 궤적이 있어서 별도로 흔들 필요가 없다. 흔들림 중심은 스폰 시점의
 			-- 로컬 X(발판 위 스폰 위치)로 고정하고, 개체마다 위상을 무작위로 달리해 겹쳐 보이지 않게 한다.
 			-- 재규어(존32/존33 지상형=2번째 종)도 유저 요청으로 같은 지그재그를 얹는다 — 단, 잔상은
 			-- 닌자 전용으로 남겨두고 재규어는 안 켠다(_hasZigzagAfterimage로 분리).
-			local isNinjaZone = zoneIndex >= 27 and zoneIndex <= 30
-			local isJaguarZone = zoneIndex == 32 or zoneIndex == 33
-			if (isNinjaZone or isJaguarZone) and not self._isFlying then
+			-- 판정은 GameManager.GetMapIsZigzag(zoneIndex, speciesIdx)로 위임한다 — 닌자/재규어존은 존
+			-- 전체가 대상이지만, 에피소드2 map2(존7~10)는 지그재그 종(루이넬류)과 그렇지 않은 종이 한 존에
+			-- 섞여 있어 zoneIndex만으로는 구분할 수 없다(종 idx까지 같이 봐야 함).
+			local isNinjaZone = appearanceZone >= 27 and appearanceZone <= 30
+			if _GameManager:GetMapIsZigzag(appearanceZone, speciesIdx) and not self._isFlying then
 				self._isZigzag = true
 				self._zigzagBaseX = self.Entity.TransformComponent.Position.x
 				self._zigzagTime = 0
 				self._zigzagPhase = _UtilLogic:RandomDouble() * math.pi * 2
+				-- 스폰된 발판의 실제 폭 안으로 진폭을 클램프한다 — 좁은 발판에서 기본 진폭(0.5)이 타일
+				-- 경계를 넘어가는 것을 막는다. EdgeMarginAerial(0.15)과 동일한 여유를 양쪽에 둔다.
+				self._zigzagAmplitudeActual = self.ZigzagAmplitude
+				local worldPos = self.Entity.TransformComponent.WorldPosition
+				local bounds = _MonsterSpawner:GetContainingRunBounds(appearanceZone, worldPos.x, worldPos.y)
+				if bounds ~= nil then
+					local safeHalfWidth = math.min(worldPos.x - bounds.xMin, bounds.xMax - worldPos.x) - 0.15
+					self._zigzagAmplitudeActual = math.max(0, math.min(self.ZigzagAmplitude, safeHalfWidth))
+					log("MonsterAI: Zigzag zone=" .. appearanceZone .. " idx=" .. speciesIdx .. " worldX=" .. string.format("%.2f", worldPos.x) .. " worldY=" .. string.format("%.2f", worldPos.y) .. " runXMin=" .. string.format("%.2f", bounds.xMin) .. " runXMax=" .. string.format("%.2f", bounds.xMax) .. " amplitude=" .. string.format("%.2f", self._zigzagAmplitudeActual))
+				else
+					log("MonsterAI: Zigzag zone=" .. appearanceZone .. " idx=" .. speciesIdx .. " worldX=" .. string.format("%.2f", worldPos.x) .. " worldY=" .. string.format("%.2f", worldPos.y) .. " NO RUN FOUND, amplitude=" .. string.format("%.2f", self._zigzagAmplitudeActual))
+				end
 				if isNinjaZone then
 					self._hasZigzagAfterimage = true
 					self._afterimageTimer = self.AfterimageInterval
@@ -838,6 +885,24 @@ script MonsterAI extends Component
 			return
 		end
 
+		-- 돌진형 종(맘무트/골든맘무트/트라고스) wind-up: dash가 아직 시작 안 됐고 도달 전이면 제자리에서
+		-- 위아래로 떨기만 하고 스케일 접근 로직 전체를 건너뛴다. wind-up이 끝나는 프레임에 dash를 시작시키고
+		-- (ApproachSpeed 부스트 + 먼지 이펙트), 그 이후로는 이 분기 자체가 실행되지 않아 아래 일반 스케일
+		-- 접근 로직(부스트된 속도로 훨씬 빠르게 진행)으로 자연히 이어진다.
+		if self._isCharge and not self._chargeDashActive and not self._reachedPlayer then
+			if not self._isStunned and not self._isHardFrozen then
+				self._chargeWindupTimer = self._chargeWindupTimer - delta
+				local jitterX = (_UtilLogic:RandomDouble() * 2 - 1) * self.ChargeShakeAmplitude
+				local jitterY = (_UtilLogic:RandomDouble() * 2 - 1) * self.ChargeShakeAmplitude
+				local jpos = self.Entity.TransformComponent.Position
+				self.Entity.TransformComponent.Position = Vector3(self._chargeSpawnX + jitterX, self._chargeSpawnY + jitterY, jpos.z)
+				if self._chargeWindupTimer <= 0 then
+					self:StartChargeDash()
+				end
+			end
+			return
+		end
+
 		-- 빙결/스턴 인디케이터는 map(=Entity.CurrentMap, 맵 루트)의 자식으로 스폰되는데 이 몬스터
 		-- 자신은 Zone12 같은 오프셋 컨테이너의 자식일 수 있다 — 로컬 Position을 그대로 쓰면 존 오프셋만큼
 		-- 어긋난 곳으로 계속 갱신되므로 WorldPosition을 써야 한다.
@@ -892,7 +957,7 @@ script MonsterAI extends Component
 		-- 완전빙결도 동일하게 멈춰야 한다.
 		if self._isZigzag and not self._isStunned and not self._isHardFrozen then
 			self._zigzagTime = self._zigzagTime + delta
-			local offsetX = math.sin(self._zigzagTime * self.ZigzagFrequency + self._zigzagPhase) * self.ZigzagAmplitude
+			local offsetX = math.sin(self._zigzagTime * self.ZigzagFrequency + self._zigzagPhase) * self._zigzagAmplitudeActual
 			local zpos = self.Entity.TransformComponent.Position
 			self.Entity.TransformComponent.Position = Vector3(self._zigzagBaseX + offsetX, zpos.y, zpos.z)
 
@@ -1040,6 +1105,27 @@ script MonsterAI extends Component
 		self._erdasHitGrowthBonus = math.min(self.ErdasHitGrowthMaxBonus, self._erdasHitGrowthBonus + self.ErdasHitGrowthPerHit)
 		local scale = self._currentScale * self._scaleMultiplier * (1.0 + self._erdasHitGrowthBonus)
 		self.Entity.TransformComponent.Scale = Vector3(scale, scale, 1.0)
+	end
+
+	-- 돌진형 종의 wind-up이 끝나는 순간 1회 호출 — 스폰 위치로 정확히 되돌리고(떨림 오프셋 제거),
+	-- 몬스터 뒤(아래쪽)에 먼지 이펙트를 1회 재생한 뒤 ApproachSpeed를 크게 부스트한다. 이후 프레임부터는
+	-- OnUpdate 하단의 일반 스케일 접근 로직이 부스트된 속도로 그대로 이어받는다.
+	@ExecSpace("ServerOnly")
+	method void StartChargeDash()
+		self._chargeDashActive = true
+		local pos = self.Entity.TransformComponent.Position
+		self.Entity.TransformComponent.Position = Vector3(self._chargeSpawnX, self._chargeSpawnY, pos.z)
+		_ParticleService:PlayBasicParticleAttached(
+			BasicParticleType.DustExplosion,
+			self.Entity,
+			Vector3(0, -0.25, 0.1),
+			0,
+			Vector3(1, 1, 1),
+			false,
+			{ SortingLayer = self.ChargeDustSortingLayer, OrderInLayer = self.ChargeDustOrderInLayer }
+		)
+		self.ApproachSpeed = self.ApproachSpeed * self.ChargeDashSpeedMultiplier
+		log("MonsterAI: charge dash started, boosted ApproachSpeed=" .. self.ApproachSpeed)
 	end
 
 	-- 비행형(박쥐) 전용: 접근/도달 개념 없이 화면 안에서 2D로 자유롭게 날아다니다가, FlyAttackInterval마다 계속 공격한다.
