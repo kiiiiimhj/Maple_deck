@@ -79,6 +79,9 @@ script MonsterSpawner extends Logic
 	property number MaxEliteRespawnDelay = 300.0  -- 5분
 	property number _nextEliteTimer = -1  -- -1이면 대기 중 아님
 	property any _activeMaps = nil  -- {[mapIndex] = true, ...} — 한 번이라도 방문해서 스폰이 시작된 맵만 기록
+	-- 성능 최적화(2026-08-20, 유저 리포트 "에피2 맵3/4에서 몬스터 소환될때 렉") — GetFlatRuns(전체 발판
+	-- 스캔) 결과를 mapIndex별로 캐싱. 발판 지형은 런타임에 안 바뀌는 정적 데이터라 최초 1회만 계산하면 됨.
+	property any _flatRunsCache = nil  -- {[mapIndex] = runs, ...}
 	-- 보스는 전역에 동시에 1마리만 존재해야 한다. 이게 없으면 여러 맵을 옮겨 다니는 동안 맵마다
 	-- 보스가 하나씩 쌓여서, 나중에 그 맵들을 다시 방문하면 "죽인 보스가 다른 맵에서 또 나오는"
 	-- 것처럼 보이는 버그가 생긴다.
@@ -216,7 +219,17 @@ script MonsterSpawner extends Logic
 		-- 때만 발동하도록 디바운스. 맵이 바뀌거나 몬스터가 다시 생기면 타이머를 리셋한다.
 		local emergencyMap = self:GetCurrentMap()
 		if emergencyMap ~= nil and not self:IsNoMonsterZone(_MapManager.CurrentMapIndex) then
-			local currentCount = #emergencyMap:GetChildComponentsByTypeName("script.MonsterAI", false)
+			-- 버그 수정(2026-08-20): SpawnBatchOnMap과 같은 이유로 존별 카운트여야 한다 — 안 그러면 맵3/4에서
+			-- 다른 존에 몬스터가 남아있는 한 지금 있는 존이 비어도 "안 비었다"고 오판해 응급 스폰이 영원히 발동 안 한다.
+			local emergencyMonsters = emergencyMap:GetChildComponentsByTypeName("script.MonsterAI", false)
+			local currentCount = 0
+			for i = 1, #emergencyMonsters do
+				---@type MonsterAI
+				local emAi = emergencyMonsters[i]
+				if isvalid(emAi) and emAi._spawnZoneIndex == _MapManager.CurrentMapIndex then
+					currentCount = currentCount + 1
+				end
+			end
 			if currentCount == 0 then
 				if self._emptyMapTrackedIndex ~= _MapManager.CurrentMapIndex then
 					self._emptyMapTrackedIndex = _MapManager.CurrentMapIndex
@@ -316,6 +329,32 @@ script MonsterSpawner extends Logic
 	method number GetZoneOffsetX(integer mapIndex)
 		local info = _MapManager:GetZoneInfo(mapIndex)
 		return (info ~= nil) and info.spawnX or 0
+	end
+
+	-- 넉백류 스킬이 존 경계를 넘어 몬스터를 옆 존으로 밀어내는 문제 방지용(2026-08-20, 유저 리포트
+	-- "넉백류 스킬쓰면 계속 존을 벗어나는 경우가 생기는거 같은데") — 맵3/4처럼 container=nil인 존
+	-- 그룹은 발판 자체가 존 경계 없이 물리적으로 이어져 있어서, CardManager.ClampKnockbackDestX의
+	-- 화면-안전 클램프(플레이어 위치 ±5)만으로는 존 경계를 완전히 못 막는다 — 플레이어가 존 가장자리
+	-- 근처에 있으면 ±5 반경 자체가 존 경계(존 간격 15.5의 절반=7.75)보다 넓어질 수 있기 때문이다.
+	-- 같은 파일을 공유하는 앞/뒤 존과의 spawnX 중간지점을 하드 경계로 계산해서 돌려준다 — container가
+	-- 있는(자기만의 엔티티를 가진) 존이거나 앞/뒤에 같은 파일을 공유하는 존이 없으면 그쪽 경계는 nil
+	-- (그 방향은 원래 클램프 로직에 맡긴다).
+	@ExecSpace("ServerOnly")
+	method table GetZoneXBounds(integer zoneIdx)
+		local info = _MapManager:GetZoneInfo(zoneIdx)
+		if info == nil or info.container ~= nil then return nil end
+		local offsetX = info.spawnX or 0
+		local minX, maxX = nil, nil
+		local prevInfo = _MapManager:GetZoneInfo(zoneIdx - 1)
+		if prevInfo ~= nil and prevInfo.container == nil and prevInfo.file == info.file then
+			minX = (prevInfo.spawnX + offsetX) / 2
+		end
+		local nextInfo = _MapManager:GetZoneInfo(zoneIdx + 1)
+		if nextInfo ~= nil and nextInfo.container == nil and nextInfo.file == info.file then
+			maxX = (offsetX + nextInfo.spawnX) / 2
+		end
+		if minX == nil and maxX == nil then return nil end
+		return { minX = minX, maxX = maxX }
 	end
 
 	-- mapIndex가 가리키는 "존"의 실제 엔티티(스폰 부모/일시정지 스코프용)를 반환한다. MapManager.ZoneInfo에서
@@ -442,14 +481,32 @@ script MonsterSpawner extends Logic
 	-- 게임 시작하자마자 첫 맵의 몬스터가 통째로 멈춰있는 채로 태어나는 버그가 생긴다.
 	@ExecSpace("ServerOnly")
 	method table SpawnBatchOnMap(Entity map, integer wave, boolean isBoss, boolean allowElite, integer mapIndex, boolean isSpike, integer minCountOverride)
-		local currentMap = self:GetCurrentMap()
-		local isCurrentMap = (currentMap == nil) or (map == currentMap)
+		-- 버그 수정(2026-08-20, 유저 리포트 "맵4에서 10존으로 들어왔는데 7존에 몬스터가 공격해") — 예전엔
+		-- "currentMap == nil 이거나 map == currentMap(엔티티 동일)"로 판정했는데, 맵3/4처럼 container=nil이라
+		-- 존 10개가 파일 하나(맵 루트)를 공유하면 GetCurrentMap()(=GetZoneEntity(플레이어의 현재 존))도
+		-- 이번에 스폰하는 map(=GetZoneEntity(mapIndex))도 항상 같은 루트 엔티티라 존7에서 스폰해도
+		-- "지금 있는 맵"으로 오판된다 — 그 결과 아래 `if not isCurrentMap then ai:Pause() end`가 전혀
+		-- 발동하지 않아 존7 몬스터가 스폰되자마자 활성 상태(추적/공격 가능)로 태어나, 실제로는 다른 존(존10)에
+		-- 있는 플레이어를 향해 공유 물리공간을 가로질러 걸어와 공격했다. 엔티티 비교 대신 zoneIndex 정수
+		-- 비교로 바꾸면 container 있는 존 그룹(zoneIndex가 엔티티와 항상 1:1)은 동작이 그대로이고,
+		-- container=nil 그룹만 정확히 "정확히 그 존"으로 좁혀진다.
+		local isCurrentMap = (self:GetCurrentMap() == nil) or (mapIndex == _MapManager.CurrentMapIndex)
 
 		local count = 1
 		if not isBoss then
 			-- 지금 이 맵에 있는 개수를 먼저 구해서, 램프 계산과 "최소 N마리 보장" 모드 둘 다에서 재사용한다.
+			-- 위와 같은 이유로 존별 카운트도 _spawnZoneIndex로 한 번 더 걸러야 한다 — 안 그러면 맵3/4의
+			-- 10개 존이 같은 엔티티를 공유해서 서로의 몬스터 수를 자기 존 스폰 상한 계산에 끌어다 쓰게 된다.
 			local maxForThisMap = isCurrentMap and self.MaxMonstersPerMap or self.MaxMonstersPerMapBackground
-			local existingCount = #map:GetChildComponentsByTypeName("script.MonsterAI", false)
+			local allMonstersHere = map:GetChildComponentsByTypeName("script.MonsterAI", false)
+			local existingCount = 0
+			for i = 1, #allMonstersHere do
+				---@type MonsterAI
+				local existingAi = allMonstersHere[i]
+				if isvalid(existingAi) and existingAi._spawnZoneIndex == mapIndex then
+					existingCount = existingCount + 1
+				end
+			end
 
 			if minCountOverride > 0 then
 				-- 2026-08-05: "적어도 N마리는 있게" 보장 모드(이동 도착 시 등) — 램프/스파이크/2배 배수를
@@ -810,7 +867,7 @@ script MonsterSpawner extends Logic
 		local footholdComp = rootMap:GetComponent("FootholdComponent")
 		if footholdComp == nil then return Vector3(offsetX, 0, 0) end
 
-		local runs = self:GetFlatRuns(footholdComp)
+		local runs = self:GetFlatRunsCached(mapIndex)
 		local baselineY = self:GetBaselineGroundY(mapIndex, footholdComp)
 
 		if isBoss then
@@ -910,9 +967,35 @@ script MonsterSpawner extends Logic
 			or ownerId == self.Zone15ExcludedFootholdOwnerId3
 	end
 
+	-- GetFlatRuns(전체 발판 스캔, 맵3/4는 152유닛 폭에 52개 구간)를 mapIndex별로 캐싱해서 재사용한다.
+	-- 하드코딩 밴드가 없는 존(맵3/4 등, GetZonePlatformBands==nil)은 몬스터 스폰(재시도 포함 최대
+	-- 5회/마리)과 넉백 클램프(ClampKnockbackDestX)가 호출될 때마다 매번 이 전체 스캔을 새로 돌렸다 —
+	-- 몬스터 여러 마리(최대 6마리)를 한 배치에 스폰할 때 같은 계산을 수십 번 반복해서 스폰 순간 렉으로
+	-- 체감됐다(유저 리포트: "에피2 맵3/4에서 몬스터 소환될때 렉이 걸리는거 같다"). 발판 지형은 런타임에
+	-- 절대 안 바뀌는 정적 레벨 데이터이므로, mapIndex별로 딱 한 번만 계산해서 영구 캐시해두고 그 뒤로는
+	-- 재사용한다 — container=nil로 파일 하나를 공유하는 존 그룹(맵3의 10개 존 등)은 mapIndex마다 캐시
+	-- 항목이 따로 생기지만(약간의 메모리 중복은 있음) 계산 자체는 각 mapIndex당 1회로 끝난다.
+	@ExecSpace("ServerOnly")
+	method table GetFlatRunsCached(integer mapIndex)
+		if self._flatRunsCache == nil then self._flatRunsCache = {} end
+		local cached = self._flatRunsCache[mapIndex]
+		if cached ~= nil then return cached end
+
+		local mapName = _MapManager:GetMapName(mapIndex)
+		local rootMap = _EntityService:GetEntityByPath("/maps/" .. mapName)
+		if rootMap == nil then return {} end
+		---@type FootholdComponent
+		local footholdComp = rootMap:GetComponent("FootholdComponent")
+		if footholdComp == nil then return {} end
+
+		local runs = self:GetFlatRuns(footholdComp)
+		self._flatRunsCache[mapIndex] = runs
+		return runs
+	end
+
 	-- FootholdComponent가 가진 발판 전체를 한 번 훑어서, 이어진 평평한 구간(run)별로 { y, xMin, xMax }를
 	-- 만든다. 개별 발판 조각(예: 길이 0.9) 하나만 보면 바닥도 "좁다"고 오판하기 쉬워서, 실제로 연결된
-	-- 전체 폭을 기준으로 판단해야 한다.
+	-- 전체 폭을 기준으로 판단해야 한다. 직접 부르지 말고 GetFlatRunsCached를 통해 호출할 것(위 캐시 함수).
 	@ExecSpace("ServerOnly")
 	method table GetFlatRuns(FootholdComponent footholdComp)
 		local all = footholdComp:GetFootholdAll()
@@ -956,14 +1039,7 @@ script MonsterSpawner extends Logic
 	-- nil을 반환해 호출측이 기본 진폭을 그대로 쓰게 한다.
 	@ExecSpace("ServerOnly")
 	method table GetContainingRunBounds(integer mapIndex, number worldX, number worldY)
-		local mapName = _MapManager:GetMapName(mapIndex)
-		local rootMap = _EntityService:GetEntityByPath("/maps/" .. mapName)
-		if rootMap == nil then return nil end
-		---@type FootholdComponent
-		local footholdComp = rootMap:GetComponent("FootholdComponent")
-		if footholdComp == nil then return nil end
-
-		local runs = self:GetFlatRuns(footholdComp)
+		local runs = self:GetFlatRunsCached(mapIndex)
 		for i = 1, #runs do
 			local run = runs[i]
 			if worldX >= run.xMin - 0.05 and worldX <= run.xMax + 0.05 and math.abs(run.y - worldY) <= 0.1 then
@@ -1191,8 +1267,14 @@ script MonsterSpawner extends Logic
 		-- (유저 리포트: "지그재그 움직일 때 타일 아닌 부분도 밟는 것 같다"). GetFlatRuns 기반 방식은
 		-- 발판별로 EdgeMarginAerial 여유를 두고 폭 비례 확률로 고르므로 더 안전하다(지그재그 진폭 자체의
 		-- 클램프는 MonsterAI.GetContainingRunBounds 별도 처리 — 아래 참고).
+		-- 에피소드2 map3/map4(mapIndex 65~84)도 같은 이유로 추가(2026-08-19) — 니할 사막 컨셉 맵 전체에
+		-- 걸쳐 3블록짜리 작은 공중 발판이 15개 안팎 촘촘히 흩어져 있는데(fromGetFootholds 실측), 기존
+		-- 단일 랜덤X+아래방향 레이캐스트(GetGroundY)는 항상 가장 위에 걸리는 발판만 잡아서, 그 발판이
+		-- 있는 X구간은 바로 아래 진짜 바닥에 영원히 스폰이 안 된다(유저 리포트: "공중발판 아래에 몹 안뜨는데
+		-- 너무 많음"). GetFlatRuns 기반 방식으로 옮기면 바닥/공중 발판 전부 폭 비례 확률로 고르게 되어
+		-- 발판 아래 바닥도 다시 스폰 후보에 들어간다.
 		if (mapIndex >= 13 and mapIndex <= 15) or mapIndex == 8 or mapIndex == 27 or mapIndex == 28 or mapIndex == 29
-			or (mapIndex >= 61 and mapIndex <= 64) then
+			or (mapIndex >= 61 and mapIndex <= 64) or (mapIndex >= 65 and mapIndex <= 84) then
 			return self:GetSpawnPositionFromFootholds(mapIndex, isBoss, map)
 		end
 
