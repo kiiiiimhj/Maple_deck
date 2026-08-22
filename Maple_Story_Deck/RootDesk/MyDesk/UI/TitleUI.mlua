@@ -6,6 +6,12 @@ script TitleUI extends Logic
 	property Entity titleGroup = "4109795c-8f3d-41f1-9403-fefcec8fbb3e"
 	property ButtonComponent btnStart = "7324df2c-c085-43e9-9b23-93c36b4e7121"
 
+	-- 로비 전용 BGM(2026-08-21, 유저 지정) — map01.map 루트 SoundComponent와 동일한 RUID. map01의
+	-- SoundComponent는 PlayOnEnable이라 월드 부팅 시 딱 한 번만 자동 재생되고, 로비↔게임 왕복 중엔 다시
+	-- 안 켜지므로(엔티티 자체가 계속 Enable 상태라 재트리거 안 됨), 로비로 돌아올 때(ShowLobby)는 이
+	-- RUID로 명시적으로 다시 재생해야 한다.
+	property string LobbyBgmRUID = "387dee48e8064f9091b090f45a8d94cf"
+
 	-- 하단 탭 5개(상점/스킬/전투/유물/랭킹) — 클릭 시 해당 패널만 보이고 나머지는 숨는다
 	property ButtonComponent btnShop = "f6e66e4a-08d4-48cc-a0a6-25305634678e"
 	property ButtonComponent btnSkill = "3d0c5a53-a76d-4349-bc82-d27bf7af450b"
@@ -162,8 +168,12 @@ script TitleUI extends Logic
 		-- characterIndex: 캐릭터 선택 팝업에서 고른 캐릭터(0=아르카나, 1=실피드)
 		-- episode: 월드 선택(</> 캐러셀)에서 고른 월드 번호(1=에피소드1, 2=에피소드2)
 		log("TitleUI: Start clicked (unlimitedMode=" .. tostring(unlimitedMode) .. ", characterIndex=" .. characterIndex .. ", episode=" .. episode .. ")")
-		-- 로비 화면을 나가는 시점에 멈춰뒀던 맵 BGM을 재개한다
-		_SoundService:ResumeBGM()
+		-- 버그 수정(2026-08-21, 유저 리포트 "게임 시작하면 즉시 꺼주고 인게임 배경음악으로 나오게... 지금은
+		-- 서서히 작아지는듯?") — ResumeBGM()은 "멈춰뒀던 로비 BGM을 그대로 이어서 재생"하는 것이라, 실제
+		-- 게임 맵(ep2_map1~4/map11/12 등)이 자기 SoundComponent(PlayOnEnable=true)로 이미 자동 재생하려는
+		-- BGM과 같은 채널을 두고 충돌해서 흐릿하게 겹치거나 서서히 잦아드는 것처럼 들렸다. StopBGM(true)로
+		-- 로비 BGM을 즉시(페이드 없이) 완전히 끊어서, 곧바로 입장할 맵의 네이티브 BGM이 깨끗하게 이어받게 한다.
+		_SoundService:StopBGM(true)
 		-- GameManager 쪽 API는 timeAttack(=무제한 모드의 반대)을 받는다 — 여기서 극성을 뒤집는다
 		local timeAttack = not unlimitedMode
 		-- 요청을 먼저 보내서 서버가 곧바로 처리를 시작하게 한다(아래 화면 닫기 지연과 병렬로 진행됨).
@@ -207,8 +217,11 @@ script TitleUI extends Logic
 	method void ShowLobby()
 		-- 게임오버 팝업의 X(로비로 가기)가 호출 — 런 상태는 건드리지 않고 타이틀 화면만 다시 보여준다
 		self.titleGroup.Enable = true
-		-- 죽은 런의 맵(몬스터/BGM)이 아직 활성 상태로 뒤에 깔려있으므로, 로비로 돌아올 때도 BGM을 다시 멈춘다
-		_SoundService:PauseBGM()
+		-- 버그 수정(2026-08-21) — 죽은 런의 맵 BGM이 아직 채널을 차지하고 있으므로 즉시 끊고(PauseBGM으로
+		-- "멈추기"만 하면 로비 곡이 자동으로 돌아오지 않는다 — map01의 SoundComponent는 PlayOnEnable이라
+		-- 월드 부팅 시 1회만 자동재생되고 이후엔 재트리거되지 않음), 로비 전용 BGM을 명시적으로 다시 재생한다.
+		_SoundService:StopBGM(true)
+		_SoundService:PlayBGM(self.LobbyBgmRUID, 1.0)
 		log("TitleUI: ShowLobby")
 	end
 

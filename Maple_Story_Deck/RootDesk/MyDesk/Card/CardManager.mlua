@@ -4153,6 +4153,11 @@ script CardManager extends Logic
 	-- 소환된 파트너 전원의 목록(레벨5에서 2체) — 전부 같은 맵/바쁨상태/유지시간을 공유한다
 	property any _shadowPartnerEntities = {}
 	property Entity _shadowPartnerMap = nil
+	-- 버그 수정(2026-08-22, Ep2Map3SummonLogic 개발 중 발견) — ep2_map3/ep2_map4처럼 존 10개가
+	-- container=nil로 파일 하나를 공유하는 맵에서는 GetCurrentMap()이 반환하는 Entity가 존을 옮겨도
+	-- 항상 똑같아서, Entity 비교(liveMap ~= self._shadowPartnerMap)로는 존 이동이 절대 감지되지
+	-- 않았다. _MapManager.CurrentMapIndex 비교로 바꾼다(GetMonstersInCurrentZone과 동일한 기준).
+	property integer _shadowPartnerZoneIndex = -1
 	property boolean _shadowPartnerBusy = false
 	-- 유저 정정(2026-08-12): "사용하는 스킬을 따라하지말고 그냥 보유중인 스킬중 랜덤하게 사용하는걸로
 	-- 바꾸자 기본 공격까지 포함해서" — 플레이어 행동을 프레임 단위로 따라하던 기존 방식(RecordShadowPartner
@@ -4223,6 +4228,7 @@ script CardManager extends Logic
 			end
 		end
 		self._shadowPartnerMap = map
+		self._shadowPartnerZoneIndex = _MapManager.CurrentMapIndex
 
 		local duration = self:GetShadowPartnerDuration(self.ShadowPartnerLevel)
 
@@ -4306,6 +4312,7 @@ script CardManager extends Logic
 		end
 		self._shadowPartnerEntities = fresh
 		self._shadowPartnerMap = newMap
+		self._shadowPartnerZoneIndex = _MapManager.CurrentMapIndex
 	end
 
 	-- 현재 슬롯에 있는 스킬(카드178 자기 자신 제외) + 기본공격(172)을 후보 풀로 반환한다.
@@ -4336,11 +4343,13 @@ script CardManager extends Logic
 	method void ExecuteShadowPartnerCopy(integer cardIdx)
 		if #self._shadowPartnerEntities == 0 then return end
 
-		-- 존 이동 감지 — 피닉스와 동일한 이유
-		local liveMap = self:GetCurrentMap()
-		if liveMap ~= nil and liveMap ~= self._shadowPartnerMap then
-			self:RelocateShadowPartnerToNewMap(liveMap)
-			if #self._shadowPartnerEntities == 0 then return end
+		-- 존 이동 감지 — Entity 비교가 아니라 존 인덱스로 비교한다(위 _shadowPartnerZoneIndex 선언부 주석 참고)
+		if _MapManager.CurrentMapIndex ~= self._shadowPartnerZoneIndex then
+			local liveMap = self:GetCurrentMap()
+			if liveMap ~= nil then
+				self:RelocateShadowPartnerToNewMap(liveMap)
+				if #self._shadowPartnerEntities == 0 then return end
+			end
 		end
 		local map = self._shadowPartnerMap
 		if map == nil then return end
@@ -5393,6 +5402,9 @@ script CardManager extends Logic
 	property string Card159SoundRUID = "0051f5688445447aa6cc9ccbd8e8fdb5"
 	property Entity _swordEntity = nil
 	property Entity _swordMap = nil  -- 소드가 현재 있는 맵(존 이동 감지용)
+	-- Entity 비교로는 ep2_map3/ep2_map4(존 10개 공유 파일)에서 존 이동이 감지 안 되는 버그 수정 —
+	-- _shadowPartnerZoneIndex 선언부 주석 참고
+	property integer _swordZoneIndex = -1
 	property Vector3 _swordAnchorPos = Vector3(0, 0, 0)  -- 소환된(또는 존 이동 후 재소환된) 고정 위치 — 타겟 탐색 기준점(피닉스와 동일)
 	property boolean _swordFacingRight = false
 	property boolean _swordAttackInProgress = false  -- true인 동안은 유지시간 만료로 인한 소환 해제를 미룬다(피닉스와 동일)
@@ -5445,6 +5457,7 @@ script CardManager extends Logic
 		if sword == nil then return end
 		self._swordEntity = sword
 		self._swordMap = map
+		self._swordZoneIndex = _MapManager.CurrentMapIndex
 		self._swordAnchorPos = spawnPos
 
 		_TimerService:SetTimerOnce(function()
@@ -5511,6 +5524,7 @@ script CardManager extends Logic
 		if isvalid(old) then old:Destroy() end
 		self._swordEntity = fresh
 		self._swordMap = newMap
+		self._swordZoneIndex = _MapManager.CurrentMapIndex
 		self._swordAnchorPos = pos
 	end
 
@@ -5523,11 +5537,13 @@ script CardManager extends Logic
 		local sword = self._swordEntity
 		if not isvalid(sword) then return end
 
-		local liveMap = self:GetCurrentMap()
-		if liveMap ~= nil and liveMap ~= self._swordMap then
-			self:RelocateScarringSwordToNewMap(liveMap)
-			sword = self._swordEntity
-			if not isvalid(sword) then return end
+		if _MapManager.CurrentMapIndex ~= self._swordZoneIndex then
+			local liveMap = self:GetCurrentMap()
+			if liveMap ~= nil then
+				self:RelocateScarringSwordToNewMap(liveMap)
+				sword = self._swordEntity
+				if not isvalid(sword) then return end
+			end
 		end
 		local map = self._swordMap
 
@@ -5641,6 +5657,9 @@ script CardManager extends Logic
 	property string ScarringBladeSoundRUID = "0051f5688445447aa6cc9ccbd8e8fdb5"  -- 유저 지정: 스카링 소드와 동일 사운드
 	property Entity _bladeEntity = nil
 	property Entity _bladeMap = nil  -- 블레이드가 현재 있는 맵(존 이동 감지용)
+	-- Entity 비교로는 ep2_map3/ep2_map4(존 10개 공유 파일)에서 존 이동이 감지 안 되는 버그 수정 —
+	-- _shadowPartnerZoneIndex 선언부 주석 참고
+	property integer _bladeZoneIndex = -1
 	property Vector3 _bladeAnchorPos = Vector3(0, 0, 0)  -- 소환된(또는 존 이동 후 재소환된) 고정 위치 — 타겟 탐색 기준점
 	property boolean _bladeFacingRight = false
 	property boolean _bladeAttackInProgress = false  -- true인 동안은 유지시간 만료로 인한 소환 해제를 미룬다
@@ -5690,6 +5709,7 @@ script CardManager extends Logic
 		if blade == nil then return end
 		self._bladeEntity = blade
 		self._bladeMap = map
+		self._bladeZoneIndex = _MapManager.CurrentMapIndex
 		self._bladeAnchorPos = spawnPos
 
 		_TimerService:SetTimerOnce(function()
@@ -5756,6 +5776,7 @@ script CardManager extends Logic
 		if isvalid(old) then old:Destroy() end
 		self._bladeEntity = fresh
 		self._bladeMap = newMap
+		self._bladeZoneIndex = _MapManager.CurrentMapIndex
 		self._bladeAnchorPos = pos
 	end
 
@@ -5767,11 +5788,13 @@ script CardManager extends Logic
 		local blade = self._bladeEntity
 		if not isvalid(blade) then return end
 
-		local liveMap = self:GetCurrentMap()
-		if liveMap ~= nil and liveMap ~= self._bladeMap then
-			self:RelocateScarringBladeToNewMap(liveMap)
-			blade = self._bladeEntity
-			if not isvalid(blade) then return end
+		if _MapManager.CurrentMapIndex ~= self._bladeZoneIndex then
+			local liveMap = self:GetCurrentMap()
+			if liveMap ~= nil then
+				self:RelocateScarringBladeToNewMap(liveMap)
+				blade = self._bladeEntity
+				if not isvalid(blade) then return end
+			end
 		end
 		local map = self._bladeMap
 
@@ -6989,6 +7012,10 @@ script CardManager extends Logic
 	property number Card105HitYOffset = 0.6  -- 히트 연출을 착탄 좌표보다 위로 띄움(유저 요청)
 	property Entity _phoenixEntity = nil
 	property Entity _phoenixMap = nil  -- 피닉스가 현재 있는 맵(존 이동 감지용) — self._phoenixEntity와 항상 짝으로 갱신
+	-- 버그 수정(2026-08-22) — Entity 비교로는 ep2_map3/ep2_map4(존 10개가 container=nil로 파일 하나를
+	-- 공유)에서 존 이동이 절대 감지되지 않았다(_shadowPartnerZoneIndex 선언부 주석 참고). 아래 "존나이동"
+	-- 버그 주석은 FindClosestByPosition으로 대상 선정을 고친 것뿐이라 이 근본 원인은 그때 못 잡았었다.
+	property integer _phoenixZoneIndex = -1
 	property Vector3 _phoenixAnchorPos = Vector3(0, 0, 0)  -- 소환된(또는 존 이동 후 재소환된) 고정 위치 — 타겟 탐색 기준점(유저 요청: "소환된 위치로부터 가장 가까운적 공격")
 	property boolean _phoenixFacingRight = false  -- 현재 바라보는 방향(FlipX와 동일한 값) — 화염 판정 중심 오프셋 방향에 사용
 	property boolean _phoenixAttackInProgress = false  -- 이동→화염 판정까지 진행 중이면 true — 유지시간 만료 시 이 공격이 끝날 때까지 소환 해제를 미루는 데 사용
@@ -7065,6 +7092,7 @@ script CardManager extends Logic
 		if phoenix == nil then return end
 		self._phoenixEntity = phoenix
 		self._phoenixMap = map
+		self._phoenixZoneIndex = _MapManager.CurrentMapIndex
 		self._phoenixAnchorPos = spawnPos
 
 		_TimerService:SetTimerOnce(function()
@@ -7181,6 +7209,7 @@ script CardManager extends Logic
 		if isvalid(oldPhoenix) then oldPhoenix:Destroy() end
 		self._phoenixEntity = fresh
 		self._phoenixMap = newMap
+		self._phoenixZoneIndex = _MapManager.CurrentMapIndex
 		self._phoenixAnchorPos = pos
 	end
 
@@ -7193,13 +7222,16 @@ script CardManager extends Logic
 		local phoenix = self._phoenixEntity
 		if not isvalid(phoenix) then return end
 
-		-- 플레이어가 피닉스가 있던 맵과 다른 맵으로 이동했으면, 그 자리에서 사라지고 플레이어의
-		-- 현재 맵에서 다시 나타나 계속 따라온다.
-		local liveMap = self:GetCurrentMap()
-		if liveMap ~= nil and liveMap ~= self._phoenixMap then
-			self:RelocatePhoenixToNewMap(liveMap)
-			phoenix = self._phoenixEntity
-			if not isvalid(phoenix) then return end
+		-- 플레이어가 피닉스가 있던 존과 다른 존으로 이동했으면, 그 자리에서 사라지고 플레이어의
+		-- 현재 존에서 다시 나타나 계속 따라온다. Entity 비교가 아니라 존 인덱스로 비교한다(위
+		-- _phoenixZoneIndex 선언부 주석 참고).
+		if _MapManager.CurrentMapIndex ~= self._phoenixZoneIndex then
+			local liveMap = self:GetCurrentMap()
+			if liveMap ~= nil then
+				self:RelocatePhoenixToNewMap(liveMap)
+				phoenix = self._phoenixEntity
+				if not isvalid(phoenix) then return end
+			end
 		end
 		local map = self._phoenixMap
 
@@ -7357,6 +7389,9 @@ script CardManager extends Logic
 	property number Card115FrameDuration = 0.05  -- 히트 이펙트 프레임 이어붙이기 간격
 	property Entity _evolveEntity = nil
 	property Entity _evolveMap = nil
+	-- Entity 비교로는 ep2_map3/ep2_map4(존 10개 공유 파일)에서 존 이동이 감지 안 되는 버그 수정 —
+	-- _shadowPartnerZoneIndex 선언부 주석 참고
+	property integer _evolveZoneIndex = -1
 	property Vector3 _evolveAnchorPos = Vector3(0, 0, 0)
 	property boolean _evolveFacingRight = false
 	property boolean _evolveAttackInProgress = false
@@ -7459,6 +7494,7 @@ script CardManager extends Logic
 		if evolve == nil then return end
 		self._evolveEntity = evolve
 		self._evolveMap = map
+		self._evolveZoneIndex = _MapManager.CurrentMapIndex
 		self._evolveAnchorPos = spawnPos
 
 		-- 공격 틱은 evolve/map을 직접 캡처하지 않고 매번 self._evolveEntity / self._evolveMap을
@@ -7513,6 +7549,7 @@ script CardManager extends Logic
 		if isvalid(oldEvolve) then oldEvolve:Destroy() end
 		self._evolveEntity = fresh
 		self._evolveMap = newMap
+		self._evolveZoneIndex = _MapManager.CurrentMapIndex
 		self._evolveAnchorPos = pos
 	end
 
@@ -7524,11 +7561,13 @@ script CardManager extends Logic
 		local evolve = self._evolveEntity
 		if not isvalid(evolve) then return end
 
-		local liveMap = self:GetCurrentMap()
-		if liveMap ~= nil and liveMap ~= self._evolveMap then
-			self:RelocateEvolveToNewMap(liveMap)
-			evolve = self._evolveEntity
-			if not isvalid(evolve) then return end
+		if _MapManager.CurrentMapIndex ~= self._evolveZoneIndex then
+			local liveMap = self:GetCurrentMap()
+			if liveMap ~= nil then
+				self:RelocateEvolveToNewMap(liveMap)
+				evolve = self._evolveEntity
+				if not isvalid(evolve) then return end
+			end
 		end
 		local map = self._evolveMap
 
@@ -8825,10 +8864,19 @@ script CardManager extends Logic
 		-- 뻗어있을 수 있다. 발판 가장자리 클램프만으로는 부족해서(유저 리포트: "양끝으로 보낼때 화면
 		-- 밖으로 나가는 케이스"), GetSpawnPositionFromFootholds가 스폰 위치에 이미 쓰는 것과 동일한
 		-- "플레이어 현재 위치 ±5" 화면 안전범위로 한 번 더 좁힌다.
+		-- 버그 수정(유저 리포트: "무스펠하임 공중타일에서 화면이 중앙이 아니면 광역대미지가 안 들어간다") —
+		-- 공중타일(플레이어가 서 있는 지면과 다른 높이의 발판)은 밴드 X범위 자체가 "플레이어 위치 ±5"
+		-- 화면 안전범위와 아예 안 겹칠 수 있다. 이전엔 그 경우 minX>maxX가 돼 destX가 pos.x로
+		-- 무너져(=넉백 이동거리 0) 착지 지점(stopPos)이 원래 자리 그대로 고정되고, 정작 몬스터들이
+		-- 흩어져 있던 자리엔 아무도 안 모이니 광역 폭발이 허공만 때리는 것처럼 보였다. 화면 안전범위와
+		-- 발판이 안 겹치면 화면 클램프를 포기하고 발판 범위 안에서만 클램프해 실제 넉백 이동은 항상
+		-- 일어나게 한다(화면 밖으로 나가는 것 자체는 발판 클램프가 여전히 막아준다).
 		local playerWorldX = self:GetPlayerCenterX()
-		minX = math.max(minX, playerWorldX - self.KnockbackScreenSafeHalfWidth)
-		maxX = math.min(maxX, playerWorldX + self.KnockbackScreenSafeHalfWidth)
-		if minX > maxX then return pos.x end
+		local safeMinX = math.max(minX, playerWorldX - self.KnockbackScreenSafeHalfWidth)
+		local safeMaxX = math.min(maxX, playerWorldX + self.KnockbackScreenSafeHalfWidth)
+		if safeMinX <= safeMaxX then
+			minX, maxX = safeMinX, safeMaxX
+		end
 		worldDestX = math.max(minX, math.min(maxX, worldDestX))
 
 		-- 버그 수정(2026-08-20, 유저 리포트 "넉백류 스킬쓰면 계속 존을 벗어나는 경우가 생기는거 같은데") —
@@ -11022,6 +11070,12 @@ script CardManager extends Logic
 	-- (배율 곱연산 누적이라 "레벨"만으로 되돌릴 수 없는) 1/2/5번 카드는 순환 대상에서 제외한다.
 	property boolean CheatCycleLevelOnClick = true
 
+	-- ── 디버그: 플레이어 기본 공격 임시 차단(개발자 전용) ──────────────
+	-- 기본 false — 에피소드2 map3 소환수(Ep2Map3SummonLogic) 광역기 판정 반경 튜닝처럼, 플레이어
+	-- 본인의 공격 없이 특정 이펙트만 격리해서 라이브로 확인하고 싶을 때 true로 켠다. 배포 전 반드시
+	-- false 확인할 것(기본값이 false라 새로 켠 세션은 안전).
+	property boolean DisableBasicAttack = false
+
 	@ExecSpace("Server")
 	method void CheatCycleSlotLevel(integer slotIdx)
 		if not self.CheatCycleLevelOnClick then return end
@@ -12514,14 +12568,18 @@ script CardManager extends Logic
 
 		-- 기본공격은 슬롯 배치와 무관하게 항상 활성 — 캐릭터별로 완전히 다른 트랙을 탄다
 		-- (0=아르카나: 파이어샷, 1=실피드: 애로우샷, 2=레이온: 콤보어택 기본공격)
-		if _GameManager.SelectedCharacter == 1 then
-			self._timerBasicArrow = self:TickCard(25, 0, self._timerBasicArrow, delta, target)
-		elseif _GameManager.SelectedCharacter == 2 then
-			self._timerBasicLeion = self:TickCard(150, 0, self._timerBasicLeion, delta, target)
-		elseif _GameManager.SelectedCharacter == 3 then
-			self._timerBasicShade = self:TickCard(172, 0, self._timerBasicShade, delta, target)
-		else
-			self._timerBasic = self:TickCard(1, 0, self._timerBasic, delta, target)
+		-- 디버그용 임시 스위치(DisableBasicAttack)가 켜져 있으면 통째로 건너뛴다(유저 요청: "플레이어
+		-- 기본 공격도 임시로 못하게해" — 소환수 광역기 판정 반경 튜닝 중 플레이어 공격이 섞여서 헷갈림).
+		if not self.DisableBasicAttack then
+			if _GameManager.SelectedCharacter == 1 then
+				self._timerBasicArrow = self:TickCard(25, 0, self._timerBasicArrow, delta, target)
+			elseif _GameManager.SelectedCharacter == 2 then
+				self._timerBasicLeion = self:TickCard(150, 0, self._timerBasicLeion, delta, target)
+			elseif _GameManager.SelectedCharacter == 3 then
+				self._timerBasicShade = self:TickCard(172, 0, self._timerBasicShade, delta, target)
+			else
+				self._timerBasic = self:TickCard(1, 0, self._timerBasic, delta, target)
+			end
 		end
 
 		-- 슬롯 1~5: 배치된 카드가 있을 때만 동작 (1번 슬롯부터 채워짐)
@@ -13003,7 +13061,10 @@ script CardManager extends Logic
 		for i = 1, #allMonsters do
 			---@type MonsterAI
 			local m = allMonsters[i]
-			if isvalid(m) and m._spawnZoneIndex == currentZone then
+			-- 카페테리아 가마솥(구름이 안 걷힌 상태)은 이 공용 타겟 풀에서부터 완전히 제외한다 — TakeDamage
+			-- 계열만 무시하면 HP는 안 깎이지만 스킬이 여전히 "타겟"으로 골라서 헛쏘는 것처럼 보인다
+			-- (유저 지적: "공격이 안되어야하는건데" — 피해 무효화가 아니라 애초에 타겟 후보에서 빠져야 함).
+			if isvalid(m) and m._spawnZoneIndex == currentZone and not (m._isCauldron and m._cauldronLocked) then
 				table.insert(result, m)
 			end
 		end
@@ -18229,6 +18290,19 @@ script CardManager extends Logic
 		end
 	end
 
+	-- Ep2MiniBeanEasterEggLogic 전용 — 노란 미니빈을 잡으면 엘리트와 동일한 액티브 카드 강화 풀에서
+	-- 딱 1개만 확정 지급한다(유저 지정: "잡으면 스킬 1개"). 강화할 카드가 없으면(전부 만렙/미해금)
+	-- 엘리트와 동일하게 골드 100으로 대체한다.
+	@ExecSpace("ServerOnly")
+	method void OnYellowMiniBeanCaught(Vector3 worldPos, number fallHeight, number groundWorldY, number dropScale)
+		local pool = self:BuildActiveUpgradePool()
+		if #pool == 0 then
+			_GameManager:AddGold(100)
+			return
+		end
+		self:GrantCardUpgradesFromPool(pool, worldPos, fallHeight, groundWorldY, dropScale, 1, 0)
+	end
+
 	@ExecSpace("ServerOnly")
 	method void OnEliteKilled(Vector3 worldPos, number fallHeight, number groundWorldY, number dropScale)
 		-- 슬롯에 배치된 카드(2~5, 9, 11...) 중에서 무작위로 1~3개를 강화. 강화할 카드가 없으면 골드 100 지급
@@ -18356,12 +18430,18 @@ script CardManager extends Logic
 	end
 
 	-- groundUI: 실제로 떨어질 UI 좌표(호출측이 groundWorldY를 _UILogic으로 변환해서 넘긴다).
-	-- GameManager.PlayFallSpin과 동일한 구현 — CardManager/GameManager가 별도 Logic이라 공유 불가.
+	-- GameManager.PlayFallSpinEx와 동일한 구현이어야 하는데(CardManager/GameManager가 별도 Logic이라
+	-- 공유 불가) 360의 배수로 맞추는 보정이 빠져있었다(버그 수정 2026-08-22, 유저 지적: "스킬은 회전하다가
+	-- 아무 각도로 딱 멈춰"). spinDegrees가 360의 배수가 아니면 낙하 도중 임의의 각도에서 회전이 끝났다가
+	-- 착지 순간 ZRotation=0으로 툭 꺾여 보인다 — GameManager 쪽엔 이미 있던 보정을 여기도 동일하게 적용.
 	@ExecSpace("ClientOnly")
 	method void PlayFallSpin(SpriteGUIRendererComponent icon, Vector2 startUI, Vector2 groundUI, number fallHeight, any onGrounded)
 		if not isvalid(icon) then return end
 		local duration = math.min(0.6, 0.15 + fallHeight / 500)
-		local spinDegrees = 540 + fallHeight
+		-- 회전량을 항상 360의 배수로 맞춰서, 다 돌고 나면 항상 원래(0도) 각도로 자연스럽게 떨어지게 한다.
+		local rawSpinDegrees = 540 + fallHeight
+		local spinDegrees = math.floor(rawSpinDegrees / 360 + 0.5) * 360
+		if spinDegrees == 0 then spinDegrees = 360 end
 
 		_TweenLogic:PlayTween(0.0, 1.0, duration, EaseType.QuadEaseIn, function(t)
 			if not isvalid(icon) then return end

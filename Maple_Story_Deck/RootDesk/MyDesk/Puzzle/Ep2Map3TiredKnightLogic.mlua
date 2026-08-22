@@ -1,0 +1,65 @@
+@Logic
+script Ep2Map3TiredKnightLogic extends Logic
+
+	-- 에피소드2 map3(니할 사막) 이스터에그 — MapObject_67을 드래그해서 목표 좌표(1.094279, 1.331939)
+	-- 근처로 옮기면 존1(mapIndex 65)에 "지쳐버린 기사"(Tired Knight)를 스폰한다. 존2~10(mapIndex 66~74)은
+	-- MonsterSpawner.TrySpawnTiredKnightForZone이 존 최초 입장 시 자동으로 우선 스폰하고, 존1만 유저
+	-- 지정으로 드래그 트리거를 거친다(AskUserQuestion 답변 확인: "지금부터 드래그로 옮기면 발동되는
+	-- 트리거로 만들어달라는 뜻", 2026-08-21/22).
+	@Sync property boolean Triggered = false
+
+	-- 유저가 손으로 직접 끌어다 놓으므로 픽셀 단위로 정확히 맞추긴 어렵다. 스킬함 이스터에그와 동일한 오차범위.
+	property number PlacementTolerance = 0.3
+
+	property string TargetObjectPath = "/maps/ep2_map3/MapObject_67"
+	property integer TargetZoneIndex = 65
+
+	property any _startPosition = nil
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		local target = _EntityService:GetEntityByPath(self.TargetObjectPath)
+		if target ~= nil then
+			self._startPosition = target.TransformComponent.Position
+		else
+			log_error("Ep2Map3TiredKnight: target entity not found at " .. self.TargetObjectPath)
+		end
+	end
+
+	-- Ep2Map3TiredKnightTrigger.RequestCheckPlacement()이 놓을 때마다 호출한다.
+	@ExecSpace("ServerOnly")
+	method void CheckPlacement(Entity item, number x, number y)
+		if self.Triggered then return end
+		if not isvalid(item) then return end
+
+		local dx = x - 1.094279
+		local dy = y - 1.331939
+		local dist = math.sqrt(dx * dx + dy * dy)
+		if dist > self.PlacementTolerance then
+			log("Ep2Map3TiredKnight: placement missed (dist=" .. dist .. ")")
+			return
+		end
+
+		self.Triggered = true
+		item.TransformComponent.Position = Vector3(1.094279, 1.331939, item.TransformComponent.Position.z)
+		log("Ep2Map3TiredKnight: placed correctly, spawning Gladiator in zone " .. self.TargetZoneIndex)
+
+		-- 유저 지정 정정(2026-08-22): 이 드래그 하나가 존1~10 전체의 게이트다 — 존1엔 즉시 스폰하고,
+		-- 이미 방문한 다른 존은 UnlockTiredKnightSpawning이 즉시 밀린 스폰을 처리하며, 아직 안 가본
+		-- 존은 나중에 처음 들어갈 때 MonsterSpawner.TrySpawnTiredKnightForZone이 정상 처리한다.
+		local map = _MonsterSpawner:GetZoneEntity(self.TargetZoneIndex)
+		_MonsterSpawner:SpawnTiredKnightOnMap(self.TargetZoneIndex, map)
+		_MonsterSpawner:UnlockTiredKnightSpawning()
+	end
+
+	-- GameManager.RestartGame()이 호출 — 새 런에서는 오브젝트를 다시 드래그해 재도전할 수 있게 한다
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		self.Triggered = false
+		local target = _EntityService:GetEntityByPath(self.TargetObjectPath)
+		if target ~= nil and isvalid(target) and self._startPosition ~= nil then
+			target.TransformComponent.Position = self._startPosition
+		end
+	end
+
+end

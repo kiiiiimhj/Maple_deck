@@ -79,6 +79,15 @@ script MonsterSpawner extends Logic
 	property number MaxEliteRespawnDelay = 300.0  -- 5분
 	property number _nextEliteTimer = -1  -- -1이면 대기 중 아님
 	property any _activeMaps = nil  -- {[mapIndex] = true, ...} — 한 번이라도 방문해서 스폰이 시작된 맵만 기록
+	-- ep2_map3 "지쳐버린 기사"(Tired Knight) — 존마다 정확히 1회만 확정 스폰하기 위한 추적(유저 지정:
+	-- "얘는 우선순위가 높아 일반몬스터보다 무조건 소환되어야한단말씀"). {[mapIndex] = true, ...}.
+	-- 존1(mapIndex 65)은 MapObject_67 드래그 트리거(Ep2Map3TiredKnightLogic) 전용이라 여기 포함되지 않는다.
+	property any _tiredKnightSpawnedZones = nil
+	-- 유저 지정 정정(2026-08-22): 존2~10 자동 스폰은 무조건이 아니라 "존1(MapObject_67) 드래그
+	-- 이스터에그를 완료해야만" 켜진다("존 1에 MapObject_67 움직이는거 만들었잖아, 그거하면 1~10존 다
+	-- 적용되는거라고" — 트리거 전엔 어떤 존에도 등장하면 안 됨). Ep2Map3TiredKnightLogic이 드래그 성공
+	-- 시 UnlockTiredKnightSpawning()을 호출해 true로 켠다.
+	property boolean _tiredKnightUnlocked = false
 	-- 성능 최적화(2026-08-20, 유저 리포트 "에피2 맵3/4에서 몬스터 소환될때 렉") — GetFlatRuns(전체 발판
 	-- 스캔) 결과를 mapIndex별로 캐싱. 발판 지형은 런타임에 안 바뀌는 정적 데이터라 최초 1회만 계산하면 됨.
 	property any _flatRunsCache = nil  -- {[mapIndex] = runs, ...}
@@ -462,6 +471,10 @@ script MonsterSpawner extends Logic
 		end
 
 		if not wasActive then
+			-- 지쳐버린 기사(Tired Knight) 우선 스폰 — 일반 스폰 배치보다 먼저, 존 최초 활성화 시 정확히
+			-- 1회만 확정 스폰한다(유저 지정 "우선순위가 높아 일반몬스터보다 무조건 소환되어야한단말씀" —
+			-- 확률이 아니라 확정). 존1(65)은 TrySpawnTiredKnightForZone 내부에서 제외된다.
+			self:TrySpawnTiredKnightForZone(mapIndex, map)
 			self:SpawnBatchOnMap(map, _GameManager.Wave, false, true, mapIndex, false, 0)
 			self._pendingRushPenalty = 0
 			return
@@ -602,6 +615,74 @@ script MonsterSpawner extends Logic
 		local label = isBoss and "BOSS" or "monster(s)"
 		log("MonsterSpawner: spawned " .. count .. " " .. label .. " on " .. map.Name .. " (Wave " .. wave .. ")")
 		return spawned
+	end
+
+	-- ActivateMap(존 최초 활성화)이 호출 — ep2_map3 존2~10(mapIndex 66~74)마다 검투사를 정확히 1회
+	-- 확정 스폰한다. 존1(65)은 MapObject_67 드래그 트리거(Ep2Map3TiredKnightLogic) 전용이라 제외한다.
+	-- _tiredKnightUnlocked가 false(존1 드래그 미완료)면 아무 존에도 스폰하지 않는다(유저 지적 — "존1
+	-- 이스터에그 하기 전인데 이미 다른 존에 몬스터가 있다"는 버그 리포트로 이 게이트를 추가함).
+	-- map 파라미터는 호출측이 이미 GetZoneEntity로 구해둔 값을 그대로 재사용(중복 조회 방지).
+	@ExecSpace("ServerOnly")
+	method void TrySpawnTiredKnightForZone(integer mapIndex, Entity map)
+		if not self._tiredKnightUnlocked then return end
+		if mapIndex < 66 or mapIndex > 74 then return end
+		if self._tiredKnightSpawnedZones == nil then self._tiredKnightSpawnedZones = {} end
+		if self._tiredKnightSpawnedZones[mapIndex] then return end
+		self._tiredKnightSpawnedZones[mapIndex] = true
+		self:SpawnTiredKnightOnMap(mapIndex, map)
+	end
+
+	-- Ep2Map3TiredKnightLogic이 존1 드래그 성공 시 호출 — 이 시점부터 존2~10 자동 확정 스폰을 켠다.
+	-- 이미 방문해서 활성화(_activeMaps)된 존은 ActivateMap의 "최초 방문" 분기를 다시 타지 않으므로,
+	-- 여기서 즉시 훑어 밀린 스폰을 대신 처리한다(유저 지정: "그거하면 1~10존 다 적용되는거라고" — 아직
+	-- 안 가본 존은 나중에 처음 들어갈 때 TrySpawnTiredKnightForZone이 정상 처리).
+	@ExecSpace("ServerOnly")
+	method void UnlockTiredKnightSpawning()
+		if self._tiredKnightUnlocked then return end
+		self._tiredKnightUnlocked = true
+		if self._tiredKnightSpawnedZones == nil then self._tiredKnightSpawnedZones = {} end
+		for mapIndex = 66, 74 do
+			if self._activeMaps ~= nil and self._activeMaps[mapIndex] and not self._tiredKnightSpawnedZones[mapIndex] then
+				local map = self:GetZoneEntity(mapIndex)
+				self._tiredKnightSpawnedZones[mapIndex] = true
+				self:SpawnTiredKnightOnMap(mapIndex, map)
+			end
+		end
+		log("MonsterSpawner: TiredKnight spawning unlocked (zone1 drag complete)")
+	end
+
+	-- 검투사(구 "지쳐버린 기사") 1마리를 지정한 존에 실제로 스폰한다. Ep2Map3TiredKnightLogic(존1 드래그
+	-- 트리거)도 이 메서드를 직접 호출한다 — speciesIdx=0으로 넘겨 GetSpawnPosition의 비행형 분기
+	-- (§species>0 조건)를 건너뛰고 mapIndex 65~84 전용 발판 레이캐스트 분기(GetSpawnPositionFromFootholds)로
+	-- 바로 떨어지게 한다. 유저 지정(2026-08-22): 몬스터 이름을 "검투사"로 확정, 등장 토스트를 항상 띄운다.
+	@ExecSpace("ServerOnly")
+	method Entity SpawnTiredKnightOnMap(integer mapIndex, Entity map)
+		if map == nil or not isvalid(map) then
+			log_error("MonsterSpawner: SpawnTiredKnightOnMap - invalid map for zone " .. mapIndex)
+			return nil
+		end
+		local pos = self:GetSpawnPosition(mapIndex, false, 0, map)
+		local entity = _SpawnService:SpawnByModelId(self.MonsterModelId, "TiredKnight", self:ToLocalSpawnPos(map, pos), map)
+		if entity == nil then
+			log_error("MonsterSpawner: SpawnTiredKnightOnMap - SpawnByModelId failed for zone " .. mapIndex)
+			return nil
+		end
+		---@type MonsterAI
+		local ai = entity:GetComponent("script.MonsterAI")
+		if ai ~= nil then
+			ai:InitializeStatsAsTiredKnight(mapIndex)
+		end
+		_UIToast:ShowMessage("검투사가 등장했습니다")
+		log("MonsterSpawner: TiredKnight(검투사) spawned on zone " .. mapIndex)
+		return entity
+	end
+
+	-- GameManager.RestartGame()이 호출 — "다시하기" 시 존별 검투사 스폰 여부 + 잠금 상태를 전부
+	-- 초기화해서 새 런에서는 다시 존1 드래그부터 해야 존2~10에 등장하게 한다(ResetEliteTracking과 동일한 정책).
+	@ExecSpace("ServerOnly")
+	method void ResetTiredKnightTracking()
+		self._tiredKnightSpawnedZones = {}
+		self._tiredKnightUnlocked = false
 	end
 
 	-- MonsterAI.Die()가 엘리트 처치 시점에 호출 — 다음 엘리트 등장까지 3~5분 랜덤 대기를 시작한다

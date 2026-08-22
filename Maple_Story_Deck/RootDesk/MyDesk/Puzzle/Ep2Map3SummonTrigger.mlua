@@ -1,0 +1,68 @@
+@Component
+script Ep2Map3SummonTrigger extends Component
+
+	-- 에피소드2 map3(니할 사막) object-658 클릭 트리거 — Ep2Map3SummonLogic.SummonAlly()를 호출한다.
+	-- Ep2Map1SkillEasterEggTrigger와 동일한 단순 클릭 패턴(드래그 아님). 런당 1회만 실제 소환되지만
+	-- (SummonAlly 내부 _usedThisRun 가드), 클릭 피드백 연출(눌림)은 매번 재생한다(유저 요청: "연출있음
+	-- 좋을듯 누르면 살짝 아래로 내려갔다 띠면 다시 제자리로").
+	property any _touchHandler = nil
+	property Vector3 _restPosition = Vector3(0, 0, 0)
+	property boolean _restCaptured = false
+	property number PressDownOffset = 0.15
+	property number PressDownDuration = 0.08
+	property number PressUpDuration = 0.12
+
+	method void OnBeginPlay()
+		if self:IsClient() then
+			self._touchHandler = self.Entity:ConnectEvent(TouchEvent, self.OnTouched)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnTouched(TouchEvent event)
+		if _GameManager.GameOver then return end
+		if _TitleUI.titleGroup.Enable then return end
+		self:PlayPressAnimation()
+		self:RequestSummon()
+	end
+
+	-- 클릭 피드백 — 살짝 아래로 눌렸다가 다시 원래 자리로 스프링백. 매 클릭 시점의 라이브 좌표가
+	-- 아니라 최초 캡처한 _restPosition을 기준으로 항상 왕복해서, 애니메이션 도중 재클릭해도 위치가
+	-- 누적으로 밀리지 않는다.
+	@ExecSpace("ClientOnly")
+	method void PlayPressAnimation()
+		if not self._restCaptured then
+			self._restPosition = self.Entity.TransformComponent.Position
+			self._restCaptured = true
+		end
+		local rest = self._restPosition
+		local pressedY = rest.y - self.PressDownOffset
+
+		_TweenLogic:PlayTween(0.0, 1.0, self.PressDownDuration, EaseType.QuadEaseOut, function(t)
+			if not isvalid(self) or not isvalid(self.Entity) then return end
+			local y = rest.y + (pressedY - rest.y) * t
+			self.Entity.TransformComponent.Position = Vector3(rest.x, y, rest.z)
+		end)
+
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) or not isvalid(self.Entity) then return end
+			_TweenLogic:PlayTween(0.0, 1.0, self.PressUpDuration, EaseType.QuadEaseIn, function(t)
+				if not isvalid(self) or not isvalid(self.Entity) then return end
+				local y = pressedY + (rest.y - pressedY) * t
+				self.Entity.TransformComponent.Position = Vector3(rest.x, y, rest.z)
+			end)
+		end, self.PressDownDuration)
+	end
+
+	@ExecSpace("Server")
+	method void RequestSummon()
+		_Ep2Map3SummonLogic:SummonAlly()
+	end
+
+	method void OnEndPlay()
+		if self:IsClient() then
+			if self._touchHandler ~= nil then self.Entity:DisconnectEvent(TouchEvent, self._touchHandler) end
+		end
+	end
+
+end

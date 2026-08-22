@@ -1,0 +1,102 @@
+@Logic
+script Ep2Map3CauldronLogic extends Logic
+
+	-- 에피소드2 map3(니할 사막) 존4 이스터에그 — "카페테리아 가마솥"(CafeteriaCauldron)은 세계 시작 시
+	-- 1회 스폰되는 고정 오브젝트 몬스터(MonsterAI._isCauldron, InitializeStatsAsCauldron 참고). 구름
+	-- (MapObject_17)을 클릭할 때마다 알파가 0.5씩 빠지고, 0이 되면(2번 클릭) 구름이 사라지면서 솥단지가
+	-- 공격 가능해진다(그 전까지는 MonsterAI._cauldronLocked=true로 모든 피격을 무시). 처치하면 확률
+	-- 포션(엘릭서5%/하얀35%/빨강60%)을 지급하고 알파 페이드아웃으로 사라진다(MonsterAI.Die() 참고).
+	@Sync property boolean CloudCleared = false
+	@Sync property number CloudAlpha = 1.0
+
+	property number CloudAlphaStep = 0.5
+	property string CloudObjectPath = "/maps/ep2_map3/MapObject_17"
+
+	-- 유저가 Maker에서 직접 배치한 좌표(2026-08-22 확인) — 위치는 유저가 직접 조정
+	property number CauldronSpawnX = 46.1224442
+	property number CauldronSpawnY = 1.42135632
+	property number CauldronSpawnZ = 999.5
+	property integer CauldronZoneIndex = 68
+
+	property Entity _cauldronEntity = nil
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		self:SpawnCauldron()
+	end
+
+	-- 솥단지 몬스터를 스폰하고 초기화한다. 세계 시작 시 1회, 그리고 "다시하기" 시 ResetForNewRun에서 재호출.
+	@ExecSpace("ServerOnly")
+	method void SpawnCauldron()
+		local map = _MonsterSpawner:GetZoneEntity(self.CauldronZoneIndex)
+		if map == nil then
+			log_error("Ep2Map3Cauldron: zone entity not found for " .. self.CauldronZoneIndex)
+			return
+		end
+		local pos = Vector3(self.CauldronSpawnX, self.CauldronSpawnY, self.CauldronSpawnZ)
+		local entity = _SpawnService:SpawnByModelId(_MonsterSpawner.MonsterModelId, "CafeteriaCauldron", pos, map)
+		if entity == nil then
+			log_error("Ep2Map3Cauldron: SpawnByModelId failed")
+			return
+		end
+		self._cauldronEntity = entity
+		---@type MonsterAI
+		local ai = entity:GetComponent("script.MonsterAI")
+		if ai ~= nil then
+			ai:InitializeStatsAsCauldron(self.CauldronZoneIndex)
+		end
+		log("Ep2Map3Cauldron: spawned")
+	end
+
+	-- Ep2Map3CauldronCloudTrigger.RequestClickCloud()가 클릭마다 호출한다.
+	@ExecSpace("ServerOnly")
+	method void OnCloudClicked()
+		if self.CloudCleared then return end
+		self.CloudAlpha = self.CloudAlpha - self.CloudAlphaStep
+		local cloud = _EntityService:GetEntityByPath(self.CloudObjectPath)
+		if self.CloudAlpha <= 0 then
+			self.CloudAlpha = 0
+			self.CloudCleared = true
+			if cloud ~= nil and isvalid(cloud) then cloud.Enable = false end
+			if isvalid(self._cauldronEntity) then
+				---@type MonsterAI
+				local ai = self._cauldronEntity:GetComponent("script.MonsterAI")
+				if ai ~= nil then ai._cauldronLocked = false end
+			end
+			log("Ep2Map3Cauldron: cloud cleared, cauldron unlocked")
+		else
+			if cloud ~= nil and isvalid(cloud) then
+				local renderer = cloud.SpriteRendererComponent
+				if renderer ~= nil then
+					local c = renderer.Color
+					renderer.Color = Color(c.r, c.g, c.b, self.CloudAlpha)
+				end
+			end
+			log("Ep2Map3Cauldron: cloud alpha=" .. self.CloudAlpha)
+		end
+	end
+
+	-- GameManager.RestartGame()이 호출 — ClearAllMonsters() 이후에 실행되어야 한다(그렇지 않으면 새로
+	-- 스폰한 솥단지가 곧바로 같이 지워진다). 구름을 원상복구하고 솥단지를 다시 스폰한다.
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		self.CloudCleared = false
+		self.CloudAlpha = 1.0
+		local cloud = _EntityService:GetEntityByPath(self.CloudObjectPath)
+		if cloud ~= nil and isvalid(cloud) then
+			cloud.Enable = true
+			local renderer = cloud.SpriteRendererComponent
+			if renderer ~= nil then
+				local c = renderer.Color
+				renderer.Color = Color(c.r, c.g, c.b, 1.0)
+			end
+		end
+		-- 처치되지 않은 채로 다시하기가 눌렸다면(ClearAllMonsters가 이미 지웠을 수도 있음) 남은 참조 정리
+		if isvalid(self._cauldronEntity) then
+			self._cauldronEntity:Destroy()
+		end
+		self._cauldronEntity = nil
+		self:SpawnCauldron()
+	end
+
+end

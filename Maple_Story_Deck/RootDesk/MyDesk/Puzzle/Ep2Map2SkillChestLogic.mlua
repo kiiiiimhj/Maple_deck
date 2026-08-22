@@ -1,0 +1,144 @@
+@Logic
+script Ep2Map2SkillChestLogic extends Logic
+
+	-- 에피소드2 map2(여신 탑) 이스터에그 — MapObject_269(오브젝트)를 드래그해서 목표 좌표
+	-- (135.1781, 1.132582) 근처로 옮기면, MapObject_240 위치에서 스킬 강화 1회를 지급한다
+	-- (Ep2Map1SkillEasterEggLogic과 동일하게 CardManager.BuildActiveUpgradePool +
+	-- GrantCardUpgradesFromPool 재사용 — 실제 스킬 슬롯으로 카드가 날아가서 레벨업됨).
+	-- 강화할 스킬이 하나도 없으면(전부 만렙/미해금) 대신 회복 포션을 확정 지급한다
+	-- (GameManager.ApplyPotionDrop, 확률 없이 무조건 — 유저 지정: "스킬 나올꺼 없으면 포션").
+	-- 버그 수정(2026-08-21, 유저 지적): 성공하면 MapObject_269(이동한 오브젝트)는 숨기지 않고 그 자리에
+	-- 고정해서 계속 보이게 두고(다시 드래그는 Triggered 플래그로 막음 — Trigger.mlua에서도 클라이언트
+	-- 단에서 한 번 더 가드), 대신 MapObject_240(보상이 나온 원천 오브젝트)을 숨긴다.
+	@Sync property boolean Triggered = false
+
+	-- 유저가 손으로 직접 끌어다 놓으므로 픽셀 단위로 정확히 맞추긴 어렵다. 오차범위를 석상 퍼즐(0.5)보다
+	-- 조금 좁혀서(유저 지정 "이동 보정값 조금 줄여줘") 좀 더 정확한 위치에서만 인정되게 한다.
+	property number PlacementTolerance = 0.3
+
+	property string TargetObjectPath = "/maps/ep2_map2/MapObject_269"
+	property string RewardSourceObjectPath = "/maps/ep2_map2/MapObject_240"
+
+	property string SkillRewardMessage = "스킬을 얻었다!"
+	property string PotionRewardMessage = "회복 포션을 얻었다!"
+
+	-- 확정 지급용 포션 종류(GameManager.ApplyPotionDrop의 potionType) — 1=빨강(기본 회복). 다른 종류를
+	-- 원하면 여기만 바꾸면 된다.
+	property integer FallbackPotionType = 1
+
+	property any _startPosition = nil
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		local target = _EntityService:GetEntityByPath(self.TargetObjectPath)
+		if target ~= nil then
+			self._startPosition = target.TransformComponent.Position
+		else
+			log_error("Ep2Map2SkillChest: target entity not found at " .. self.TargetObjectPath)
+		end
+	end
+
+	-- Ep2Map2SkillChestTrigger.RequestCheckPlacement()이 놓을 때마다 호출한다.
+	@ExecSpace("ServerOnly")
+	method void CheckPlacement(Entity item, number x, number y)
+		if self.Triggered then return end
+		if not isvalid(item) then return end
+
+		local dx = x - 135.1781
+		local dy = y - 1.132582
+		local dist = math.sqrt(dx * dx + dy * dy)
+		if dist > self.PlacementTolerance then
+			log("Ep2Map2SkillChest: placement missed (dist=" .. dist .. ")")
+			return
+		end
+
+		self.Triggered = true
+		item.TransformComponent.Position = Vector3(135.1781, 1.132582, item.TransformComponent.Position.z)
+		log("Ep2Map2SkillChest: placed correctly, granting reward")
+		self:GrantReward()
+	end
+
+	-- 버그 수정(2026-08-22, 유저 지적: "아이템이 바닥까지 안 떨어지고 인벤에 들어감, 공중 유닛이 아이템
+	-- 떨굴때처럼 해줘") — fallHeight=0으로 고정해서 넘겼더니 드롭 연출이 MapObject_240 높이에서 곧바로
+	-- 슬롯/인벤으로 날아가버렸다. MonsterAI.mlua의 비행형 몬스터 사망 처리(Die())와 동일한 방식으로
+	-- 아래로 레이캐스트해서 실제 발판 높이까지 떨어지는 연출이 나오게 한다.
+	@ExecSpace("ServerOnly")
+	method Vector3 ComputeDropFall(Entity refEntity)
+		-- 반환: [1]=fallHeight(UI px 근사, 낙하 연출 시간/회전량용), [2]=groundWorldY(실제 착지 월드 Y)
+		local worldPos = refEntity.TransformComponent.WorldPosition
+		local fallHeight = 0
+		local groundWorldY = worldPos.y
+		local map = refEntity.CurrentMap
+		if map ~= nil then
+			---@type FootholdComponent
+			local foothold = map:GetComponent("FootholdComponent")
+			if foothold ~= nil then
+				local hits = foothold:RaycastAll(Vector2(worldPos.x, worldPos.y), Vector2(0, -1), 50)
+				local groundY = nil
+				local bestDist = nil
+				for i = 1, #hits do
+					local h = hits[i]
+					local y = h:GetYByX(worldPos.x)
+					local dist = worldPos.y - y
+					if bestDist == nil or dist < bestDist then
+						bestDist = dist
+						groundY = y
+					end
+				end
+				if groundY ~= nil and worldPos.y > groundY then
+					fallHeight = (worldPos.y - groundY) * 100
+					groundWorldY = groundY
+				end
+			end
+		end
+		return Vector3(fallHeight, groundWorldY, 0)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void GrantReward()
+		local rewardSource = _EntityService:GetEntityByPath(self.RewardSourceObjectPath)
+		local worldPos = (rewardSource ~= nil) and rewardSource.TransformComponent.WorldPosition or Vector3(135.1781, 1.132582, 0)
+		local fallHeight = 0
+		local groundWorldY = worldPos.y
+		if rewardSource ~= nil then
+			local fall = self:ComputeDropFall(rewardSource)
+			fallHeight = fall.x
+			groundWorldY = fall.y
+		end
+
+		local pool = _CardManager:BuildActiveUpgradePool()
+		if #pool > 0 then
+			_CardManager:GrantCardUpgradesFromPool(pool, worldPos, fallHeight, groundWorldY, 1.0, 1, 0)
+			log("Ep2Map2SkillChest: granted 1 card upgrade from active pool")
+			_UIToast:ShowMessage(self.SkillRewardMessage)
+		else
+			_GameManager:ApplyPotionDrop(self.FallbackPotionType, worldPos, fallHeight, groundWorldY, 1.0)
+			log("Ep2Map2SkillChest: no upgradeable skill, granted potion instead")
+			_UIToast:ShowMessage(self.PotionRewardMessage)
+		end
+
+		-- 유저 지정: "아이템이 나오면 MapObject_240 이걸 안보이게" — 보상이 나온 원천 오브젝트를 숨긴다
+		-- (이동한 MapObject_269 자신은 그대로 보이게 남겨둔다).
+		if rewardSource ~= nil and isvalid(rewardSource) then
+			rewardSource.Enable = false
+		end
+	end
+
+	-- GameManager.RestartGame()이 호출 — 새 런에서는 오브젝트를 다시 드래그해 재도전할 수 있게 한다
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		self.Triggered = false
+		local target = _EntityService:GetEntityByPath(self.TargetObjectPath)
+		if target ~= nil and isvalid(target) then
+			target.Enable = true
+			if self._startPosition ~= nil then
+				target.TransformComponent.Position = self._startPosition
+			end
+		end
+		local rewardSource = _EntityService:GetEntityByPath(self.RewardSourceObjectPath)
+		if rewardSource ~= nil and isvalid(rewardSource) then
+			rewardSource.Enable = true
+		end
+	end
+
+end

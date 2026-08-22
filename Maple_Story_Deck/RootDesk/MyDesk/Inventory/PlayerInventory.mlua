@@ -16,6 +16,17 @@ script PlayerInventory extends Logic
 		log("Inventory: " .. itemId .. " +" .. amount .. " -> " .. tostring(self.ItemCounts[itemId]))
 	end
 
+	-- 잡템을 소모한다(교환/제작 등) — amount보다 적게 가지고 있으면 아무 일도 하지 않고 false를 돌려준다.
+	-- 호출측이 항상 먼저 GetItemCount로 충분한지 확인한 뒤에만 부르는 게 기본이지만, 방어적으로 다시 확인한다.
+	@ExecSpace("ServerOnly")
+	method boolean RemoveItem(string itemId, integer amount)
+		local current = self:GetItemCount(itemId)
+		if current < amount then return false end
+		self.ItemCounts[itemId] = current - amount
+		log("Inventory: " .. itemId .. " -" .. amount .. " -> " .. tostring(self.ItemCounts[itemId]))
+		return true
+	end
+
 	@ExecSpace("ServerOnly")
 	method void ReserveAcquisitionOrder(string itemId)
 		-- 실제 지급(AddItem)은 드롭 연출이 도착하는 시점까지 지연되는데, 그때 순번을 매기면
@@ -55,7 +66,7 @@ script PlayerInventory extends Logic
 			"star_pixie_dust", "luna_pixie_moon_shard", "nepenthes_seed", "luster_pixie_wing",
 			"ghost_pixie_veil", "dark_nepenthes_seed", "giant_nepenthes_seed",
 			"erdas_essence",
-			"unknown_ticket",
+			"unknown_ticket", "unknown_key", "unknown_medal", "tired_knight_seal",
 		}
 		local owned = {}
 		for _, itemId in ipairs(allIds) do
@@ -176,13 +187,32 @@ script PlayerInventory extends Logic
 			luster_pixie_wing = { name = "러스터픽시의 빛나는 날개", icon = "cd3c7bc5e9324599a706551623bbae32", coinValue = 12 },
 			ghost_pixie_veil = { name = "고스트픽시의 투명한 조각", icon = "467c44951cd64609a04d1457ae849023", coinValue = 13 },
 			dark_nepenthes_seed = { name = "다크네펜데스의 씨앗", icon = "b9c6517e5f87408ba297cb5c3403b6cb", coinValue = 13 },
-			giant_nepenthes_seed = { name = "거대네펜데스의 씨앗", icon = "e5b1a00e79134c71badf6697e8d7e46b", coinValue = 15 },
+			-- 버그 수정(2026-08-21, 유저 리포트 "거대 네펜데스 씨앗 이미지가 너무큰데") — 원본 아이콘
+			-- (e5b1a00e...)이 60x28px로 다른 잡템(대부분 28~32px)의 거의 2배 폭이라 유독 커 보였다.
+			-- 유저가 직접 확인 후 20x28px 크기의 다른 리소스로 교체 지정.
+			giant_nepenthes_seed = { name = "거대네펜데스의 씨앗", icon = "b46b687430ba4cd7809b8258ea2646a8", coinValue = 15 },
 
 			-- 맵23 이스터에그(불안정한 에르다스, Map23ErdasEasterEggLogic) 전용 — 3개 모으면 맵23 포탈(portal-12)
 			-- 통과 조건을 만족한다. 포탈 통과 시 소모하지 않고 계속 보유(유저 지정)
 			erdas_essence = { name = "불안정한 에르다스의 정수", icon = "1c7e9f1bc213438b9b68062d399e5f72", coinValue = 15 },
 
 			unknown_ticket = { name = "알 수 없는 티켓", icon = "5d9d14a961464c0da4c2dae7ed99b8a0", coinValue = 0 },
+			-- 에피2 map1 열쇠 이스터에그(object-3428_75) 전용 — 다른 이스터에그용 아이템, 이번 런 한정
+			-- (unknown_ticket과 동일한 정책: coinValue=0 + ConvertAllToCoins 목록에도 포함해 "다시하기"·
+			-- 종료 시 그냥 사라지게 한다)
+			unknown_key = { name = "알 수 없는 열쇠", icon = "752a314d933a45f788b43b24ad42f7d0", coinValue = 0 },
+			-- 에피2 map1 상자 이스터에그(object-3428_31, 열쇠로 여는 상자) 전용 — 나중에 또 사용할
+			-- 이스터에그용 아이템(유저 지정). unknown_key/unknown_ticket과 동일한 정책(coinValue=0 +
+			-- ConvertAllToCoins 목록 포함)으로 이번 런 한정 처리한다 — 상자 자체가 런마다 초기화돼
+			-- 다시 열 수 있으므로 아이템도 같이 사라지는 게 일관적이다.
+			unknown_medal = { name = "알 수 없는 메달", icon = "1306d0ee7b57434b96787203fd543385", coinValue = 0 },
+
+			-- 에피2 map3 "검투사"(구 "지쳐버린 기사", 2026-08-22 이름 변경) 전용 확정 드롭템(존마다
+			-- 1마리씩, 최대 10장). 유저 지정: "나중에 히든 맵 들어가는데 사용할 예정(추후 연결)" — 지금은
+			-- 수집만 하고 사용처는 미연결. unknown_ticket/key/medal과 동일한 정책(coinValue=0 +
+			-- ConvertAllToCoins 목록 포함, "다시하기" 시 초기화). itemId(tired_knight_seal)는 내부
+			-- 코드네임으로 유지(GrandPepe 사례와 동일 정책) — 표시명만 변경.
+			tired_knight_seal = { name = "검투사의 증표", icon = "961d66da044a4476a67ad0b2834020e6", coinValue = 0 },
 		}
 	end
 
@@ -210,7 +240,7 @@ script PlayerInventory extends Logic
 			"star_pixie_dust", "luna_pixie_moon_shard", "nepenthes_seed", "luster_pixie_wing",
 			"ghost_pixie_veil", "dark_nepenthes_seed", "giant_nepenthes_seed",
 			"erdas_essence",
-			"unknown_ticket",
+			"unknown_ticket", "unknown_key", "unknown_medal", "tired_knight_seal",
 		}
 		local totalValue = 0
 		for _, itemId in ipairs(itemIds) do

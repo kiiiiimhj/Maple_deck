@@ -159,6 +159,9 @@ script MonsterAI extends Component
 	-- 빈 문자열이면 PlayRangedHitEffect가 아무것도 재생하지 않는다.
 	property string _hitEffectRUID = ""
 	property number _hitEffectDuration = 0.5
+	-- PlayRangedHitEffect의 dropScale에 곱해지는 추가 배율(기본 1.0=무영향). Ep2MiniBeanEasterEggLogic
+	-- 전용 — 유저 요청: "이 연출 크기 30% 크게"
+	property number _hitEffectScaleMultiplier = 1.0
 	-- 원거리 히트 이펙트를 쓰는 종(네펜데스/다크네펜데스/거대 네펜데스 2페이즈) 전용 공격 쿨타임
 	-- 오버라이드 — 유저 요청: "너무 빠르게 공격하는 감이 있는데 공격하고 0.7초정도는 쉬자". 0이면
 	-- 공용 AttackInterval을 그대로 쓴다. 공격 애니메이션(_attackDuration) 재생이 끝난 뒤 순수하게
@@ -285,11 +288,56 @@ script MonsterAI extends Component
 	property number ChargeDashSpeedMultiplier = 7.0 -- wind-up 종료 시 ApproachSpeed에 곱해지는 배수
 	property string ChargeDustSortingLayer = "MapLayer0"
 	property integer ChargeDustOrderInLayer = 1  -- 몬스터 본체(OrderInLayer=2, platform.md 기본값)보다 낮게 둬서 몬스터가 먼지 위에 그려지게 한다
+	property number ChargeDustScale = 0.6  -- 원형 먼지 이펙트 스케일(유저 요청: 기존 1.0 대비 40% 축소)
 
 	property boolean _isPushingBack = false
 
 	-- 플레이어가 이 몬스터가 있는 맵을 떠났을 때 true — 접근/공격 로직을 멈춘다 (MapManager가 제어)
 	property boolean _paused = false
+
+	-- true면 Pause()가 호출돼도 무시한다(Ep2MiniBeanEasterEggLogic 전용 — "존을 이동해도 항상 활동"을
+	-- 위해 도입. 예전엔 _spawnZoneIndex에 존 범위 밖 예약값(999)을 넣어 SetMonstersPausedForZone의
+	-- 매칭 자체를 피해가는 방식이었는데, GetMonstersInCurrentZone(플레이어 카드/스킬 타겟팅이 쓰는
+	-- 목록)도 똑같이 _spawnZoneIndex==currentZone으로 걸러서 그 트릭 때문에 플레이어 공격이 얘네를
+	-- 영원히 못 때리는 부작용이 있었다 — 유저 리포트: "플레이어가 미니빈 공격을 안한다". 이제
+	-- _spawnZoneIndex는 항상 실제 현재 존을 따라가게 하고(RepositionFlyingCenter가 갱신), 대신 이
+	-- 플래그로 "일시정지만" 별도로 막는다.)
+	property boolean _neverPauses = false
+
+	-- true면 OnReachPlayer의 비행형 공격 분기에서 PlayLungeAnimation(스케일이 확 커졌다 돌아오는
+	-- 들이받기 임팩트)을 생략한다(Ep2MiniBeanEasterEggLogic 전용 — 유저 요청: "스케일 작아졌다
+	-- 커졌다 안 하고 그냥 날아다녀도 될 듯"). 다른 비행형(뉴그레이 화이트 등)은 기존 그대로 유지.
+	property boolean _skipAttackLunge = false
+
+	-- true면 OnReachPlayer 진입 즉시 Ep2MiniBeanEasterEggLogic:TryClaimGroupAttack()을 거쳐, 그 프레임에
+	-- 이미 다른 무리원이 먼저 공격을 "선점"했으면 전부 스킵한다(Ep2MiniBeanEasterEggLogic 전용 — 유저
+	-- 요청: "핑크빈 무리가 공격할때 무조건 1회 공격 들어가게, 딴 몬스터가 때리는거 관계없이" — 미니빈
+	-- 12마리는 전부 같은 시점에 스폰돼 FlyAttackInterval도 동일하므로 공격 타이머가 완전히 동기화돼
+	-- 있고, 매 주기마다 12마리가 동시에 OnReachPlayer를 불러 12배 대미지가 들어가고 있었다).
+	property boolean _isSwarmMember = false
+
+	-- true면 OnReachPlayer의 대미지 판정이 GameManager._hitImmune(플레이어 피격 후 0.8초 전역 무적 프레임)를
+	-- 무시하고 항상 들어간다(_isSwarmMember와 동일한 ignoreHitImmune 경로를 공유 — Tired Knight("지쳐버린
+	-- 기사") 전용, 유저 지정: "일반 몬스터가 때릴때 대미지가 안들어가는 부분을 뚫고 공격할수있음(일반
+	-- 몬스터가 떄리고 바로 떄려도 대미지 들어감)"). InitializeStatsAsTiredKnight에서 true로 설정.
+	property boolean _ignoresHitImmune = false
+
+	-- true면 이 개체가 "지쳐버린 기사"(Tired Knight)다 — Die()에서 일반 잡템 확률 드롭 대신
+	-- tired_knight_seal을 100% 확정 지급한다(GameManager.GrantLootItemDrop). ep2_map3 각 존마다
+	-- 1마리씩 등장(유저 지정 "존마다 1마리씩 무조건 스폰"). InitializeStatsAsTiredKnight에서 true로 설정.
+	property boolean _isTiredKnight = false
+
+	-- true면 이 개체가 ep2_map3 존4 "카페테리아 가마솥"(Cafeteria Cauldron)이다 — 구름(MapObject_17)이
+	-- 걷히기 전까지는 _cauldronLocked=true로 TakeDamage 계열 전부를 무시한다(유저 지정: "구름이 있는
+	-- 상태에서는 솥단지 눌리면 안됨(공격도 안됨)"). Die()에서 일반 잡템 대신 확률 포션(엘릭서5%/하얀35%/
+	-- 빨강60%)을 지급하고 알파 페이드아웃으로 사라진다. Ep2Map3CauldronLogic이 초기화/잠금해제를 담당.
+	property boolean _isCauldron = false
+	property boolean _cauldronLocked = false
+
+	-- true면 원거리 공격을 하지 않는다(_neverAttacks와 별개로 UpdateFlying 비행형 분기에도 적용) +
+	-- Die()에서 일반 잡템/카드 드롭 대신 _CardManager:OnYellowMiniBeanCaught로 스킬 1개를 지급한다
+	-- (Ep2MiniBeanEasterEggLogic 전용 — 유저 지정: "노란미니빈은 공격은 안하고 잡으면 스킬 1개").
+	property boolean _isYellowMiniBean = false
 
 	-- 빙결 스택 (프리징 이펙트 패시브)
 	@Sync property integer FreezeStack = 0
@@ -571,6 +619,131 @@ script MonsterAI extends Component
 		log("MonsterAI: Zone=" .. zoneIndex .. " Wave=" .. wave .. " HP=" .. self.CurrentHp .. " Speed=" .. self.ApproachSpeed)
 	end
 
+	-- ep2_map3 "지쳐버린 기사"(Tired Knight) 전용 초기화 — InitializeAlienInvader와 동일하게 존 몬스터
+	-- 풀 시스템(InitializeStats)을 거치지 않고 고정된 전용 리소스팩으로 직접 초기화한다(유저 지정 리소스팩,
+	-- 2026-08-22). MonsterSpawner가 존마다 1마리씩 우선 스폰할 때, 그리고 MapObject_67 드래그 트리거가
+	-- 존1에서 호출한다.
+	-- 체력=일반 몬스터의 3배, 공격력=1배(dmgMultiplier 관여 없음, OnReachPlayer 기본값 그대로),
+	-- 크기=1.3배(_scaleMultiplier), 피격 무적 프레임 무시(_ignoresHitImmune — OnReachPlayer 참고),
+	-- 처치 시 tired_knight_seal 100% 확정 드롭(_isTiredKnight — Die() 참고).
+	-- attackDuration/dieDuration은 attack1(5프레임)/die1 클립의 정확한 실측값이 아니라, 다른 종의 프레임수별
+	-- 실측 패턴(GetMapAttackDuration/GetMapDieDuration 주석 참고 — 대략 0.1초/프레임)에 맞춘 추정치다.
+	@ExecSpace("ServerOnly")
+	method void InitializeStatsAsTiredKnight(integer zoneIndex)
+		self._dead = false
+		self._spawnZoneIndex = zoneIndex
+		self._isBoss = false
+		self._isElite = false
+		self._isTiredKnight = true
+		self._ignoresHitImmune = true
+		self._reachedScaleThreshold = 1.5
+
+		self.MaxHp = _GameManager:GetTimeStepHp(_GameManager:GetTimeStep()) * 3
+		self.CurrentHp = self.MaxHp
+		-- 보스와 동일하게 느리고 일정한 접근(변동폭 없이) — 유저 지정 없음, 일반 잡몹과 구분되는 "특별한
+		-- 강적" 정체성에 맞춰 안정적으로 다가오게 한다.
+		self.ApproachSpeed = _GameManager:GetWaveApproachSpeed(10)
+
+		-- 전용 리소스팩(유저 제공 RUID, resource_pack "지쳐버린 기사")
+		self._standRUID = "8e4d16ddd74644d8bfafaf422a1f7400"
+		self._moveRUID = "009463a95c1f47d8a0c62e2507ff1799"
+		self._attackRUID = "ac8d9def0432409eabc96f14c268c8ad"
+		self._dieRUID = "5915fd536a8c417693933725d2858118"
+		self._hitRUID = "380100b9447542e8a11559ea18d5a5b8"
+		self._attackSoundRUID = "5095fddab73842a5af4750a178e4c98d"
+		self._hitSoundRUID = "972a7ccd15234882acd9face6fd52d93"
+		self._dieSoundRUID = "437dd7114fac4758a1d4195cd541853c"
+		self._attackDuration = 0.55
+		self._dieDuration = 0.45
+
+		-- 재사용 엔티티에 이전 점유자의 특수 플래그가 남아있을 수 있어(위쪽 InitializeStats 주석 참고)
+		-- 명시적으로 초기화한다 — 지쳐버린 기사는 평범한 지상형 근접 공격 개체다.
+		self._isFlying = false
+		self._isRangedInk = false
+		self._isRangedSlash = false
+		self._isCharge = false
+		self._isZigzag = false
+		self._neverAttacks = false
+		self._isGiantNepenthes = false
+		self._isSwarmMember = false
+		self._isYellowMiniBean = false
+		self._hitEffectRUID = ""
+		self._customAttackInterval = 0
+		self._accuracyDebuffPercent = 0
+		self.FreezeStack = 0
+
+		self._scaleMultiplier = 1.3
+		self.MonsterSprite = self._moveRUID
+		self.Entity.TransformComponent.Scale = Vector3(self._currentScale * self._scaleMultiplier, self._currentScale * self._scaleMultiplier, 1.0)
+		self:SyncDepthOverlaySprite()
+		self:UpdateDepth()
+		if _GameManager._globalFreezeActive and _GameManager._globalFreezeRemaining > 0 then
+			self:ApplyHardFreeze(_GameManager._globalFreezeRemaining)
+		end
+		log("MonsterAI: TiredKnight initialized Zone=" .. zoneIndex .. " HP=" .. self.CurrentHp)
+	end
+
+	-- Ep2Map3CauldronLogic.SpawnCauldron()이 스폰 직후 호출: ep2_map3 존4에 고정 배치되는 "카페테리아
+	-- 가마솥" 전용 초기화. InitializeTreasureChest(보물상자)와 동일한 패턴 — 이동/공격 리소스가 없는
+	-- (stand/hit1/die1만 있는) 완전 고정형 오브젝트라 접근 애니메이션 없이 처음부터 "도달" 상태로
+	-- 등장하고 _neverAttacks=true로 플레이어를 절대 공격하지 않는다. 구름(MapObject_17)이 걷히기
+	-- 전까지는 _cauldronLocked=true로 모든 피격을 무시한다(Ep2Map3CauldronLogic이 구름 클리어 시 해제).
+	-- HP는 유저가 별도 수치를 지정하지 않아 일반 몬스터와 동일한 시간대 기준값(GetTimeStepHp)을 쓴다.
+	@ExecSpace("ServerOnly")
+	method void InitializeStatsAsCauldron(integer zoneIndex)
+		self._dead = false
+		self._spawnZoneIndex = zoneIndex
+		self._isBoss = false
+		self._isElite = false
+		self._isCauldron = true
+		self._cauldronLocked = true
+		self._neverAttacks = true
+		self._reachedScaleThreshold = 1.5
+
+		self.MaxHp = _GameManager:GetTimeStepHp(_GameManager:GetTimeStep())
+		self.CurrentHp = self.MaxHp
+		self.ApproachSpeed = 0
+
+		-- 전용 리소스팩(유저 제공 RUID, resource_pack "Cafeteria Cauldron") — move/attack 없음
+		self._standRUID = "07fda3686b304900bdea6d71e01618d7"
+		self._hitRUID = "c2bd674886f6462fbc94de108fa4883b"
+		self._dieRUID = "923f98f630cb4a89a144cd5b6bf1c883"
+		self._moveRUID = ""
+		self._attackRUID = ""
+		self._hitSoundRUID = "4cfc46ecd21c4c3382f4dcf470047d29"
+		self._dieSoundRUID = "d3652d96e0664d989c3f988f4e5ff7c3"
+		self._attackSoundRUID = ""
+		-- 프레임 수 정보가 없어 다른 소형 오브젝트 사망연출과 비슷한 수준으로 추정(실측 아님)
+		self._dieDuration = 0.35
+
+		self._isFlying = false
+		self._isRangedInk = false
+		self._isRangedSlash = false
+		self._isCharge = false
+		self._isZigzag = false
+		self._isGiantNepenthes = false
+		self._isSwarmMember = false
+		self._isYellowMiniBean = false
+		self._hitEffectRUID = ""
+		self._customAttackInterval = 0
+		self._accuracyDebuffPercent = 0
+		self.FreezeStack = 0
+
+		-- InitializeTreasureChest와 동일 — 접근 연출 없이 처음부터 "도달" 상태로 고정, 실제 공격 호출만
+		-- _neverAttacks로 막는다
+		self._currentScale = self._reachedScaleThreshold
+		self._reachedPlayer = true
+
+		self.MonsterSprite = self._standRUID
+		self.Entity.TransformComponent.Scale = Vector3(self._currentScale * self._scaleMultiplier, self._currentScale * self._scaleMultiplier, 1.0)
+		self:SyncDepthOverlaySprite()
+		self:HideDepthOverlay()
+		if _GameManager._globalFreezeActive and _GameManager._globalFreezeRemaining > 0 then
+			self:ApplyHardFreeze(_GameManager._globalFreezeRemaining)
+		end
+		log("MonsterAI: Cauldron initialized Zone=" .. zoneIndex .. " HP=" .. self.CurrentHp)
+	end
+
 	-- MonsterSpawner.SpawnBonusBoss()가 스폰 직후 호출: 배회 범위/스프라이트를 설정하고 무적·보상형 보스로 전환한다.
 	-- MonsterSprite를 명시적으로 세팅해야 한다 — 안 그러면 OnBeginPlay의 클라이언트 분기가 빈 문자열을
 	-- SpriteRUID에 덮어써서(기본값 "") 모델에 박아둔 스프라이트가 순간적으로 사라져 보일 수 있다.
@@ -618,6 +791,41 @@ script MonsterAI extends Component
 		self:SyncDepthOverlaySprite()
 		self:HideDepthOverlay()
 		log("MonsterAI: alien invader initialized HP=" .. hp)
+	end
+
+	-- Ep2MiniBeanEasterEggLogic 전용 — "존을 이동해도 따라오게" 하기 위해 비행 사인파 중심(_flyCenterX/
+	-- _flyBaseY, InitializeStats/InitializeAlienInvader가 스폰 시점에 한 번만 고정하는 값)을 새 존의
+	-- 스폰 위치로 즉시 옮긴다(드리프트 없이 스냅 — SilentMoveToMap처럼 강제 이동은 원래 순간이동이라
+	-- 자연스럽다). _spawnZoneIndex도 함께 항상 "실제 현재 존"으로 갱신한다 — GetMonstersInCurrentZone
+	-- (플레이어 카드/스킬 타겟팅 목록)이 _spawnZoneIndex==currentZone으로 걸러내므로, 이걸 실제 존과
+	-- 다르게 둬버리면 플레이어 공격이 영원히 안 맞는다(_neverPauses로 일시정지만 별도로 막으므로
+	-- SetMonstersPausedForZone이 실제 존을 보고 Pause를 걸어도 무시된다).
+	--
+	-- 버그 수정(2026-08-21, 유저 리포트: "구름을 눌러 미니빈 소환 후, 다시 다른 구름을 눌러 다른 존으로
+	-- 이동하면 미니빈이 안 죽는다 — 정확히는 공격이 안 먹힌다") — 실제 원인은 이 메서드가 엔티티를
+	-- 재부모(reparent)하지 않고 있었던 것. GetMonstersInCurrentZone은 map:GetChildComponentsByTypeName을
+	-- 비재귀로 호출해 "그 존 컨테이너의 직계 자식"만 후보로 보는데, 미니빈은 항상 최초 스폰 존의 컨테이너
+	-- 밑에 그대로 남아있었다 — 그래서 플레이어가 그 다음 존으로 한 번 더 이동하면(스폰 존 ≠ 현재 존)
+	-- GetClosestTargets가 아예 후보에서 빼버려 영원히 공격이 안 맞았다(492줄 UpdateFlying 초기화 주석과
+	-- 동일한 클래스의 버그 — "로컬 Position에 월드/타 존 좌표를 그대로 쓰면 오프셋이 겹친다"는 것도
+	-- 여기 같이 걸려있었다: newCenterX는 MapManager.GetSpawnPositionForIndex가 반환하는 물리 맵 파일
+	-- 기준 좌표인데, 재부모 없이 옛 존 컨테이너 기준 로컬 Position에 그대로 썼으니 화면 위치도 같이
+	-- 틀어져 있었다). MonsterSpawner.GetZoneEntity/ToLocalSpawnPos(스폰 시점과 동일한 헬퍼)로 실제
+	-- 컨테이너를 옮기고 좌표도 그 컨테이너 기준 로컬로 다시 변환한다.
+	@ExecSpace("ServerOnly")
+	method void RepositionFlyingCenter(number newCenterX, number newBaseY, integer newZoneIndex)
+		self._spawnZoneIndex = newZoneIndex
+		local newMap = _MonsterSpawner:GetZoneEntity(newZoneIndex)
+		if newMap == nil or not isvalid(newMap) then
+			log_error("MonsterAI: RepositionFlyingCenter - zone entity not found for " .. newZoneIndex)
+			return
+		end
+		self.Entity:AttachTo(newMap)
+		local localPos = _MonsterSpawner:ToLocalSpawnPos(newMap, Vector3(newCenterX, newBaseY, 0))
+		self._flyCenterX = localPos.x
+		self._flyBaseY = localPos.y
+		local pos = self.Entity.TransformComponent.Position
+		self.Entity.TransformComponent.Position = Vector3(localPos.x, localPos.y, pos.z)
 	end
 
 	-- Map23ErdasEasterEggLogic.SpawnErdas()가 스폰 직후 호출: 일반 지상형 몬스터와 동일한 접근(스케일 성장)
@@ -1115,12 +1323,14 @@ script MonsterAI extends Component
 		self._chargeDashActive = true
 		local pos = self.Entity.TransformComponent.Position
 		self.Entity.TransformComponent.Position = Vector3(self._chargeSpawnX, self._chargeSpawnY, pos.z)
+		-- 유저 지정(2026-08-22): 원형파장(DustExplosion — "연기와 함께 원형 파장이 터지는" 네이티브
+		-- 파티클) 위치가 발밑에 너무 깔려 보였다는 지적으로 Y오프셋을 0.5 올림(-0.25 → 0.25).
 		_ParticleService:PlayBasicParticleAttached(
 			BasicParticleType.DustExplosion,
 			self.Entity,
-			Vector3(0, -0.25, 0.1),
+			Vector3(0, 0.25, 0.1),
 			0,
-			Vector3(1, 1, 1),
+			Vector3(self.ChargeDustScale, self.ChargeDustScale, self.ChargeDustScale),
 			false,
 			{ SortingLayer = self.ChargeDustSortingLayer, OrderInLayer = self.ChargeDustOrderInLayer }
 		)
@@ -1142,10 +1352,27 @@ script MonsterAI extends Component
 		local pos = self.Entity.TransformComponent.Position
 		self.Entity.TransformComponent.Position = Vector3(x, y, pos.z)
 
+		-- 무리원(_isSwarmMember) 전용 — CardManager.FindTarget()은 살아있는 몬스터 중 _currentScale이
+		-- 가장 큰 "단 하나"만 매 프레임 고정 타겟으로 고른다(전 게임 공통 로직, 엄격한 > 비교라 동률이면
+		-- 먼저 나온 쪽이 계속 이긴다). 일반 몬스터는 접근하며 스케일이 계속 자라 자연히 타겟이 바뀌는데,
+		-- 미니빈은 스케일이 고정이라 그중 한 마리(스케일이 가장 낮게 뽑힌 개체)가 다른 개체들이 전부
+		-- 죽기 전까지 영원히 타겟에서 배제됐다(유저 리포트: "현재 공격하는 한마리는 플레이어가 공격
+		-- 자체를 못함"). 각자 비행 위상(_flyPhaseX, 스폰 시 이미 개별 랜덤)에 맞춰 아주 작게(±2%,
+		-- 육안으로는 거의 안 보임 — 유저가 뺀 "커졌다 작아졌다"는 공격 순간의 큰 들이받기 펌프였지 이
+		-- 미세한 상시 진동이 아니다) 흔들어서, 매 순간 "제일 큰" 개체가 무리 안에서 계속 돌아가며
+		-- 바뀌게 한다.
+		if self._isSwarmMember then
+			local swarmScale = 1.0 + math.sin(self._flyTime * 1.7 + self._flyPhaseX) * 0.02
+			self._currentScale = swarmScale
+			self.Entity.TransformComponent.Scale = Vector3(swarmScale * self._scaleMultiplier, swarmScale * self._scaleMultiplier, 1.0)
+		end
+
 		self._attackTimer = self._attackTimer - delta
 		if self._attackTimer <= 0 then
-			-- 미니무르는 순수 이스터에그용(플레이어를 공격하지 않음) — 공격 판정 자체를 건너뛴다
-			if not self._isMiniMoore then
+			-- 미니무르/_neverAttacks(노란 미니빈 등)는 순수 이스터에그용(플레이어를 공격하지 않음) —
+			-- 공격 판정 자체를 건너뛴다. _neverAttacks는 원래 지상형 분기(_reachedPlayer)에서만
+			-- 체크되고 있었는데, 비행형은 이 분기를 아예 안 타서 무시되고 있었다.
+			if not self._isMiniMoore and not self._neverAttacks then
 				self:OnReachPlayer()
 			end
 			self._attackTimer = self.FlyAttackInterval
@@ -1281,6 +1508,7 @@ script MonsterAI extends Component
 	method void TakeDamage(number damage)
 		-- 카드 공격 시 호출
 		if self._dead then return end
+		if self._isCauldron and self._cauldronLocked then return end
 		damage = damage * self:GetGearEliteBossDamageMult()
 		if self._isBonusBoss then
 			self:PlayDamageSkin(damage, false)
@@ -1341,6 +1569,7 @@ script MonsterAI extends Component
 	@ExecSpace("ServerOnly")
 	method void TakeDamageWithOffset(number damage, Vector2 offset)
 		if self._dead then return end
+		if self._isCauldron and self._cauldronLocked then return end
 		if self._isBonusBoss then
 			self:PlayDamageSkinWithOffset(damage, false, offset)
 			self:OnBonusBossHit()
@@ -1364,6 +1593,7 @@ script MonsterAI extends Component
 	@ExecSpace("ServerOnly")
 	method void TakeDamageCritWithOffset(number damage, Vector2 offset)
 		if self._dead then return end
+		if self._isCauldron and self._cauldronLocked then return end
 		damage = damage * (1.0 + _CardManager:GetCriticalShotBonus() + _CardManager:GetKarmaBonus())
 		-- 장비 치명타 피해 보너스(자마다르 에픽 상시 / 레전더리 확률 버프) — 모든 크리티컬이
 		-- 이 두 진입점(TakeDamageCrit / TakeDamageCritWithOffset)만 거치므로 개별 스킬의
@@ -1391,6 +1621,7 @@ script MonsterAI extends Component
 	@ExecSpace("ServerOnly")
 	method void TakeDamageCrit(number damage)
 		if self._dead then return end
+		if self._isCauldron and self._cauldronLocked then return end
 		-- 크리티컬 샷(카드111, 실피드 전용 패시브) + 카르마(카드182, 쉐이드 전용 패시브) 보너스 —
 		-- 모든 크리티컬 대미지에 추가 배율 적용(같은 런에서 둘 다 활성일 수 없어 가산해도 안전)
 		damage = damage * (1.0 + _CardManager:GetCriticalShotBonus() + _CardManager:GetKarmaBonus())
@@ -1425,6 +1656,7 @@ script MonsterAI extends Component
 	@ExecSpace("ServerOnly")
 	method void TakeDamageDelayedDeath(number damage, boolean isCrit, number deathDelay)
 		if self._dead then return end
+		if self._isCauldron and self._cauldronLocked then return end
 		-- 크리티컬 샷(카드111)/카르마(카드182) 보너스 — 크리티컬 경로에서만 추가 배율 적용
 		if isCrit then damage = damage * (1.0 + _CardManager:GetCriticalShotBonus() + _CardManager:GetKarmaBonus()) end
 		if self._isBonusBoss then
@@ -2164,7 +2396,9 @@ script MonsterAI extends Component
 		if self._isElite then
 			_CardManager:OnEliteKilled(self.Entity.TransformComponent.WorldPosition, fallHeight, groundWorldY, dropScale)
 			_MonsterSpawner:OnEliteKilled()
-		else
+		elseif not self._isCauldron then
+			-- 카페테리아 가마솥은 자기만의 확정 포션 표(아래 elseif 체인)가 있으므로 일반 존의 확률성
+			-- 힐포션/빙결아이템/허수아비/바운스 드롭과 중복되지 않게 제외한다.
 			_GameManager:TryDropHealPotion(self.Entity.TransformComponent.WorldPosition, fallHeight, groundWorldY, dropScale)
 			_GameManager:TryDropFreezeItem(self.Entity.TransformComponent.WorldPosition, fallHeight, groundWorldY, dropScale)
 			_GameManager:TryDropScarecrowItem(self.Entity.TransformComponent.WorldPosition, fallHeight, groundWorldY, dropScale)
@@ -2174,9 +2408,26 @@ script MonsterAI extends Component
 		if self._isErdas then
 			-- 존 잡템 풀 대신 Map23ErdasEasterEggLogic이 정수 드롭(100% 확정)+킬카운트를 전담한다
 			_Map23ErdasEasterEggLogic:OnErdasKilled(self._erdasOrdinal, self.Entity.TransformComponent.WorldPosition, fallHeight, groundWorldY, dropScale)
+		elseif self._isYellowMiniBean then
+			-- 일반 존 잡템 대신 스킬 카드 1개(슬롯 강화)를 지급한다 — _isYellowMiniBean 주석 참고
+			_CardManager:OnYellowMiniBeanCaught(self.Entity.TransformComponent.WorldPosition, fallHeight, groundWorldY, dropScale)
 		elseif self._isTreasureChest then
 			-- map24는 웨이브/존 잡템 개념이 없다 — 처치 시점에 그 자리에 귀환 포탈을 생성한다
 			_Map24TreasureChestLogic:OnChestKilled(self.Entity.TransformComponent.WorldPosition)
+		elseif self._isTiredKnight then
+			-- 지쳐버린 기사(ep2_map3 존마다 1마리) — 유저 지정: "처치시 100% 아이템이 나오고" — 존 잡템
+			-- 확률 대신 GrantLootItemDrop(무조건 지급)으로 tired_knight_seal을 확정 지급한다.
+			_GameManager:GrantLootItemDrop(self.Entity.TransformComponent.WorldPosition, fallHeight, groundWorldY, "tired_knight_seal", dropScale)
+		elseif self._isCauldron then
+			-- 카페테리아 가마솥 — 유저 지정 확률표: 엘릭서(potionType=3) 5% / 하얀포션(2) 35% / 빨간포션(1) 60%
+			local roll = _UtilLogic:RandomDouble()
+			local potionType = 1
+			if roll < 0.05 then
+				potionType = 3
+			elseif roll < 0.40 then
+				potionType = 2
+			end
+			_GameManager:ApplyPotionDrop(potionType, self.Entity.TransformComponent.WorldPosition, fallHeight, groundWorldY, dropScale)
 		elseif self._spawnZoneIndex == 16 or self._spawnZoneIndex == 17 then
 			_GameManager:TryDropShadowVoucher(self.Entity.TransformComponent.WorldPosition, fallHeight, groundWorldY, dropScale)
 		else
@@ -2186,6 +2437,19 @@ script MonsterAI extends Component
 		end
 		if self._isBoss then
 			_GameManager:OnBossDefeated(self.Entity.TransformComponent.WorldPosition, fallHeight, groundWorldY, dropScale)
+		end
+		if self._isCauldron then
+			-- 유저 지정: "포션을 뱉으면 알파가 빠지면서 자연스럽게 사라짐" — die1 재생과 동시에 알파를
+			-- 0으로 페이드, 파괴 타이밍(_dieDuration+0.2)에 정확히 맞춰 끝나게 한다.
+			local renderer = self.Entity.SpriteRendererComponent
+			if renderer ~= nil then
+				_TweenLogic:PlayTween(1.0, 0.0, self._dieDuration + 0.2, EaseType.QuadEaseIn, function(alpha)
+					if isvalid(self) and isvalid(self.Entity) and isvalid(renderer) then
+						local c = renderer.Color
+						renderer.Color = Color(c.r, c.g, c.b, alpha)
+					end
+				end)
+			end
 		end
 		self:PlayDeathAnimation(self._dieRUID, self._dieDuration)
 		self.Entity:Destroy(self._dieDuration + 0.2)
@@ -2277,7 +2541,67 @@ script MonsterAI extends Component
 	-- MapManager가 호출: 플레이어가 이 맵을 떠나면 접근/공격을 멈춘다 (화면 밖에서 몰래 때리는 것 방지)
 	@ExecSpace("ServerOnly")
 	method void Pause()
+		if self._neverPauses then return end
 		self._paused = true
+	end
+
+	-- Ep2MiniBeanEasterEggLogic 전용 — 위 _neverPauses 주석 참고
+	@ExecSpace("ServerOnly")
+	method void SetNeverPauses(boolean value)
+		self._neverPauses = value
+	end
+
+	-- Ep2MiniBeanEasterEggLogic 전용 — 위 _skipAttackLunge 주석 참고
+	@ExecSpace("ServerOnly")
+	method void SetSkipAttackLunge(boolean value)
+		self._skipAttackLunge = value
+	end
+
+	-- Ep2MiniBeanEasterEggLogic 전용 — InitializeAlienInvader는 원거리 히트 이펙트 개념이 없어서
+	-- (Zone21AlienEasterEggLogic과 공유하는 시그니처라 파라미터를 늘리지 않았다) 별도 세터로 뺐다.
+	-- PlayRangedHitEffect()는 _hitEffectRUID가 빈 문자열이면 스스로 아무것도 안 하므로, 이걸 호출
+	-- 안 하는 다른 비행형(뉴그레이 화이트 등)에는 영향이 없다.
+	@ExecSpace("ServerOnly")
+	method void SetRangedHitEffect(string hitEffectRUID, number hitEffectDuration, number scaleMultiplier)
+		self._hitEffectRUID = hitEffectRUID
+		self._hitEffectDuration = hitEffectDuration
+		self._hitEffectScaleMultiplier = scaleMultiplier
+	end
+
+	-- Ep2MiniBeanEasterEggLogic 전용 — GetClosestTargets 등이 _currentScale 내림차순으로 정렬해 타겟을
+	-- 고르는데, 미니빈은 전부 고정 1.0이라 완전히 동률이었다. 동률이면 table.sort가 매번 같은 순서로
+	-- 정리해버려서(입력 순서가 고정이라 사실상 결정적) 특정 한 마리(하필 무리 공격 선점자와 겹치는
+	-- 경우가 많았다)가 영구히 타겟 후보 밖으로 밀려 플레이어 공격을 아예 못 맞는 버그가 있었다(유저
+	-- 리포트: "현재 공격하는 한마리는 플레이어가 공격 자체를 못함"). 눈에 안 띄는 아주 작은 편차를
+	-- 줘서 동률을 깨고, 렌더 크기도 같이 갱신한다(InitializeAlienInvader와 동일한 계산식).
+	@ExecSpace("ServerOnly")
+	method void SetCurrentScale(number scale)
+		self._currentScale = scale
+		self.Entity.TransformComponent.Scale = Vector3(scale * self._scaleMultiplier, scale * self._scaleMultiplier, 1.0)
+	end
+
+	-- Ep2MiniBeanEasterEggLogic 전용 — InitializeAlienInvader는 _attackDuration을 세팅하지 않아
+	-- 기본값(0.25초)으로 남는다. PlayAttackAnimation은 이 시간이 지나면 무조건 attackRUID를 stand로
+	-- 되돌리는데, attack2가 19프레임짜리라(이 프로젝트 관례상 초당 약 10프레임 → 1.9초 필요,
+	-- GetMapAttackDuration 주석의 "11프레임=1.1초" 사례와 동일 계산) 0.25초는 한참 모자라 애니메이션이
+	-- 중간에 잘려 보였다(유저 리포트: "공격 모션이 너무 빨라서 짤린다").
+	@ExecSpace("ServerOnly")
+	method void SetAttackDuration(number duration)
+		self._attackDuration = duration
+	end
+
+	-- Ep2MiniBeanEasterEggLogic 전용 — 위 _isSwarmMember 주석 참고
+	@ExecSpace("ServerOnly")
+	method void SetSwarmMember(boolean value)
+		self._isSwarmMember = value
+	end
+
+	-- Ep2MiniBeanEasterEggLogic 전용 — 위 _isYellowMiniBean 주석 참고. 공격 자체를 막는 것까지 한 번에
+	-- 처리한다(_neverAttacks는 UpdateFlying 비행형 분기에서도 존중하도록 아래에서 같이 수정했다).
+	@ExecSpace("ServerOnly")
+	method void SetYellowMiniBean(boolean value)
+		self._isYellowMiniBean = value
+		self._neverAttacks = value
 	end
 
 	-- MapManager가 호출: 플레이어가 이 맵으로 돌아오면 다시 활동 재개
@@ -2288,46 +2612,66 @@ script MonsterAI extends Component
 
 	@ExecSpace("ServerOnly")
 	method void OnReachPlayer()
-		-- 연막탄(쉐이드) 명중 하락 판정 — 보스/엘리트는 절반만 적용. 빗나가면 데미지/연출 전부
-		-- 스킵(공격 자체가 안 일어난 것으로 처리).
-		if self._accuracyDebuffPercent > 0 then
-			local missChance = self._accuracyDebuffPercent
-			if self._isBoss or self._isElite then missChance = missChance * 0.5 end
-			if _UtilLogic:RandomDouble() < missChance then
-				log("Monster attack missed (smoke debuff " .. math.floor(missChance * 100) .. "%)")
-				return
+		-- 무리 공격 중복 제거(_isSwarmMember 주석 참고) — 유저 지정: "공격모션은 전체가 다 해야함,
+		-- 데미지만 1번" — 그래서 데미지 판정(미스 굴림 포함)만 이 플래그로 막고, 아래 연출 블록은
+		-- 무리원 전체가 항상(선점 실패해도) 실행한다. TryClaimGroupAttack이 false를 반환해도 함수
+		-- 전체를 리턴하지 않고 isGroupWinner만 꺼둔 채로 계속 진행한다.
+		local isGroupWinner = true
+		if self._isSwarmMember then
+			isGroupWinner = _Ep2MiniBeanEasterEggLogic:TryClaimGroupAttack()
+		end
+
+		if isGroupWinner then
+			-- 연막탄(쉐이드) 명중 하락 판정 — 보스/엘리트는 절반만 적용. 빗나가면 데미지만 스킵
+			-- (연출은 아래에서 무리원 전체가 그대로 재생됨).
+			local missed = false
+			if self._accuracyDebuffPercent > 0 then
+				local missChance = self._accuracyDebuffPercent
+				if self._isBoss or self._isElite then missChance = missChance * 0.5 end
+				if _UtilLogic:RandomDouble() < missChance then
+					log("Monster attack missed (smoke debuff " .. math.floor(missChance * 100) .. "%)")
+					missed = true
+				end
 			end
-		end
 
-		-- 다크 사이트(카드184, 쉐이드 전용 패시브) — 영구 회피 확률. 연막탄 디버프와 별개 판정이고
-		-- 보스/엘리트도 감쇄 없이 그대로 적용된다(플레이어 자신의 고정 스탯이라 몬스터 등급과 무관).
-		local darkSightChance = _CardManager:GetDarkSightEvadeChance()
-		if darkSightChance > 0 and _UtilLogic:RandomDouble() < darkSightChance then
-			log("Monster attack missed (dark sight " .. math.floor(darkSightChance * 100) .. "%)")
-			return
-		end
+			-- 다크 사이트(카드184, 쉐이드 전용 패시브) — 영구 회피 확률. 연막탄 디버프와 별개 판정이고
+			-- 보스/엘리트도 감쇄 없이 그대로 적용된다(플레이어 자신의 고정 스탯이라 몬스터 등급과 무관).
+			local darkSightChance = _CardManager:GetDarkSightEvadeChance()
+			if not missed and darkSightChance > 0 and _UtilLogic:RandomDouble() < darkSightChance then
+				log("Monster attack missed (dark sight " .. math.floor(darkSightChance * 100) .. "%)")
+				missed = true
+			end
 
-		-- 플레이어 HP 감소 (엘리트는 공격력 15% 추가, 보스는 BossAttackMultiplier 배)
-		log("Monster reached player!")
-		local dmgMultiplier = 1.0
-		if self._isBoss then
-			dmgMultiplier = _GameManager.BossAttackMultiplier
-		elseif self._isElite then
-			dmgMultiplier = 1.15
-		end
-		-- 빠른 이동 안전장치 2단계(6연속) — ApplyRushPenalty가 세팅한 배율을 그대로 곱한다(기본 1.0이면 무영향)
-		dmgMultiplier = dmgMultiplier * self._rushDamageMultiplier
-		if self._isRangedSlash then
-			-- 발톱자국 이펙트가 실제로 최대 스케일(화면에 닿는 시점)에 도달했을 때 대미지가 들어가도록
-			-- PlaySlashEffect와 동일한 지연(공격모션 절반 + 이펙트 성장 시간)만큼 늦춘다(유저 요청 —
-			-- "스케일이 0.6까지 도달했을때 대미지 들어오도록"). 다른 종(근접/비행/먹물)은 기존처럼 즉시.
-			local hitDelay = self._attackDuration * 0.5 + self.SlashEffectDuration
-			_TimerService:SetTimerOnce(function()
-				if not isvalid(self) or self._dead then return end
-				_GameManager:OnMonsterReached(dmgMultiplier)
-			end, hitDelay)
-		else
-			_GameManager:OnMonsterReached(dmgMultiplier)
+			if not missed then
+				-- 플레이어 HP 감소 (엘리트는 공격력 15% 추가, 보스는 BossAttackMultiplier 배)
+				log("Monster reached player!")
+				local dmgMultiplier = 1.0
+				if self._isBoss then
+					dmgMultiplier = _GameManager.BossAttackMultiplier
+				elseif self._isElite then
+					dmgMultiplier = 1.15
+				end
+				-- 빠른 이동 안전장치 2단계(6연속) — ApplyRushPenalty가 세팅한 배율을 그대로 곱한다(기본 1.0이면 무영향)
+				dmgMultiplier = dmgMultiplier * self._rushDamageMultiplier
+				if self._isRangedSlash then
+					-- 발톱자국 이펙트가 실제로 최대 스케일(화면에 닿는 시점)에 도달했을 때 대미지가 들어가도록
+					-- PlaySlashEffect와 동일한 지연(공격모션 절반 + 이펙트 성장 시간)만큼 늦춘다(유저 요청 —
+					-- "스케일이 0.6까지 도달했을때 대미지 들어오도록"). 다른 종(근접/비행/먹물)은 기존처럼 즉시.
+					local hitDelay = self._attackDuration * 0.5 + self.SlashEffectDuration
+					_TimerService:SetTimerOnce(function()
+						if not isvalid(self) or self._dead then return end
+						_GameManager:OnMonsterReached(dmgMultiplier, self._isSwarmMember or self._ignoresHitImmune)
+					end, hitDelay)
+				else
+					-- 무리 공격(_isSwarmMember)은 TryClaimGroupAttack으로 이미 무리 내부에서 1회로 제한해뒀는데,
+					-- 일반 스폰 몬스터가 방금 때려서 걸린 전역 무적 프레임(GameManager._hitImmune, 0.8초)에
+					-- 또 막혀서 대미지가 안 들어가는 경우가 있었다(유저 지적: "다른 일반 스폰 몬스터가 연속으로
+					-- 때리면 대미지 안들어가게 딜레이 걸었잖아? 쟤는 무시하라는말임"). 무리 공격은 이 무적
+					-- 프레임을 무시하고 항상 들어가게 한다 — 다른 몬스터끼리의 무적 프레임 상호작용은 그대로 유지.
+					-- _ignoresHitImmune(Tired Knight)도 동일한 경로로 무적 프레임을 무시한다.
+					_GameManager:OnMonsterReached(dmgMultiplier, self._isSwarmMember or self._ignoresHitImmune)
+				end
+			end
 		end
 
 		-- 비행형(박쥐)은 배회 중 스케일이 고정돼 있어 "접근감"이 없고 공격이 잘 안 보인다는 피드백이 있어,
@@ -2342,11 +2686,24 @@ script MonsterAI extends Component
 			if self._attackRUID ~= "" then
 				self:PlayAttackAnimation(self._attackRUID, self.MonsterSprite, self._attackDuration)
 			end
-			self:PlayLungeAnimation(1.0, 0)
+			if not self._skipAttackLunge then
+				self:PlayLungeAnimation(1.0, 0)
+			end
+			-- 원거리 비행형(미니빈 등) 전용 — 근접 비행형(_hitEffectRUID=="")은 내부에서 그냥 아무것도
+			-- 안 하고 리턴하므로 무조건 호출해도 안전하다.
+			self:PlayRangedHitEffect()
 		elseif self._attackRUID ~= "" then
 			self:PlayAttackAnimation(self._attackRUID, self.MonsterSprite, self._attackDuration)
 			self:FlashHideDepthOverlay(self._attackDuration)
-			self:PlayAttackHop()
+			-- 버그 수정(2026-08-21, 유저 리포트 "다가오다가 일정 거리 되면 그냥 어택으로 넘어가야하는데
+			-- 근접처럼 점프하는 코드가 불린다 — 네펜데스도 마찬가지") — attackRUID(공격1 스프라이트)가
+			-- 있는 종은 원거리(_isRangedInk)든 근접이든 구분 없이 전부 이 홉(제자리에서 위로 살짝 뛰었다
+			-- 착지하는 트윈)을 같이 재생하고 있었다. 근접 종은 "들이받는" 느낌을 위해 필요하지만, 원거리
+			-- 종(네펜데스/스코피 등)은 제자리에서 공격 포즈만 보여줘야 하는데 이 홉 때문에 몸이 붕 떴다
+			-- 내려오는 게 "근접처럼 점프해서 때린다"로 보였다 — 원거리 종만 홉을 생략한다.
+			if not self._isRangedInk then
+				self:PlayAttackHop()
+			end
 			-- 원거리(칼자국) 종(자이언트 쉐도우)은 자기 자신의 attack1 스프라이트 교체 위에 발톱자국
 			-- 이펙트를 추가로 띄운다 — 원거리(먹물)와 달리 대체 연출이 아니라 "얹는" 방식이라 elseif가
 			-- 아니라 이 분기 안에 같이 넣는다.
@@ -2493,14 +2850,21 @@ script MonsterAI extends Component
 			local px = _CardManager:GetPlayerCenterX()
 			local py = _CardManager:GetPlayerCenterY()
 			local z = self.Entity.TransformComponent.WorldPosition.z
-			local dropScale = _CardManager:GetEffectScaleRatio(self)
+			local dropScale = _CardManager:GetEffectScaleRatio(self) * self._hitEffectScaleMultiplier
 			-- 문어(PlayInkSplat)처럼 화면 전체 범위에서 무작위 위치에 뜨도록 스프레드를 넓혔다(유저
 			-- 요청: "연출 위치 좀 랜덤으로 화면내에(먹물처럼)"). PC 카메라 가시범위(±6.4, ±3.6) 대비
 			-- 화면 밖으로 새지 않을 정도로 여유를 둔 값 — ink splat의 UI px 스프레드(±220,±140)를
 			-- 월드 단위로 환산한 비율과 동일하다.
 			local offsetX = (_UtilLogic:RandomDouble() * 2 - 1) * 1.5
 			local offsetY = (_UtilLogic:RandomDouble() * 2 - 1) * 0.9
-			local fxPos = Vector3(px + offsetX, py + offsetY, z - 0.2)
+			local fxY = py + offsetY
+			-- 유저 지정(2026-08-22, PlayInkSplat 하단 30% 제외와 동일한 요청 — "네펜데스랑 골든 어쩌구
+			-- 걔네도") — PC 카메라 가시범위(세로 ±3.6, 전체 7.2) 기준 화면 하단 30%(2.16)를 제외한다.
+			-- py(GetPlayerCenterY, 카메라가 대체로 플레이어를 따라가므로 화면 중심 Y의 근사치)를 기준으로
+			-- 하단 경계는 py - 3.6 + 2.16 = py - 1.44.
+			local worldBottomExcludeY = py - 1.44
+			if fxY < worldBottomExcludeY then fxY = worldBottomExcludeY end
+			local fxPos = Vector3(px + offsetX, fxY, z - 0.2)
 			-- 실제 스폰/중복 방지는 GameManager가 전담한다(문어 PlayInkSplat과 동일한 전역 가드 —
 			-- 유저 요청: "문어처럼", 여러 마리가 동시에 쏴도 화면엔 한 번에 하나만 뜨게 함).
 			_GameManager:PlayRangedHitEffect(fxPos, self._hitEffectRUID, self._hitEffectDuration, map, dropScale)

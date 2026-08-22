@@ -1,0 +1,301 @@
+@Logic
+script Ep2MiniBeanEasterEggLogic extends Logic
+
+	-- 에피소드2 미니빈 이스터에그: MapObject_41/222/153/223(ep2_map2, Ep2MiniBeanEasterEggTrigger) 중
+	-- 하나를 누르면 지정된 존으로 강제 이동시키고 그 존에 미니빈(비행 군집형 원거리) 12마리(+확률로
+	-- 노란 미니빈 1마리)를 소환한다(유저 지정). Zone21AlienEasterEggLogic과 동일한 "InitializeAlienInvader로
+	-- 정상 존 풀을 거치지 않는 일회성 특수 몬스터 직접 초기화" 패턴을 재사용한다.
+	--
+	-- "존을 이동해도 따라오게" — 미니빈은 MonsterAI._neverPauses=true로 초기화돼(SetNeverPauses)
+	-- MapManager.SetMonstersPausedForZone(정상 존 전환마다 자동으로 "떠난 존" 몬스터를 일시정지시키는
+	-- 로직)이 Pause()를 걸어도 무시한다 — 그래서 플레이어가 어디로 이동하든 항상 활동(공격 타이머)
+	-- 상태를 유지한다. _spawnZoneIndex 자체는 항상 실제 현재 존 값을 유지한다(GetMonstersInCurrentZone
+	-- — 플레이어 카드/스킬 타겟팅이 쓰는 목록 — 이 이 값으로 걸러내므로, 존 밖 예약값을 쓰면 플레이어
+	-- 공격이 영원히 안 맞는 부작용이 있었다 — 유저 리포트: "플레이어가 미니빈 공격을 안한다"). 다만
+	-- 비행형은 사인파 중심이 스폰 시점에 고정돼 있어(MonsterAI.UpdateFlying) 그것만으로는 화면에 안
+	-- 보이는 채로 계속 공격만 하는 유령이 되므로, 여기서 매 프레임 CurrentMapIndex 변화를 감지해
+	-- 살아있는 미니빈 전체를 MonsterAI.RepositionFlyingCenter로 새 존의 스폰 위치 근처로 즉시 옮겨
+	-- (_spawnZoneIndex도 같이 갱신) 시각적으로도 따라오게 한다.
+	@Sync property boolean Triggered = false
+
+	property integer MiniBeanCount = 12
+	-- 미니빈(mob/8820007.img) 리소스팩 — fly=대기/이동, hit1=피격, die1=사망, attack2=공격 모션(유저 지정),
+	-- regen=소환 연출(유저 지정). fe568684...는 미니빈 팩에 같이 딸려온 원거리 착탄 이펙트(유저 지정 —
+	-- 확인해보니 실제로 폭발 모양 스타버스트 스프라이트).
+	property string MiniBeanStandRUID = "109a27a8b746465887d851112fab883b"
+	property string MiniBeanHitRUID = "14c719c1e88c4acc820639b48664ac04"
+	property string MiniBeanDieRUID = "89673f9669704176a53200c512d29d30"
+	property number MiniBeanDieDuration = 1.2
+	property string MiniBeanAttackRUID = "c608f69f1bcd4f979814be928cacf22f"
+	-- attack2가 19프레임 — 이 프로젝트 관례상 초당 약 10프레임(GetMapAttackDuration 주석 "11프레임=1.1초"와
+	-- 동일 계산)이라 19/10=1.9초 필요. MonsterAI.InitializeAlienInvader는 _attackDuration을 세팅하지
+	-- 않아 기본값(0.25초)에 머물러 애니메이션이 중간에 잘렸다(유저 리포트: "공격 모션이 너무 빨라서 짤린다").
+	property number MiniBeanAttackDuration = 1.9
+	-- 공격 주기(FlyAttackInterval, 기본 1.5초)가 애니메이션 길이(1.9초)보다 짧으면 끝나기 전에 다음
+	-- 공격이 겹쳐 들어와 계속 프레임 0부터 다시 시작하는 것처럼 보인다 — 최소 애니메이션 길이만큼은
+	-- 유지되도록 여유를 두고 늘린다.
+	property number MiniBeanAttackInterval = 2.1
+	-- 원거리 공격이 실제로 플레이어 화면에 찍히는 착탄 이펙트(MonsterAI.PlayRangedHitEffect가 사용)
+	property string MiniBeanHitEffectRUID = "fe568684794246348c8da9a3f6446b4c"
+	property number MiniBeanHitEffectDuration = 0.5
+	-- 유저 요청: "이 연출 크기 30% 크게"
+	property number MiniBeanHitEffectScale = 1.3
+	-- GetClosestTargets가 _currentScale 내림차순 동률 정렬을 하는데 미니빈은 전부 고정 1.0이라
+	-- 완전히 동률이었다 — 특정 한 마리가 영구히 타겟 후보 밖으로 밀려 플레이어 공격을 아예 못 맞는
+	-- 버그의 원인이었다(유저 리포트: "현재 공격하는 한마리는 플레이어가 공격 자체를 못함"). 눈에 안
+	-- 띄는 편차(±1%)로 동률을 깨서 타겟 선정이 매번 골고루 돌아가게 한다.
+	property number MiniBeanScaleJitter = 0.01
+	-- 소환 순간 1회 재생하는 연출(스폰 직후 그 자리에서 살짝 재생되다 사라짐)
+	property string MiniBeanSpawnEffectRUID = "b772237e48984bbb9f426181a1336eeb"
+	property number MiniBeanSpawnEffectDuration = 0.6
+
+	-- 유저 요청: "군집형이랬잖아 뭉쳐서 다니면 좋겠어" — 기존엔 스폰 스프레드(±5)+개별 사인파 진폭
+	-- (MonsterAI 기본 FlyRangeX=3.0)이 합쳐져 최대 16유닛까지 흩어져 보였다. 스폰 스프레드를 좁히고
+	-- (MiniBeanClusterRadius) 개별 진폭도 줄여서(MiniBeanFlyRangeX) 한 무리로 뭉쳐 다니는 것처럼 보이게 한다.
+	property number MiniBeanClusterRadius = 1.5
+	property number MiniBeanFlyRangeX = 1.0
+
+	-- 노랑 미니빈(resource_pack "노랑 미니빈") — 공격은 안 하고(MonsterAI.SetYellowMiniBean이
+	-- _neverAttacks까지 같이 켠다), 잡으면(Die) _CardManager:OnYellowMiniBeanCaught로 슬롯 카드 1개를
+	-- 지급한다(유저 지정). attack RUID가 없어(공격을 안 하므로) InitializeAlienInvader에는 빈 문자열을 넘긴다.
+	property number YellowMiniBeanChance = 0.10
+	property string YellowMiniBeanStandRUID = "932504d966da4d0db4ce2977d1938139" -- fly
+	property string YellowMiniBeanHitRUID = "63860593d90244dc98bd26742a31d5d0" -- hit1
+	property string YellowMiniBeanDieRUID = "3eef1c9b78dd4793abddee456254c9c3" -- die1
+	-- 런당 1번만 뜰 수 있다(유저 지정) — 스폰 성공 여부와 무관하게 "이번 런에 노란 미니빈을 이미
+	-- 시도했는지"를 추적한다(확률에 걸려 실제로 안 나왔어도 재시도하지 않음 — 유저가 "10% 확률"이라고
+	-- 명시했으므로 매번 재도전하면 사실상 훨씬 자주 나오게 된다).
+	property boolean _yellowMiniBeanRolledThisRun = false
+
+	-- 유저 요청: "맵 1로 보내던 부분을 그냥 맵2 2~9(구름을 누르는 존 제외하고) 랜덤으로 보내자" —
+	-- MapObject_153/223(예전엔 TargetMapIndex=45 고정)는 이제 이 예약값을 갖고, OnObjectTouched가
+	-- 터치 시점의 현재 존(=누른 그 "구름"이 있는 존)을 제외한 맵2 존2~9(mapIndex 56~63) 중 하나로
+	-- 매번 다시 무작위 이동시킨다. MapObject_41/222(맵2 존1=55 고정)는 그대로 둔다.
+	property integer RandomReturnSentinel = 0
+	property table Map2RandomZonePool = {56, 57, 58, 59, 60, 61, 62, 63}
+
+	property table _followers = {} -- 살아있는(추정) 미니빈의 script.MonsterAI 컴포넌트 목록
+	property integer _lastZoneIndex = 0
+	property number SpawnDelay = 1.0
+
+	-- 버그 수정(유저 리포트: "미니빈이 있는상태에서 구름을 눌러서 랜덤으로 워프하면 미니빈이 안따라오네") —
+	-- 실측 재현: 랜덤 워프 포탈을 대기 없이 연달아 3번 누르면(SilentMoveToMap이 MoveToMap의 _moveLocked
+	-- 같은 연타 방지 장치가 전혀 없어 매번 그대로 실행됨) 12마리 중 1마리가 사망 로그 없이 조용히
+	-- isvalid()=false가 되어 목록에서 유령처럼 남는 현상을 확인했다(TeleportService로 같은 물리 맵
+	-- "ep2_map2"에 텔레포트 요청이 겹쳐 들어가면서 생기는 엔진 레벨 경합으로 추정). MapManager.MoveToMap이
+	-- 이미 쓰는 것과 동일한 쿨다운 패턴을 여기도 적용해 애초에 겹쳐 들어가지 않게 막는다.
+	property number TouchCooldownDuration = 1.5
+	property boolean _touchLocked = false
+
+	-- TryClaimGroupAttack 전용 — Logic.OnUpdate가 Component.OnUpdate보다 먼저 실행되는 걸 이용해,
+	-- 이 프레임 번호를 미니빈들의 OnReachPlayer보다 먼저 갱신해둔다(아래 TryClaimGroupAttack 주석 참고)
+	property integer _frameCounter = 0
+	property integer _lastGroupAttackFrame = -1
+
+	-- Ep2MiniBeanEasterEggTrigger.RequestTouch()가 호출 — 어느 오브젝트를 눌렀든 targetMapIndex만 받는다.
+	-- 왕복 포탈이라 이동 자체는 매번 다시 동작한다. 소환은 더 이상 "런당 1번"이 아니라 "지금 따라다니는
+	-- 무리가 하나도 안 남았을 때만" 다시 일어난다(유저 지적: "미니빈이 다 잡혔으면 구름 누르면 또
+	-- 미니빈이 떠야해 지금은 1회 뜨고 안뜨네").
+	@ExecSpace("ServerOnly")
+	method void OnObjectTouched(integer targetMapIndex)
+		-- 연타 방지(위 TouchCooldownDuration 주석 참고) — 쿨다운 중이면 조용히 무시
+		if self._touchLocked then return end
+		self._touchLocked = true
+		_TimerService:SetTimerOnce(function()
+			if isvalid(self) then self._touchLocked = false end
+		end, self.TouchCooldownDuration)
+
+		local actualTarget = targetMapIndex
+		if targetMapIndex == self.RandomReturnSentinel then
+			actualTarget = self:PickRandomMap2Zone()
+		end
+		_MapManager:SilentMoveToMap(_MapManager.CurrentMapIndex, actualTarget)
+		-- SilentMoveToMap 자체는 BGM을 안 건드린다(월드 접속 직후 리다이렉트에서도 쓰이는 함수라, 거기서
+		-- 곧바로 BGM을 틀면 타이틀 화면 뒤로 새어 들릴 위험이 있어 의도적으로 뺐다 — MapManager.mlua 참고).
+		-- 여기는 플레이어가 명시적으로 포탈을 누른 안전한 호출부라 DoMapChange/DoScrollMapChange와
+		-- 동일하게 직접 트리거해준다(안 그러면 왕복해도 BGM이 안 바뀌는 버그가 있었다).
+		_MapManager:TriggerBgmIfFileChanged(_MapManager:GetMapName(actualTarget))
+		self.Triggered = true
+		-- 맵 이동(와이프/카메라 스냅)이 끝나고 화면이 안정된 뒤에 메세지+스폰이 나오도록 1초 지연
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) then return end
+			if self:HasLivingFollowers() then return end -- 아직 무리가 남아있으면 재소환하지 않는다
+			self:SpawnMiniBeanSwarm(actualTarget)
+			_UIToast:ShowMessage("미니빈이 출현했다!")
+			log("Ep2MiniBeanEasterEgg: triggered, moved to zone " .. actualTarget .. " and spawned mini beans")
+		end, self.SpawnDelay)
+	end
+
+	-- 터치 시점의 현재 존(플레이어가 지금 누르고 있는 "구름"이 있는 그 존)을 제외한 나머지 풀에서 고른다
+	method integer PickRandomMap2Zone()
+		local currentZone = _MapManager.CurrentMapIndex
+		local candidates = {}
+		for i = 1, #self.Map2RandomZonePool do
+			if self.Map2RandomZonePool[i] ~= currentZone then
+				table.insert(candidates, self.Map2RandomZonePool[i])
+			end
+		end
+		if #candidates == 0 then return self.Map2RandomZonePool[1] end
+		return candidates[_UtilLogic:RandomIntegerRange(1, #candidates)]
+	end
+
+	method boolean HasLivingFollowers()
+		if self._followers == nil then return false end
+		for i = 1, #self._followers do
+			---@type MonsterAI
+			local ai = self._followers[i]
+			if isvalid(ai) and isvalid(ai.Entity) then return true end
+		end
+		return false
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SpawnMiniBeanSwarm(integer targetMapIndex)
+		local map = _MonsterSpawner:GetZoneEntity(targetMapIndex)
+		if map == nil then
+			log_error("Ep2MiniBeanEasterEgg: zone entity not found for " .. targetMapIndex)
+			return
+		end
+		local offsetX = _MonsterSpawner:GetZoneOffsetX(targetMapIndex)
+		-- 현재 난이도 기준 체력/속도로 스케일(Zone21AlienEasterEggLogic과 동일한 이유 — 이스터에그를
+		-- 언제 발견하든 그 시점 난이도에 맞게 나온다)
+		local hp = _GameManager:GetTimeStepHp(_GameManager:GetTimeStep())
+		local speed = _GameManager:GetWaveApproachSpeed(_GameManager.Wave)
+
+		self._followers = {}
+		for i = 1, self.MiniBeanCount do
+			-- 무리(군집)로 뭉쳐 보이도록 스폰 스프레드를 좁힌다(위 MiniBeanClusterRadius 주석 참고) —
+			-- 기존 비행형 스폰 공식(MonsterSpawner.GetSpawnPosition 존7+ 비행형 분기)의 넓은 스프레드
+			-- 대신 좁은 범위만 사용한다.
+			local fx = (_UtilLogic:RandomDouble() * 2 - 1) * self.MiniBeanClusterRadius + offsetX
+			local fy = _MonsterSpawner.FlyingMinY + _UtilLogic:RandomDouble() * (_MonsterSpawner.FlyingMaxY - _MonsterSpawner.FlyingMinY)
+			local worldPos = Vector3(fx, fy, 0)
+			local localPos = _MonsterSpawner:ToLocalSpawnPos(map, worldPos)
+
+			local entity = _SpawnService:SpawnByModelId(_MonsterSpawner.MonsterModelId, "MiniBean", localPos, map)
+			if entity == nil then
+				log_error("Ep2MiniBeanEasterEgg: SpawnByModelId failed")
+			else
+				---@type MonsterAI
+				local ai = entity:GetComponent("script.MonsterAI")
+				if ai ~= nil then
+					ai:InitializeAlienInvader(targetMapIndex, hp, speed, self.MiniBeanStandRUID, self.MiniBeanHitRUID, self.MiniBeanDieRUID, self.MiniBeanDieDuration, self.MiniBeanAttackRUID)
+					ai:SetNeverPauses(true)
+					-- 유저 요청: "스케일 작아졌다 커졌다 안 하고 그냥 날아다녀도 될 듯" — 공격 순간의
+					-- 들이받기 스케일 펌프를 끄고, 대신 원거리 착탄 이펙트를 화면에 띄운다.
+					ai:SetSkipAttackLunge(true)
+					ai:SetRangedHitEffect(self.MiniBeanHitEffectRUID, self.MiniBeanHitEffectDuration, self.MiniBeanHitEffectScale)
+					-- 공격 애니메이션이 잘리지 않도록 실측 프레임 길이만큼 재생 시간을 늘리고, 그보다
+					-- 짧은 주기로 겹쳐 재생되지 않도록 공격 주기도 같이 늘린다(위 두 property 주석 참고)
+					ai:SetAttackDuration(self.MiniBeanAttackDuration)
+					ai.FlyAttackInterval = self.MiniBeanAttackInterval
+					-- 개별 사인파 진폭도 좁혀서 무리 밖으로 흩어지지 않게 한다
+					ai.FlyRangeX = self.MiniBeanFlyRangeX
+					-- 위 MiniBeanScaleJitter 주석 참고 — GetClosestTargets 동률 정렬 편향 방지
+					ai:SetCurrentScale(1.0 + (_UtilLogic:RandomDouble() * 2 - 1) * self.MiniBeanScaleJitter)
+					-- 유저 요청: "무조건 1회 공격 들어가게" — 12마리 전부 공격 타이머가 완전히 동기화돼
+					-- 있어(같은 순간 스폰+같은 FlyAttackInterval) 매 주기 12배 대미지가 들어가고 있었다.
+					-- TryClaimGroupAttack으로 무리 전체에서 한 프레임에 1번만 실제로 공격이 통과하게 한다.
+					ai:SetSwarmMember(true)
+					table.insert(self._followers, ai)
+
+					-- 소환 연출 — 스폰 위치에서 1회 재생 후 사라진다
+					local fx2 = _CardManager:SpawnEffectWithModel(self.MiniBeanSpawnEffectRUID, localPos, 0, 1.0, 1.0, 1.0, "skilleffect")
+					if fx2 ~= nil then fx2:Destroy(self.MiniBeanSpawnEffectDuration) end
+				end
+			end
+		end
+
+		-- 노란 미니빈(런당 1번만 시도, 유저 지정 10%) — 공격은 안 하고 잡으면 스킬 1개를 준다
+		if not self._yellowMiniBeanRolledThisRun then
+			self._yellowMiniBeanRolledThisRun = true
+			if _UtilLogic:RandomDouble() < self.YellowMiniBeanChance then
+				local fx = (_UtilLogic:RandomDouble() * 2 - 1) * self.MiniBeanClusterRadius + offsetX
+				local fy = _MonsterSpawner.FlyingMinY + _UtilLogic:RandomDouble() * (_MonsterSpawner.FlyingMaxY - _MonsterSpawner.FlyingMinY)
+				local worldPos = Vector3(fx, fy, 0)
+				local localPos = _MonsterSpawner:ToLocalSpawnPos(map, worldPos)
+				local entity = _SpawnService:SpawnByModelId(_MonsterSpawner.MonsterModelId, "YellowMiniBean", localPos, map)
+				if entity == nil then
+					log_error("Ep2MiniBeanEasterEgg: yellow SpawnByModelId failed")
+				else
+					---@type MonsterAI
+					local ai = entity:GetComponent("script.MonsterAI")
+					if ai ~= nil then
+						ai:InitializeAlienInvader(targetMapIndex, hp, speed, self.YellowMiniBeanStandRUID, self.YellowMiniBeanHitRUID, self.YellowMiniBeanDieRUID, self.MiniBeanDieDuration, "")
+						ai:SetNeverPauses(true)
+						ai:SetSkipAttackLunge(true)
+						ai:SetYellowMiniBean(true) -- _neverAttacks까지 같이 켜지고, Die()에서 스킬 보상으로 이어진다
+						ai.FlyRangeX = self.MiniBeanFlyRangeX
+						table.insert(self._followers, ai)
+
+						local fx2 = _CardManager:SpawnEffectWithModel(self.MiniBeanSpawnEffectRUID, localPos, 0, 1.0, 1.0, 1.0, "skilleffect")
+						if fx2 ~= nil then fx2:Destroy(self.MiniBeanSpawnEffectDuration) end
+						log("Ep2MiniBeanEasterEgg: yellow mini bean spawned")
+					end
+				end
+			end
+		end
+
+		self._lastZoneIndex = targetMapIndex
+	end
+
+	-- MonsterAI.OnReachPlayer(_isSwarmMember=true인 경우)가 호출 — 이 프레임에 아직 아무도 공격을
+	-- 선점하지 않았으면 true(선점 성공)를, 이미 누가 선점했으면 false를 반환한다. Logic.OnUpdate가
+	-- Component.OnUpdate보다 먼저 실행되므로(엔진 보장) _frameCounter는 이 메서드가 호출되는 시점에
+	-- 이미 이번 프레임 값으로 갱신돼 있다.
+	@ExecSpace("ServerOnly")
+	method boolean TryClaimGroupAttack()
+		if self._lastGroupAttackFrame == self._frameCounter then return false end
+		self._lastGroupAttackFrame = self._frameCounter
+		return true
+	end
+
+	-- 미니빈이 살아있는 동안 매 프레임 존 이동 여부를 감지해 시각적으로도 따라오게 한다(위 주석 참고)
+	@ExecSpace("ServerOnly")
+	method void OnUpdate(number delta)
+		self._frameCounter = self._frameCounter + 1
+
+		if not self.Triggered then return end
+		if self._followers == nil or #self._followers == 0 then return end
+		local currentZone = _MapManager.CurrentMapIndex
+		if currentZone == self._lastZoneIndex then return end
+		self._lastZoneIndex = currentZone
+
+		-- 스폰 직후(0.3초 안팎)엔 방금 만든 엔티티가 isvalid() 체크에서 일시적으로 false로 나오는
+		-- 타이밍 이슈가 실측으로 확인됐다(엔티티 자체는 멀쩡히 살아있음). 그 순간에 존 이동이 겹치면
+		-- "죽은 애들만 골라냈다"고 착각하고 self._followers를 통째로 비워버려 이후 영구히 못 따라오게
+		-- 되는 게 진짜 원인이었다 — 그래서 여기서는 무효로 판정된 항목도 리스트에서 제거하지 않고
+		-- 그냥 이번 틱만 건너뛴다(재배치를 못 받을 뿐 다음 존 이동 때 다시 시도됨). 리스트는 최대
+		-- MiniBeanCount(12)+1(노란)개뿐이고 ResetForNewRun에서 항상 비워지므로, 죽은 참조가 좀
+		-- 남아있어도 문제 되지 않는다.
+		local spawnPos = _MapManager:GetSpawnPositionForIndex(currentZone)
+		for i = 1, #self._followers do
+			---@type MonsterAI
+			local ai = self._followers[i]
+			if isvalid(ai) and isvalid(ai.Entity) then
+				-- 군집 유지를 위해 재배치 시 흩어지는 폭도 MiniBeanClusterRadius와 맞춘다
+				local jitterX = (_UtilLogic:RandomDouble() * 2 - 1) * self.MiniBeanClusterRadius
+				local baseY = (ai.FlyingWanderMinY + ai.FlyingWanderMaxY) * 0.5
+				ai:RepositionFlyingCenter(spawnPos.x + jitterX, baseY, currentZone)
+			end
+		end
+	end
+
+	-- GameManager.RestartGame()이 호출 — 새 런에서는 다시 도전할 수 있고, 남아있던 미니빈은 정리한다
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		self.Triggered = false
+		self._lastZoneIndex = 0
+		self._yellowMiniBeanRolledThisRun = false
+		self._lastGroupAttackFrame = -1
+		if self._followers ~= nil then
+			for i = 1, #self._followers do
+				---@type MonsterAI
+				local ai = self._followers[i]
+				if isvalid(ai) and isvalid(ai.Entity) then ai.Entity:Destroy(0) end
+			end
+		end
+		self._followers = {}
+	end
+
+end

@@ -1,0 +1,83 @@
+@Component
+script Ep2Map2SkillChestTrigger extends Component
+
+	-- 에피소드2 map2(여신 탑) 이스터에그 — MapObject_269를 클릭+드래그해서 목표 좌표
+	-- (135.1781, 1.132582) 근처로 옮기면 Ep2Map2SkillChestLogic이 MapObject_240에서 스킬(없으면
+	-- 포션) 1개를 지급하고 이 오브젝트를 숨긴다. 석상 퍼즐(Ep2Map2StatuePuzzleItemTrigger)과 동일한
+	-- 마우스 드래그 패턴 그대로 복제 — 슬롯이 하나뿐이라 ItemIndex 없이 단일 목표만 판정한다.
+	property any _touchHandler = nil
+	property any _holdHandler = nil
+	property any _releaseHandler = nil
+
+	property boolean _dragging = false
+	property integer _activeTouchId = 0
+	property number _dragOffsetX = 0
+	property number _dragOffsetY = 0
+
+	method void OnBeginPlay()
+		if self:IsClient() then
+			self._touchHandler = self.Entity:ConnectEvent(TouchEvent, self.OnTouched)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnTouched(TouchEvent event)
+		if _GameManager.GameOver then return end
+		if _TitleUI.titleGroup.Enable then return end
+		-- 성공해서 자리 잡은 뒤에는 다시 못 옮기게 막는다(유저 지정: "다시 이동 불가")
+		if _Ep2Map2SkillChestLogic.Triggered then return end
+		if self._dragging then return end
+		self._dragging = true
+		self._activeTouchId = event.TouchId
+
+		local worldTouch = _UILogic:ScreenToWorldPosition(event.TouchPoint)
+		local pos = self.Entity.TransformComponent.Position
+		self._dragOffsetX = pos.x - worldTouch.x
+		self._dragOffsetY = pos.y - worldTouch.y
+
+		self._holdHandler = _InputService:ConnectEvent(ScreenTouchHoldEvent, self.OnDragHold)
+		self._releaseHandler = _InputService:ConnectEvent(ScreenTouchReleaseEvent, self.OnDragRelease)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnDragHold(ScreenTouchHoldEvent event)
+		if not self._dragging then return end
+		if event.TouchId ~= self._activeTouchId then return end
+		local worldTouch = _UILogic:ScreenToWorldPosition(event.TouchPoint)
+		local pos = self.Entity.TransformComponent.Position
+		self.Entity.TransformComponent.Position = Vector3(worldTouch.x + self._dragOffsetX, worldTouch.y + self._dragOffsetY, pos.z)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnDragRelease(ScreenTouchReleaseEvent event)
+		if not self._dragging then return end
+		if event.TouchId ~= self._activeTouchId then return end
+		self._dragging = false
+		if self._holdHandler ~= nil then
+			_InputService:DisconnectEvent(ScreenTouchHoldEvent, self._holdHandler)
+			self._holdHandler = nil
+		end
+		if self._releaseHandler ~= nil then
+			_InputService:DisconnectEvent(ScreenTouchReleaseEvent, self._releaseHandler)
+			self._releaseHandler = nil
+		end
+
+		local pos = self.Entity.TransformComponent.Position
+		self:RequestCheckPlacement(pos.x, pos.y)
+	end
+
+	-- 목표 좌표 근처인지는 서버가 최종 판정한다
+	@ExecSpace("Server")
+	method void RequestCheckPlacement(number x, number y)
+		_Ep2Map2SkillChestLogic:CheckPlacement(self.Entity, x, y)
+	end
+
+	method void OnEndPlay()
+		if self:IsClient() then
+			if self._touchHandler ~= nil then self.Entity:DisconnectEvent(TouchEvent, self._touchHandler) end
+			if self._holdHandler ~= nil then _InputService:DisconnectEvent(ScreenTouchHoldEvent, self._holdHandler) end
+			if self._releaseHandler ~= nil then _InputService:DisconnectEvent(ScreenTouchReleaseEvent, self._releaseHandler) end
+		end
+	end
+
+end

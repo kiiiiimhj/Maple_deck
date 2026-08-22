@@ -1,0 +1,179 @@
+@Logic
+script Ep2Map2StatuePuzzleLogic extends Logic
+
+	-- 에피소드2 map2(여신 탑) 이스터에그 — 석상 3개를 슬롯 3개 위로 마우스로 끌어다 놓는 퍼즐.
+	-- 아이템 3개(MapObject_37/195/38, ItemIndex 1/2/3)를 슬롯 3개(MapObject_196/36/263, SlotIndex 1/2/3)
+	-- 위로 끌어다 놓는다. 전부 zone58(mapIndex58, spawnX=46.5, landY=-0.53) 근처 한 화면 안에 모여있어
+	-- 위치 이동 없이 그대로 사용 가능(라이브 검증 완료 — 아래 참고).
+	-- 정답 매핑: 슬롯3(263)엔 반드시 아이템3(38)만 정답. 슬롯1(196)/슬롯2(36)는 아이템1(37)·아이템2(195)가
+	-- 순서 상관없이 하나씩만 들어가면 정답(유저 지정: "38은 263 고정, 나머지 둘은 서로 바뀌어도 정답").
+	-- 판정 시점은 3슬롯이 전부 채워진 그 순간 — 정답이면 그대로 두고 MapObject_224(기본 Enable=false)를
+	-- 드러내고, 오답이면 3개 전부 최초 스폰 위치로 되돌린다(유저 지정).
+	--
+	-- 버그 이력(2026-08-21): 이 퍼즐은 원래 ep2_map2용이었는데 이전 세션이 동명(같은 번호) 오브젝트가
+	-- 있는 ep2_map3에 실수로 배선했었다. ep2_map3 쪽 변경은 git checkout으로 전부 원복했고, 이 Logic부터
+	-- ep2_map2 전용으로 새로 작성한다. [[project_ep2map3_crystal_puzzle_handoff]] 참고.
+	@Sync property boolean Solved = false
+
+	-- 유저가 손으로 직접 끌어다 놓으므로 픽셀 단위로 정확히 맞추긴 어렵다.
+	property number PlacementTolerance = 0.5
+
+	property string SuccessMessage = "맵 어딘가에 변화가 생겼습니다"
+	property string FailureMessage = "석상이 반응하지 않습니다"
+
+	property string RevealObjectPath = "/maps/ep2_map2/MapObject_224"
+
+	-- slotIndex -> itemIndex(놓여있으면), 없으면 키 자체가 없음
+	property any _slotOccupant = nil
+	property any _slotTargets = nil
+	property any _itemPaths = nil
+	property any _itemStartPositions = nil
+
+	-- 아이템 인덱스: 1=MapObject_37, 2=MapObject_195, 3=MapObject_38
+	method any GetItemPaths()
+		return {
+			[1] = "/maps/ep2_map2/MapObject_37",
+			[2] = "/maps/ep2_map2/MapObject_195",
+			[3] = "/maps/ep2_map2/MapObject_38",
+		}
+	end
+
+	-- 슬롯 인덱스: 1=MapObject_196, 2=MapObject_36, 3=MapObject_263
+	-- 좌표는 각 슬롯 오브젝트의 실측 Position 그대로(ep2_map2.map에서 MapBuilder로 직접 읽음).
+	-- Z만 슬롯 원본보다 0.05 앞으로 당겨서(작을수록 앞) 놓인 아이템이 슬롯 스프라이트 뒤로 숨지 않게 한다.
+	method any GetSlotTargets()
+		return {
+			[1] = Vector3(45.18627, 0.35, 999.884),   -- MapObject_196
+			[2] = Vector3(46.7699165, 0.35, 999.884), -- MapObject_36
+			[3] = Vector3(45.9725037, 0.35, 999.881), -- MapObject_263
+		}
+	end
+
+	-- 버그 수정(2026-08-21, 유저 지적: "왜 막냐고, 올라갈 수도 있지") — 예전엔 아이템마다 놓을 수 있는
+	-- 슬롯을 여기서 미리 막아버려서(38은 슬롯3만 허용 등) 애초에 오답 조합 자체를 만들 수가 없었다.
+	-- 유저 의도는 "아무 슬롯에나 다 올라갈 수 있게 하고, 3개가 다 찼을 때 CheckSolved()가 정답/오답을
+	-- 판정"하는 것 — 그래야 오답 시 리셋 로직도 실제로 의미가 생긴다. 이제 세 아이템 다 세 슬롯 어디든
+	-- 놓을 수 있고, 정답 여부는 오직 CheckSolved()의 slot3Ok/slot12Ok 검사에서만 결정된다.
+	method any GetAllowedSlots(integer itemIndex)
+		return { 1, 2, 3 }
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		self._slotTargets = self:GetSlotTargets()
+		self._itemPaths = self:GetItemPaths()
+		self._slotOccupant = {}
+		self._itemStartPositions = {}
+		local paths = self._itemPaths
+		for i = 1, 3 do
+			local item = _EntityService:GetEntityByPath(paths[i])
+			if item ~= nil then
+				self._itemStartPositions[i] = item.TransformComponent.Position
+			else
+				log_error("Ep2Map2StatuePuzzle: item entity not found at " .. paths[i])
+			end
+		end
+	end
+
+	method integer GetOccupiedSlotByItem(integer itemIndex)
+		for slotIdx = 1, 3 do
+			if self._slotOccupant[slotIdx] == itemIndex then return slotIdx end
+		end
+		return 0
+	end
+
+	-- Ep2Map2StatuePuzzleItemTrigger.RequestCheckPlacement()이 놓을 때마다(정답 위치였다가 다시
+	-- 딴 데로 옮겨도) 매번 호출한다 — "그 순간 실제로 정답 슬롯 근처에 있는가"를 매번 재확인한다.
+	-- 3슬롯이 전부 채워진 순간에만 최종 판정(CheckSolved)까지 이어진다.
+	@ExecSpace("ServerOnly")
+	method void CheckItemPlacement(integer itemIndex, Entity item, number x, number y)
+		if self.Solved then return end
+		if not isvalid(item) then return end
+
+		local currentSlot = self:GetOccupiedSlotByItem(itemIndex)
+		local allowed = self:GetAllowedSlots(itemIndex)
+
+		local nearestSlot = 0
+		local nearestDist = 0.0
+		for _, slotIdx in ipairs(allowed) do
+			local occupant = self._slotOccupant[slotIdx]
+			if occupant == nil or occupant == itemIndex then
+				local target = self._slotTargets[slotIdx]
+				local dx = x - target.x
+				local dy = y - target.y
+				local dist = math.sqrt(dx * dx + dy * dy)
+				if dist <= self.PlacementTolerance and (nearestSlot == 0 or dist < nearestDist) then
+					nearestSlot = slotIdx
+					nearestDist = dist
+				end
+			end
+		end
+
+		if currentSlot ~= 0 and currentSlot ~= nearestSlot then
+			self._slotOccupant[currentSlot] = nil
+		end
+
+		if nearestSlot ~= 0 then
+			self._slotOccupant[nearestSlot] = itemIndex
+			self:SnapToTarget(item, self._slotTargets[nearestSlot])
+			log("Ep2Map2StatuePuzzle: item " .. itemIndex .. " placed on slot " .. nearestSlot)
+			self:CheckSolved()
+		elseif currentSlot ~= 0 then
+			log("Ep2Map2StatuePuzzle: item " .. itemIndex .. " moved away from slot " .. currentSlot)
+		else
+			log("Ep2Map2StatuePuzzle: item " .. itemIndex .. " placement missed (dist=" .. nearestDist .. ")")
+		end
+	end
+
+	-- 오차범위 안에 들어오면 픽셀 단위로 딱 맞도록 정확한 목표 좌표로 스냅시킨다(서버가 직접 Position을 쓴다).
+	@ExecSpace("ServerOnly")
+	method void SnapToTarget(Entity item, Vector3 target)
+		if not isvalid(item) then return end
+		item.TransformComponent.Position = target
+	end
+
+	-- 3슬롯이 전부 채워진 순간에만 판정한다 — 정답이면 Solved, 오답이면 전부 원위치로 되돌린다.
+	@ExecSpace("ServerOnly")
+	method void CheckSolved()
+		if self.Solved then return end
+		if self._slotOccupant[1] == nil or self._slotOccupant[2] == nil or self._slotOccupant[3] == nil then return end
+
+		local slot3Ok = self._slotOccupant[3] == 3
+		local pair12 = { [self._slotOccupant[1]] = true, [self._slotOccupant[2]] = true }
+		local slot12Ok = pair12[1] == true and pair12[2] == true
+
+		if slot3Ok and slot12Ok then
+			self.Solved = true
+			log("Ep2Map2StatuePuzzle: solved, revealing " .. self.RevealObjectPath)
+			local reveal = _EntityService:GetEntityByPath(self.RevealObjectPath)
+			if reveal ~= nil then reveal.Enable = true end
+			_UIToast:ShowMessage(self.SuccessMessage)
+		else
+			log("Ep2Map2StatuePuzzle: wrong combination, resetting to start positions")
+			self:ResetItemsToStart()
+			_UIToast:ShowMessage(self.FailureMessage)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetItemsToStart()
+		local paths = self._itemPaths
+		for i = 1, 3 do
+			local item = _EntityService:GetEntityByPath(paths[i])
+			if item ~= nil and isvalid(item) then
+				item.TransformComponent.Position = self._itemStartPositions[i]
+			end
+		end
+		self._slotOccupant = {}
+	end
+
+	-- GameManager.RestartGame()이 호출 — 새 런에서는 다시 도전할 수 있게 초기화한다
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		self.Solved = false
+		self:ResetItemsToStart()
+		local reveal = _EntityService:GetEntityByPath(self.RevealObjectPath)
+		if reveal ~= nil then reveal.Enable = false end
+	end
+
+end

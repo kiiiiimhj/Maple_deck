@@ -1,0 +1,58 @@
+@Component
+script Ep2Map1KeyEasterEggTrigger extends Component
+
+	-- 에피소드2 map1 이스터에그 3: object-3428_75(이 엔티티 자신)를 2번 누르면 알 수 없는 열쇠
+	-- (unknown_key, 다른 이스터에그용) 하나를 지급한다(Ep2Map1KeyEasterEggLogic). 이 오브젝트 위치에서
+	-- 작게 시작해 점점 커지며 다가와 바닥에 착지한 뒤 가방으로 날아간다(유저 지정 연출).
+	-- Ep2Map1SkillEasterEggTrigger/Ep2Map1GiftNpcTrigger와 동일한 흔들림 연출 패턴 재사용.
+	property any _touchHandler = nil
+	property any _shakeTween = nil
+	property number ShakeDuration = 0.35
+	property number ShakeAngle = 10
+
+	method void OnBeginPlay()
+		if self:IsClient() then
+			self._touchHandler = self.Entity:ConnectEvent(TouchEvent, self.OnTouched)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnTouched(TouchEvent event)
+		-- 게임오버 팝업/타이틀(로비) 화면이 떠 있는 동안은 뒤에 있는 월드 오브젝트가 눌리면 안 된다
+		if _GameManager.GameOver then return end
+		if _TitleUI.titleGroup.Enable then return end
+		self:PlayShake()
+		self:RequestTouch()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayShake()
+		if self._shakeTween ~= nil then
+			self._shakeTween:Stop()
+			self._shakeTween = nil
+		end
+		local transform = self.Entity.TransformComponent
+		self._shakeTween = _TweenLogic:PlayTween(0.0, 1.0, self.ShakeDuration, EaseType.Linear, function(t)
+			if not isvalid(self) or not isvalid(self.Entity) then return end
+			local angle = self.ShakeAngle * math.sin(t * math.pi * 3) * (1.0 - t)
+			transform.ZRotation = angle
+			if t >= 1.0 then
+				transform.ZRotation = 0
+				self._shakeTween = nil
+			end
+		end)
+	end
+
+	-- self.Entity를 그대로 서버로 넘긴다(Ep2Map1SkillEasterEggTrigger/Ep2Map1GiftNpcTrigger와 동일 이유)
+	@ExecSpace("Server")
+	method void RequestTouch()
+		_Ep2Map1KeyEasterEggLogic:OnObjectTouched(self.Entity)
+	end
+
+	method void OnEndPlay()
+		if self:IsClient() and self._touchHandler ~= nil then
+			self.Entity:DisconnectEvent(TouchEvent, self._touchHandler)
+		end
+	end
+
+end

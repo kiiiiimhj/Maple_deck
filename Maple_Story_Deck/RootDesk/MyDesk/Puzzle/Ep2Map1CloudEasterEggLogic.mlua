@@ -1,0 +1,53 @@
+@Logic
+script Ep2Map1CloudEasterEggLogic extends Logic
+
+	-- 에피소드2 map1 이스터에그 4-1: object-3428_79(구름, Ep2Map1CloudEasterEggTrigger)를 누를 때마다
+	-- 알파값이 20%씩 빠진다. 5번(100%→80%→...→0%) 누르면 구름 엔티티를 완전히 끈다(Entity.Enable=false —
+	-- 화면에서 사라지고 자기 TouchReceiveComponent도 같이 꺼져 더 이상 반응하지 않는다).
+	-- CloudCleared(@Sync)는 뒤에 가려져 있던 상자(Ep2Map1ChestEasterEggLogic)가 "구름이 아직 있으면
+	-- 안 열리게" 판정하는 게이트로 그대로 참조한다(유저 지정: "구름이 있으면 뒤에꺼가 눌리면 안된다").
+	-- 다른 Ep2Map1 이스터에그와 동일한 런 정책: "다시하기"/"새로 시작"에서 ResetForNewRun()이 호출돼
+	-- 구름이 다시 나타나고 처음부터 다시 도전할 수 있다("이어하기"는 건드리지 않음).
+	@Sync property boolean CloudCleared = false
+	property integer _touchCount = 0
+	property integer RequiredTouchCount = 5
+	property number AlphaStepPercent = 0.2
+	-- ResetForNewRun에서 다시 찾아 Enable/알파를 되돌리는 용도 — Entity를 property로 박아두면 맵
+	-- 미로드 시점에 nil이 되는 문제가 있어(다른 이스터에그와 동일 이유) 경로로 매번 다시 조회한다
+	property string CloudEntityPath = "/maps/ep2_map1/object-3428_79"
+
+	-- Ep2Map1CloudEasterEggTrigger.RequestTouch()가 호출 — 터치된 오브젝트 엔티티를 그대로 받는다
+	-- (Logic에 UUID를 property로 박아두면 맵 미로드 시점에 nil이 되는 문제 회피, 다른 이스터에그와 동일 이유)
+	@ExecSpace("ServerOnly")
+	method void OnObjectTouched(Entity touchedObject)
+		if self.CloudCleared then return end
+		self._touchCount = self._touchCount + 1
+		local alpha = math.max(0, 1.0 - self.AlphaStepPercent * self._touchCount)
+		local sprite = touchedObject.SpriteRendererComponent
+		if sprite ~= nil then
+			sprite.Color = Color(1, 1, 1, alpha)
+		end
+		log("Ep2Map1CloudEasterEgg: touch " .. self._touchCount .. "/" .. self.RequiredTouchCount .. " alpha=" .. alpha)
+		if self._touchCount < self.RequiredTouchCount then return end
+
+		self.CloudCleared = true
+		touchedObject.Enable = false
+		log("Ep2Map1CloudEasterEgg: cloud cleared, chest is now reachable")
+	end
+
+	-- GameManager.RestartGame()이 호출 — 구름을 다시 보이게 하고 처음부터 다시 5번 눌러야 한다
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		self.CloudCleared = false
+		self._touchCount = 0
+		local cloudEntity = _EntityService:GetEntityByPath(self.CloudEntityPath)
+		if cloudEntity ~= nil then
+			cloudEntity.Enable = true
+			local sprite = cloudEntity.SpriteRendererComponent
+			if sprite ~= nil then
+				sprite.Color = Color(1, 1, 1, 1)
+			end
+		end
+	end
+
+end

@@ -1,0 +1,340 @@
+@Logic
+script Ep2Map3SummonLogic extends Logic
+
+	-- 에피소드2 map3(니할 사막) object-658 클릭 이스터에그 — 소환수("겁에 질린 사자", mob 9309200
+	-- 리소스팩)를 불러내 플레이어 대신 30초간 싸우게 한다. CardManager.Phoenix(카드105)와 동일한
+	-- "소환수" 패턴(SpawnEffectWithModel + persistenteffect 모델 + 존이동 시 재소환)을 그대로 재사용 —
+	-- CardManager의 공용 헬퍼(GetCurrentMap/FindClosestInMap/FindClosestByPosition/IsSameDepthBand/
+	-- GetEffectScaleRatio/SpawnEffectWithModel)를 그대로 호출한다.
+	-- 어택1(단일 대상)과 어택2(광역, 연출 반경 표시)를 3초 간격으로 번갈아 사용한다. 대미지는 소환
+	-- 시점의 "현재 스폰되는 일반 몬스터 체력"(GameManager.GetTimeStepHp)의 2/3로 고정한다(유저 지정).
+	property number Duration = 30.0
+	property number AttackInterval = 3.0
+	property number DamageRatio = 2.0 / 3.0
+	-- 어택2(Attack2RUID) 클립 자체에 내장된 원형 폭발 연출의 실측 화면 반경에 맞춰 판정 반경을
+	-- 키운다(기존 2.2는 연출보다 훨씬 좁아서 화면상 불길에 있어도 대미지가 안 들어가는 경우가
+	-- 많았다). 유저가 라이브로 노란 디버그 원(ShowDebugRangeCircle)과 직접 비교하며 5→4.5→4.3
+	-- 순으로 조절해 최종 확정.
+	property number AoeRadius = 4.3
+	property number SummonScale = 1.0
+	property number DepthZ = -2.0
+	-- 소환수 자신의 스폰/앵커 Y좌표에는 오프셋을 주지 않는다(유저 지적: "몬스터가아니라 소환수가"
+	-- 공중에 떠 있었음 — 과거 값 0.3이 원인, 대상의 발밑 좌표에 그대로 세운다)
+	property number HoverYOffset = 0.0
+	-- 타격 이펙트만 대상 몸통 높이에 맞춰 살짝 띄운다(소환수 본체와는 무관, 연출용)
+	property number HitYOffset = 0.3
+	-- 어택1(단일기) 타격 이펙트/대미지 타이밍 — "약 0.7s"에서 "+0.3s 더" 요청으로 1.0으로 확정.
+	-- 포즈 전환 자체는 Attack1WindupDelay만큼 늦게 시작한다(windup 시작 대비 hit 간격만 조절한 것).
+	-- 어택2(광역)는 라이브 튜닝 중 0.4→0→0.3→1.0→3.0을 거쳐 최종 2.2로 확정.
+	property number Attack1WindupDelay = 0.3
+	property number Attack1HitDelay = 1.0
+	property number Attack2HitDelay = 2.2
+	property number DieDuration = 0.5
+	property number HitEffectLifetime = 0.35
+
+	-- 전용 리소스팩(msw-search로 확인, resource_pack "mob/9309200.img" — "겁에 질린 사자"/"토네이도")
+	property string StandRUID = "30a66cf560294334bc22aecf333de5f2"
+	property string Attack1RUID = "67aace8f28ea4fcc8b21673ebaae80de"
+	property string Attack2RUID = "36969e29f96742a396a91a3041f56a4f"
+	property string Attack1HitRUID = "adbbf0db306f4b4ca102c0fab3577b31"
+	property string Attack2HitRUID = "bba06c3ef6844c9f9c8856549a813360"
+	property string DieRUID = "4716d7fd1b1c4aae90e762ca82771991"
+	property string Attack1SoundRUID = "ac954624f0cb403cada403a20352d3ec"
+	property string Attack2SoundRUID = "6b7376652cc7475982387fa118218102"
+
+	property Entity _summonEntity = nil
+	property Entity _summonMap = nil
+	-- 존 이동 감지 기준 — _summonMap(Entity) 비교가 아니라 이 존 인덱스로 비교한다(버그 수정: 유저
+	-- 리포트 "맵이동해도 얘 안따라오고" — ep2_map3는 존 65~74가 전부 container=nil로 물리 파일 하나를
+	-- 공유해서(GetMonstersInCurrentZone 주석 참고) _CardManager:GetCurrentMap()이 반환하는 엔티티가
+	-- 존을 옮겨도 항상 똑같다. 그래서 Entity 비교(liveMap ~= self._summonMap)는 ep2_map3 안에서는
+	-- 절대 참이 되지 않아 존이 바뀌어도 재소환 로직이 한 번도 안 돌았다.)
+	property integer _summonZoneIndex = -1
+	property Vector3 _anchorPos = Vector3(0, 0, 0)
+	property boolean _facingRight = false
+	property boolean _nextIsAttack2 = false
+	-- 재소환(재클릭) 시 이전 소환의 예약된 타이머들이 새 소환에 잘못 영향을 주지 않도록 막는 세대 번호
+	property integer _summonGen = 0
+	-- 런당 1회 제한(유저 요청: "1회만 소환되야함 런당") — GameManager.RestartGame → ResetForNewRun에서 리셋
+	property boolean _usedThisRun = false
+	-- 디버그용 임시 스위치 — true면 어택1(단일)을 건너뛰고 항상 어택2(광역)만 사용한다(유저 요청:
+	-- "임시로 기본공격 못하게 막아줘" — 광역기 판정 반경 튜닝 중 어택1이 섞여서 헷갈림). Play 중에도
+	-- _Ep2Map3SummonLogic.DisableAttack1 = true/false로 즉시 바꿀 수 있다.
+	property boolean DisableAttack1 = false
+	-- 디버그용 임시 스위치 — true면 어택2 판정이 나갈 때마다 실제 AoeRadius를 그대로 반영한 노란
+	-- 원(LineRendererComponent) 테두리를 잠깐 띄운다(유저 요청: "범위 테두리로 보여줄수있니" —
+	-- 연출에 내장된 원과 실제 판정 반경을 눈으로 직접 비교하기 위함). 튜닝 끝나서 다시 false로
+	-- 되돌림(유저 요청: "테스트때매 변경한건 다시 정상적으로").
+	property boolean ShowDebugRangeCircle = false
+	property integer DebugCircleSegments = 40
+	property number DebugCircleWidth = 0.15
+	property number DebugCircleLifetime = 1.2
+
+	-- Ep2Map3SummonTrigger.RequestSummon()이 클릭 시 호출. 런당 1회만 소환 가능(유저 요청).
+	@ExecSpace("ServerOnly")
+	method void SummonAlly()
+		if self._usedThisRun then return end
+		local map = _CardManager:GetCurrentMap()
+		if map == nil then return end
+		self._usedThisRun = true
+
+		if isvalid(self._summonEntity) then
+			self._summonEntity:Destroy()
+			self._summonEntity = nil
+		end
+		self._summonGen = self._summonGen + 1
+		local gen = self._summonGen
+		self._nextIsAttack2 = false
+
+		local damage = _GameManager:GetTimeStepHp(_GameManager:GetTimeStep()) * self.DamageRatio
+
+		local firstTarget = _CardManager:FindClosestInMap(map)
+		-- 버그 수정: 그 순간 존에 살아있는 몬스터가 하나도 없으면(유저 리포트: "가끔 소환이 공중에서
+		-- 이루어지는데") firstTarget이 nil이 되고, 예전엔 Vector3(0, 2.0, ...)로 하드코딩된 허공
+		-- 좌표에 스폰됐다. ZoneInfo의 실제 지면 landY/spawnX로 폴백해서 항상 발판 위에 서게 한다.
+		local zoneInfo = _MapManager:GetZoneInfo(_MapManager.CurrentMapIndex)
+		local fallbackX = (zoneInfo ~= nil) and zoneInfo.spawnX or 0
+		local fallbackY = (zoneInfo ~= nil and zoneInfo.landY ~= nil) and zoneInfo.landY or self.HoverYOffset
+		local spawnPos = Vector3(fallbackX, fallbackY, self.DepthZ)
+		if firstTarget ~= nil and isvalid(firstTarget) and isvalid(firstTarget.Entity) then
+			local tp = firstTarget.Entity.TransformComponent.Position
+			spawnPos = Vector3(tp.x, tp.y + self.HoverYOffset, self.DepthZ)
+		end
+
+		local summon = _CardManager:SpawnEffectWithModel(self.StandRUID, spawnPos, 0, 1.0, self.SummonScale, 1.0, "persistenteffect")
+		if summon == nil then return end
+		self._summonEntity = summon
+		self._summonMap = map
+		self._summonZoneIndex = _MapManager.CurrentMapIndex
+		self._anchorPos = spawnPos
+
+		local attackCount = math.floor(self.Duration / self.AttackInterval)
+		for i = 1, attackCount do
+			local delay = i * self.AttackInterval
+			_TimerService:SetTimerOnce(function()
+				self:AttackTick(gen, damage)
+			end, delay)
+		end
+
+		_TimerService:SetTimerOnce(function()
+			self:EndSummonLife(gen)
+		end, self.Duration)
+
+		log("Ep2Map3Summon: summoned duration=" .. self.Duration .. " attacks=" .. attackCount .. " dmg=" .. math.floor(damage))
+	end
+
+	-- 존 이동 감지 시 소환수를 플레이어의 새 맵으로 다시 소환한다(유저 지정: "존을 이동하면 같이
+	-- 따라다니게" — CardManager.RelocatePhoenixToNewMap과 동일 패턴). 예전 엔티티는 파괴하고
+	-- self._summonEntity/_summonMap만 새 것으로 갱신하면, 이미 예약된 공격/소멸 타이머들이 다음 실행
+	-- 때 자동으로 새 엔티티를 집는다(gen 값으로 무효화된 재소환과는 구분됨).
+	@ExecSpace("ServerOnly")
+	method void RelocateToNewMap(Entity newMap)
+		local oldSummon = self._summonEntity
+		local anchor = _CardManager:FindClosestInMap(newMap)
+		-- SummonAlly와 동일한 버그 수정 — 새 존에 몬스터가 하나도 없어도 허공(y=2.0)이 아니라
+		-- 그 존의 실제 지면(ZoneInfo.landY)에 착지한다.
+		local zoneInfo = _MapManager:GetZoneInfo(_MapManager.CurrentMapIndex)
+		local fallbackX = (zoneInfo ~= nil) and zoneInfo.spawnX or 0
+		local fallbackY = (zoneInfo ~= nil and zoneInfo.landY ~= nil) and zoneInfo.landY or self.HoverYOffset
+		local pos = Vector3(fallbackX, fallbackY, self.DepthZ)
+		if anchor ~= nil and isvalid(anchor) and isvalid(anchor.Entity) then
+			local ap = anchor.Entity.TransformComponent.Position
+			pos = Vector3(ap.x, ap.y + self.HoverYOffset, self.DepthZ)
+		end
+		local fresh = _CardManager:SpawnEffectWithModel(self.StandRUID, pos, 0, 1.0, self.SummonScale, 1.0, "persistenteffect")
+		if fresh == nil then return end
+		if isvalid(oldSummon) then oldSummon:Destroy() end
+		self._summonEntity = fresh
+		self._summonMap = newMap
+		self._summonZoneIndex = _MapManager.CurrentMapIndex
+		self._anchorPos = pos
+	end
+
+	-- 공격 1회 — 어택1(단일)/어택2(광역)을 번갈아 사용한다. gen이 현재 소환 세대와 다르면(재소환으로
+	-- 무효화된 예약) 조용히 무시한다.
+	@ExecSpace("ServerOnly")
+	method void AttackTick(integer gen, number damage)
+		if not isvalid(self) or gen ~= self._summonGen then return end
+		local summon = self._summonEntity
+		if not isvalid(summon) then return end
+
+		-- 플레이어가 소환수가 있던 존과 다른 존으로 이동했으면, 그 자리에서 사라지고 플레이어의
+		-- 현재 존에서 다시 나타나 계속 따라온다. Entity 비교가 아니라 존 인덱스로 비교한다(위
+		-- _summonZoneIndex 선언부 주석 참고 — ep2_map3는 존이 바뀌어도 맵 Entity가 그대로라 Entity
+		-- 비교로는 절대 감지되지 않았다).
+		if _MapManager.CurrentMapIndex ~= self._summonZoneIndex then
+			local liveMap = _CardManager:GetCurrentMap()
+			if liveMap ~= nil then
+				self:RelocateToNewMap(liveMap)
+				summon = self._summonEntity
+				if not isvalid(summon) then return end
+			end
+		end
+		local map = self._summonMap
+
+		local target = _CardManager:FindClosestByPosition(map, self._anchorPos)
+		if target == nil or not isvalid(target) or not isvalid(target.Entity) or target._dead then return end
+
+		local renderer = summon.SpriteRendererComponent
+		local targetPos = target.Entity.TransformComponent.Position
+		local facingRight = self._facingRight
+		if targetPos.x > self._anchorPos.x then facingRight = true
+		elseif targetPos.x < self._anchorPos.x then facingRight = false end
+		self._facingRight = facingRight
+		if renderer ~= nil then renderer.FlipX = facingRight end
+
+		local isAttack2 = self._nextIsAttack2
+		self._nextIsAttack2 = not self._nextIsAttack2
+		if self.DisableAttack1 then isAttack2 = true end
+
+		if isAttack2 then
+			self:PlayAttack2(gen, map, target, damage)
+		else
+			self:PlayAttack1(gen, map, target, damage)
+		end
+	end
+
+	-- 어택1 — 단일 대상. 소환수 자신은 앵커 위치에 고정한 채(유저 지정 없음 — 이동 연출 없이 그 자리에서
+	-- 공격), 공격 포즈 재생 후 대미지를 넣고 타격 이펙트를 target 위치에 띄운다. 유저 요청("연출도
+	-- 0.3 늦게")으로 포즈 전환 자체를 Attack1WindupDelay만큼 늦춘 뒤, 그 시점부터 다시 Attack1HitDelay
+	-- 뒤에 대미지가 들어간다(기존 0.7초 windup→hit 간격은 그대로 유지, 시작점만 통째로 밀림).
+	@ExecSpace("ServerOnly")
+	method void PlayAttack1(integer gen, Entity map, MonsterAI target, number damage)
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) or gen ~= self._summonGen then return end
+			local summon = self._summonEntity
+			if not isvalid(summon) then return end
+			local renderer = summon.SpriteRendererComponent
+			if renderer ~= nil then renderer.SpriteRUID = self.Attack1RUID end
+			if self.Attack1SoundRUID ~= "" then _SoundService:PlaySound(self.Attack1SoundRUID, 1.0) end
+
+			_TimerService:SetTimerOnce(function()
+				if not isvalid(self) or gen ~= self._summonGen then return end
+				if isvalid(target) and isvalid(target.Entity) and not target._dead then
+					target:TakeDamage(damage)
+					local hitScaleRatio = _CardManager:GetEffectScaleRatio(target)
+					local tp = target.Entity.TransformComponent.Position
+					local fxHit = _CardManager:SpawnEffectWithModel(self.Attack1HitRUID, Vector3(tp.x, tp.y + self.HitYOffset, tp.z - 0.05), 0, 1.0, hitScaleRatio, 1.0, "skilleffect")
+					if fxHit ~= nil then fxHit:Destroy(self.HitEffectLifetime) end
+				end
+				-- Stand으로 억지로 되돌리지 않는다(CardManager.PhoenixAttackTick과 동일한 이유 — 공격
+				-- 클립이 끝까지 재생되기 전에 강제로 되돌리면 "연출이 짤리는"/모션이 아예 안 보이는
+				-- 증상이 생김. 다음 공격 틱(3초 뒤, 어택2)이 자연스럽게 덮어쓸 때까지 그대로 재생되게 둔다.
+			end, self.Attack1HitDelay)
+		end, self.Attack1WindupDelay)
+	end
+
+	-- 어택2 — 광역. target 위치를 중심으로 반경(AoeRadius) 안의 몬스터를 전부 타격한다. 별도 범위
+	-- 표시 스프라이트(attack2/info/range)는 안 쓴다 — Attack2RUID 클립 자체(프레임 22번째 근처)에
+	-- 이미 동일한 모양의 원형 폭발 연출이 내장돼 있어 따로 띄우면 중복이었다(유저 지적: "이 연출이
+	-- 저거 전에 나오는거 같은데" — 실측 확인: 두 리소스가 캔버스 크기(960x928 vs 960x932)까지 거의
+	-- 동일해서 사실상 같은 그림임).
+	@ExecSpace("ServerOnly")
+	method void PlayAttack2(integer gen, Entity map, MonsterAI target, number damage)
+		local summon = self._summonEntity
+		if not isvalid(summon) then return end
+		local renderer = summon.SpriteRendererComponent
+		if renderer ~= nil then renderer.SpriteRUID = self.Attack2RUID end
+		if self.Attack2SoundRUID ~= "" then _SoundService:PlaySound(self.Attack2SoundRUID, 1.0) end
+
+		local centerPos = target.Entity.TransformComponent.Position
+
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) or gen ~= self._summonGen then return end
+			-- 버그 수정: target(앵커)이 딜레이가 도는 사이 죽어서 파괴되면 GetEffectScaleRatio(target)이
+			-- 무효 객체를 인덱싱해 런타임 에러를 던졌고, 그 에러 때문에 이 콜백 전체가 중단돼 아래
+			-- AoE 반경 판정 루프까지 통째로 안 돌았다(유저 리포트: "타겟 애가 죽으면 범위기 대미지가
+			-- 다 안들어가냐" — 정확히 이 증상). Phoenix.ResolvePhoenixHit과 동일하게 target 유효성과
+			-- 무관하게 반경 판정은 항상 이어서 실행되도록 분리한다.
+			local hitScaleRatio = 1.0
+			if isvalid(target) and isvalid(target.Entity) then
+				hitScaleRatio = _CardManager:GetEffectScaleRatio(target)
+			end
+			local fxHit = _CardManager:SpawnEffectWithModel(self.Attack2HitRUID, Vector3(centerPos.x, centerPos.y + self.HitYOffset, centerPos.z - 0.05), 0, 1.0, hitScaleRatio, 1.0, "skilleffectlong")
+			if fxHit ~= nil then fxHit:Destroy(self.HitEffectLifetime) end
+
+			local monsters = _CardManager:GetMonstersInCurrentZone(map)
+			local hitCount = 0
+			for _, mob in ipairs(monsters) do
+				---@type MonsterAI
+				local m = mob
+				if isvalid(m) and not m._dead and isvalid(m.Entity) then
+					local mp = m.Entity.TransformComponent.Position
+					local dx = mp.x - centerPos.x
+					local dy = mp.y - centerPos.y
+					if (dx * dx + dy * dy) <= (self.AoeRadius * self.AoeRadius) and _CardManager:IsSameDepthBand(target, m) then
+						m:TakeDamage(damage)
+						hitCount = hitCount + 1
+					end
+				end
+			end
+			log("Ep2Map3Summon: attack2 hit=" .. hitCount .. " radius=" .. self.AoeRadius)
+			if self.ShowDebugRangeCircle then
+				self:SpawnDebugRangeCircle(map, centerPos)
+			end
+			-- Stand으로 억지로 되돌리지 않는다(PlayAttack1과 동일한 이유 — 다음 틱이 자연스럽게 덮어쓴다)
+		end, self.Attack2HitDelay)
+	end
+
+	-- 디버그 전용 — centerPos를 중심으로 실제 AoeRadius 반경의 노란 원 테두리를 잠깐 그린다.
+	-- 스프라이트 크기/피벗에 의존하지 않고 LineRendererComponent로 세계 좌표를 직접 계산해서 그리므로
+	-- 애니메이션에 내장된 원 연출과 달리 반경이 항상 정확하다.
+	@ExecSpace("ServerOnly")
+	method void SpawnDebugRangeCircle(Entity map, Vector3 centerPos)
+		local marker = _SpawnService:SpawnByModelId("persistenteffect", "DebugRangeCircle", centerPos, map)
+		if marker == nil then return end
+		local sr = marker.SpriteRendererComponent
+		if sr ~= nil then sr.SpriteRUID = "" end
+
+		---@type LineRendererComponent
+		local line = marker:AddComponent("MOD.Core.LineRendererComponent")
+		if line == nil then
+			marker:Destroy()
+			return
+		end
+		line.Loop = true
+		line.IsSmooth = true
+		line.SortingLayer = "Default"
+		line.OrderInLayer = 999
+
+		local yellow = Color(1.0, 0.9, 0.0, 1.0)
+		local segments = self.DebugCircleSegments
+		for i = 0, segments - 1 do
+			local angle = (i / segments) * 2 * math.pi
+			local x = math.cos(angle) * self.AoeRadius
+			local y = math.sin(angle) * self.AoeRadius
+			line.Points:Add(LinePoint(Vector2(x, y), yellow, self.DebugCircleWidth))
+		end
+
+		marker:Destroy(self.DebugCircleLifetime)
+	end
+
+	-- 유지시간 만료 — 사망 연출 재생 후 파괴한다.
+	@ExecSpace("ServerOnly")
+	method void EndSummonLife(integer gen)
+		if not isvalid(self) or gen ~= self._summonGen then return end
+		local fx = self._summonEntity
+		if isvalid(fx) then
+			local r = fx.SpriteRendererComponent
+			if r ~= nil then r.SpriteRUID = self.DieRUID end
+			fx:Destroy(self.DieDuration)
+		end
+		self._summonEntity = nil
+		self._summonMap = nil
+		log("Ep2Map3Summon: duration expired, dismissed")
+	end
+
+	-- GameManager.RestartGame()이 호출 — 남아있는 소환수를 즉시 정리하고(연출 없이 바로 파괴),
+	-- 새 런에서 다시 1회 소환할 수 있도록 사용 여부를 리셋한다.
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		self._summonGen = self._summonGen + 1
+		self._usedThisRun = false
+		if isvalid(self._summonEntity) then
+			self._summonEntity:Destroy()
+		end
+		self._summonEntity = nil
+		self._summonMap = nil
+	end
+
+end

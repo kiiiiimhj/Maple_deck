@@ -1,0 +1,48 @@
+@Logic
+script Ep2Map1KeyEasterEggLogic extends Logic
+
+	-- 에피소드2 map1 이스터에그 3: object-3428_75(Ep2Map1KeyEasterEggTrigger가 붙은 오브젝트)를 2번 터치하면
+	-- "알 수 없는 열쇠"(unknown_key, 다른 이스터에그용 아이템) 1개를 지급한다. 표준 몬스터 잡템 드롭과
+	-- 달리 오브젝트 위치에서 작게 시작해 점점 커지며 다가와 바닥에 착지하는 연출(GameManager.
+	-- ScheduleApproachDrop/PlayApproachDropVisual, 유저 지정)을 쓴다.
+	-- unknown_key는 PlayerInventory.ConvertAllToCoins 목록에 포함돼 있어(unknown_ticket과 동일 정책)
+	-- "처음부터 다시하기"에서 자동으로 사라진다(월드 재시작·게임 종료는 어차피 인메모리 상태라 그냥 사라짐).
+	-- Zone21AlienEasterEggLogic과 동일한 런 정책: "다시하기"/"새로 시작"에서는 GameManager.RestartGame()이
+	-- ResetForNewRun()을 호출해 다시 도전할 수 있게 초기화되지만, "이어하기"(ContinueGame)는 이 플래그를
+	-- 건드리지 않으므로 같은 런 안에서는(이미 발동했다면) 다시 뜨지 않는다.
+	@Sync property boolean Triggered = false
+	property integer _touchCount = 0
+	property integer RequiredTouchCount = 2
+
+	property string KeyItemId = "unknown_key"
+	property string KeyIconRUID = "752a314d933a45f788b43b24ad42f7d0"
+	-- object-3428_75 바로 아래 착지 지점의 실측 지면 Y(MapBuilder.getFootholds로 x=64.5 부근 확인:
+	-- Id 76~78 구간, walk=1, y=-1.13 — ep2_map1 존5/6 공통 지면과 동일)
+	property number LandingWorldY = -1.13
+
+	-- Ep2Map1KeyEasterEggTrigger.RequestTouch()가 호출 — 터치된 오브젝트 엔티티를 그대로 받는다
+	-- (Logic에 UUID를 property로 박아두면 맵 미로드 시점에 nil이 되는 문제 회피, 다른 이스터에그와 동일 이유)
+	@ExecSpace("ServerOnly")
+	method void OnObjectTouched(Entity touchedObject)
+		if self.Triggered then return end
+		self._touchCount = self._touchCount + 1
+		log("Ep2Map1KeyEasterEgg: touch " .. self._touchCount .. "/" .. self.RequiredTouchCount)
+		if self._touchCount < self.RequiredTouchCount then return end
+
+		self.Triggered = true
+		local startPos = touchedObject.TransformComponent.WorldPosition
+		local groundPos = Vector3(startPos.x, self.LandingWorldY, startPos.z)
+		_GameManager:ScheduleApproachDrop(startPos, groundPos, self.KeyIconRUID, function()
+			_PlayerInventory:AddItem(self.KeyItemId, 1)
+		end, 1.0)
+		log("Ep2Map1KeyEasterEgg: triggered, granted 1x " .. self.KeyItemId)
+	end
+
+	-- GameManager.RestartGame()이 호출 — 새 런에서는 오브젝트를 다시 두 번 눌러 재도전할 수 있다
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		self.Triggered = false
+		self._touchCount = 0
+	end
+
+end

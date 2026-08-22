@@ -330,6 +330,16 @@ script GameManager extends Logic
 	-- 잡템/포션/카드 드롭이 공통으로 쓰는 착지 Y 보정치. dropScale은 각 드롭 시점에 계산되는
 	-- CardManager.GetEffectScaleRatio(mob) 값을 그대로 넘겨받는다(죽은 몬스터가 화면상 얼마나
 	-- 멀리/뒤에 있었는지)
+	-- 에피2 map1 열쇠 이스터에그(object-3428_75) 전용 — 표준 드롭(펑 튀어나와 바운스)과 달리 오브젝트
+	-- 위치에서 작게 시작해 점점 커지며 다가와 바닥에 착지하는 연출(PlayApproachDropVisual)의 소요 시간
+	property number KeyApproachDuration = 0.9
+	-- 버그 수정(2026-08-21, 유저 지정: "지금 수직 낙하하는데 살짝 포물선으로 떨어지면 더 좋을듯") —
+	-- 시작점과 착지점의 x가 같아서(오브젝트 바로 아래로 착지) 그대로 두면 완전히 수직으로 떨어져 보였다.
+	-- sin(t*pi)로 이동 경로 중간에만 옆으로 살짝 부풀렸다가 착지 시점엔 다시 0으로 돌아오게 해서(시작/
+	-- 착지 좌표 자체는 그대로 유지) 포물선처럼 휘어져 떨어지는 것처럼 보이게 한다(UI px 기준, 좌우
+	-- 방향은 매번 랜덤).
+	property number KeyApproachArcWidth = 45
+
 	method number GetDropLandYCorrection(number dropScale)
 		return self.DropLandYOffset + math.max(0, 1.0 - dropScale) * self.DropLandDepthCompensation
 	end
@@ -594,7 +604,13 @@ script GameManager extends Logic
 		local rawUI = _UILogic:ScreenToUIPosition(_UILogic:WorldToScreenPosition(worldPos))
 		local offsetX = (_UtilLogic:RandomDouble() * 2 - 1) * 220
 		local offsetY = (_UtilLogic:RandomDouble() * 2 - 1) * 140
-		local splatUI = Vector2(rawUI.x + offsetX, rawUI.y + offsetY)
+		local splatY = rawUI.y + offsetY
+		-- 유저 지정(2026-08-22): "좌표가 너무 아래일때있어서 하단 30%는 제외" — 캔버스는 1920x1080
+		-- 중앙원점(ui-fundamentals.md 기준, Y 범위 -540~+540)이므로 하단 30%(-540~-540+1080*0.3=-216)를
+		-- 잘라내고, 그 밑으로 떨어지면 화면 하단 30% 경계선(-216)에 고정한다.
+		local screenBottomExcludeY = -216
+		if splatY < screenBottomExcludeY then splatY = screenBottomExcludeY end
+		local splatUI = Vector2(rawUI.x + offsetX, splatY)
 
 		local icon = self.inkSplatIcon
 		icon.Color = Color(1, 1, 1, 1)
@@ -1574,13 +1590,8 @@ script GameManager extends Logic
 		if mapIndex == 54 and idx == 3 then return 0.75 end
 		if mapIndex == 56 and idx == 2 then return 0.75 end
 		if mapIndex == 59 and idx == 3 then return 0.75 end
-		-- 버그 수정(2026-08-20, 유저 리포트 "저 공격모션이 빠진거같은디?") — 스코피/골든스코피의
-		-- attack1(481276dd.../5ff34e9f...)은 이미 GetMapAttackRUID에 채워져 있었지만 msw-search로
-		-- 실측해보니 15프레임(공식값 0.05+0.1*15=1.55초)짜리 긴 클립이었다 — 이 표에 항목이 없어서
-		-- 기본값 0.25초로 잘려서, 스프라이트가 attack1로 바뀌자마자 거의 바로 stand로 되돌아가
-		-- "공격 모션이 빠진 것처럼" 보였다. GetMapIsRanged/GetMapHitEffectRUID와 동일한 (mapIndex, idx)
-		-- 조합에 실측값을 채운다 — 이 값이 커지면 MonsterAI._customAttackInterval(=attackDuration+0.7)도
-		-- 같이 늘어나서 공격 간격도 자동으로 이 긴 모션에 맞춰진다.
+		-- 스코피/골든스코피 attack1(481276dd.../5ff34e9f...) 실측 길이(15프레임=1.55초) — GetMapAttackRUID
+		-- 참고. 이 값이 없으면 기본값 0.25초에 잘려서 공격 모션이 거의 안 보인다.
 		if mapIndex == 65 and idx == 2 then return 1.55 end  -- 골든스코피
 		if mapIndex == 67 and idx == 1 then return 1.55 end  -- 스코피
 		if mapIndex == 68 and idx == 1 then return 1.55 end  -- 골든스코피
@@ -1915,9 +1926,14 @@ script GameManager extends Logic
 
 	-- 몬스터가 플레이어에게 도달했을 때 MonsterAI가 호출 (엘리트는 dmgMultiplier로 공격력 가산)
 	@ExecSpace("ServerOnly")
-	method void OnMonsterReached(number dmgMultiplier)
+	-- ignoreHitImmune=true(미니빈 무리 등 _isSwarmMember)면 다른 몬스터가 방금 때려서 걸린 0.8초
+	-- 전역 무적 프레임(_hitImmune)을 무시하고 항상 들어간다 — 유저 지정: "다른 일반 스폰 몬스터가
+	-- 연속으로 때리면 대미지 안들어가게 딜레이 걸었잖아? 쟤는 무시하라는말임". 무리 공격이 착지한
+	-- 뒤에도 _hitImmune은 여느 공격과 동일하게 켰다 꺼서(아래), 그 뒤로 0.8초간 다른 몬스터의 공격을
+	-- 막는 기존 동작 자체는 그대로 유지한다 — 무리 공격이 "들어가는 쪽"만 예외를 받는다.
+	method void OnMonsterReached(number dmgMultiplier, boolean ignoreHitImmune)
 		if self.GameOver then return end
-		if self._hitImmune then return end
+		if self._hitImmune and not ignoreHitImmune then return end
 
 		-- 허수아비가 소환되어 있는 동안은 몬스터의 공격을 플레이어 대신 허수아비가 맞는다 —
 		-- 플레이어 HP는 전혀 깎이지 않고, 허수아비만 맞는 연출을 재생한다. 존마다 독립적이므로
@@ -2136,6 +2152,9 @@ script GameManager extends Logic
 		_MapMoveUI:NotifyBossDefeated(false)
 		-- 이전 런에서 맵4+까지 진행했더라도 시작 맵(map02)으로 되돌린다. 이미 시작 맵이면 내부에서 no-op
 		_MapManager:SilentMoveToMap(_MapManager.CurrentMapIndex, _MapManager.DesiredStartMapIndex)
+		-- 버그 수정(2026-08-21) — 로비/게임오버 화면이 StopBGM(true)로 채널을 끊어놨을 수 있으므로,
+		-- 시작 맵과 같은 파일이어도(no-op이어도) 무조건 다시 튼다(MapManager.ForcePlayBgmForCurrentMap 참고)
+		_MapManager:ForcePlayBgmForCurrentMap()
 		_CardManager:ResetAllCards()
 		_CardManager:InitWeaponSkillForRun(userId)
 		-- 장비 등급 스킬(무기 외 4부위 포함)의 런 상태도 같은 시점에 초기화한다
@@ -2149,10 +2168,44 @@ script GameManager extends Logic
 		-- 존40~43 에르다스 이스터에그 + 존44(map24) 보물상자도 동일한 정책으로 초기화
 		_Map23ErdasEasterEggLogic:ResetForNewRun()
 		_Map24TreasureChestLogic:ResetForNewRun()
+		-- 에피2 map1 보유 스킬 이스터에그(object-3428_19)도 동일한 정책으로 초기화
+		_Ep2Map1SkillEasterEggLogic:ResetForNewRun()
+		-- 에피2 map1 선물 NPC(object-3428_84)도 동일한 정책으로 초기화(다시 2번 도전 + 잡템 재추첨)
+		_Ep2Map1GiftNpcLogic:ResetForNewRun()
+		-- 에피2 map1 열쇠 이스터에그(object-3428_75)도 동일한 정책으로 초기화(다시 2번 도전 가능)
+		_Ep2Map1KeyEasterEggLogic:ResetForNewRun()
+		-- 에피2 map1 구름/상자 이스터에그(object-3428_79 구름 + object-3428_31 상자)도 동일한 정책으로
+		-- 초기화 — 구름이 다시 나타나고(5번 눌러야 걷힘) 상자도 다시 열 수 있다
+		_Ep2Map1CloudEasterEggLogic:ResetForNewRun()
+		_Ep2Map1ChestEasterEggLogic:ResetForNewRun()
+		-- 에피2 map2 아이템 이스터에그(MapObject_46)도 동일한 정책으로 초기화(다시 2번 도전 가능)
+		_Ep2Map2ItemEasterEggLogic:ResetForNewRun()
+		-- 에피2 미니빈 이스터에그(MapObject_41/222/153/223)도 동일한 정책으로 초기화 — 남아있던
+		-- 미니빈은 정리하고 다시 도전할 수 있게 한다
+		_Ep2MiniBeanEasterEggLogic:ResetForNewRun()
+		-- 에피2 map2(여신 탑) 석상 퍼즐(MapObject_37/195/36/196/38/263)도 동일한 정책으로 초기화 — 들고
+		-- 있던/놓았던 아이템을 전부 원위치로 되돌리고 보상 오브젝트(MapObject_224)도 다시 숨긴다
+		_Ep2Map2StatuePuzzleLogic:ResetForNewRun()
+		-- 에피2 map2 스킬함 이스터에그(MapObject_269→240)도 동일한 정책으로 초기화 — 숨겼던 오브젝트를
+		-- 다시 보이게 하고 원위치로 되돌린다
+		_Ep2Map2SkillChestLogic:ResetForNewRun()
+		-- 에피2 map2 뒤집기 포션 이스터에그(MapObject_230)도 동일한 정책으로 초기화 — 다시 뒤집힌
+		-- 상태로 되돌려서 재도전할 수 있게 한다
+		_Ep2Map2FlipPotionLogic:ResetForNewRun()
+		-- 에피2 map3 지쳐버린 기사 존1 드래그 트리거(MapObject_67)도 동일한 정책으로 초기화 — 원위치로
+		-- 되돌려서 재도전할 수 있게 한다(존2~10 우선 스폰 여부는 위 ResetTiredKnightTracking이 따로 처리)
+		_Ep2Map3TiredKnightLogic:ResetForNewRun()
+		-- 에피2 map3 object-658 소환수(있으면) 즉시 정리 — 다시하기 시 이전 런의 소환수가 남아있지 않게 한다
+		_Ep2Map3SummonLogic:ResetForNewRun()
 		-- "처음부터 다시하기": 이번 런에 가방에 쌓인 잡템은 골드로 환전한 뒤 가방을 비운다
 		_PlayerInventory:ConvertAllToCoins()
 		_MonsterSpawner:ClearAllMonsters()
+		-- 카페테리아 가마솥(ep2_map3 존4)은 ClearAllMonsters 이후에 다시 스폰해야 한다 — 먼저 하면
+		-- 방금 새로 스폰한 솥단지까지 같이 지워진다. 구름(MapObject_17)도 여기서 원상복구한다.
+		_Ep2Map3CauldronLogic:ResetForNewRun()
 		_MonsterSpawner:ResetEliteTracking()
+		-- 지쳐버린 기사(Tired Knight) 존별 스폰 여부도 초기화 — 새 런에서 존마다 다시 1마리씩 등장한다
+		_MonsterSpawner:ResetTiredKnightTracking()
 		_MonsterSpawner:RestartSpawning()
 		self:NotifyExpChanged(self.Exp, self.ExpNeeded, self.Level, true)
 		log("Game restarted (full reset)")
@@ -2545,6 +2598,117 @@ script GameManager extends Logic
 		end, arrivalDelay)
 
 		self:PlayLootDropVisual(Vector2(worldPos.x, worldPos.y), iconRuid, groundDelay, fallHeight, groundWorldY, dropScale, freezeOnFly)
+	end
+
+	-- Ep2Map1KeyEasterEggLogic 전용 — 일반 몬스터 잡템 드롭(ScheduleLootDrop)과 서버측 타이밍 구조는
+	-- 동일(도착 예정시각에 onGrant 지급 + 존 이탈시 조기지급)하지만, 클라 연출은 PlayLootDropVisual이
+	-- 아니라 아래 PlayApproachDropVisual(오브젝트에서 작게 시작해 커지며 다가와 착지)을 재생한다.
+	@ExecSpace("ServerOnly")
+	method void ScheduleApproachDrop(Vector3 startWorldPos, Vector3 groundWorldPos, string iconRuid, any onGrant, number dropScale)
+		local dropZone = _MapManager.CurrentMapIndex
+		local groundDelay = 0.6 + _UtilLogic:RandomDouble() * 0.6
+		local arrivalDelay = self.KeyApproachDuration + groundDelay + self.PotionFlyDuration
+
+		local granted = false
+		local watchTimerId = 0
+		watchTimerId = _TimerService:SetTimerRepeat(function()
+			if not isvalid(self) or granted then return end
+			if _MapManager.CurrentMapIndex ~= dropZone then
+				granted = true
+				onGrant()
+				_TimerService:ClearTimer(watchTimerId)
+				self:RequestLootCollectNow()
+			end
+		end, 0.15)
+
+		_TimerService:SetTimerOnce(function()
+			if isvalid(self) and not granted then
+				granted = true
+				onGrant()
+				_TimerService:ClearTimer(watchTimerId)
+			end
+		end, arrivalDelay)
+
+		self:PlayApproachDropVisual(Vector2(startWorldPos.x, startWorldPos.y), Vector2(groundWorldPos.x, groundWorldPos.y), iconRuid, groundDelay, dropScale)
+	end
+
+	-- 표준 잡템 드롭(PlayLootDropVisual)과 동일한 4개 아이콘 슬롯/워치독/가방으로 날아가는 마무리
+	-- 로직(TryFlyLootToBag)을 그대로 재사용하되, 등장 연출만 다르다 — "펑 튀어나와 바운스" 대신
+	-- startUI(오브젝트 위치)에서 groundUI(착지 지점)까지 위치와 크기(작음→큼)를 함께 보간해서
+	-- "멀리서 작게 보이다가 다가올수록 커지며 착지하는" 원근감 있는 이동으로 보이게 한다
+	-- (유저 지정: "작은데 점차 커지면서 다가오는것처럼 땅에 착지").
+	@ExecSpace("Multicast")
+	method void PlayApproachDropVisual(Vector2 startWorldPos, Vector2 groundWorldPos, string iconRuid, number groundDelay, number dropScale)
+		if self:IsServer() then return end
+		local slots = self:GetLootSlots()
+		local slotIndex = 0
+		for i = 1, #slots do
+			if not slots[i].busy then
+				slotIndex = i
+				break
+			end
+		end
+		if slotIndex == 0 then return end
+
+		local slot = slots[slotIndex]
+		slot.busy = true
+		slot.landed = false
+		slot.collectRequested = false
+		slot.flown = false
+		slot.token = slot.token + 1
+		slot.dropScale = dropScale
+		slot.freezeOnFly = false
+		local myToken = slot.token
+		local icon = slot.icon
+
+		_TimerService:SetTimerOnce(function()
+			self:WatchdogClearLootIcon(slotIndex, myToken)
+		end, 5.0)
+
+		local startUI = _UILogic:ScreenToUIPosition(_UILogic:WorldToScreenPosition(startWorldPos))
+		local landYCorrection = self:GetDropLandYCorrection(dropScale)
+		local rawGroundUI = _UILogic:ScreenToUIPosition(_UILogic:WorldToScreenPosition(groundWorldPos))
+		local groundUI = Vector2(rawGroundUI.x, rawGroundUI.y + landYCorrection)
+
+		icon.ImageRUID = iconRuid
+		icon.AnimClipPlayType = SpriteAnimClipPlayType.Loop
+		icon.StartFrameIndex = 0
+		icon.EndFrameIndex = 2147483647
+		icon.PreserveSprite = PreserveSpriteType.None
+		icon.Color = Color(1, 1, 1, 1)
+		icon.Entity:SetEnable(true)
+		local tc = icon.Entity.UITransformComponent
+		local startScale = 0.12 * dropScale
+		tc.anchoredPosition = startUI
+		tc.Scale = Vector3(startScale, startScale, 1)
+		tc.ZRotation = 0
+
+		-- QuadEaseIn: 처음엔 천천히(작게 멀리) 움직이다가 착지 직전으로 갈수록 빨라지고 커진다 — 원근감을 흉내.
+		-- 여기에 sin(t*pi) 부풀림을 더해 이동 중간에만 옆으로 휘었다가 시작/착지 지점(t=0, t=1)에서는
+		-- 정확히 원래 좌표로 돌아오게 해서 포물선처럼 보이게 한다.
+		local arcSign = (_UtilLogic:RandomDouble() < 0.5) and -1 or 1
+		local arcWidth = self.KeyApproachArcWidth * arcSign
+		_TweenLogic:PlayTween(0.0, 1.0, self.KeyApproachDuration, EaseType.QuadEaseIn, function(t)
+			if not isvalid(icon) then return end
+			local x = startUI.x + (groundUI.x - startUI.x) * t + math.sin(t * math.pi) * arcWidth
+			local y = startUI.y + (groundUI.y - startUI.y) * t
+			icon.Entity.UITransformComponent.anchoredPosition = Vector2(x, y)
+			local scale = startScale + (dropScale - startScale) * t
+			icon.Entity.UITransformComponent.Scale = Vector3(scale, scale, 1)
+		end)
+
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(icon) then return end
+			slot.landed = true
+			slot.landUI = groundUI
+			if slot.collectRequested then
+				self:TryFlyLootToBag(slotIndex, groundUI)
+				return
+			end
+			_TimerService:SetTimerOnce(function()
+				self:TryFlyLootToBag(slotIndex, groundUI)
+			end, groundDelay)
+		end, self.KeyApproachDuration)
 	end
 
 	-- 메소 익스플로젼(Card177) 전용 — 서버 권위 메소 드랍 목록을 지연 생성해서 돌려준다.

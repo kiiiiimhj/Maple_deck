@@ -1,0 +1,62 @@
+@Component
+script Ep2MiniBeanEasterEggTrigger extends Component
+
+	-- 에피소드2 미니빈 이스터에그 트리거 — MapObject_41/MapObject_222/MapObject_153/MapObject_223
+	-- (ep2_map2) 4개 오브젝트에 전부 이 컴포넌트를 붙이되, TargetMapIndex만 인스턴스마다 다르게 지정한다
+	-- (유저 지정: 41/222 → 맵2 존1(mapIndex55), 153/223 → 맵1 존1(mapIndex45)).
+	-- 누르면 즉시(터치 카운트 없이 1번) 강제 이동 + 미니빈 12마리 소환이 발동한다(Ep2MiniBeanEasterEggLogic).
+	-- Ep2Map1SkillEasterEggTrigger 계열과 동일한 흔들림 연출 패턴 재사용.
+	property integer TargetMapIndex = 55
+
+	property any _touchHandler = nil
+	property any _shakeTween = nil
+	property number ShakeDuration = 0.35
+	property number ShakeAngle = 10
+
+	method void OnBeginPlay()
+		if self:IsClient() then
+			self._touchHandler = self.Entity:ConnectEvent(TouchEvent, self.OnTouched)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnTouched(TouchEvent event)
+		-- 게임오버 팝업/타이틀(로비) 화면이 떠 있는 동안은 뒤에 있는 월드 오브젝트가 눌리면 안 된다
+		if _GameManager.GameOver then return end
+		if _TitleUI.titleGroup.Enable then return end
+		self:PlayShake()
+		self:RequestTouch()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayShake()
+		if self._shakeTween ~= nil then
+			self._shakeTween:Stop()
+			self._shakeTween = nil
+		end
+		local transform = self.Entity.TransformComponent
+		self._shakeTween = _TweenLogic:PlayTween(0.0, 1.0, self.ShakeDuration, EaseType.Linear, function(t)
+			if not isvalid(self) or not isvalid(self.Entity) then return end
+			local angle = self.ShakeAngle * math.sin(t * math.pi * 3) * (1.0 - t)
+			transform.ZRotation = angle
+			if t >= 1.0 then
+				transform.ZRotation = 0
+				self._shakeTween = nil
+			end
+		end)
+	end
+
+	-- TargetMapIndex를 그대로 서버로 넘긴다(어느 인스턴스가 눌렸는지는 self.Entity로도 알 수 있지만,
+	-- 목적지는 인스턴스마다 다른 값이라 직접 넘기는 게 더 명확하다)
+	@ExecSpace("Server")
+	method void RequestTouch()
+		_Ep2MiniBeanEasterEggLogic:OnObjectTouched(self.TargetMapIndex)
+	end
+
+	method void OnEndPlay()
+		if self:IsClient() and self._touchHandler ~= nil then
+			self.Entity:DisconnectEvent(TouchEvent, self._touchHandler)
+		end
+	end
+
+end

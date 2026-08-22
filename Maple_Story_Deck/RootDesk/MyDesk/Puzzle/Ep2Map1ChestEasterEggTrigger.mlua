@@ -1,0 +1,64 @@
+@Component
+script Ep2Map1ChestEasterEggTrigger extends Component
+
+	-- 에피소드2 map1 이스터에그 4-2: object-3428_31(상자, 이 엔티티 자신)를 누르면 알 수 없는 메달
+	-- (unknown_medal, 나중에 또 사용할 이스터에그용 아이템)을 지급한다(Ep2Map1ChestEasterEggLogic).
+	-- 실제 조건 판정(구름이 아직 안 걷혔으면 무시/열쇠가 없으면 무시/이미 열었으면 무시)은 전부 Logic에서
+	-- 서버 권위로 처리한다 — Ep2Map1SkillEasterEggTrigger 계열과 동일한 흔들림 연출 패턴 재사용.
+	property any _touchHandler = nil
+	property any _shakeTween = nil
+	property number ShakeDuration = 0.35
+	property number ShakeAngle = 10
+
+	method void OnBeginPlay()
+		if self:IsClient() then
+			self._touchHandler = self.Entity:ConnectEvent(TouchEvent, self.OnTouched)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnTouched(TouchEvent event)
+		-- 게임오버 팝업/타이틀(로비) 화면이 떠 있는 동안은 뒤에 있는 월드 오브젝트가 눌리면 안 된다
+		if _GameManager.GameOver then return end
+		if _TitleUI.titleGroup.Enable then return end
+		-- 버그 수정(2026-08-21, 유저 리포트 "구름이 있을때 상자가 흔들리네 흔들려서도 안된다") — 구름과
+		-- 상자의 터치 판정 영역이 겹쳐서, 구름을 누른 좌표가 뒤에 가려진 상자의 TouchReceiveComponent에도
+		-- 동시에 닿는다(서버 판정은 이미 Ep2Map1ChestEasterEggLogic.OnObjectTouched가 CloudCleared로
+		-- 막아주지만, 클라이언트 쪽 흔들림 연출은 그 판정과 무관하게 무조건 재생되고 있었다). CloudCleared는
+		-- @Sync라 클라에도 값이 있으므로 여기서 미리 걸러 흔들림 자체가 아예 재생되지 않게 한다.
+		if not _Ep2Map1CloudEasterEggLogic.CloudCleared then return end
+		self:PlayShake()
+		self:RequestTouch()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayShake()
+		if self._shakeTween ~= nil then
+			self._shakeTween:Stop()
+			self._shakeTween = nil
+		end
+		local transform = self.Entity.TransformComponent
+		self._shakeTween = _TweenLogic:PlayTween(0.0, 1.0, self.ShakeDuration, EaseType.Linear, function(t)
+			if not isvalid(self) or not isvalid(self.Entity) then return end
+			local angle = self.ShakeAngle * math.sin(t * math.pi * 3) * (1.0 - t)
+			transform.ZRotation = angle
+			if t >= 1.0 then
+				transform.ZRotation = 0
+				self._shakeTween = nil
+			end
+		end)
+	end
+
+	-- self.Entity를 그대로 서버로 넘긴다(다른 이스터에그 트리거와 동일 이유)
+	@ExecSpace("Server")
+	method void RequestTouch()
+		_Ep2Map1ChestEasterEggLogic:OnObjectTouched(self.Entity)
+	end
+
+	method void OnEndPlay()
+		if self:IsClient() and self._touchHandler ~= nil then
+			self.Entity:DisconnectEvent(TouchEvent, self._touchHandler)
+		end
+	end
+
+end
