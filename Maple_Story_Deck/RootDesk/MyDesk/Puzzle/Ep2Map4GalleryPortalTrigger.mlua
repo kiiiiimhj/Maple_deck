@@ -41,13 +41,17 @@ script Ep2Map4GalleryPortalTrigger extends Component
 		local have = _PlayerInventory:GetItemCount(self.RequiredItemId)
 		if have < self.RequiredAmount then
 			local itemDef = _PlayerInventory:GetItemDef(self.RequiredItemId)
-			_UIToast:ShowMessage(itemDef.name .. "이(가) 부족합니다 (" .. have .. "/" .. self.RequiredAmount .. ")")
+			_UIToast:ShowMessage(itemDef.name .. "가 부족합니다 (" .. have .. "/" .. self.RequiredAmount .. ")")
 			return
 		end
 		_PlayerInventory:RemoveItem(self.RequiredItemId, self.RequiredAmount)
 
 		local zoneEntity = _MonsterSpawner:GetZoneEntity(self.Ep2Map4Zone10Index)
 		_MapManager:SetMonstersPausedForZone(zoneEntity, self.Ep2Map4Zone10Index, true)
+		-- 기존 몬스터를 한 번 Pause하는 것만으로는 안 된다 — 그 사이 새로 리스폰되는 몬스터가 Pause 없이
+		-- 태어나는 문제(MonsterSpawner.SpawnBatchOnMap)가 남아있어서, 갤러리에 있는 동안은 이 플래그로
+		-- "지금 있는 맵이 아님"을 강제한다. 돌아올 때 Ep2Map2GalleryReturnPortalTrigger가 false로 되돌린다.
+		_MapManager.AwayOnSideMap = true
 
 		local playerEntity = _UserService:GetUserEntityByUserId(senderUserId)
 		if playerEntity == nil or playerEntity.PlayerComponent == nil then return end
@@ -55,10 +59,26 @@ script Ep2Map4GalleryPortalTrigger extends Component
 		-- 갤러리 맵은 ZoneInfo 인덱스 밖이라 MapManager.ResetCameraConfine을 안 타므로 전용 진입점으로
 		-- 카메라를 고정한다. Client RPC라 마지막 인자로 대상 유저만 targeting한다(다른 플레이어 카메라엔
 		-- 영향 없음).
-		_MapManager:SetGalleryCameraConfine(senderUserId)
+		_MapManager:SetGalleryCameraConfine()
 		-- Ep2Map2ArenaLogic은 @Logic이라 OnMapEnter가 안 온다(AGENTS.md) — 진입 트리거인 여기서
 		-- 전투 미니게임 선택 단계를 직접 시작시킨다.
 		_Ep2Map2ArenaLogic:StartSelectionPhase(senderUserId)
+		-- 유저 지적: "미니게임 맵에서 <버튼 있으면 없애주면 좋을듯" — Ep2Map2GalleryHudGate(맵 루트
+		-- Component, OnMapEnter로 HUD를 숨기는 원래 설계)가 라이브 확인 결과 실제로 발동하지 않았다
+		-- (DefaultGroup.Enable=true로 남아있었음) — MoveToEntityByPath 직접 텔레포트가 일반
+		-- TeleportToMapPosition과 달리 OnMapEnter/OnMapLeave 라이프사이클을 안 태우는 것으로 보인다.
+		-- 그래서 여기서 직접 HUD(카드슬롯 + 존 이동 "<"/">" 버튼 전부 포함)를 끈다.
+		-- 유저당 targetUserId를 지정하는 Client RPC(SetHudVisible을 "Client"로 선언)는 라이브 테스트에서
+		-- 매번 "[LEA-3032] FailedSendToClient: TargetUserId ... 유효하지 않습니다" 에러로 실제 전달이
+		-- 안 되는 것이 확인됐다(이 프로젝트는 어차피 월드당 플레이어 1명뿐 — PlayerInventory 등도 userId
+		-- 파라미터가 아예 없음). Multicast로 바꿔 targetUserId 없이 브로드캐스트한다.
+		self:SetHudVisible(false)
+	end
+
+	@ExecSpace("Multicast")
+	method void SetHudVisible(boolean visible)
+		local hud = _EntityService:GetEntityByPath("/ui/DefaultGroup")
+		if hud ~= nil then hud.Enable = visible end
 	end
 
 	method void OnEndPlay()

@@ -31,6 +31,9 @@ script Ep2Map2GalleryReturnPortalTrigger extends Component
 
 	@ExecSpace("Server")
 	method void RequestReturn()
+		-- AwayOnSideMap을 먼저 꺼야 한다 — 켜진 채로 있으면 지금 여기서 Resume하는 기존 몬스터는
+		-- 살아나도, 이 시점 이후 새로 리스폰되는 몬스터가 계속 Pause 상태로 태어나 버린다.
+		_MapManager.AwayOnSideMap = false
 		local zoneEntity = _MonsterSpawner:GetZoneEntity(self.Ep2Map4Zone10Index)
 		_MapManager:SetMonstersPausedForZone(zoneEntity, self.Ep2Map4Zone10Index, false)
 		_MapManager:ResetCameraConfine(self.Ep2Map4Zone10Index)
@@ -38,6 +41,20 @@ script Ep2Map2GalleryReturnPortalTrigger extends Component
 		local playerEntity = _UserService:GetUserEntityByUserId(senderUserId)
 		if playerEntity == nil or playerEntity.PlayerComponent == nil then return end
 		playerEntity.PlayerComponent:MoveToEntityByPath(self.DestinationPath)
+		-- Ep2Map4GalleryPortalTrigger가 껐던 HUD(카드슬롯 + "<"/">" 존 이동 버튼)를 되돌린다
+		-- (같은 이유로 OnMapLeave도 못 믿어서 직접 호출).
+		-- targetUserId 지정 Client RPC는 라이브 테스트에서 "[LEA-3032] FailedSendToClient" 에러로
+		-- 실제 전달이 안 됐다(Ep2Map4GalleryPortalTrigger와 동일 문제) — Multicast로 교체.
+		-- 실측 확인: Ep2Map4GalleryPortalTrigger에도 동일한 이름(SetHudVisible)의 Multicast 메서드가
+		-- 있으면 이쪽 호출이 조용히 씹힌다(어느 컴포넌트의 메서드인지 라우팅이 꼬이는 것으로 보임) —
+		-- 서로 다른 컴포넌트 타입이라도 Multicast 메서드명은 겹치면 안 된다. 이름을 고유하게 바꿨다.
+		self:SetHudVisibleOnReturn(true)
+	end
+
+	@ExecSpace("Multicast")
+	method void SetHudVisibleOnReturn(boolean visible)
+		local hud = _EntityService:GetEntityByPath("/ui/DefaultGroup")
+		if hud ~= nil then hud.Enable = visible end
 	end
 
 	method void OnEndPlay()
