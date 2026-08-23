@@ -10,6 +10,10 @@ script CharacterUnlockUI extends Logic
 
 	property any _acquireHandler = nil
 	property any _closeHandler = nil
+	-- Open()에서 받은 캐릭터 이름을 그대로 저장해뒀다가 획득 클릭 시 서버로 넘긴다 — 실피드는
+	-- 맵21 비밀구역 탈출 이동이 따라붙고, 그 외(레이온 등)는 이미 해금 처리가 끝난 뒤 팝업만
+	-- 닫으면 된다(Ep2Map2ArenaLogic 참고).
+	property string _pendingCharacterName = ""
 
 	@ExecSpace("ClientOnly")
 	method void OnBeginPlay()
@@ -23,24 +27,31 @@ script CharacterUnlockUI extends Logic
 		log("CharacterUnlockUI started")
 	end
 
-	-- Map21RelicEasterEgg(서버)가 직접 호출한다 — Client ExecSpace라 서버에서 불러도 클라이언트에서 실행된다
+	-- Map21RelicEasterEgg / Ep2Map2ArenaLogic(둘 다 서버)가 직접 호출한다 — Client ExecSpace라
+	-- 서버에서 불러도 클라이언트에서 실행된다. 아이콘/이름/설명을 파라미터로 받아 캐릭터마다
+	-- 재사용한다(유저 지정: "실피드처럼 팝업 동일 이미지는 레이온").
 	@ExecSpace("Client")
-	method void Open()
-		self.iconSprite.ImageRUID = DataRef("c8d5851228a844da80c8c94586b06aa7")
-		self.nameText.Text = "실피드"
-		self.descText.Text = "바람과 함께 전장을 누비는 신비로운 궁수.\n빠른 화살로 적의 약점을 꿰뚫고, 거센\n바람으로 전장을 지배한다."
+	method void Open(string iconRuid, string characterName, string desc)
+		self._pendingCharacterName = characterName
+		self.iconSprite.ImageRUID = DataRef(iconRuid)
+		self.nameText.Text = characterName
+		self.descText.Text = desc
 		self.popupGroup.Enable = true
 	end
 
 	@ExecSpace("ClientOnly")
 	method void OnAcquireClicked()
 		self.popupGroup.Enable = false
-		self:RequestAcquire()
+		self:RequestAcquire(self._pendingCharacterName)
 	end
 
+	-- 실피드는 맵21 비밀구역이라 해금 후 탈출 이동까지 같이 처리해야 한다. 그 외 캐릭터(레이온 등)는
+	-- 호출부에서 해금이 이미 끝난 뒤 팝업을 띄운 것이므로 여기서는 닫는 것 외에 할 일이 없다.
 	@ExecSpace("Server")
-	method void RequestAcquire()
-		_Map21RelicEasterEgg:AcquireAndTravel()
+	method void RequestAcquire(string characterName)
+		if characterName == "실피드" then
+			_Map21RelicEasterEgg:AcquireAndTravel()
+		end
 	end
 
 	@ExecSpace("ClientOnly")

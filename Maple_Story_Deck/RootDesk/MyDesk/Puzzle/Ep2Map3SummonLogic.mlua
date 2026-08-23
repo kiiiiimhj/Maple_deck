@@ -55,8 +55,12 @@ script Ep2Map3SummonLogic extends Logic
 	property boolean _nextIsAttack2 = false
 	-- 재소환(재클릭) 시 이전 소환의 예약된 타이머들이 새 소환에 잘못 영향을 주지 않도록 막는 세대 번호
 	property integer _summonGen = 0
-	-- 런당 1회 제한(유저 요청: "1회만 소환되야함 런당") — GameManager.RestartGame → ResetForNewRun에서 리셋
-	property boolean _usedThisRun = false
+	-- 맵당 1회 제한(유저 요청: "1회만 소환되야함 런당" → 이후 ep2_map4에도 같은 오브젝트가 추가되면서
+	-- "맵마다 1번씩"으로 확정 — 존 인덱스가 아니라 물리 파일명(ZoneInfo.file, 예: "ep2_map3"/"ep2_map4")
+	-- 기준으로 따로 센다. 이 Logic 자체는 map3/map4 어느 쪽 object-658이 불러도 똑같이 동작하는 범용
+	-- 구조라(파일명 하드코딩 없음), 이 테이블 하나로 맵별 사용 여부만 구분하면 충분하다.
+	-- GameManager.RestartGame → ResetForNewRun에서 리셋
+	property table _usedMapFiles = {}
 	-- 디버그용 임시 스위치 — true면 어택1(단일)을 건너뛰고 항상 어택2(광역)만 사용한다(유저 요청:
 	-- "임시로 기본공격 못하게 막아줘" — 광역기 판정 반경 튜닝 중 어택1이 섞여서 헷갈림). Play 중에도
 	-- _Ep2Map3SummonLogic.DisableAttack1 = true/false로 즉시 바꿀 수 있다.
@@ -70,13 +74,15 @@ script Ep2Map3SummonLogic extends Logic
 	property number DebugCircleWidth = 0.15
 	property number DebugCircleLifetime = 1.2
 
-	-- Ep2Map3SummonTrigger.RequestSummon()이 클릭 시 호출. 런당 1회만 소환 가능(유저 요청).
+	-- Ep2Map3SummonTrigger.RequestSummon()이 클릭 시 호출. 맵당 1회만 소환 가능(유저 요청).
 	@ExecSpace("ServerOnly")
 	method void SummonAlly()
-		if self._usedThisRun then return end
+		local zoneInfo = _MapManager:GetZoneInfo(_MapManager.CurrentMapIndex)
+		local mapFile = (zoneInfo ~= nil) and zoneInfo.file or nil
+		if mapFile ~= nil and self._usedMapFiles[mapFile] then return end
 		local map = _CardManager:GetCurrentMap()
 		if map == nil then return end
-		self._usedThisRun = true
+		if mapFile ~= nil then self._usedMapFiles[mapFile] = true end
 
 		if isvalid(self._summonEntity) then
 			self._summonEntity:Destroy()
@@ -92,7 +98,6 @@ script Ep2Map3SummonLogic extends Logic
 		-- 버그 수정: 그 순간 존에 살아있는 몬스터가 하나도 없으면(유저 리포트: "가끔 소환이 공중에서
 		-- 이루어지는데") firstTarget이 nil이 되고, 예전엔 Vector3(0, 2.0, ...)로 하드코딩된 허공
 		-- 좌표에 스폰됐다. ZoneInfo의 실제 지면 landY/spawnX로 폴백해서 항상 발판 위에 서게 한다.
-		local zoneInfo = _MapManager:GetZoneInfo(_MapManager.CurrentMapIndex)
 		local fallbackX = (zoneInfo ~= nil) and zoneInfo.spawnX or 0
 		local fallbackY = (zoneInfo ~= nil and zoneInfo.landY ~= nil) and zoneInfo.landY or self.HoverYOffset
 		local spawnPos = Vector3(fallbackX, fallbackY, self.DepthZ)
@@ -325,11 +330,11 @@ script Ep2Map3SummonLogic extends Logic
 	end
 
 	-- GameManager.RestartGame()이 호출 — 남아있는 소환수를 즉시 정리하고(연출 없이 바로 파괴),
-	-- 새 런에서 다시 1회 소환할 수 있도록 사용 여부를 리셋한다.
+	-- 새 런에서 맵마다 다시 1회씩 소환할 수 있도록 사용 여부를 리셋한다.
 	@ExecSpace("ServerOnly")
 	method void ResetForNewRun()
 		self._summonGen = self._summonGen + 1
-		self._usedThisRun = false
+		self._usedMapFiles = {}
 		if isvalid(self._summonEntity) then
 			self._summonEntity:Destroy()
 		end

@@ -1,0 +1,192 @@
+@Logic
+script Ep2Map4PiecePuzzleLogic extends Logic
+
+	-- 에피소드2 map4 이스터에그 — 조각 7개(MapObject_111/130/131/179/225/230/231)를 각자의 목표 위치
+	-- (MapObject_233/234/235/236/237/238/240)로 끌어다 놓는 퍼즐. 구조는 Ep2Map2StatuePuzzleLogic과
+	-- 동일하지만, 여기는 유저가 준 페어링표대로 아이템마다 정답 슬롯이 정확히 하나로 고정된 1:1
+	-- 매칭이라(GetAllowedSlots가 항상 자기 슬롯 하나만 반환) "다른 슬롯에도 올라갈 수 있는" 유연성이
+	-- 없고, 따라서 "오답 조합"도 존재하지 않는다 — 7개가 전부 채워지면 곧 정답이다.
+	--
+	-- 7개가 전부 맞으면 MapObject_9와 portal-7(둘 다 기본 Enable=false로 시작하도록 미리 꺼둠)을
+	-- 드러낸다. MapObject_9를 클릭하면 "검투사의 증표(tired_knight_seal) x10 필요" 말풍선을 보여주고
+	-- (말풍선은 새로 안 만들고 Ep2Map1GiftNpcLogic.SpawnBubble(GiftBubble.model)을 그대로 재사용,
+	-- 유저 지정: "우리 말풍선 쓴거처럼"), 바로 옆 portal-7을 클릭하면 실제로 10개를 확인+소모한 뒤
+	-- 몬스터 갤러리 맵으로 이동한다(Ep2Map4GalleryPortalTrigger.RequestEnterGallery).
+	@Sync property boolean Solved = false
+
+	-- 유저가 손으로 직접 끌어다 놓으므로 픽셀 단위로 정확히 맞추긴 어렵다(보정값, 유저 요청).
+	property number PlacementTolerance = 0.5
+
+	property string RevealObjectPath1 = "/maps/ep2_map4/MapObject_9"
+	property string RevealObjectPath2 = "/maps/ep2_map4/portal-7"
+
+	-- 검투사의 증표(tired_knight_seal) 요구 수량 표시용 — PlayerInventory.GetItemDef과 동일 아이콘
+	property string RequirementIconRUID = "961d66da044a4476a67ad0b2834020e6"
+	property string RequirementText = "X10"
+	property number BubbleYOffset = 1.0
+
+	property any _slotOccupant = nil
+	property any _itemPaths = nil
+	property any _slotTargets = nil
+	property any _itemStartPositions = nil
+
+	-- 아이템 인덱스 1~7 = MapObject_111/130/131/179/225/230/231(유저 지정 순서 그대로)
+	method any GetItemPaths()
+		return {
+			[1] = "/maps/ep2_map4/MapObject_111",
+			[2] = "/maps/ep2_map4/MapObject_130",
+			[3] = "/maps/ep2_map4/MapObject_131",
+			[4] = "/maps/ep2_map4/MapObject_179",
+			[5] = "/maps/ep2_map4/MapObject_225",
+			[6] = "/maps/ep2_map4/MapObject_230",
+			[7] = "/maps/ep2_map4/MapObject_231",
+		}
+	end
+
+	-- 슬롯 인덱스 1~7 = MapObject_233/234/235/236/237/238/240(유저 지정 페어링). 좌표는 각 목표
+	-- 오브젝트의 실측 Position(ep2_map4.map에서 MapBuilder로 직접 읽음). Z만 목표 원본(999.886)보다
+	-- 0.05 앞으로 당겨서(작을수록 앞) 놓인 조각이 목표 스프라이트 뒤로 숨지 않게 한다(스테추 퍼즐과 동일 관례).
+	method any GetSlotTargets()
+		return {
+			[1] = Vector3(105.494858, 0.730391, 999.836),     -- MapObject_233 (↔ MapObject_111)
+			[2] = Vector3(109.884834, 2.44245529, 999.836),   -- MapObject_234 (↔ MapObject_130)
+			[3] = Vector3(114.33297, -0.295368433, 999.836),  -- MapObject_235 (↔ MapObject_131)
+			[4] = Vector3(118.6997, 1.61932874, 999.836),     -- MapObject_236 (↔ MapObject_179)
+			[5] = Vector3(123.054794, -0.501623154, 999.836), -- MapObject_237 (↔ MapObject_225)
+			[6] = Vector3(127.418571, 0.5491073, 999.836),    -- MapObject_238 (↔ MapObject_230)
+			[7] = Vector3(136.166473, 1.76016116, 999.836),   -- MapObject_240 (↔ MapObject_231)
+		}
+	end
+
+	-- 각 아이템은 자기 자신의 슬롯에만 놓을 수 있다(유저가 페어링을 명시적으로 지정했으므로 통계
+	-- 퍼즐과 달리 "여러 슬롯 허용" 로직이 필요 없다).
+	method any GetAllowedSlots(integer itemIndex)
+		return { itemIndex }
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		self._slotTargets = self:GetSlotTargets()
+		self._itemPaths = self:GetItemPaths()
+		self._slotOccupant = {}
+		self._itemStartPositions = {}
+		local paths = self._itemPaths
+		for i = 1, 7 do
+			local item = _EntityService:GetEntityByPath(paths[i])
+			if item ~= nil then
+				self._itemStartPositions[i] = item.TransformComponent.Position
+			else
+				log_error("Ep2Map4PiecePuzzle: item entity not found at " .. paths[i])
+			end
+		end
+	end
+
+	method integer GetOccupiedSlotByItem(integer itemIndex)
+		for slotIdx = 1, 7 do
+			if self._slotOccupant[slotIdx] == itemIndex then return slotIdx end
+		end
+		return 0
+	end
+
+	-- Ep2Map4PieceTrigger.RequestCheckPlacement()이 놓을 때마다 호출한다.
+	@ExecSpace("ServerOnly")
+	method void CheckItemPlacement(integer itemIndex, Entity item, number x, number y)
+		if self.Solved then return end
+		if not isvalid(item) then return end
+
+		local currentSlot = self:GetOccupiedSlotByItem(itemIndex)
+		local allowed = self:GetAllowedSlots(itemIndex)
+
+		local nearestSlot = 0
+		local nearestDist = 0.0
+		for _, slotIdx in ipairs(allowed) do
+			local occupant = self._slotOccupant[slotIdx]
+			if occupant == nil or occupant == itemIndex then
+				local target = self._slotTargets[slotIdx]
+				local dx = x - target.x
+				local dy = y - target.y
+				local dist = math.sqrt(dx * dx + dy * dy)
+				if dist <= self.PlacementTolerance and (nearestSlot == 0 or dist < nearestDist) then
+					nearestSlot = slotIdx
+					nearestDist = dist
+				end
+			end
+		end
+
+		if currentSlot ~= 0 and currentSlot ~= nearestSlot then
+			self._slotOccupant[currentSlot] = nil
+		end
+
+		if nearestSlot ~= 0 then
+			self._slotOccupant[nearestSlot] = itemIndex
+			self:SnapToTarget(item, self._slotTargets[nearestSlot])
+			log("Ep2Map4PiecePuzzle: item " .. itemIndex .. " placed on slot " .. nearestSlot)
+			self:CheckSolved()
+		elseif currentSlot ~= 0 then
+			log("Ep2Map4PiecePuzzle: item " .. itemIndex .. " moved away from slot " .. currentSlot)
+		else
+			log("Ep2Map4PiecePuzzle: item " .. itemIndex .. " placement missed (dist=" .. nearestDist .. ")")
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SnapToTarget(Entity item, Vector3 target)
+		if not isvalid(item) then return end
+		item.TransformComponent.Position = target
+	end
+
+	-- 7슬롯이 전부 채워진 순간에만 판정한다 — 각 슬롯은 자기 짝 아이템만 들어올 수 있으므로 다
+	-- 채워졌다는 것 자체가 곧 정답이다(오답 조합이 애초에 존재하지 않음).
+	@ExecSpace("ServerOnly")
+	method void CheckSolved()
+		if self.Solved then return end
+		for i = 1, 7 do
+			if self._slotOccupant[i] ~= i then return end
+		end
+
+		self.Solved = true
+		log("Ep2Map4PiecePuzzle: solved, revealing MapObject_9 + portal-7")
+		local r1 = _EntityService:GetEntityByPath(self.RevealObjectPath1)
+		if r1 ~= nil then r1.Enable = true end
+		local r2 = _EntityService:GetEntityByPath(self.RevealObjectPath2)
+		if r2 ~= nil then r2.Enable = true end
+		_UIToast:ShowMessage("맵 어딘가에 변화가 생겼습니다")
+	end
+
+	-- Ep2Map4PortalInfoTrigger.RequestShowRequirement()이 MapObject_9 클릭 시 호출한다. 실제 맵 이동은
+	-- 아직 구현하지 않고(유저 지정), 필요 수량만 말풍선으로 보여준다. Ep2Map1GiftNpcLogic의 GiftBubble
+	-- 스폰 로직을 그대로 재사용한다.
+	@ExecSpace("ServerOnly")
+	method void OnPortalObjectClicked(Entity clickedEntity)
+		if not isvalid(clickedEntity) then return end
+		local map = clickedEntity.CurrentMap
+		if map == nil then return end
+		local worldPos = clickedEntity.TransformComponent.WorldPosition
+		local bubblePos = Vector3(worldPos.x, worldPos.y + self.BubbleYOffset, worldPos.z - 0.5)
+		_Ep2Map1GiftNpcLogic:SpawnBubble(map, bubblePos, self.RequirementIconRUID, self.RequirementText, true)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetItemsToStart()
+		local paths = self._itemPaths
+		for i = 1, 7 do
+			local item = _EntityService:GetEntityByPath(paths[i])
+			if item ~= nil and isvalid(item) then
+				item.TransformComponent.Position = self._itemStartPositions[i]
+			end
+		end
+		self._slotOccupant = {}
+	end
+
+	-- GameManager.RestartGame()이 호출 — 새 런에서는 다시 도전할 수 있게 조각/공개 오브젝트를 초기화한다
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		self.Solved = false
+		self:ResetItemsToStart()
+		local r1 = _EntityService:GetEntityByPath(self.RevealObjectPath1)
+		if r1 ~= nil then r1.Enable = false end
+		local r2 = _EntityService:GetEntityByPath(self.RevealObjectPath2)
+		if r2 ~= nil then r2.Enable = false end
+	end
+
+end

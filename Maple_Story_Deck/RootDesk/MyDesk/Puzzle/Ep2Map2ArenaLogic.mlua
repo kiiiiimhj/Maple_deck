@@ -1,0 +1,571 @@
+@Logic
+script Ep2Map2ArenaLogic extends Logic
+
+	@Sync
+	property string Phase = "Idle"
+
+	property number MoveSpeed = 2.0
+
+	property number MeleeRange = 1.0
+
+	property number BaseAttackCooldown = 1.4
+
+	property number AttackLungeDistance = 0.4
+
+	property number AttackWindupDuration = 0.15
+
+	property number BackstepDistance = 0.6
+
+	property number BackstepDuration = 0.3
+
+	property number DieVanishDelay = 1.0
+
+	property number MinFighterX = -3.5
+
+	property number MaxFighterX = 12.5
+
+	property integer NearestTargetPoolSize = 3
+
+	property string SelectIconRUID = "b01019e1987747fab6ea39ac5b9219f9"
+
+	property string DamageSkinId = "6ba67548f43f48f29eb23dafd0766383"
+
+	property string Portal7Path = "/maps/ep2_map2_estermap_1/portal-7"
+
+	-- 선택 단계(10마리 고르는 화면)와 결과 단계(단상) 양쪽에서 같이 쓰는 딤드(월드 스프라이트).
+	-- 몬스터들이 같은 맵에 붙어있는 월드 엔티티라 UI 딤으로는 절대 그 위로 못 올린다(구조적 한계,
+	-- GalleryArenaUI.mlua 헤더 주석 참고) — 대신 딤 자체를 월드 스프라이트로 두고 Z(999.999)/
+	-- OrderInLayer(0)를 몬스터(999.5/2)보다 뒤에 둬서 몬스터가 자연히 위에 뜨게 한다. 결과 화면의
+	-- Podium(UI)은 월드보다 항상 위 렌더 패스라 이 딤 위에 뜨는 것도 별도 처리 없이 보장된다.
+	property Entity galleryDim = "1493fb8b-4d16-4184-9727-cc522a82d951"
+
+	property integer RetryCost = 300
+
+	property any _fighters = nil
+
+	property any _fighterOrder = nil
+
+	property any _deathOrder = nil
+
+	property any _startPositions = nil
+
+	property boolean _battleActive = false
+
+	property string _selectedName = ""
+
+	property any _selectIconEntity = nil
+
+	property string _currentUserId = ""
+
+	property boolean _usedFreeRetryThisRun = false
+
+	-- 유저 지적: "몬스터 선택안했는데 강제 시작되는 경우도 있는듯" — OnFighterClicked가 예약하는
+	-- StartBattle 타이머(2초 뒤)가 StartSelectionPhase로 취소되지 않고 그대로 남아있다가, 이후
+	-- 재도전/재입장으로 또 PreBattle 단계에 들어간 시점에 뒤늦게 발동하면서 유저가 이번엔 아직
+	-- 안 골랐어도(혹은 다른 몬스터를 고른 도중에도) 전투를 강제로 시작시키는 레이스가 있었다.
+	-- 선택 단계를 새로 시작할 때마다 토큰을 올리고, 예약된 타이머는 발동 시점에 자기 토큰이 아직도
+	-- 최신인지 확인해서 오래된(취소되지 않은) 타이머는 무시한다.
+	property integer _selectionToken = 0
+
+	-- hp = 종별 체력 보정치(유저 지적: "승률이 낮은애한테 체력 보정치를 주면"). 실제 전투 타이밍
+	-- 수식을 그대로 복제한 오프라인 시뮬레이터(scratchpad/arena_sim 계열)로 1000판 승률을 뽑은 뒤,
+	-- 승률이 낮은 종은 체력을 올리고 높은 종은 내리는 보정을 2회 반복 적용 — 원래 전원 공통 15000
+	-- 이었던 걸 종별로 분리했다. 보정 전 승률 표준편차 6.85(2.8%~24.4%) → 보정 후 독립 검증
+	-- 3000판에서 2.32(6.7%~14.1%)로 균등해짐 확인.
+	method any GetFighterData()
+		-- iconW/iconH = stand 애니메이션클립의 원본 픽셀 크기(msw-search로 조회) — 결과 화면 UI
+		-- 단상 위 아이콘(GalleryArenaUI.ShowResult/ApplySlot)이 종별로 찌그러지지 않게 쓴다.
+		return {
+			Gallery_Capybara = { stand = "a68e56b33aa1490fb6b77bc325188849", move = "ce17bc468e29422c8f3a04112a4c6adc", attack = "", die = "a1b6fb11ac96460db049a9dad2ffb079", hit = "9f115b002076442fa816491cf9b49084", atkDuration = 0.4, hp = 10900, iconW = 52, iconH = 40 },
+			Gallery_GoldenScorpi = { stand = "18a96d577f3c4581869b75ffb50eedb6", move = "3af212d920b54915bf20da636d3a1ecb", attack = "5ff34e9ff1584c7985769dcdf68d8b92", die = "9bcded8c1f9c4d1594f962e70aa21943", hit = "6fa26efeef524bef846ae625c9f13762", atkDuration = 1.75, hp = 14100, iconW = 122, iconH = 78 },
+			Gallery_GoldenFennec = { stand = "e9b2f6e0e83248f28917437673ad9fe0", move = "4d0e2ba3fab640248f6353d5a3a8edb2", attack = "fc4a21f96f654d1db1faaa9cc2098dcb", die = "307bc468581a4ca690a29cb2794756c0", hit = "9d1d35b75fc3483a9ee508a8fd2238a7", atkDuration = 2.71, hp = 21100, iconW = 143, iconH = 93 },
+			Gallery_GoldenGerbil = { stand = "1cb378e7400a4bdeb9889a63e5ce69b5", move = "93b90b8494eb48358de87a2c5c578142", attack = "de01424460ed460da3a0098fff6561a9", die = "c4f49d25f3c04728a3acc9edb7906d60", hit = "1b2a1a75d1964f1c82038e8cd91c8626", atkDuration = 2.32, hp = 23700, iconW = 120, iconH = 96 },
+			Gallery_GoldenMammoth = { stand = "b3064694def64a3e808cdf2c42775b1f", move = "51ea8a75d89a4ed99392467602b8b197", attack = "36dd38298da44154964ed281e502c21a", die = "d07d7dbf63eb47f886816cad667e87f9", hit = "292b9e036c4b4240a5c5a80f4aad01a7", atkDuration = 2.71, hp = 23700, iconW = 128, iconH = 121 },
+			Gallery_Gerbil = { stand = "8ab826ecc08441a6854d06e136884003", move = "e772569bcc164941bfc27abb84786f40", attack = "058700abecea476aaa921620aa05e730", die = "3cb7d76be749472e8520c34a8acc923c", hit = "2961a18b730044988e88994bd9aebfd0", atkDuration = 2.32, hp = 18900, iconW = 120, iconH = 80 },
+			Gallery_TiredKnight = { stand = "8e4d16ddd74644d8bfafaf422a1f7400", move = "009463a95c1f47d8a0c62e2507ff1799", attack = "ac8d9def0432409eabc96f14c268c8ad", die = "5915fd536a8c417693933725d2858118", hit = "380100b9447542e8a11559ea18d5a5b8", atkDuration = 0.55, hp = 15700, iconW = 110, iconH = 92 },
+			Gallery_SummonLion = { stand = "30a66cf560294334bc22aecf333de5f2", move = "30a66cf560294334bc22aecf333de5f2", attack = "67aace8f28ea4fcc8b21673ebaae80de", die = "4716d7fd1b1c4aae90e762ca82771991", hit = "30a66cf560294334bc22aecf333de5f2", atkDuration = 1.99, hp = 15700, iconW = 203, iconH = 214 },
+			Gallery_Tragos = { stand = "ddc7d18e119b48d2b56eaba9bd82dd36", move = "74742300b9624532a723a66dac87a139", attack = "", die = "35cb16e4191a41e3ac20d03d2fe76ab9", hit = "73a39daa799947348de6b6f47bb14c2d", atkDuration = 0.4, hp = 12800, iconW = 102, iconH = 91 },
+			Gallery_CorruptedCentaur = { stand = "d5b65bd56bcd4f85a87a8ca123abe32f", move = "06a3223907a14b64b9e8990c8a30bf72", attack = "fd9aa2adc8ed47989304af6904d24ccb", die = "fcdccdc2a9c04eecaa97f6bf1ebdc0ae", hit = "6c48dbfea7c542b98309f8e51fe877d1", atkDuration = 2.23, hp = 12800, iconW = 137, iconH = 119 },
+		}
+	end
+
+	method any GetAtkTiers()
+		return { 1700, 1900, 2100, 2300, 2500, 3000, 3500, 4000, 4500, 5000 }
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		local data = self:GetFighterData()
+		self._fighters = {}
+		self._fighterOrder = {}
+		self._startPositions = {}
+		for name, fdata in pairs(data) do
+			local entity = _EntityService:GetEntityByPath("/maps/ep2_map2_estermap_1/" .. name)
+			if entity ~= nil then
+				table.insert(self._fighterOrder, name)
+				self._startPositions[name] = entity.TransformComponent.Position
+				self._fighters[name] = {
+					entity = entity,
+					data = fdata,
+					hp = fdata.hp,
+					atk = 0,
+					alive = true,
+					facing = 1,
+					attackTimer = 0,
+					isBusy = false,
+					targetName = "",
+					anim = "stand",
+				}
+			else
+				log_error("Ep2Map2ArenaLogic: fighter entity not found: " .. name)
+			end
+		end
+		_GalleryArenaUI:HideResult()
+		self:SetPortalRevealed(false)
+		self:SetDimVisible(false)
+		log("Ep2Map2ArenaLogic: initialized fighters=" .. #self._fighterOrder)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SetDimVisible(boolean visible)
+		if isvalid(self.galleryDim) then self.galleryDim.Enable = visible end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void StartSelectionPhase(string userId)
+		self._currentUserId = userId
+		self._battleActive = false
+		self._deathOrder = {}
+		self._selectedName = ""
+		self._selectionToken = self._selectionToken + 1
+		self:SetPortalRevealed(false)
+		_GalleryArenaUI:HideResult()
+		self:ClearSelectIcon()
+		for _, name in ipairs(self._fighterOrder) do
+			self:ResetFighterVisual(name)
+		end
+		self.Phase = "Selecting"
+		self:SetDimVisible(true)
+		_GalleryArenaUI:ShowBanner("전투가 시작됩니다! 승리를 거머쥘 몬스터를 선택하세요!")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetFighterVisual(string name)
+		local f = self._fighters[name]
+		if f == nil or not isvalid(f.entity) then return end
+		f.entity.Enable = true
+		f.hp = f.data.hp
+		f.atk = 0
+		f.alive = true
+		f.facing = 1
+		f.attackTimer = 0
+		f.isBusy = false
+		f.targetName = ""
+		f.anim = "stand"
+		f.entity.TransformComponent.Position = self._startPositions[name]
+		f.entity.TransformComponent.Scale = Vector3(1, 1, 1)
+		local renderer = f.entity.SpriteRendererComponent
+		if renderer ~= nil then renderer.SpriteRUID = f.data.stand end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnFighterClicked(string fighterName)
+		if self.Phase ~= "Selecting" then return end
+		local f = self._fighters[fighterName]
+		if f == nil or not isvalid(f.entity) then return end
+		self._selectedName = fighterName
+		self.Phase = "PreBattle"
+		-- 유저 지정: "몬스터 선택하면 꺼지게" — 고른 직후 딤을 끄고 전투를 맨눈으로 본다.
+		self:SetDimVisible(false)
+		self:SpawnSelectIcon(f.entity)
+		_GalleryArenaUI:ShowBanner("곧 전투가 시작됩니다!")
+		local token = self._selectionToken
+		_TimerService:SetTimerOnce(function()
+			if self._selectionToken ~= token then return end
+			self:StartBattle()
+		end, 2.0)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SpawnSelectIcon(Entity aboveEntity)
+		self:ClearSelectIcon()
+		local pos = aboveEntity.TransformComponent.Position
+		local iconPos = Vector3(pos.x, pos.y + 1.4, pos.z - 0.1)
+		self._selectIconEntity = _CardManager:SpawnEffectWithModel(self.SelectIconRUID, iconPos, 0, 1.0, 2.0, 1.0, "persistenteffect")
+		if self._selectIconEntity ~= nil and isvalid(self._selectIconEntity) then
+			local renderer = self._selectIconEntity.SpriteRendererComponent
+			if renderer ~= nil then
+				renderer.SortingLayer = "Default"
+				renderer.OrderInLayer = 50
+			end
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ClearSelectIcon()
+		if self._selectIconEntity ~= nil and isvalid(self._selectIconEntity) then
+			self._selectIconEntity:Destroy()
+		end
+		self._selectIconEntity = nil
+	end
+
+	@ExecSpace("ServerOnly")
+	method void StartBattle()
+		if self.Phase ~= "PreBattle" then return end
+		_GalleryArenaUI:HideBanner()
+		local tiers = self:GetAtkTiers()
+		for i = #tiers, 2, -1 do
+			local j = _UtilLogic:RandomIntegerRange(1, i)
+			local tmp = tiers[i]
+			tiers[i] = tiers[j]
+			tiers[j] = tmp
+		end
+		for idx, name in ipairs(self._fighterOrder) do
+			local f = self._fighters[name]
+			f.atk = tiers[idx]
+			log("Arena: " .. name .. " ATK=" .. f.atk)
+		end
+		self.Phase = "Battle"
+		self._battleActive = true
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnUpdate(number delta)
+		if not self._battleActive then return end
+		local aliveCount = 0
+		local lastAliveName = ""
+		for _, name in ipairs(self._fighterOrder) do
+			local f = self._fighters[name]
+			if f.alive then
+				aliveCount = aliveCount + 1
+				lastAliveName = name
+				self:UpdateFighter(name, f, delta)
+			end
+		end
+		if aliveCount <= 1 then
+			self._battleActive = false
+			-- 마지막 한 방을 날린 승자의 돌진(lunge) 트윈이 이 시점에 아직 끝나지 않았을 수 있다 —
+			-- 트윈 콜백이 나중에 한 번 더 Position을 덮어써서 시상대 배치가 원위치로 되돌아가버리는
+			-- 레이스가 실측 확인됨. 트윈이 확실히 끝날 시간(AttackWindupDuration + 여유)만큼
+			-- 미룬 뒤 시상대 배치를 실행한다.
+			_TimerService:SetTimerOnce(function()
+				self:FinishBattle(lastAliveName)
+			end, self.AttackWindupDuration + 0.1)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void UpdateFighter(string name, any f, number delta)
+		if f.isBusy then return end
+		if f.targetName == "" or not self._fighters[f.targetName].alive then
+			f.targetName = self:PickRandomLivingTarget(name)
+			if f.targetName == "" then return end
+		end
+		local target = self._fighters[f.targetName]
+		local selfPos = f.entity.TransformComponent.Position
+		local targetPos = target.entity.TransformComponent.Position
+		local dx = targetPos.x - selfPos.x
+		local dist = dx
+		if dist < 0 then dist = -dist end
+		-- 쿨타임은 접근/대기 상태 모두에서 흐른다(공격 재생 중·백스텝 중엔 isBusy=true라 함수 맨 위에서
+		-- 걸러져 자연히 제외된다) — 그래야 백스텝→재접근에 걸리는 시간이 매번 쿨타임 위에 그대로
+		-- 얹혀서 다음 공격이 불필요하게 밀리지 않는다.
+		if f.attackTimer > 0 then
+			f.attackTimer = f.attackTimer - delta
+		end
+		if dist > self.MeleeRange then
+			local dir = 1
+			if dx < 0 then dir = -1 end
+			f.facing = dir
+			local newX = selfPos.x + dir * self.MoveSpeed * delta
+			if newX < self.MinFighterX then newX = self.MinFighterX end
+			if newX > self.MaxFighterX then newX = self.MaxFighterX end
+			f.entity.TransformComponent.Position = Vector3(newX, selfPos.y, selfPos.z)
+			-- 몬스터 원본 스프라이트는 기본적으로 왼쪽을 보고 있다(메이플 몹 아트 관례 — 골든맘무트
+			-- 실측 확인). dir=+1(오른쪽 이동)일 때 뒤집어야 오른쪽을 보고, dir=-1(왼쪽 이동)일 땐
+			-- 원본 그대로 둬야 한다 — 부호를 그대로 쓰면 반대로 뒤돌아 걷는다(유저 지적: "뒤돌아서
+			-- 걷는 경우도 있고").
+			f.entity.TransformComponent.Scale = Vector3(-dir * 1.0, 1.0, 1.0)
+			self:SetFighterAnim(f, "move")
+		else
+			self:SetFighterAnim(f, "stand")
+			if f.attackTimer <= 0 then
+				f.attackTimer = self.BaseAttackCooldown
+				self:PlayAttack(name, f, f.targetName)
+			end
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method string PickRandomLivingTarget(string excludeName)
+		local selfFighter = self._fighters[excludeName]
+		local selfX = selfFighter.entity.TransformComponent.Position.x
+		local candidates = {}
+		for _, name in ipairs(self._fighterOrder) do
+			local other = self._fighters[name]
+			if name ~= excludeName and other.alive then
+				local dist = other.entity.TransformComponent.Position.x - selfX
+				if dist < 0 then dist = -dist end
+				table.insert(candidates, { name = name, dist = dist })
+			end
+		end
+		if #candidates == 0 then return "" end
+		table.sort(candidates, function(a, b) return a.dist < b.dist end)
+		local poolSize = self.NearestTargetPoolSize
+		if poolSize > #candidates then poolSize = #candidates end
+		return candidates[_UtilLogic:RandomIntegerRange(1, poolSize)].name
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SetFighterAnim(any f, string anim)
+		if f.anim == anim then return end
+		f.anim = anim
+		local renderer = f.entity.SpriteRendererComponent
+		if renderer == nil then return end
+		if anim == "move" then
+			renderer.SpriteRUID = f.data.move
+		elseif anim == "attack" then
+			-- 공격 클립이 없는 종은 스탠드 포즈를 유지한다 — PlayAttack의 스케일 펀치(별도 처리)와
+			-- 돌진 이동만으로 "공격했다"를 표현한다. 이동 클립을 재사용하면 그냥 걷는 것처럼 보여서
+			-- (유저 지적: "어택모션이 없는애들이 많음") 오히려 더 헷갈렸다.
+			local ruid = f.data.attack
+			if ruid == "" then ruid = f.data.stand end
+			renderer.SpriteRUID = ruid
+		elseif anim == "hit" then
+			renderer.SpriteRUID = f.data.hit
+		elseif anim == "die" then
+			renderer.SpriteRUID = f.data.die
+		else
+			renderer.SpriteRUID = f.data.stand
+		end
+	end
+
+	@ExecSpace("Multicast")
+	method void PlayArenaDamageSkin(Entity targetEntity, number damage)
+		if self:IsServer() then return end
+		if not isvalid(targetEntity) then return end
+		_DamageSkinService:Play(targetEntity, self.DamageSkinId, 0.05, { math.floor(damage) }, DamageSkinTweenType.Default, false)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void PlayAttack(string name, any f, string targetName)
+		if not f.alive then return end
+		if self.Phase ~= "Battle" then return end
+		f.isBusy = true
+		f.anim = "" -- 강제로 SetFighterAnim이 다시 적용되게
+		self:SetFighterAnim(f, "attack")
+		local startPos = f.entity.TransformComponent.Position
+		local lungeX = startPos.x + f.facing * self.AttackLungeDistance
+		_TweenLogic:PlayTween(0.0, 1.0, self.AttackWindupDuration, EaseType.QuadEaseOut, function(t)
+			if not isvalid(f.entity) then return end
+			local x = startPos.x + (lungeX - startPos.x) * t
+			f.entity.TransformComponent.Position = Vector3(x, startPos.y, startPos.z)
+		end)
+		if f.data.attack == "" then
+			-- 공격 클립이 아예 없는 종(카피바라/트라고스) — 돌진 절반 지점까지 몸을 부풀렸다가
+			-- 되돌리는 스케일 펀치로 "때렸다"는 느낌을 준다.
+			local half = self.AttackWindupDuration * 0.5
+			_TweenLogic:PlayTween(1.0, 1.3, half, EaseType.QuadEaseOut, function(s)
+				if not isvalid(f.entity) then return end
+				f.entity.TransformComponent.Scale = Vector3(-f.facing * s, s, 1.0)
+			end)
+			_TimerService:SetTimerOnce(function()
+				if not isvalid(f.entity) then return end
+				_TweenLogic:PlayTween(1.3, 1.0, half, EaseType.QuadEaseIn, function(s)
+					if not isvalid(f.entity) then return end
+					f.entity.TransformComponent.Scale = Vector3(-f.facing * s, s, 1.0)
+				end)
+			end, half)
+		end
+		_TimerService:SetTimerOnce(function()
+			self:ResolveAttackHit(name, f, targetName)
+		end, self.AttackWindupDuration)
+		-- 실제 대미지 판정(ResolveAttackHit)은 돌진이 끝나는 시점(빠른 타격감)에 이미 처리하고,
+		-- 포즈 자체는 클립 실측 재생시간(atkDuration)만큼 더 유지한 뒤에야 백스텝으로 넘어간다 —
+		-- 유저 지적: "공격모션이 짤리는듯". 예전엔 windup+recover 고정 0.4초 뒤 바로 끊었는데, 실측
+		-- 클립 길이가 최대 2.76초라 대부분 끝까지 재생되지 못했다.
+		_TimerService:SetTimerOnce(function()
+			self:BeginBackstep(f)
+		end, f.data.atkDuration)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void BeginBackstep(any f)
+		-- atkDuration이 species에 따라 최대 2.7초 가까이 길어져서, 이 타이머가 예약된 뒤 승부가
+		-- 나버릴 수 있다(승자 본인의 마지막 공격 홀드 도중 상대가 전멸해 전투가 끝나는 경우) —
+		-- Phase가 Battle이 아니면 시상대에 이미 배치된 위치/포즈를 건드리지 않고 그냥 멈춘다
+		-- (ResolveAttackHit/KillFighter와 동일한 Phase 가드 관례).
+		if self.Phase ~= "Battle" then
+			f.isBusy = false
+			return
+		end
+		if not isvalid(f.entity) or not f.alive then
+			f.isBusy = false
+			return
+		end
+		local startPos = f.entity.TransformComponent.Position
+		local destX = startPos.x - f.facing * self.BackstepDistance
+		if destX < self.MinFighterX then destX = self.MinFighterX end
+		if destX > self.MaxFighterX then destX = self.MaxFighterX end
+		f.anim = ""
+		self:SetFighterAnim(f, "move")
+		_TweenLogic:PlayTween(0.0, 1.0, self.BackstepDuration, EaseType.QuadEaseOut, function(t)
+			-- 유저 지적: "1등이 시상대에 안올라가고 바닥에 있는경우가 있어" — 원인 실측: 짧은 atkDuration
+			-- 종(카피바라/트라고스=0.4초)이 마지막 한 방을 날린 승자였을 때, BeginBackstep 진입 시점의
+			-- Phase 체크(위)는 통과했더라도 이 트윈 자체는 BackstepDuration(0.3초) 동안 매 프레임
+			-- Position을 계속 덮어쓴다 — 그 사이 FinishBattle이 전투 몬스터를 전부 숨겨도(Enable=false)
+			-- 바로 다음 프레임에 트윈이 다시 Position을 건드리는 게 낭비/레이스였다. 프레임마다
+			-- Phase를 재확인해서 Result로 넘어간 순간 즉시 멈춘다.
+			if self.Phase ~= "Battle" then return end
+			if not isvalid(f.entity) then return end
+			local x = startPos.x + (destX - startPos.x) * t
+			f.entity.TransformComponent.Position = Vector3(x, startPos.y, startPos.z)
+		end)
+		_TimerService:SetTimerOnce(function()
+			if isvalid(f.entity) and f.alive then f.isBusy = false end
+		end, self.BackstepDuration)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResolveAttackHit(string name, any f, string targetName)
+		if not f.alive then return end
+		-- 전투가 끝난 뒤(단상 배치 이후)에도 이미 예약돼있던 히트 타이머가 뒤늦게 실행돼 단상 위에서
+		-- 공격 연출이 다시 나오던 버그(유저 지적: "단상위에서도 공격 연출이 나오고") — Phase가
+		-- Battle이 아니면 아무것도 하지 않는다. 마지막 한 방(승부를 가르는 타격) 자체는 FinishBattle이
+		-- 호출되기 전에 실행되므로 Phase가 아직 Battle이라 정상 처리된다.
+		if self.Phase ~= "Battle" then return end
+		local target = self._fighters[targetName]
+		if target ~= nil and target.alive and isvalid(target.entity) then
+			target.hp = target.hp - f.atk
+			self:PlayArenaDamageSkin(target.entity, f.atk)
+			if target.hp <= 0 then
+				self:KillFighter(targetName, target)
+			else
+				self:SetFighterAnim(target, "hit")
+				_TimerService:SetTimerOnce(function()
+					if target.alive and target.anim == "hit" then
+						target.anim = ""
+						self:SetFighterAnim(target, "stand")
+					end
+				end, 0.25)
+			end
+		end
+		-- isBusy 해제/백스텝은 여기서 관리하지 않는다 — PlayAttack이 atkDuration(클립 실측 재생시간)
+		-- 시점에 BeginBackstep을 직접 예약해두었으므로, 공격 포즈가 끝까지 재생된 뒤에 알아서 이어진다.
+	end
+
+	@ExecSpace("ServerOnly")
+	method void KillFighter(string name, any f)
+		f.alive = false
+		f.hp = 0
+		f.anim = ""
+		self:SetFighterAnim(f, "die")
+		table.insert(self._deathOrder, name)
+		log("Arena: " .. name .. " died (order " .. #self._deathOrder .. ")")
+		-- die 클립이 한 번 재생된 뒤에도 SpriteRUID가 그대로 남아있으면 엔진이 계속 반복 재생한다
+		-- (유저 지적: "die 연출 나오고 사라져야하는데 반복됨") — 한 번 볼 시간만 주고 완전히 숨긴다.
+		-- Phase가 이미 Result로 넘어갔으면 FinishBattle이 전투 몬스터 가시성을 이미 전부 결정했으므로
+		-- (등수는 이제 GalleryArenaUI 쪽 UI 아이콘으로 표시) 여기서는 건드리지 않는다.
+		_TimerService:SetTimerOnce(function()
+			if isvalid(f.entity) and not f.alive and self.Phase == "Battle" then
+				f.entity.Enable = false
+			end
+		end, self.DieVanishDelay)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void FinishBattle(string winnerName)
+		self.Phase = "Result"
+		local ranking = { winnerName }
+		local deathCount = #self._deathOrder
+		local i = deathCount
+		while i >= 1 and #ranking < 3 do
+			table.insert(ranking, self._deathOrder[i])
+			i = i - 1
+		end
+		self:SetPortalRevealed(true)
+		self:ClearSelectIcon()
+		-- 유저 지정: "Podium 이거는 내가 만든 디머 위에 올라가게" — 결과(단상) 화면도 같은 딤을 다시 켜서
+		-- 배경으로 깐다. Podium은 UI라 월드 딤보다 항상 위 렌더 패스라 별도 처리 없이 위에 뜬다.
+		self:SetDimVisible(true)
+
+		-- 전투가 끝나면 이제 단상/등수 아이콘은 GalleryArenaUI(UI)가 전부 그린다 — 실제 전투에
+		-- 쓰인 월드 몬스터 엔티티는 더 이상 필요 없으니 전부 숨긴다(예전엔 우승/2등/3등만 남기고
+		-- 물리적으로 단상 위치로 옮겨 세웠었다).
+		for _, name in ipairs(self._fighterOrder) do
+			local f = self._fighters[name]
+			if f ~= nil and isvalid(f.entity) then f.entity.Enable = false end
+		end
+
+		local showRetry = winnerName ~= self._selectedName
+		local retryLabel = "다시하기 (무료)"
+		if self._usedFreeRetryThisRun then
+			retryLabel = "다시하기 (-" .. self.RetryCost .. ")"
+		end
+		self:ShowPodiumResultUI(ranking, showRetry, retryLabel)
+
+		if winnerName == self._selectedName then
+			self:GrantVictoryReward()
+		end
+	end
+
+	-- 유저 지정: "단상이랑 단상위 몬스터 크기 좀 더 키우자 한 15%정도" — 단상 이미지 자체는 .ui
+	-- 쪽(GalleryArenaUI ResultGroup/Podium RectSize)에서 이미 1.15배로 키웠고, 그 위에 서는 몬스터
+	-- 아이콘 크기도 여기서 같은 배율로 맞춘다(둘이 따로 놀면 비율이 어긋나 보임).
+	property number PodiumIconScale = 1.15
+
+	@ExecSpace("ServerOnly")
+	method void ShowPodiumResultUI(any ranking, boolean showRetry, string retryLabel)
+		-- 유저 제안대로("좌표 그대로 UI로 만들면 되지않음?") 딤드+단상+3마리+버튼을 전부
+		-- GalleryArenaUI(.ui) 쪽 UI로 옮겼다 — Client RPC라 3개 슬롯의 RUID/크기를 한 번에 넘긴다.
+		local data = self:GetFighterData()
+		local ruid = { "", "", "" }
+		local w = { 0, 0, 0 }
+		local h = { 0, 0, 0 }
+		for place = 1, 3 do
+			local name = ranking[place]
+			if name ~= nil and data[name] ~= nil then
+				ruid[place] = data[name].stand
+				w[place] = data[name].iconW * self.PodiumIconScale
+				h[place] = data[name].iconH * self.PodiumIconScale
+			end
+		end
+		_GalleryArenaUI:ShowResult(ruid[1], w[1], h[1], ruid[2], w[2], h[2], ruid[3], w[3], h[3], showRetry, retryLabel)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SetPortalRevealed(boolean revealed)
+		local portal = _EntityService:GetEntityByPath(self.Portal7Path)
+		if portal ~= nil then portal.Enable = revealed end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void GrantVictoryReward()
+		if _CharacterUnlockLogic.LeionUnlocked then
+			_UIToast:ShowMessage("우승! 레이온은 이미 해금되어 있습니다")
+			return
+		end
+		_CharacterUnlockLogic:UnlockLeion()
+		_CharacterUnlockUI:Open("c26beb96e46e41289ecd838a62c60da1", "레이온", "적중할수록 강해지는 전사.\n승부의 흐름을 읽고 결정적인 순간에\n강력한 일격을 꽂아 넣는다.")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnRetryClicked()
+		if self.Phase ~= "Result" then return end
+		if not self._usedFreeRetryThisRun then
+			self._usedFreeRetryThisRun = true
+		else
+			if not _GameManager:SpendCoins(self.RetryCost) then
+				_UIToast:ShowMessage("재화가 부족합니다")
+				return
+			end
+		end
+		self:StartSelectionPhase(self._currentUserId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		self._usedFreeRetryThisRun = false
+	end
+
+end

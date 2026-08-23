@@ -334,6 +334,13 @@ script MonsterAI extends Component
 	property boolean _isCauldron = false
 	property boolean _cauldronLocked = false
 
+	-- true면 이 개체가 ep2_map4 MapObject_205 이스터에그(Ep2Map4CentaurLogic)로 스폰된 "검은 켄타우로스"
+	-- 또는 "타락한 켄타우로스"다 — 둘 다 Die()에서 일반 잡템 드롭을 건너뛴다(유저 지정: "잡템은 나올필요없고").
+	-- 타락한 켄타우로스만 별도로 _isCorruptedCentaur도 true가 되어 엘리트처럼(빨간포션+슬롯 스킬 1개) 확정
+	-- 드롭을 받는다. InitializeStatsAsBlackCentaur/InitializeStatsAsCorruptedCentaur에서 설정.
+	property boolean _isBlackCentaur = false
+	property boolean _isCorruptedCentaur = false
+
 	-- true면 원거리 공격을 하지 않는다(_neverAttacks와 별개로 UpdateFlying 비행형 분기에도 적용) +
 	-- Die()에서 일반 잡템/카드 드롭 대신 _CardManager:OnYellowMiniBeanCaught로 스킬 1개를 지급한다
 	-- (Ep2MiniBeanEasterEggLogic 전용 — 유저 지정: "노란미니빈은 공격은 안하고 잡으면 스킬 1개").
@@ -742,6 +749,112 @@ script MonsterAI extends Component
 			self:ApplyHardFreeze(_GameManager._globalFreezeRemaining)
 		end
 		log("MonsterAI: Cauldron initialized Zone=" .. zoneIndex .. " HP=" .. self.CurrentHp)
+	end
+
+	-- Ep2Map4CentaurLogic.SpawnCentaurHorde()가 스폰 직후 호출 — ep2_map4 MapObject_205를 2번 클릭하면
+	-- 등장하는 무리 중 "검은 켄타우로스"(9마리, 유저 지정: 크기 0.8, 체력은 그 시점 일반 몬스터와 동일).
+	-- 전용 리소스팩(msw-search로 확인, resource_pack "mob/8140101.img" — "검은 켄타우로스").
+	@ExecSpace("ServerOnly")
+	method void InitializeStatsAsBlackCentaur(integer zoneIndex)
+		self._dead = false
+		self._spawnZoneIndex = zoneIndex
+		self._isBoss = false
+		self._isElite = false
+		self._isBlackCentaur = true
+		self._reachedScaleThreshold = 1.5
+
+		self.MaxHp = _GameManager:GetTimeStepHp(_GameManager:GetTimeStep())
+		self.CurrentHp = self.MaxHp
+		self.ApproachSpeed = _GameManager:GetWaveApproachSpeed(_GameManager.Wave)
+
+		self._standRUID = "cbb6bd77341b4dceb4c88e70cf524740"
+		self._moveRUID = "83c104143ccd4550bd61d180ea70c369"
+		self._attackRUID = "bff36d5a39404119a6f8160653fd745a"
+		self._dieRUID = "433a8737e1044f21ab6db90ae7864ffc"
+		self._hitRUID = "4b2f616d2fe640bab7335c33cf535d3f"
+		self._attackSoundRUID = "3c987a84b45a42e9b01d5a5b5404ee66"
+		self._hitSoundRUID = "fa7114a0b24b473ba32b1b98aa761606"
+		self._dieSoundRUID = "775705f8cc904686a64ed763b93af841"
+		-- 프레임 수 실측 없이 일반 지상형 몬스터 관례값 사용(라이브 확인 후 조정 가능)
+		self._attackDuration = 0.55
+		self._dieDuration = 0.45
+
+		self._isFlying = false
+		self._isRangedInk = false
+		self._isRangedSlash = false
+		self._isCharge = false
+		self._isZigzag = false
+		self._neverAttacks = false
+		self._isGiantNepenthes = false
+		self._isSwarmMember = false
+		self._isYellowMiniBean = false
+		self._hitEffectRUID = ""
+		self._customAttackInterval = 0
+		self._accuracyDebuffPercent = 0
+		self.FreezeStack = 0
+
+		self._scaleMultiplier = 0.8
+		self.MonsterSprite = self._moveRUID
+		self.Entity.TransformComponent.Scale = Vector3(self._currentScale * self._scaleMultiplier, self._currentScale * self._scaleMultiplier, 1.0)
+		self:SyncDepthOverlaySprite()
+		self:UpdateDepth()
+		if _GameManager._globalFreezeActive and _GameManager._globalFreezeRemaining > 0 then
+			self:ApplyHardFreeze(_GameManager._globalFreezeRemaining)
+		end
+		log("MonsterAI: BlackCentaur initialized Zone=" .. zoneIndex .. " HP=" .. self.CurrentHp)
+	end
+
+	-- Ep2Map4CentaurLogic.SpawnCentaurHorde()가 스폰 직후 호출 — 무리의 우두머리 "타락한 켄타우로스"
+	-- (1마리, 유저 지정: 체력=그 시점 일반 몬스터의 2배, 크기 1.2). 처치 시 엘리트와 동일하게 확정
+	-- 드롭(빨간 포션 + 슬롯 스킬 1개, CardManager.OnCorruptedCentaurKilled 참고)을 받는다. 전용 리소스팩
+	-- (msw-search로 확인, resource_pack "mob/8220019.img" — "타락한 켄타우로스").
+	@ExecSpace("ServerOnly")
+	method void InitializeStatsAsCorruptedCentaur(integer zoneIndex)
+		self._dead = false
+		self._spawnZoneIndex = zoneIndex
+		self._isBoss = false
+		self._isElite = false
+		self._isCorruptedCentaur = true
+		self._reachedScaleThreshold = 1.5
+
+		self.MaxHp = _GameManager:GetTimeStepHp(_GameManager:GetTimeStep()) * 2.0
+		self.CurrentHp = self.MaxHp
+		self.ApproachSpeed = _GameManager:GetWaveApproachSpeed(_GameManager.Wave)
+
+		self._standRUID = "d5b65bd56bcd4f85a87a8ca123abe32f"
+		self._moveRUID = "06a3223907a14b64b9e8990c8a30bf72"
+		self._attackRUID = "fd9aa2adc8ed47989304af6904d24ccb"
+		self._dieRUID = "fcdccdc2a9c04eecaa97f6bf1ebdc0ae"
+		self._hitRUID = "6c48dbfea7c542b98309f8e51fe877d1"
+		self._attackSoundRUID = "2375c66fa3364e2f9b182c9b7a37ff87"
+		self._hitSoundRUID = "700e833db5c245b0bd9100170b071bec"
+		self._dieSoundRUID = "9e8683b5c8e84d0485e2053b63d7711b"
+		self._attackDuration = 0.55
+		self._dieDuration = 0.45
+
+		self._isFlying = false
+		self._isRangedInk = false
+		self._isRangedSlash = false
+		self._isCharge = false
+		self._isZigzag = false
+		self._neverAttacks = false
+		self._isGiantNepenthes = false
+		self._isSwarmMember = false
+		self._isYellowMiniBean = false
+		self._hitEffectRUID = ""
+		self._customAttackInterval = 0
+		self._accuracyDebuffPercent = 0
+		self.FreezeStack = 0
+
+		self._scaleMultiplier = 1.2
+		self.MonsterSprite = self._moveRUID
+		self.Entity.TransformComponent.Scale = Vector3(self._currentScale * self._scaleMultiplier, self._currentScale * self._scaleMultiplier, 1.0)
+		self:SyncDepthOverlaySprite()
+		self:UpdateDepth()
+		if _GameManager._globalFreezeActive and _GameManager._globalFreezeRemaining > 0 then
+			self:ApplyHardFreeze(_GameManager._globalFreezeRemaining)
+		end
+		log("MonsterAI: CorruptedCentaur initialized Zone=" .. zoneIndex .. " HP=" .. self.CurrentHp)
 	end
 
 	-- MonsterSpawner.SpawnBonusBoss()가 스폰 직후 호출: 배회 범위/스프라이트를 설정하고 무적·보상형 보스로 전환한다.
@@ -2396,6 +2509,11 @@ script MonsterAI extends Component
 		if self._isElite then
 			_CardManager:OnEliteKilled(self.Entity.TransformComponent.WorldPosition, fallHeight, groundWorldY, dropScale)
 			_MonsterSpawner:OnEliteKilled()
+		elseif self._isCorruptedCentaur then
+			-- 타락한 켄타우로스(ep2_map4 MapObject_205) — 유저 지정: "엘리트처럼" 확정 드롭(빨간 포션 +
+			-- 슬롯 스킬 1개). 검은 켄타우로스(_isBlackCentaur)는 이 분기를 안 타므로 힐포션 등 일반
+			-- 확률성 드롭이 그대로 나간다(유저가 "잡템"만 없애달라고 했지 이쪽은 언급 안 함).
+			_CardManager:OnCorruptedCentaurKilled(self.Entity.TransformComponent.WorldPosition, fallHeight, groundWorldY, dropScale)
 		elseif not self._isCauldron then
 			-- 카페테리아 가마솥은 자기만의 확정 포션 표(아래 elseif 체인)가 있으므로 일반 존의 확률성
 			-- 힐포션/빙결아이템/허수아비/바운스 드롭과 중복되지 않게 제외한다.
@@ -2418,6 +2536,9 @@ script MonsterAI extends Component
 			-- 지쳐버린 기사(ep2_map3 존마다 1마리) — 유저 지정: "처치시 100% 아이템이 나오고" — 존 잡템
 			-- 확률 대신 GrantLootItemDrop(무조건 지급)으로 tired_knight_seal을 확정 지급한다.
 			_GameManager:GrantLootItemDrop(self.Entity.TransformComponent.WorldPosition, fallHeight, groundWorldY, "tired_knight_seal", dropScale)
+		elseif self._isBlackCentaur or self._isCorruptedCentaur then
+			-- 검은/타락한 켄타우로스(ep2_map4 MapObject_205 이벤트) — 유저 지정: "잡템은 나올필요없고" —
+			-- 존 잡템 지급을 완전히 건너뛴다.
 		elseif self._isCauldron then
 			-- 카페테리아 가마솥 — 유저 지정 확률표: 엘릭서(potionType=3) 5% / 하얀포션(2) 35% / 빨간포션(1) 60%
 			local roll = _UtilLogic:RandomDouble()

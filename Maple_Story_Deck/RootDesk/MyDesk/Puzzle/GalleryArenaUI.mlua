@@ -1,0 +1,124 @@
+@Logic
+script GalleryArenaUI extends Logic
+
+	-- 몬스터 갤러리(ep2_map2_estermap_1) 전투 미니게임 전용 상단 배너 텍스트. 항상 떠있는 안내
+	-- 문구("전투가 시작됩니다! 승리를 거머쥘 몬스터를 선택하세요!" → 선택 후 "곧 전투가 시작됩니다!")를
+	-- 보여준다. Ep2Map2ArenaLogic(서버)이 Client RPC로 호출 — 이 맵에 있는 플레이어에게만 보이면
+	-- 되므로 targetUserId를 호출부 마지막 인자로 넘겨서 단일 클라이언트에만 반영한다.
+	property TextGUIRendererComponent bannerText = "ae1f3ad6-6a6b-40f8-92cd-51d20a02890f"
+
+	-- 결과 화면(단상+단상 위 3마리+다시하기 버튼) 전용 UI. 딤드 자체는 더 이상 이 UI에 없다 — 선택
+	-- 단계와 결과 단계가 공유하는 월드 스프라이트 GalleryDim(Ep2Map2ArenaLogic.SetDimVisible)이
+	-- 배경을 담당한다(월드 몬스터가 UI 딤 위로 못 올라오는 구조적 한계 때문에 딤 자체를 월드로 뺐다 —
+	-- 상세 이유는 Ep2Map2ArenaLogic.galleryDim 주석 참고). resultGroup은 단상+아이콘 3개+버튼만
+	-- 켜고 끈다. resultGroup은 GalleryArenaUI(.ui) 자식이라 여전히 카드슬롯 등 다른 UI보다 위에
+	-- 그려진다(OnBeginPlay의 SetSiblingIndex).
+	property Entity resultGroup = "f54302eb-b272-4a4f-8961-9c37f150b15f"
+
+	-- 등수 1/2/3위 아이콘. Ep2Map2ArenaLogic.PlaceOnPodium이 종별 stand 애니메이션클립 RUID를 넘겨준다.
+	property SpriteGUIRendererComponent resultSlot1 = "70c04309-e377-4255-bf6b-b68e629a464b"
+	property SpriteGUIRendererComponent resultSlot2 = "e64b9e55-594b-4b78-a184-1214ac0088f3"
+	property SpriteGUIRendererComponent resultSlot3 = "86a561bd-05ae-4cc9-a195-147e07babe4d"
+
+	property ButtonComponent retryButton = "509f1aa1-3470-4755-8d46-07abb88254a2"
+
+	-- 결과 화면 우상단 닫기(X) 버튼. 서버 상태와 무관한 순수 클라 UI 동작이라(재도전과 달리 재화/단계
+	-- 검증이 필요 없음) 서버 왕복 없이 바로 resultGroup만 끈다.
+	property ButtonComponent closeButton = "f995536b-7541-408d-9f18-2d73db57fdbf"
+
+	-- .ui 루트(GalleryArenaUI 그룹) 바인딩. GroupOrder(=1)만으로는 DefaultGroup(=0) 등 다른 UIGroup보다
+	-- 항상 앞에 그려진다는 보장이 없다(InventoryUI/ShadowShopUI에서 이미 확인된 동일 문제) — 유저 지적:
+	-- "딤드가 카드 슬롯이랑 이런거 위에 덮혀야한다니깐". 실제 렌더 순서를 결정하는 형제 인덱스를
+	-- OnBeginPlay에서 확정적으로 맨 뒤(=맨 앞)로 올려야 한다.
+	property Entity rootGroup = "135eaa2f-fb1a-4194-8f71-6f22dfc69090"
+
+	property any _retryTouchHandler = nil
+
+	property any _closeTouchHandler = nil
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		self.bannerText.Entity.Enable = false
+		self.resultGroup.Enable = false
+		_UILogic:SetSiblingIndex(self.rootGroup.UITransformComponent, 1000000)
+		self._retryTouchHandler = self.retryButton.Entity:ConnectEvent(ButtonClickEvent, self.OnRetryButtonClicked)
+		self._closeTouchHandler = self.closeButton.Entity:ConnectEvent(ButtonClickEvent, self.OnCloseButtonClicked)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		if self._retryTouchHandler ~= nil then
+			self.retryButton.Entity:DisconnectEvent(ButtonClickEvent, self._retryTouchHandler)
+		end
+		if self._closeTouchHandler ~= nil then
+			self.closeButton.Entity:DisconnectEvent(ButtonClickEvent, self._closeTouchHandler)
+		end
+	end
+
+	@ExecSpace("Client")
+	method void ShowBanner(string text)
+		self.bannerText.Text = text
+		self.bannerText.Entity.Enable = true
+	end
+
+	@ExecSpace("Client")
+	method void HideBanner()
+		self.bannerText.Entity.Enable = false
+	end
+
+	-- 결과 화면을 띄운다. slotRuid1/2/3은 각 등수 몬스터의 stand 애니메이션클립 RUID(없으면 "" —
+	-- 그 슬롯은 숨김), slotW/H는 종별 아이콘 원본 픽셀 크기(찌그러짐 방지, Pivot=(0.5,0.5)라
+	-- 크기만 바꿔도 중심은 안 움직인다). showRetry/retryLabel은 "다시하기" 버튼 노출 여부와 문구.
+	@ExecSpace("Client")
+	method void ShowResult(string slotRuid1, number slotW1, number slotH1, string slotRuid2, number slotW2, number slotH2, string slotRuid3, number slotW3, number slotH3, boolean showRetry, string retryLabel)
+		-- 유저 지정: "Podium 뜰 때는 텍스트는 뜨면 안 된다" — StartBattle에서 이미 HideBanner를
+		-- 호출하지만, 결과 화면 진입 지점에서도 한 번 더 확정적으로 꺼둔다.
+		self:HideBanner()
+		self:ApplySlot(self.resultSlot1, slotRuid1, slotW1, slotH1)
+		self:ApplySlot(self.resultSlot2, slotRuid2, slotW2, slotH2)
+		self:ApplySlot(self.resultSlot3, slotRuid3, slotW3, slotH3)
+		self.retryButton.Entity.Enable = showRetry
+		if showRetry then
+			-- button()이 만든 텍스트는 같은 엔티티 위의 TextGUIRendererComponent다(별도 자식 아님).
+			self.retryButton.Entity.TextGUIRendererComponent.Text = retryLabel
+		end
+		self.resultGroup.Enable = true
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ApplySlot(SpriteGUIRendererComponent slot, string ruid, number w, number h)
+		if ruid == "" then
+			slot.Entity.Enable = false
+			return
+		end
+		slot.Entity.Enable = true
+		-- SpriteGUIRendererComponent.ImageRUID는 (월드 SpriteRendererComponent.SpriteRUID와 달리)
+		-- string이 아니라 DataRef다 — 그냥 문자열을 대입하면 타입 에러로 여기서 죽어버려서 이후의
+		-- self.resultGroup.Enable = true까지 아예 실행이 안 됐다("미니게임 끝나고 단상이랑 몬스터가
+		-- 없음" 버그의 원인).
+		slot.ImageRUID = DataRef(ruid)
+		slot.Entity.UITransformComponent.RectSize = Vector2(w, h)
+	end
+
+	@ExecSpace("Client")
+	method void HideResult()
+		self.resultGroup.Enable = false
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnRetryButtonClicked(ButtonClickEvent event)
+		self:RequestRetry()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnCloseButtonClicked(ButtonClickEvent event)
+		-- 유저 지정: "몬스터 1~3등 나오는 거기에 X버튼 누르면 GalleryArenaUI 이거 꺼지게".
+		self:HideResult()
+	end
+
+	@ExecSpace("Server")
+	method void RequestRetry()
+		_Ep2Map2ArenaLogic:OnRetryClicked()
+	end
+
+end

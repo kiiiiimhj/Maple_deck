@@ -17819,7 +17819,9 @@ script CardManager extends Logic
 		end
 
 		local playerInventory = playerEntity.PkgPlayerInventory
-		local weaponStruct = playerInventory:GetAttachedGearItemStruct(playerInventory.CurrentJob, _GearCategoryEnum.OneHandedWeapon)
+		-- 버그 수정: playerInventory.CurrentJob은 UIInventory.Open()이 ClientOnly에서만 세팅해서
+		-- 서버에서는 항상 nil이었다 — ResolveCurrentJob()으로 서버에서도 안전하게 job을 구한다.
+		local weaponStruct = playerInventory:GetAttachedGearItemStruct(playerInventory:ResolveCurrentJob(), _GearCategoryEnum.OneHandedWeapon)
 		if weaponStruct == nil then return end
 		-- 등급 스킬 프록(SkillVariant→실제 스킬카드)은 레거시 스태프 라인만 갖고 있다 — 2026-08-17에 추가된
 		-- 신규 8개 라인은 텍스트 효과라 여기서 걸러내야 한다(IsWeaponItem은 9개 라인 전부 true)
@@ -18312,6 +18314,17 @@ script CardManager extends Logic
 			return
 		end
 		self:GrantCardUpgradesFromPool(pool, worldPos, fallHeight, groundWorldY, dropScale, self:RollDropCount(), 0)
+	end
+
+	-- 타락한 켄타우로스(ep2_map4 MapObject_205, MonsterAI._isCorruptedCentaur) 처치 — 유저 지정:
+	-- "빨간포션, 슬롯에 있는 스킬 1개 나오게 해줘(엘리트처럼)". 엘리트(OnEliteKilled)와 달리 개수는
+	-- 항상 정확히 1개 고정(RollDropCount의 1~3 랜덤 대신)이고, 빨간 포션(potionType=1)이 항상 같이 나간다.
+	@ExecSpace("ServerOnly")
+	method void OnCorruptedCentaurKilled(Vector3 worldPos, number fallHeight, number groundWorldY, number dropScale)
+		_GameManager:ApplyPotionDrop(1, worldPos, fallHeight, groundWorldY, dropScale)
+		local pool = self:BuildActiveUpgradePool()
+		if #pool == 0 then return end
+		self:GrantCardUpgradesFromPool(pool, worldPos, fallHeight, groundWorldY, dropScale, 1, 0)
 	end
 
 	-- ── 상자(TreasureChestEgg) 드롭 ─────────────────────────────────

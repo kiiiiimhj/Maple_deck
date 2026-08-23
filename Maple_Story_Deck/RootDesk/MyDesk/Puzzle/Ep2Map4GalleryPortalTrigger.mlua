@@ -1,0 +1,70 @@
+@Component
+script Ep2Map4GalleryPortalTrigger extends Component
+
+	-- 몬스터 갤러리 맵(ep2_map2_estermap_1)으로 플레이어를 이동시키는 클릭 트리거. ep2_map4 존10의
+	-- portal-7(Ep2Map4PiecePuzzleLogic 7조각 퍼즐 완성 시 드러남, 바로 옆 MapObject_9가 "NPC" 역할로
+	-- 요구 수량 말풍선을 보여준다)에만 붙는다. 유저 지정: "티켓조각 10개 주면 이동되는거였어" — 검투사의
+	-- 증표(tired_knight_seal) 10개를 실제로 확인+소모한 뒤에만 이동한다(예전엔 재화 체크 없는 테스트용
+	-- 임시 연결이었고, ep2_map1 존1에 항상 보이는 GalleryTestPortal도 같이 붙어있었는데 둘 다 제거함).
+	property string DestinationPath = "/maps/ep2_map2_estermap_1/GalleryEntryPoint"
+
+	property string RequiredItemId = "tired_knight_seal"
+
+	property integer RequiredAmount = 10
+
+	-- 유저 지적: "미니게임 맵에서 몬스터한테 피격당하거든 아마 들어오기 전 존에서 공격하는거 같음,
+	-- 예전 실피드 얻는 맵에서 그랬었던거랑 똑같음" — MapManager.DoMapChange(일반 존 이동)는 떠나는
+	-- 존의 몬스터를 항상 Pause시키는데, 여기서 쓰는 MoveToEntityByPath 직접 텔레포트는 그 절차를
+	-- 안 타서 존10 몬스터가 화면 밖에서 계속 공격 타이머를 돌려 갤러리 맵의 플레이어를 때렸다.
+	-- 돌아올 때 Resume은 Ep2Map2GalleryReturnPortalTrigger가 담당한다.
+	property integer Ep2Map4Zone10Index = 84
+
+	property any _touchHandler = nil
+
+	method void OnBeginPlay()
+		if self:IsClient() then
+			self._touchHandler = self.Entity:ConnectEvent(TouchEvent, self.OnTouched)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnTouched(TouchEvent event)
+		if _GameManager.GameOver then return end
+		if _TitleUI.titleGroup.Enable then return end
+		self:RequestEnterGallery()
+	end
+
+	-- MapManager의 존 인덱스 체계(ZoneInfo)와 무관한 별도 맵이라 MoveToMap을 타지 않고,
+	-- PlayerComponent의 네이티브 MoveToEntityByPath로 직접 텔레포트한다(와이프 연출 없음).
+	@ExecSpace("Server")
+	method void RequestEnterGallery()
+		local have = _PlayerInventory:GetItemCount(self.RequiredItemId)
+		if have < self.RequiredAmount then
+			local itemDef = _PlayerInventory:GetItemDef(self.RequiredItemId)
+			_UIToast:ShowMessage(itemDef.name .. "이(가) 부족합니다 (" .. have .. "/" .. self.RequiredAmount .. ")")
+			return
+		end
+		_PlayerInventory:RemoveItem(self.RequiredItemId, self.RequiredAmount)
+
+		local zoneEntity = _MonsterSpawner:GetZoneEntity(self.Ep2Map4Zone10Index)
+		_MapManager:SetMonstersPausedForZone(zoneEntity, self.Ep2Map4Zone10Index, true)
+
+		local playerEntity = _UserService:GetUserEntityByUserId(senderUserId)
+		if playerEntity == nil or playerEntity.PlayerComponent == nil then return end
+		playerEntity.PlayerComponent:MoveToEntityByPath(self.DestinationPath)
+		-- 갤러리 맵은 ZoneInfo 인덱스 밖이라 MapManager.ResetCameraConfine을 안 타므로 전용 진입점으로
+		-- 카메라를 고정한다. Client RPC라 마지막 인자로 대상 유저만 targeting한다(다른 플레이어 카메라엔
+		-- 영향 없음).
+		_MapManager:SetGalleryCameraConfine(senderUserId)
+		-- Ep2Map2ArenaLogic은 @Logic이라 OnMapEnter가 안 온다(AGENTS.md) — 진입 트리거인 여기서
+		-- 전투 미니게임 선택 단계를 직접 시작시킨다.
+		_Ep2Map2ArenaLogic:StartSelectionPhase(senderUserId)
+	end
+
+	method void OnEndPlay()
+		if self:IsClient() then
+			if self._touchHandler ~= nil then self.Entity:DisconnectEvent(TouchEvent, self._touchHandler) end
+		end
+	end
+
+end

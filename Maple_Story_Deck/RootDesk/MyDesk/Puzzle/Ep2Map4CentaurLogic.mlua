@@ -1,0 +1,80 @@
+@Logic
+script Ep2Map4CentaurLogic extends Logic
+
+	-- 에피소드2 map4 MapObject_205 이스터에그 — 2번 클릭하면 "검은 켄타우로스" 9마리 + 우두머리
+	-- "타락한 켄타우로스" 1마리가 한꺼번에 등장한다(유저 지정). 검은 켄타우로스는 그 시점 일반 몬스터와
+	-- 같은 체력에 크기만 0.8, 타락한 켄타우로스는 체력 2배에 크기 1.2 — 실제 스탯/리소스 배정은
+	-- MonsterAI.InitializeStatsAsBlackCentaur/InitializeStatsAsCorruptedCentaur가 전담한다. 처치 시
+	-- 잡템은 전혀 안 나오고(유저 지정), 타락한 켄타우로스만 엘리트처럼 확정 드롭(빨간 포션 + 슬롯 스킬
+	-- 1개, CardManager.OnCorruptedCentaurKilled)을 받는다. 런당 1회 제한.
+	property integer ClickCount = 0
+	property boolean _usedThisRun = false
+	property integer BlackCentaurCount = 9
+
+	-- Ep2Map4CentaurTrigger.RequestClick()이 클릭마다 호출한다. 2번째 클릭에서 실제로 무리가 등장한다.
+	-- 1번째 클릭은 유저 요청으로 아무 토스트도 띄우지 않는다(카운트만 조용히 올라감).
+	@ExecSpace("ServerOnly")
+	method void OnObjectClicked()
+		if self._usedThisRun then return end
+		self.ClickCount = self.ClickCount + 1
+		if self.ClickCount < 2 then return end
+		self._usedThisRun = true
+		self:SpawnCentaurHorde()
+	end
+
+	-- 검은 켄타우로스 9마리 + 타락한 켄타우로스 1마리를 현재 존에 스폰한다. 위치 스캐터 방식은
+	-- MonsterSpawner.SpawnBatchOnMap과 동일(GetSpawnPosition + IsPositionCrowded로 겹침 방지).
+	@ExecSpace("ServerOnly")
+	method void SpawnCentaurHorde()
+		local map = _CardManager:GetCurrentMap()
+		if map == nil then return end
+		local mapIndex = _MapManager.CurrentMapIndex
+
+		local spawnedXs = {}
+
+		for i = 1, self.BlackCentaurCount do
+			local pos = _MonsterSpawner:GetSpawnPosition(mapIndex, false, 0, map)
+			local attempts = 0
+			while attempts < 4 and _MonsterSpawner:IsPositionCrowded(map, pos.x, spawnedXs) do
+				pos = _MonsterSpawner:GetSpawnPosition(mapIndex, false, 0, map)
+				attempts = attempts + 1
+			end
+			table.insert(spawnedXs, pos.x)
+
+			local entity = _SpawnService:SpawnByModelId(_MonsterSpawner.MonsterModelId, "BlackCentaur" .. i, _MonsterSpawner:ToLocalSpawnPos(map, pos), map)
+			if entity == nil then
+				log_error("Ep2Map4Centaur: BlackCentaur SpawnByModelId failed")
+			else
+				---@type MonsterAI
+				local ai = entity:GetComponent("script.MonsterAI")
+				if ai ~= nil then ai:InitializeStatsAsBlackCentaur(mapIndex) end
+			end
+		end
+
+		local bossPos = _MonsterSpawner:GetSpawnPosition(mapIndex, false, 0, map)
+		local bossAttempts = 0
+		while bossAttempts < 4 and _MonsterSpawner:IsPositionCrowded(map, bossPos.x, spawnedXs) do
+			bossPos = _MonsterSpawner:GetSpawnPosition(mapIndex, false, 0, map)
+			bossAttempts = bossAttempts + 1
+		end
+		local bossEntity = _SpawnService:SpawnByModelId(_MonsterSpawner.MonsterModelId, "CorruptedCentaur", _MonsterSpawner:ToLocalSpawnPos(map, bossPos), map)
+		if bossEntity == nil then
+			log_error("Ep2Map4Centaur: CorruptedCentaur SpawnByModelId failed")
+		else
+			---@type MonsterAI
+			local ai = bossEntity:GetComponent("script.MonsterAI")
+			if ai ~= nil then ai:InitializeStatsAsCorruptedCentaur(mapIndex) end
+		end
+
+		_UIToast:ShowMessage("켄타우로스 무리가 나타났습니다!")
+		log("Ep2Map4Centaur: spawned " .. self.BlackCentaurCount .. " black + 1 corrupted on zone " .. mapIndex)
+	end
+
+	-- GameManager.RestartGame()이 호출 — 새 런에서는 다시 2번 클릭할 수 있게 리셋한다.
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		self.ClickCount = 0
+		self._usedThisRun = false
+	end
+
+end

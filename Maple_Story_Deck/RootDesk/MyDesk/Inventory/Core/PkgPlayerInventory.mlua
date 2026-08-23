@@ -1070,6 +1070,27 @@ script PkgPlayerInventory extends Component
 		self.Entity:SendEvent(evt)
 	end
 
+	-- 버그 수정(2026-08-22, 유저 리포트: "장비 장착중인데 효과 적용이 안되는거같다") — CurrentJob은
+	-- UIInventory.Open()이 @ExecSpace("ClientOnly")에서만 세팅하는 값이라 서버에서는 항상 nil이었다
+	-- (실측 확인: 장비를 눈으로 보이게 장착해도 서버 쪽 GearEffectLogic.InitForRun/CardManager.
+	-- InitWeaponSkillForRun이 읽는 inventory.CurrentJob은 계속 nil → 모든 장비 등급 효과가 항상
+	-- 미장착 취급됐음). 서버 전용 읽기 경로는 이 메서드로 job을 구해야 한다 — CurrentJob이 세팅돼
+	-- 있으면 그대로 쓰고, 아니면 UIInventory와 동일한 규칙(정렬순 첫 번째 해금 job)으로 직접 계산한다.
+	method integer ResolveCurrentJob()
+		if self.CurrentJob ~= nil then return self.CurrentJob end
+		local playerJob = self.Entity.PlayerJob
+		if playerJob == nil then return nil end
+		local jobDataList = _JobDataLogic:GetSortJobDataList()
+		for i, jobData in ipairs(jobDataList) do
+			---@type JobData
+			local jd = jobData
+			if not playerJob:IsJobLocked(jd.Id) then
+				return jd.Id
+			end
+		end
+		return nil
+	end
+
 	method ItemStruct GetAttachedGearItemStruct(integer job, integer gearCategory)
 		local categoryRuidTable = self.AttachedNormalGearItems[job]
 		if categoryRuidTable == nil then
