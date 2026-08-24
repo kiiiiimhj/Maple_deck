@@ -105,7 +105,10 @@ script MapManager extends Logic
 	method void SetEpisodeRange(integer episode)
 		if episode == 2 then
 			self.MinMapIndex = 45
-			self.MaxMapIndex = 84
+			-- 84→88: ep2_map2_hidden(존1~4 = mapIndex85~88, 석상 퍼즐 보상 스퍼) 포함. 순차 진행으로는
+			-- 도달할 수 없다 — MoveByDelta의 "존84 dead end" 차단은 그대로 유지하고, 진입은 오직
+			-- RequestMoveToEp2Map2Hidden(존61 전용)로만 가능하다.
+			self.MaxMapIndex = 88
 			self.DesiredStartMapIndex = 45
 		else
 			self.MinMapIndex = 1
@@ -384,6 +387,26 @@ script MapManager extends Logic
 			[82] = { file = "ep2_map4", container = nil, spawnX = 108.5, landY = -1.35 },
 			[83] = { file = "ep2_map4", container = nil, spawnX = 124.0, landY = -1.35 },
 			[84] = { file = "ep2_map4", container = nil, spawnX = 139.5, landY = -1.35 },
+			-- 에피소드2 map2 히든존(ep2_map2_hidden.map, 유저가 ep2_map2를 덤프해서 만듦) — 존1~4를
+			-- mapIndex 85~88로 배정한다. ep2_map2 존9(mapIndex61, x=96.49)에 있는 석상 퍼즐 보상
+			-- 오브젝트(MapObject_224, "구름")를 눌러야만 들어갈 수 있는 비밀 구역이다(순차 진행이
+			-- 아니라 존61 전용 스퍼 — RequestMoveToEp2Map2Hidden 참고, 그룹D/I/J/K와 동일한 패턴).
+			-- container/spawnX는 덤프 원본 그대로 유지된 값을 MapBuilder로 실측 확인(15.5/31.0/46.5,
+			-- ep2_map2와 동일). 존4(88)만 예외 — ep2_map2 존4(58)와 동일한 위치(x46.35~48.55)에 둔덕
+			-- (y=-0.53) 지형이 그대로 남아있어(실측 getFootholds) landY를 명시한다. 존1~3은 그 X지점
+			-- 공통 지면(y=-1.13)이 그대로 남아있어 landY 불필요.
+			-- 주의: 유저가 이 맵에서 바닥과 공중 발판 배치를 일부 바꿔서(예: 존3 근방 x24~38 구간이
+			-- ep2_map2에선 지면 자체가 융기하는 언덕이었는데 여기선 지면은 평탄하게 두고 그 자리에
+			-- 별개의 "공중 발판"을 새로 얹어놨다 — 실측 getFootholds로 확인), 존1~3의 화면 안전범위
+			-- (±5) 안에 바닥과 분리된 공중 발판이 들어온다. 이 상태로 기존 방식(무작위 X + 아래방향
+			-- 레이캐스트, GetZonePlatformBands==nil일 때의 기본 분기)을 쓰면 레이가 공중 발판에 먼저
+			-- 걸려 지상형 몬스터가 허공에 떠 스폰될 위험이 있다 — 그래서 MonsterSpawner.GetSpawnPosition의
+			-- 라우팅에 85~88을 추가해(맵2 존7~10/맵3/맵4와 동일한 이유) GetSpawnPositionFromFootholds
+			-- (발판 데이터 기반, 바닥/공중 전부 폭 비례로 고르는 안전한 방식)를 타게 했다.
+			[85] = { file = "ep2_map2_hidden", container = nil, spawnX = 0 },
+			[86] = { file = "ep2_map2_hidden", container = "Zone2", spawnX = 15.5 },
+			[87] = { file = "ep2_map2_hidden", container = "Zone3", spawnX = 31.0 },
+			[88] = { file = "ep2_map2_hidden", container = "Zone4", spawnX = 46.5, landY = -0.53 },
 		}
 		-- 몬스터 스폰/시작맵 리다이렉트는 GameStarted가 될 때까지 미룬다(BeginGameplay 참고) —
 		-- 타이틀 화면을 보는 동안 몬스터가 먼저 쌓이면 안 된다. 여기서는 현재 위치만 계산해둔다.
@@ -617,6 +640,18 @@ script MapManager extends Logic
 		self:MoveToMap(actualIndex, 29)
 	end
 
+	-- Ep2Map2CloudPortalTrigger(MapObject_224, 석상 퍼즐 정답 시 드러나는 "구름" 오브젝트)가 클릭 시
+	-- 호출 — 존61(ep2_map2 존9, 오브젝트가 실제로 있는 위치)에서만 유효한 전용 스퍼다. 존19↔15/존29↔40과
+	-- 동일한 패턴 — 일반 순차 델타로는 도달할 수 없고 이 전용 경로로만 존85(ep2_map2_hidden 존1)에 들어간다.
+	-- MoveToMap이 파일이 다르면(ep2_map2 → ep2_map2_hidden) 자동으로 와이프 전환(DoMapChange)을 타므로
+	-- 카메라 confine 리셋/몬스터 일시정지·재개/ActivateMap/BGM 전환까지 전부 기존 로직 그대로 재사용된다.
+	@ExecSpace("Server")
+	method void RequestMoveToEp2Map2Hidden()
+		local actualIndex = self.CurrentMapIndex
+		if actualIndex ~= 61 then return end
+		self:MoveToMap(actualIndex, 85)
+	end
+
 	-- 클라이언트의 map1 존5 전용 "위로" 버튼 요청 (존19↔15, 존40↔29와 동일한 스퍼 패턴) — map2가 꼭대기고
 	-- 그 아래층이 map1이라는 설정이라 map1→map2가 "위로" 방향이다(유저 지정, 최초엔 반대로 만들었다가
 	-- 정정받음). map1 존5(mapIndex49)와 map2 존5(mapIndex59)는 물리적으로 다른 파일(ep2_map1/ep2_map2)이라
@@ -743,7 +778,18 @@ script MapManager extends Logic
 			return
 		elseif actualIndex == 84 and delta == 1 then
 			-- map4 존10(mapIndex84)도 동일하게 막다른 길이다 — map4 진입/진행은 map1 존10의 ">"(75로
-			-- 직행)와 map3 존5의 스퍼(69↔79)뿐이고, 존84 다음(85)은 존재하지 않는다.
+			-- 직행)와 map3 존5의 스퍼(69↔79)뿐이다. 85(ep2_map2_hidden 존1)는 이제 존재하지만
+			-- 순차 진행 대상이 아니라 존61 전용 스퍼(RequestMoveToEp2Map2Hidden)로만 들어가야 하므로
+			-- 여기서는 여전히 막다른 길로 남겨둔다(그룹L의 존39/43과 동일한 차단 패턴).
+			return
+		elseif actualIndex == 88 and delta == 1 then
+			-- ep2_map2_hidden 존4(mapIndex88)는 히든존의 끝 — 그 다음(89)은 존재하지 않는다.
+			return
+		elseif actualIndex == 85 and delta == -1 then
+			-- 유저 지정(2026-08-24): "여기 나가는길은 없고 시간이 끝나면 자동으로 복귀" — 히든존은
+			-- 나가는 경로 자체가 없다. 3분 타이머가 끝나면 Ep2Map2HiddenExpBoostLogic이 존61로 직접
+			-- MoveToMap을 호출해 자동 복귀시킨다(일반 "<" 이동이 아님). 그래서 존85의 "<"는 항상
+			-- 막다른 길이어야 한다(MapMoveUI에서 버튼 자체도 숨김).
 			return
 		end
 

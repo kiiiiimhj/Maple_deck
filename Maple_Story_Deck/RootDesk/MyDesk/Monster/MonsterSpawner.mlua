@@ -284,8 +284,14 @@ script MonsterSpawner extends Logic
 		-- 2026-08-05(2차, 유저 지정): "적이 없은지 2초 지나면 즉시 스폰" — 비는 즉시 채우면 너무
 		-- 민감해서(마지막 한 마리 잡은 순간 바로 다시 몰림) EmptyMapSpawnDelay(2초) 연속으로 비어있을
 		-- 때만 발동하도록 디바운스. 맵이 바뀌거나 몬스터가 다시 생기면 타이머를 리셋한다.
+		-- 버그 수정(2026-08-24, 유저 리포트 "발록 스테이지인데 다른 존 몹들을 공격함") — 존10에 무적
+		-- 보너스 보스가 떠 있는 동안은 SpawnWave와 동일하게 이 응급 스폰도 건너뛴다. InitializeBonusBoss가
+		-- SetSpawnZone을 빠뜨렸던 게 근본 원인(수정 완료)이지만, 등록 타이밍이 어긋나는 경우까지 대비해
+		-- 이 가드를 별도로 둔다 — 안 그러면 "이 존 몬스터 수=0" 오판이 재발할 때마다 무적 보스가 있는
+		-- 화면에 일반 웨이브 몬스터(맵9 풀)가 2초마다 계속 끼어든다.
 		local emergencyMap = self:GetCurrentMap()
-		if emergencyMap ~= nil and not self:IsNoMonsterZone(_MapManager.CurrentMapIndex) then
+		if emergencyMap ~= nil and not self:IsNoMonsterZone(_MapManager.CurrentMapIndex)
+			and not (_MapManager.CurrentMapIndex == 10 and self._bonusBossActive) then
 			-- 버그 수정(2026-08-20): SpawnBatchOnMap과 같은 이유로 존별 카운트여야 한다 — 안 그러면 맵3/4에서
 			-- 다른 존에 몬스터가 남아있는 한 지금 있는 존이 비어도 "안 비었다"고 오판해 응급 스폰이 영원히 발동 안 한다.
 			-- 성능 최적화(2026-08-24, 유저 리포트 "몬스터 많을때 끊김") — 이 블록은 OnUpdate 안이라
@@ -854,6 +860,20 @@ script MonsterSpawner extends Logic
 	@ExecSpace("ServerOnly")
 	method integer ResolveAppearanceZone(integer mapIndex)
 		if mapIndex == 10 then return 9 end
+		-- ep2_map2_hidden(존1~4=mapIndex85~88, 석상 퍼즐 보상 스퍼) — 전용 종 풀을 새로 만드는 대신
+		-- ep2_map2 자신의 기존 존 풀(mapIndex55~64, GameManager의 검증된 RUID 테이블 재사용) 중
+		-- 근접/원거리/비행형이 골고루 섞인 조합을 골라 재사용한다(유저 요청: "원거리 비행 근접 같이
+		-- 골고루 섞이게"). 85→56(주니어라이오너·근접/네펜데스·원거리), 86→61(라이오너·근접/고스트픽시·
+		-- 비행/주니어루이넬·지그재그), 87→63(거대네펜데스·고정원거리/고스트픽시·비행/주니어루이넬·지그재그 —
+		-- 세 유형이 한 존에 다 섞인 조합), 88→60(거대네펜데스·고정원거리/주니어그류핀·근접/샐리온·근접).
+		-- 4존 전체로 보면 원거리 1,3,4 / 비행 2,3 / 근접 1,2,4에 걸쳐 고르게 나온다. mapIndex==10과
+		-- 동일하게 여기 하나만 고치면 RollSpeciesForMap/GetMapIsRangedSpecies/GetMapIsFlyingSpecies가
+		-- 전부 자동으로 이 별칭을 따라간다 — MonsterAI.InitializeStats의 동일 목적 인라인 해석에도
+		-- 같은 매핑을 그대로 복제해뒀다(두 스크립트가 별도 로직이라 짝을 맞춰야 함).
+		if mapIndex == 85 then return 56 end
+		if mapIndex == 86 then return 61 end
+		if mapIndex == 87 then return 63 end
+		if mapIndex == 88 then return 60 end
 		return mapIndex
 	end
 
@@ -1467,8 +1487,16 @@ script MonsterSpawner extends Logic
 		-- 있는 X구간은 바로 아래 진짜 바닥에 영원히 스폰이 안 된다(유저 리포트: "공중발판 아래에 몹 안뜨는데
 		-- 너무 많음"). GetFlatRuns 기반 방식으로 옮기면 바닥/공중 발판 전부 폭 비례 확률로 고르게 되어
 		-- 발판 아래 바닥도 다시 스폰 후보에 들어간다.
+		-- ep2_map2_hidden(mapIndex85~88)도 같은 이유로 추가(2026-08-24, 유저 지적 "공중 발판이랑 바닥
+		-- 바꾼게 있으니깐 확인해야하고") — 유저가 이 맵에서 존1~3 근방(x대략 -0.85~2.65 / 12.65~18.85 /
+		-- 24.35~37.75)의 지면·공중 발판 배치를 ep2_map2와 다르게 바꿔놨는데(실측 getFootholds 대조 —
+		-- ep2_map2에선 그 구간 자체가 지면이 융기하는 언덕이었지만 여기선 지면은 평탄히 두고 별개의
+		-- 분리된 공중 발판을 얹었다), 이 X구간이 전부 각 존의 스폰 화면범위(±5) 안에 들어온다. 기존
+		-- 단일 랜덤X+아래방향 레이캐스트(GetGroundY)를 그대로 쓰면 레이가 위에 뜬 공중 발판에 먼저
+		-- 걸려 지상형 몬스터가 허공에 스폰될 위험이 있다 — GetFlatRuns 기반 방식으로 바닥/공중 전부
+		-- 폭 비례 확률 후보에 넣어야 안전하다.
 		if (mapIndex >= 13 and mapIndex <= 15) or mapIndex == 8 or mapIndex == 27 or mapIndex == 28 or mapIndex == 29
-			or (mapIndex >= 61 and mapIndex <= 64) or (mapIndex >= 65 and mapIndex <= 84) then
+			or (mapIndex >= 61 and mapIndex <= 64) or (mapIndex >= 65 and mapIndex <= 84) or (mapIndex >= 85 and mapIndex <= 88) then
 			return self:GetSpawnPositionFromFootholds(mapIndex, isBoss, map)
 		end
 
