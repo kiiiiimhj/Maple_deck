@@ -784,11 +784,15 @@ script MapManager extends Logic
 	@ExecSpace("ServerOnly")
 	method void SetMonstersPausedForZone(Entity map, integer zoneIndex, boolean paused)
 		if map == nil then return end
-		local monsters = map:GetChildComponentsByTypeName("script.MonsterAI", false)
+		-- 성능 최적화(2026-08-24, 유저 리포트 "맵이동할때 렉 여전함") — 실측: map:GetChildComponentsByTypeName로
+		-- container=nil 공유맵(map3/4, 존 10개가 파일 하나를 공유)의 몬스터를 전부(100마리 이상) 훑고
+		-- _spawnZoneIndex로 걸러내던 방식이 맵이동 한 번(old/new 두 번 호출)에 1.3초까지 걸렸다. 이제
+		-- MonsterSpawner가 존별로 직접 들고 있는 레지스트리에서 정확히 이 존만 O(그 존 크기)로 받아온다.
+		local monsters = _MonsterSpawner:GetMonstersInZone(zoneIndex)
 		for i = 1, #monsters do
 			---@type MonsterAI
 			local ai = monsters[i]
-			if isvalid(ai) and isvalid(ai.Entity) and ai._spawnZoneIndex == zoneIndex then
+			if isvalid(ai) and isvalid(ai.Entity) then
 				if paused then ai:Pause() else ai:Resume() end
 			end
 		end

@@ -13056,7 +13056,12 @@ script CardManager extends Logic
 	method table GetMonstersInCurrentZone(Entity map)
 		if map == nil then return {} end
 		local currentZone = _MapManager.CurrentMapIndex
-		local allMonsters = map:GetChildComponentsByTypeName("script.MonsterAI", false)
+		-- 성능 최적화(2026-08-24, 유저 리포트 "몬스터 많을때/공중유닛일때 끊기는 느낌이 강함") — 이 메서드는
+		-- 모든 카드/스킬 타겟팅(GetClosestTargets 등)의 단일 진입점이라 전투 중 초당 여러 번 불린다.
+		-- map:GetChildComponentsByTypeName 전체 스캔은 container=nil 공유맵(map3/4)에서 그 파일의 몬스터를
+		-- 전부(100마리 이상 실측) 훑었는데, 이게 전투 내내 반복 호출되면서 체감 렉의 주 원인이었다 —
+		-- MonsterSpawner가 존별로 들고 있는 레지스트리로 정확히 이 존만 O(그 존 크기)로 받아온다.
+		local allMonsters = _MonsterSpawner:GetMonstersInZone(currentZone)
 		local result = {}
 		for i = 1, #allMonsters do
 			---@type MonsterAI
@@ -13068,7 +13073,7 @@ script CardManager extends Logic
 			-- 유저 지적: "미니게임에 들어갔는데 유저가 적을 공격하네" — 몬스터 갤러리 미니게임에 들어가도
 			-- CurrentMapIndex는 원래 존(예: 존10)에 그대로 남아있어서, 그 존 몬스터가 Pause되어 화면 밖에서
 			-- 공격은 안 해도 플레이어 카드는 여전히 그들을 타겟으로 찾아 화면 밖에서 계속 때리고 있었다.
-			if isvalid(m) and m._spawnZoneIndex == currentZone and not (m._isCauldron and m._cauldronLocked) and not m._paused then
+			if isvalid(m) and not (m._isCauldron and m._cauldronLocked) and not m._paused then
 				table.insert(result, m)
 			end
 		end
