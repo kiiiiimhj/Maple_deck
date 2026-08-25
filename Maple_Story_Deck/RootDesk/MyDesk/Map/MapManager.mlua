@@ -96,11 +96,11 @@ script MapManager extends Logic
 		return #self.ZoneInfo
 	end
 
-	-- 현재 선택된 에피소드(1 또는 2) — GameManager.StartGame/RestartGame이 시작/다시하기 시점에 호출.
+	-- 현재 선택된 에피소드(1/2/3) — GameManager.StartGame/RestartGame이 시작/다시하기 시점에 호출.
 	-- MinMapIndex/MaxMapIndex/DesiredStartMapIndex를 통째로 바꿔치기해서, 이후 SpawnWave 순회
 	-- (MinMapIndex~MaxMapIndex)·ResolveCurrentMapIndex 폴백·시작 리다이렉트가 전부 해당 에피소드의
-	-- 범위 안에서만 동작하게 한다. ZoneInfo 자체는 1~44(에피1)/45~54(에피2) 항목을 항상 같이 들고
-	-- 있으므로(위 OnBeginPlay 참고) 여기서 테이블을 바꿔치기할 필요는 없다 — 순회 범위만 좁히면 된다.
+	-- 범위 안에서만 동작하게 한다. ZoneInfo 자체는 1~44(에피1)/45~88(에피2)/89~98(에피3) 항목을 항상
+	-- 같이 들고 있으므로(위 OnBeginPlay 참고) 여기서 테이블을 바꿔치기할 필요는 없다 — 순회 범위만 좁히면 된다.
 	@ExecSpace("ServerOnly")
 	method void SetEpisodeRange(integer episode)
 		if episode == 2 then
@@ -110,6 +110,13 @@ script MapManager extends Logic
 			-- RequestMoveToEp2Map2Hidden(존61 전용)로만 가능하다.
 			self.MaxMapIndex = 88
 			self.DesiredStartMapIndex = 45
+		elseif episode == 3 then
+			-- 에피소드3(mapIndex89~128, "엘라스 산맥" 컨셉) — map1(존1~10=89~98)/map2(존1~10=99~108)/
+			-- map3(존1~10=109~118)/map4(존1~10=119~128). 98→99, 108→109, 118→119 전부 인접 mapIndex라
+			-- MoveByDelta 기본 델타만으로 자연스럽게 이어진다(별도 분기 불필요).
+			self.MinMapIndex = 89
+			self.MaxMapIndex = 128
+			self.DesiredStartMapIndex = 89
 		else
 			self.MinMapIndex = 1
 			self.MaxMapIndex = 44
@@ -138,6 +145,18 @@ script MapManager extends Logic
 	property number Ep2Map3ConfineMinX = -7.02
 	property number Ep2Map3ConfineMaxX = 144.72
 	property number Ep2Map3FixedCameraY = -1.35
+
+	-- 유저 지정(2026-08-25) — 에피소드3 map3(존1~10=mapIndex109~118)/map4(존1~10=mapIndex119~128)도
+	-- ep2_map3와 동일 패턴: "존1(root) 기준 카메라 앵글을 유지한 채 존2~10까지 좌우로만 스크롤하고 싶다"
+	-- (지형 자체는 그대로 두고 카메라 Y만 존1 기준으로 고정). X는 두 맵 다 발판 전체 범위가 동일
+	-- (getFootholdBounds 실측, ep3_map1/2/3 시리즈 공통 원본 덤프라 폭이 동일). Y는 각 맵 존1(spawnX=0)의
+	-- landY(ZoneInfo[109]/[119], 둘 다 1.12)를 그대로 재사용한다.
+	property number Ep3Map3ConfineMinX = -7.09
+	property number Ep3Map3ConfineMaxX = 144.79
+	property number Ep3Map3FixedCameraY = 1.12
+	property number Ep3Map4ConfineMinX = -7.09
+	property number Ep3Map4ConfineMaxX = 144.79
+	property number Ep3Map4FixedCameraY = 1.12
 
 	-- 몬스터 갤러리(ep2_map2_estermap_1) 전용 카메라 confine — 이 맵은 ZoneInfo 인덱스 체계 밖의
 	-- 독립 맵이라(Ep2Map4GalleryPortalTrigger의 네이티브 MoveToEntityByPath로만 진입) ResetCameraConfine의
@@ -407,6 +426,64 @@ script MapManager extends Logic
 			[86] = { file = "ep2_map2_hidden", container = "Zone2", spawnX = 15.5 },
 			[87] = { file = "ep2_map2_hidden", container = "Zone3", spawnX = 31.0 },
 			[88] = { file = "ep2_map2_hidden", container = "Zone4", spawnX = 46.5, landY = -0.53 },
+
+			-- 에피소드3 map1(ep3_map1.map, 유저가 다른 맵을 덤프해서 만듦) — 존1~10을 mapIndex 89~98로
+			-- 배정한다. container/spawnX는 덤프 원본 그대로 유지된 값을 MapBuilder로 실측 확인(15.5 간격,
+			-- ep2_map3/ep2_map4와 동일한 좌표 패턴). 유저가 "발판 바꿨으니 다 체크가 필요해"라고 명시해서
+			-- getFootholds()로 258개 발판을 전수 실측했다: 존4(92, x43.25~48.55)는 y=-0.64 둔덕, 존5(93,
+			-- x58.55~63.85)는 y=-0.04 평지가 공통지면(y=-1.24) 대신 남아있고, 나머지 8존은 공통지면
+			-- 그대로다. map3/map4 때의 교훈(존39 예외를 놓쳤던 사고)대로 예외를 또 놓치지 않기 위해 10존
+			-- 전부에 실측한 landY를 명시한다.
+			[89] = { file = "ep3_map1", container = nil, spawnX = 0, landY = -1.24 },
+			[90] = { file = "ep3_map1", container = "Zone2", spawnX = 15.5, landY = -1.24 },
+			[91] = { file = "ep3_map1", container = "Zone3", spawnX = 31.0, landY = -1.24 },
+			[92] = { file = "ep3_map1", container = "Zone4", spawnX = 46.5, landY = -0.64 },
+			[93] = { file = "ep3_map1", container = "Zone5", spawnX = 62.0, landY = -0.04 },
+			[94] = { file = "ep3_map1", container = "Zone6", spawnX = 77.5, landY = -1.24 },
+			[95] = { file = "ep3_map1", container = "Zone7", spawnX = 93.0, landY = -1.24 },
+			[96] = { file = "ep3_map1", container = "Zone8", spawnX = 108.5, landY = -1.24 },
+			[97] = { file = "ep3_map1", container = "Zone9", spawnX = 124.0, landY = -1.24 },
+			[98] = { file = "ep3_map1", container = "Zone10", spawnX = 139.5, landY = -1.24 },
+
+			-- 에피소드3 map2(ep3_map2.map, 유저가 다른 맵을 덤프해서 만듦, map1과 동일 원본) — 존1~10을
+			-- mapIndex 99~108로 배정한다. map1과 완전히 동일한 발판 패턴(공통지면 y=-1.24, 존4만 y=-0.64
+			-- 둔덕, 존5만 y=-0.04 평지, 나머지 8존 화면안전범위에 공중 발판)이라 landY도 동일하게 명시한다.
+			[99] = { file = "ep3_map2", container = nil, spawnX = 0, landY = -1.24 },
+			[100] = { file = "ep3_map2", container = "Zone2", spawnX = 15.5, landY = -1.24 },
+			[101] = { file = "ep3_map2", container = "Zone3", spawnX = 31.0, landY = -1.24 },
+			[102] = { file = "ep3_map2", container = "Zone4", spawnX = 46.5, landY = -0.64 },
+			[103] = { file = "ep3_map2", container = "Zone5", spawnX = 62.0, landY = -0.04 },
+			[104] = { file = "ep3_map2", container = "Zone6", spawnX = 77.5, landY = -1.24 },
+			[105] = { file = "ep3_map2", container = "Zone7", spawnX = 93.0, landY = -1.24 },
+			[106] = { file = "ep3_map2", container = "Zone8", spawnX = 108.5, landY = -1.24 },
+			[107] = { file = "ep3_map2", container = "Zone9", spawnX = 124.0, landY = -1.24 },
+			[108] = { file = "ep3_map2", container = "Zone10", spawnX = 139.5, landY = -1.24 },
+
+			-- 에피소드3 map3(ep3_map3.map, 유저가 다른 맵을 덤프해서 만듦) — 존1~10을 mapIndex 109~118로
+			-- 배정한다. container/spawnX는 덤프 원본 그대로 유지된 값을 MapBuilder로 실측 확인(15.5 간격,
+			-- 기존 그룹들과 동일). landY는 각 존의 spawnX 지점에서 실제로 가장 위에 걸리는(=중력이 착지시킬)
+			-- 발판을 실측해 명시한다 — 존1/2/7/8/10은 공중 발판(y=1.12/0.52)이 공통지면보다 먼저 걸려
+			-- 그쪽이 진짜 착지 지점이고, 존4/5는 map1/2와 달리 이 맵만의 독자적인 둔덕/단(y=-0.68/-0.08)이다.
+			[109] = { file = "ep3_map3", container = nil, spawnX = 0, landY = 1.12 },
+			[110] = { file = "ep3_map3", container = "Zone2", spawnX = 15.5, landY = 1.12 },
+			[111] = { file = "ep3_map3", container = "Zone3", spawnX = 31.0, landY = -1.28 },
+			[112] = { file = "ep3_map3", container = "Zone4", spawnX = 46.5, landY = -0.68 },
+			[113] = { file = "ep3_map3", container = "Zone5", spawnX = 62.0, landY = -0.08 },
+			[114] = { file = "ep3_map3", container = "Zone6", spawnX = 77.5, landY = -1.28 },
+			[115] = { file = "ep3_map3", container = "Zone7", spawnX = 93.0, landY = 0.52 },
+			[116] = { file = "ep3_map3", container = "Zone8", spawnX = 108.5, landY = 1.12 },
+			[117] = { file = "ep3_map3", container = "Zone9", spawnX = 124.0, landY = -1.28 },
+			[118] = { file = "ep3_map3", container = "Zone10", spawnX = 139.5, landY = 0.52 },
+			[119] = { file = "ep3_map4", container = nil, spawnX = 0, landY = 1.12 },
+			[120] = { file = "ep3_map4", container = "Zone2", spawnX = 15.5, landY = 1.12 },
+			[121] = { file = "ep3_map4", container = "Zone3", spawnX = 31.0, landY = 1.12 },
+			[122] = { file = "ep3_map4", container = "Zone4", spawnX = 46.5, landY = -0.68 },
+			[123] = { file = "ep3_map4", container = "Zone5", spawnX = 62.0, landY = -0.68 },
+			[124] = { file = "ep3_map4", container = "Zone6", spawnX = 77.5, landY = -1.28 },
+			[125] = { file = "ep3_map4", container = "Zone7", spawnX = 93.0, landY = 0.52 },
+			[126] = { file = "ep3_map4", container = "Zone8", spawnX = 108.5, landY = 1.12 },
+			[127] = { file = "ep3_map4", container = "Zone9", spawnX = 124.0, landY = -1.28 },
+			[128] = { file = "ep3_map4", container = "Zone10", spawnX = 139.5, landY = 0.52 },
 		}
 		-- 몬스터 스폰/시작맵 리다이렉트는 GameStarted가 될 때까지 미룬다(BeginGameplay 참고) —
 		-- 타이틀 화면을 보는 동안 몬스터가 먼저 쌓이면 안 된다. 여기서는 현재 위치만 계산해둔다.
@@ -691,6 +768,46 @@ script MapManager extends Logic
 		self:MoveToMap(actualIndex, 69)
 	end
 
+	-- 클라이언트의 에피소드3 map1 존5 전용 "위로" 버튼 요청(유저 지정 — "맵1 5에서 위에누르면 맵2
+	-- 1존으로 이동"). 위 map1↔map2/map3↔map4 존5 쌍(항상 같은 존 번호끼리 연결)과 달리 이번엔 map1
+	-- 존5(mapIndex93)→map2 존1(mapIndex99)로 존 번호가 다르다 — 유저가 명시적으로 지정한 매핑을
+	-- 그대로 따른다. ep3_map1/ep3_map2는 물리적으로 다른 파일이라 일반 순차 델타로는 이어질 수 없다.
+	@ExecSpace("Server")
+	method void RequestMoveToEp3Map2Zone1()
+		local actualIndex = self.CurrentMapIndex
+		if actualIndex ~= 93 then return end
+		self:MoveToMap(actualIndex, 99)
+	end
+
+	-- 클라이언트의 에피소드3 map2 존1 전용 "아래로" 버튼 요청 (map2 존1 → map1 존5 복귀,
+	-- RequestMoveToEp3Map2Zone1의 역방향 전용 경로)
+	@ExecSpace("Server")
+	method void RequestMoveToEp3Map1Zone5()
+		local actualIndex = self.CurrentMapIndex
+		if actualIndex ~= 99 then return end
+		self:MoveToMap(actualIndex, 93)
+	end
+
+	-- 클라이언트의 에피소드3 map3 존6 전용 "아래로" 버튼 요청(유저 지정, 2026-08-25 — "맵3의 6존에서
+	-- 아래 누르면 맵4의 3존 나오게해줘"). map3 존6(mapIndex114)과 map4 존3(mapIndex121)은 물리적으로
+	-- 다른 파일(ep3_map3/ep3_map4)이라 일반 순차 델타로는 이어질 수 없어, 위 map1↔map2/map3↔map4
+	-- 존5 스퍼와 동일한 전용 Up/Down 버튼 경로로 연결한다.
+	@ExecSpace("Server")
+	method void RequestMoveToEp3Map4Zone3()
+		local actualIndex = self.CurrentMapIndex
+		if actualIndex ~= 114 then return end
+		self:MoveToMap(actualIndex, 121)
+	end
+
+	-- 클라이언트의 에피소드3 map4 존3 전용 "위로" 버튼 요청 (map4 존3 → map3 존6 복귀,
+	-- RequestMoveToEp3Map4Zone3의 역방향 전용 경로)
+	@ExecSpace("Server")
+	method void RequestMoveToEp3Map3Zone6()
+		local actualIndex = self.CurrentMapIndex
+		if actualIndex ~= 121 then return end
+		self:MoveToMap(actualIndex, 114)
+	end
+
 	-- self.CurrentMapIndex를 그대로 신뢰한다 — 그룹D(맵11/12) 병합 이후 ResolveCurrentMapIndex()는
 	-- CurrentMapName("map11")만으로 11/12를 구분하지 못해 항상 11로 오판하는데(실측 확인됨), 이동이
 	-- 전부 버튼 트리거라 CurrentMapIndex는 매 이동마다 확정적으로 갱신되므로 여기서는 이게 더 정확하다.
@@ -791,6 +908,14 @@ script MapManager extends Logic
 			-- MoveToMap을 호출해 자동 복귀시킨다(일반 "<" 이동이 아님). 그래서 존85의 "<"는 항상
 			-- 막다른 길이어야 한다(MapMoveUI에서 버튼 자체도 숨김).
 			return
+		elseif actualIndex == 89 and delta == -1 then
+			-- 에피소드3 map1 존1(mapIndex89)의 "<" 특수 분기(유저 지정, 2026-08-25 — "맵1의 1존에서
+			-- 왼쪽 버튼누르면 맵3의 1존 나오게"). 델타 그대로 두면 88(ep2_map2_hidden 존4, 전혀 다른
+			-- 에피소드의 히든존)로 새어 들어가므로 원래는 항상 막다른 길(return)이었는데, 이제 map3
+			-- 존1(mapIndex109)로 직행하는 전용 곁가지로 바뀐다. 반대 방향(map3 존1의 "<")은 원래도
+			-- 순차적으로 108(map2 존10)로 이어지는 정상 경로라 별도 처리가 필요 없다 — MapMoveUI에서
+			-- 숨겨뒀던 이 버튼도 다시 보이게 해야 한다(UpdateButtonVisibility 참고).
+			targetIndex = 109
 		end
 
 		self:MoveToMap(actualIndex, targetIndex)
@@ -939,8 +1064,12 @@ script MapManager extends Logic
 		-- 45~54는 전부 4 이상이라 에피소드2의 첫 이동(존1→존2)부터 무조건 잠겨서 아예 못 움직이는
 		-- 버그였다(유저 리포트로 발견). 에피소드별 "그 에피소드 안에서 몇 번째 존인지"로 환산해서
 		-- 비교해야 한다 — 에피1은 그대로 1~44, 에피2는 45를 빼서 1~10으로 되돌린다.
+		-- 2026-08-25: 에피소드3(존1~10 = 내부 mapIndex 89~98) 추가로 89 이상 분기를 먼저 걸어야 한다 —
+		-- 45 이상 분기가 먼저면 89도 걸려서(89>=45) 45를 빼 localIndex=45가 되어버려 항상 잠기는 동일한
+		-- 버그가 재발한다. 큰 범위부터 먼저 체크.
 		local localIndex = targetIndex
-		if targetIndex >= 45 then localIndex = targetIndex - 44 end
+		if targetIndex >= 89 then localIndex = targetIndex - 88
+		elseif targetIndex >= 45 then localIndex = targetIndex - 44 end
 		if localIndex >= 4 and _GameManager.Level < 5 then
 			log("MapManager: map" .. targetIndex .. " (local " .. localIndex .. ") locked until level 5")
 			return
@@ -972,6 +1101,11 @@ script MapManager extends Logic
 	-- 화면이 통째로 줌아웃되는 버그가 있었다) 그냥 플레이어만 옮긴다. 네이티브 Damping이 알아서
 	-- 옆으로 자연스럽게 따라붙는다 — "처음 맵11에 도착했을 때의 카메라 앵글이 계속 유지된다"는
 	-- 요청과도 정확히 맞아떨어진다(confine을 아예 안 바꾸니까).
+	-- 버그 수정(2026-08-25) — DoScrollMapChange 아래 코멘트 참고. 직전 존과 착지 Y가 이 오차 이내로
+	-- 같으면 "Y가 안 바뀌는 이동"으로 판단해 NoHeightChangeYNudge만큼 위로 띄워 강제 재낙하시킨다.
+	property number NoHeightChangeYThreshold = 0.02
+	property number NoHeightChangeYNudge = 0.15
+
 	@ExecSpace("ServerOnly")
 	method void DoScrollMapChange(integer fromIndex, integer targetIndex)
 		local mapName = self:GetMapName(targetIndex)
@@ -1002,7 +1136,21 @@ script MapManager extends Logic
 			local rigidbody = userEntity.RigidbodyComponent
 			local y = (landY ~= nil) and landY or userEntity.TransformComponent.WorldPosition.y
 			if rigidbody ~= nil then
-				rigidbody:SetPosition(Vector2(spawnX, y))
+				-- 버그 수정(2026-08-25, 유저 리포트 "존5 화면 튕김") — 직전 존과 착지 Y가 완전히 같은
+				-- 이동에서만 재현됨을 라이브로 실측 확인했다(존4→존5: -0.68→-0.68 실패 / 존1→존2:
+				-- 1.12→1.12도 동일하게 실패 / 존3→존4: 1.12→-0.68처럼 Y가 실제로 바뀌는 이동은 항상
+				-- 정상). SetPosition은 위치를 즉시 갱신하지만, Y값이 이전과 완전히 같으면 물리엔진이
+				-- "발판이 그대로다"로 오판해 새 X의 발판을 다시 인식하지 않고 그대로 허공에 남아
+				-- 떨어지는 것으로 추정된다(PositionReset/SetWorldPosition으로도 안 고쳐졌던 것과
+				-- 일치 — 물리 갱신이 아니라 발판 재탐지 자체가 안 되는 문제). Y가 같을 때만 살짝
+				-- 위로(NoHeightChangeYNudge) 띄워 실제 낙하가 한 프레임 이상 발생하게 강제하면 착지
+				-- 순간 새 발판이 정상적으로 다시 인식된다.
+				local rbCurrentY = userEntity.TransformComponent.WorldPosition.y
+				local targetY = y
+				if math.abs(y - rbCurrentY) < self.NoHeightChangeYThreshold then
+					targetY = y + self.NoHeightChangeYNudge
+				end
+				rigidbody:SetPosition(Vector2(spawnX, targetY))
 			else
 				userEntity.TransformComponent.Position = Vector3(spawnX, y, 0)
 			end
@@ -1047,6 +1195,11 @@ script MapManager extends Logic
 	-- self.CurrentMapIndex는 이 호출 시점엔 아직 fromIndex(이동 전 존)로 남아있고 targetIndex로
 	-- 갱신되는 건 이 호출 "이후"라(MonsterSpawner.GetCurrentMap 판정 때문에 일부러 늦게 갱신하도록
 	-- 짜여있음), self.CurrentMapIndex를 그대로 읽으면 한 존 뒤처진 값으로 판정해버린다.
+	-- 네이티브 DeadZone/SoftZone(카메라가 타겟을 따라가는 화면 비율 영역) 기본값 — 카메라 Y고정 존을
+	-- 벗어날 때 여기로 복원한다.
+	property Vector2 DefaultDeadZone = Vector2(0.052, 0.080)
+	property Vector2 DefaultSoftZone = Vector2(0.268, 0.750)
+
 	@ExecSpace("Multicast")
 	method void ResetCameraConfine(integer mapIndex)
 		if not self:IsClient() then return end
@@ -1058,11 +1211,45 @@ script MapManager extends Logic
 			-- ep2_map3(존1~10) 체류 중엔 존4~5 계단 지형으로 인한 카메라 높낮이 변화를 없애기 위해
 			-- Y를 고정한 커스텀 confine을 쓴다(위 프로퍼티 주석 참고). X는 맵 전체 발판 범위 그대로라
 			-- 좌우 스크롤 동작은 기존과 동일하다.
+			-- 버그 수정(2026-08-25, ep3_map3/4와 동일한 근본 원인 — 유저 지정 "ep2_map3도 같은 문제
+			-- 있으니 변경") — ConfineCameraArea(기본 true)를 꺼두지 않으면 네이티브가 여전히 그 존의
+			-- 실제 발판 높이를 따라 카메라를 자체 confine해버려 커스텀 박스가 무력화된다.
+			cam.ConfineCameraArea = false
 			cam.UseCustomBound = true
 			cam.LeftBottom = Vector2(self.Ep2Map3ConfineMinX, self.Ep2Map3FixedCameraY)
 			cam.RightTop = Vector2(self.Ep2Map3ConfineMaxX, self.Ep2Map3FixedCameraY)
+			cam.DeadZone = Vector2(self.DefaultDeadZone.x, 1.0)
+			cam.SoftZone = Vector2(self.DefaultSoftZone.x, 1.0)
+		elseif mapIndex >= 109 and mapIndex <= 118 then
+			-- 에피소드3 map3(존1~10) — 유저 지정: "존1(root)랑 같은 카메라 위치를 가지고 싶은데... 존1
+			-- 기준으로 쭉 카메라 앵글 이동없이 10까지". Y를 존1 기준 고정한다.
+			-- 버그 수정(2026-08-25, 유저 스크린샷으로 실측 확인 — DeadZone/SoftZone만 넓혀도 여전히
+			-- 존109→111에서 카메라가 위로 튀는 게 재현됨). 근본 원인: CameraComponent.ConfineCameraArea
+			-- (기본값 true, "발판 영역만 비추게 confine")가 UseCustomBound와 별개의 스위치라서, 계속
+			-- true인 채로 있으면 커스텀 LeftBottom/RightTop을 켜놔도 네이티브가 여전히 그 존의 실제
+			-- 발판(foothold) 높이를 따라 카메라를 자체적으로 다시 confine해버린다(mlua_api_retriever로
+			-- CameraComponent 문서 재확인 — UseCustomBound 설명에 "When this is False, you will use the
+			-- map area..."만 있고 ConfineCameraArea와의 우선순위는 별도임을 확인). 그래서 반드시
+			-- ConfineCameraArea도 함께 false로 꺼야 커스텀 박스가 실제로 유일한 confine 기준이 된다.
+			cam.ConfineCameraArea = false
+			cam.UseCustomBound = true
+			cam.LeftBottom = Vector2(self.Ep3Map3ConfineMinX, self.Ep3Map3FixedCameraY)
+			cam.RightTop = Vector2(self.Ep3Map3ConfineMaxX, self.Ep3Map3FixedCameraY)
+			cam.DeadZone = Vector2(self.DefaultDeadZone.x, 1.0)
+			cam.SoftZone = Vector2(self.DefaultSoftZone.x, 1.0)
+		elseif mapIndex >= 119 and mapIndex <= 128 then
+			-- 에피소드3 map4(존1~10) — 유저 지정, map3와 동일한 이유로 동일 패턴 적용.
+			cam.ConfineCameraArea = false
+			cam.UseCustomBound = true
+			cam.LeftBottom = Vector2(self.Ep3Map4ConfineMinX, self.Ep3Map4FixedCameraY)
+			cam.RightTop = Vector2(self.Ep3Map4ConfineMaxX, self.Ep3Map4FixedCameraY)
+			cam.DeadZone = Vector2(self.DefaultDeadZone.x, 1.0)
+			cam.SoftZone = Vector2(self.DefaultSoftZone.x, 1.0)
 		else
+			cam.ConfineCameraArea = true
 			cam.UseCustomBound = false
+			cam.DeadZone = self.DefaultDeadZone
+			cam.SoftZone = self.DefaultSoftZone
 		end
 	end
 

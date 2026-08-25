@@ -1,0 +1,83 @@
+@Component
+script Ep3Map1MushroomTrigger extends Component
+
+	-- 에피소드3 map1(엘라스 산맥) 이스터에그 — MapObject_120을 클릭+드래그해서 목표 좌표
+	-- (62.08138, 0.4935707) 근처로 옮기면 Ep3Map1MushroomLogic이 "한겨울의 주황버섯"을 존5에 스폰한다.
+	-- Ep2Map2SkillChestTrigger와 동일한 마우스 드래그 패턴 그대로 복제 — 슬롯이 하나뿐이라 ItemIndex
+	-- 없이 단일 목표만 판정한다.
+	property any _touchHandler = nil
+	property any _holdHandler = nil
+	property any _releaseHandler = nil
+
+	property boolean _dragging = false
+	property integer _activeTouchId = 0
+	property number _dragOffsetX = 0
+	property number _dragOffsetY = 0
+
+	method void OnBeginPlay()
+		if self:IsClient() then
+			self._touchHandler = self.Entity:ConnectEvent(TouchEvent, self.OnTouched)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnTouched(TouchEvent event)
+		if _GameManager.GameOver then return end
+		if _TitleUI.titleGroup.Enable then return end
+		-- 성공해서 버섯이 나온 뒤에는 다시 못 옮기게 막는다
+		if _Ep3Map1MushroomLogic.Triggered then return end
+		if self._dragging then return end
+		self._dragging = true
+		self._activeTouchId = event.TouchId
+
+		local worldTouch = _UILogic:ScreenToWorldPosition(event.TouchPoint)
+		local pos = self.Entity.TransformComponent.Position
+		self._dragOffsetX = pos.x - worldTouch.x
+		self._dragOffsetY = pos.y - worldTouch.y
+
+		self._holdHandler = _InputService:ConnectEvent(ScreenTouchHoldEvent, self.OnDragHold)
+		self._releaseHandler = _InputService:ConnectEvent(ScreenTouchReleaseEvent, self.OnDragRelease)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnDragHold(ScreenTouchHoldEvent event)
+		if not self._dragging then return end
+		if event.TouchId ~= self._activeTouchId then return end
+		local worldTouch = _UILogic:ScreenToWorldPosition(event.TouchPoint)
+		local pos = self.Entity.TransformComponent.Position
+		self.Entity.TransformComponent.Position = Vector3(worldTouch.x + self._dragOffsetX, worldTouch.y + self._dragOffsetY, pos.z)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnDragRelease(ScreenTouchReleaseEvent event)
+		if not self._dragging then return end
+		if event.TouchId ~= self._activeTouchId then return end
+		self._dragging = false
+		if self._holdHandler ~= nil then
+			_InputService:DisconnectEvent(ScreenTouchHoldEvent, self._holdHandler)
+			self._holdHandler = nil
+		end
+		if self._releaseHandler ~= nil then
+			_InputService:DisconnectEvent(ScreenTouchReleaseEvent, self._releaseHandler)
+			self._releaseHandler = nil
+		end
+
+		local pos = self.Entity.TransformComponent.Position
+		self:RequestCheckPlacement(pos.x, pos.y)
+	end
+
+	-- 목표 좌표 근처인지는 서버가 최종 판정한다
+	@ExecSpace("Server")
+	method void RequestCheckPlacement(number x, number y)
+		_Ep3Map1MushroomLogic:CheckPlacement(self.Entity, x, y)
+	end
+
+	method void OnEndPlay()
+		if self:IsClient() then
+			if self._touchHandler ~= nil then self.Entity:DisconnectEvent(TouchEvent, self._touchHandler) end
+			if self._holdHandler ~= nil then _InputService:DisconnectEvent(ScreenTouchHoldEvent, self._holdHandler) end
+			if self._releaseHandler ~= nil then _InputService:DisconnectEvent(ScreenTouchReleaseEvent, self._releaseHandler) end
+		end
+	end
+
+end

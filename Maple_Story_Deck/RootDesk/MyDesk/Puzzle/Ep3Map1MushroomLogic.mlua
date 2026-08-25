@@ -1,0 +1,106 @@
+@Logic
+script Ep3Map1MushroomLogic extends Logic
+
+	-- 에피소드3 map1(엘라스 산맥) 이스터에그 — MapObject_120(오브젝트)을 드래그해서 목표 좌표
+	-- (62.08138, 0.4935707) 근처로 옮기면 "한겨울의 주황버섯"(mob 리소스팩) 한 마리가 존5(mapIndex93)에
+	-- 등장한다. 존27 석상 이스터에그의 "얄미운 미니무르"(NinjaStatuePuzzleLogic 참고)와 완전히 동일한
+	-- 드롭/유지시간/전투무시 정책(RollMiniMooreDrop/EndMiniMooreLife 재사용, 유저 지정: "유지 시간도
+	-- 같게해줘, 드롭템 확률도 같게")이지만 비행형이 아니라(유저 지정: "얘는 비행형은 아니다") 지상에서
+	-- 좌우로 배회한다(MonsterAI.InitializeGroundMiniMoore).
+	@Sync property boolean Triggered = false
+
+	-- 유저가 손으로 직접 끌어다 놓으므로 픽셀 단위로 정확히 맞추긴 어렵다 — 스킬함 이스터에그와 동일한
+	-- 오차범위(0.3)보다 살짝 넉넉하게(유저 지정: "어느정도 보정값은 넣어주고").
+	property number PlacementTolerance = 0.4
+	property number TargetX = 62.08138
+	property number TargetY = 0.4935707
+
+	property string TargetObjectPath = "/maps/ep3_map1/MapObject_120"
+
+	-- 존5(mapIndex93, container="Zone5", 월드 오프셋 x=62) 기준 로컬 좌표. Zone5 자체가 이미 x=62만큼
+	-- 오프셋되어 있으므로 스폰/배회 좌표는 전부 "월드 - 62"로 변환한 값이다(ToLocalSpawnPos와 동일 원리 —
+	-- MapManager.ZoneInfo[93].landY(-0.04)를 그대로 지면 Y로 재사용, 실측 발판(58.55~63.85, y=-0.04) 범위
+	-- 안쪽으로 0.5만큼 여유를 두고 좌우 배회 범위를 잡았다).
+	property integer SpawnZoneIndex = 93
+	property number LocalSpawnX = 0.08
+	property number LocalWanderMinX = -3.0
+	property number LocalWanderMaxX = 1.3
+	property number GroundY = -0.04
+
+	-- 리소스팩 "한겨울의 주황버섯"(유저 지정 RUID) — hit1/die1은 전투 대상이 아니라서(미니무르와 동일
+	-- 정책) 쓰지 않는다.
+	property string MushroomStandRUID = "df30a6804bba494897be7e35ae8d59c3"
+	property string MushroomMoveRUID = "5381baa97d2f47df8536985f8db4e969"
+
+	property string AppearMessage = "한겨울의 주황버섯이 나타났다!"
+
+	property any _startPosition = nil
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		local target = _EntityService:GetEntityByPath(self.TargetObjectPath)
+		if target ~= nil then
+			self._startPosition = target.TransformComponent.Position
+		else
+			log_error("Ep3Map1Mushroom: target entity not found at " .. self.TargetObjectPath)
+		end
+	end
+
+	-- Ep3Map1MushroomTrigger.RequestCheckPlacement()가 놓을 때마다 호출한다.
+	@ExecSpace("ServerOnly")
+	method void CheckPlacement(Entity item, number x, number y)
+		if self.Triggered then return end
+		if not isvalid(item) then return end
+
+		local dx = x - self.TargetX
+		local dy = y - self.TargetY
+		local dist = math.sqrt(dx * dx + dy * dy)
+		if dist > self.PlacementTolerance then
+			log("Ep3Map1Mushroom: placement missed (dist=" .. dist .. ")")
+			return
+		end
+
+		self.Triggered = true
+		item.TransformComponent.Position = Vector3(self.TargetX, self.TargetY, item.TransformComponent.Position.z)
+		log("Ep3Map1Mushroom: placed correctly, spawning mushroom")
+		self:SpawnMushroom()
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SpawnMushroom()
+		local map = _MonsterSpawner:GetZoneEntity(self.SpawnZoneIndex)
+		if map == nil then
+			log_error("Ep3Map1Mushroom: zone entity not found for zone " .. self.SpawnZoneIndex)
+			return
+		end
+
+		local localPos = Vector3(self.LocalSpawnX, self.GroundY, 0)
+		local entity = _SpawnService:SpawnByModelId(_MonsterSpawner.MonsterModelId, "WinterMushroom", localPos, map)
+		if entity == nil then
+			log_error("Ep3Map1Mushroom: SpawnByModelId failed")
+			return
+		end
+
+		---@type MonsterAI
+		local ai = entity:GetComponent("script.MonsterAI")
+		if ai ~= nil then
+			ai:InitializeGroundMiniMoore(self.SpawnZoneIndex, self.MushroomStandRUID, self.MushroomMoveRUID,
+				self.LocalSpawnX, self.LocalWanderMinX, self.LocalWanderMaxX, self.GroundY)
+		end
+		_UIToast:ShowMessage(self.AppearMessage)
+		log("Ep3Map1Mushroom: winter mushroom spawned")
+	end
+
+	-- GameManager.RestartGame()이 호출 — 새 런에서는 오브젝트를 다시 드래그해 재도전할 수 있게 한다
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		self.Triggered = false
+		local target = _EntityService:GetEntityByPath(self.TargetObjectPath)
+		if target ~= nil and isvalid(target) then
+			if self._startPosition ~= nil then
+				target.TransformComponent.Position = self._startPosition
+			end
+		end
+	end
+
+end

@@ -65,6 +65,15 @@ script MonsterAI extends Component
 	-- 다른 종을 거대 네펜데스로 변신/소환시키지 않는다 — 유저가 여러 차례 강하게 확정한 사항).
 	property boolean _isGiantNepenthes = false
 	property boolean _giantNepenthesRevived = false
+	-- 예티/다크예티/예티와페페/다크예티와페페(에피소드3 map2) 전용 범용 2단계 부활 메커니즘 — 위
+	-- 거대 네펜데스와 동일한 구조(1페이즈 die1 재생 후 진짜 죽지 않고 2페이즈로 부활)이지만, 종마다
+	-- 1/2페이즈 외형이 전부 달라서 GiantNepenthes*처럼 고정 프로퍼티가 아니라 존 풀 테이블
+	-- (GetMapHasPhase2/GetMapPhase2*RUID, mapIndex+idx 기준)로 관리한다.
+	property boolean _hasPhase2 = false
+	property boolean _phase2Revived = false
+	-- 2페이즈 발동 확률(0.0~1.0, 기본 1.0=항상). 주니어 예티(사망 시 50%만 성체 예티로 성장)처럼 부활이
+	-- 확정이 아닌 종을 위한 필드 — 실제 굴림은 Die()에서 1회만 한다.
+	property number _phase2Chance = 1.0
 	-- 공격 사운드(선택적 — 대부분 종은 비워둔다). 현재는 거대 네펜데스 2페이즈 전용으로만 채워진다.
 	property string _attackSoundRUID = ""
 
@@ -171,8 +180,15 @@ script MonsterAI extends Component
 	property string _hitEffectRUID = ""
 	property number _hitEffectDuration = 0.5
 	-- PlayRangedHitEffect의 dropScale에 곱해지는 추가 배율(기본 1.0=무영향). Ep2MiniBeanEasterEggLogic
-	-- 전용 — 유저 요청: "이 연출 크기 30% 크게"
+	-- 전용 값(30% 크게)뿐 아니라, InitializeStats(존 풀 종)에서도 GameManager.GetMapHitEffectScaleMultiplier로
+	-- 채운다 — 유저 지정(2026-08-25): 몽실생크림 20%·예티류 15% 축소.
 	property number _hitEffectScaleMultiplier = 1.0
+	-- 원거리 히트 이펙트 알파(투명도, GameManager.GetMapHitEffectAlpha와 짝) — 기본 1.0. 유저 지정
+	-- (2026-08-25): 예티류만 15% 감소(0.85).
+	property number _hitEffectAlpha = 1.0
+	-- 원거리 히트 이펙트 동시 출력 개수 상한(GameManager._rangedHitEffectActiveCount와 짝) — 기본 1(기존
+	-- 종은 전부 이 값), 예티류만 유저 지정으로 3(GetMapHitEffectMaxConcurrent 참고).
+	property integer _hitEffectMaxConcurrent = 1
 	-- 원거리 히트 이펙트를 쓰는 종(네펜데스/다크네펜데스/거대 네펜데스 2페이즈) 전용 공격 쿨타임
 	-- 오버라이드 — 유저 요청: "너무 빠르게 공격하는 감이 있는데 공격하고 0.7초정도는 쉬자". 0이면
 	-- 공용 AttackInterval을 그대로 쓴다. 공격 애니메이션(_attackDuration) 재생이 끝난 뒤 순수하게
@@ -495,6 +511,9 @@ script MonsterAI extends Component
 			-- 자체적으로 아무것도 재생하지 않는다
 			self._hitEffectRUID = _GameManager:GetMapHitEffectRUID(appearanceZone, speciesIdx)
 			self._hitEffectDuration = _GameManager:GetMapHitEffectDuration(appearanceZone, speciesIdx)
+			self._hitEffectMaxConcurrent = _GameManager:GetMapHitEffectMaxConcurrent(appearanceZone, speciesIdx)
+			self._hitEffectScaleMultiplier = _GameManager:GetMapHitEffectScaleMultiplier(appearanceZone, speciesIdx)
+			self._hitEffectAlpha = _GameManager:GetMapHitEffectAlpha(appearanceZone, speciesIdx)
 			if self._hitEffectRUID ~= "" then
 				self._customAttackInterval = self._attackDuration + 0.7
 			else
@@ -526,6 +545,80 @@ script MonsterAI extends Component
 				-- 1페이즈 리소스팩엔 hit1이 없다 — 피격 시 스프라이트/사운드 교체 없이 데미지 숫자만 뜬다
 				self._hitRUID = ""
 				self._hitSoundRUID = ""
+			end
+			-- 에피소드3 map2 예티/다크예티/예티와페페/다크예티와페페 전용 범용 2페이즈(유저 지정 —
+			-- "거대 네펜데스처럼 페이즈가 나눠져있는 몬스터"). 존 풀 테이블(GetMap*RUID)이 그대로 1페이즈
+			-- 외형이라 거대 네펜데스처럼 덮어쓸 필요 없이, hasPhase2 플래그와 부활 여부만 기록해둔다 —
+			-- 실제 전환은 Die()에서 DieAndRevivePhase1Generic이 처리한다.
+			-- 단, 주니어예티(라이트) 3슬롯(99/1, 100/2, 102/2) + 다크주니어예티 3슬롯(99/2, 101/1, 103/2)만은
+			-- 예외다(유저 최종 지정, 2026-08-25 재재정정+다크 추가 요청 — "예티는 죽을때 바로죽거나 페이즈2로
+			-- 넘어가 그확률이 50%... 스폰될때 정할꺼면 [페이즈없는 예티]/[페이즈있는 예티] 이거 쓰면 되고,
+			-- 페이즈있는 예티는 die1이 변신 모션" + "다크 주니어 예티도 해줘야지"). 이 6슬롯은
+			-- GetMapHasPhase2(확정형 종 전용)를 거치지 않고, 스폰 시점에 여기서 직접 50% 코인플립으로
+			-- "페이즈있는"/"페이즈없는" 두 리소스팩 중 하나를 확정한다(라이트/다크는 GetMapIsJuniorYetiDark로
+			-- 갈라서 각자의 RUID 세트를 쓴다) — 그래서 존 풀 테이블 값(위에서 이미 읽은 pack1=페이즈없는 값)을
+			-- 덮어써야 한다. Die()에서는 더 이상 확률을 굴리지 않는다(_phase2Chance=1.0 고정 — 이미 스폰
+			-- 시점에 확정됐으므로).
+			if _GameManager:GetMapIsJuniorYetiPhase2Roll(appearanceZone, speciesIdx) then
+				local isDarkJuniorYeti = _GameManager:GetMapIsJuniorYetiDark(appearanceZone, speciesIdx)
+				self._hasPhase2 = _UtilLogic:RandomDouble() < 0.5
+				self._phase2Chance = 1.0
+				if self._hasPhase2 then
+					self._phase2Revived = false
+					if isDarkJuniorYeti then
+						-- "페이즈있는 다크주니어예티" 팩 — die1(16프레임 실측=1.65초)이 변신 모션. 사운드는 effect.
+						self._standRUID = "92b8be5ea1164ccf839ebfc3f76ecb46"
+						self._moveRUID = "1e7b429eb65e497db96b0c70defbc971"
+						self._hitRUID = "8cab9c536b5347e7b29c62310d9709df"
+						self._dieRUID = "5c4af8b63f6d4bb981bd14257751e34c"
+						self._dieDuration = 1.65
+						self._hitSoundRUID = "19da3f9e06b948f49b8ad43647b3e73a"
+						self._dieSoundRUID = "7b1c4562c6564cc5bbf7594f20c95260"
+					else
+						-- "페이즈있는 예티" 팩 — die1(16프레임 실측=1.65초) 자체가 변신 모션. 사운드는 effect.
+						self._standRUID = "48399164e47a4c0ebf7b09332ffee38f"
+						self._moveRUID = "6f11483b09a942f4b954e238f86e4d13"
+						self._hitRUID = "59be70295ac0403ba16e0ed911920906"
+						self._dieRUID = "f7ee11ac35cd4983b592d51cbabc0a55"
+						self._dieDuration = 1.65
+						self._hitSoundRUID = "a0f695a2323c43378124889d88ef1d1e"
+						self._dieSoundRUID = "3f970229ffde4240b129112a59925f93"
+					end
+					-- 버그 수정(2026-08-25, 유저 리포트 "맵3,맵4에 공격 모션 빠진애들이 보이는데") — 주니어
+					-- 예티/다크주니어예티 리소스팩(mob/5100000·5100001·5130105)엔 attack1 서브클립 자체가
+					-- 없다(msw-search 실측 확인 — stand/move/hit1/die1/jump뿐). 개체마다 코인플립으로 결정된
+					-- hit1을 그대로 "공격" 연출로 재사용한다(리소스가 없는 상태로 방치하면 도달 공격 때마다
+					-- 스프라이트가 아예 안 바뀌어 "공격 모션이 빠짐"으로 보인다).
+					self._attackRUID = self._hitRUID
+				else
+					if isDarkJuniorYeti then
+						-- "페이즈없는 다크주니어예티" 팩 — die1(5프레임 실측=0.55초)은 진짜 사망. 사운드는 voice.
+						self._standRUID = "ce56cf9613174f80976dab5b61f7b604"
+						self._moveRUID = "8d2b8951794d406a86cc580e9eeff18d"
+						self._hitRUID = "cbe070cdf1fa4611a3529f3d70296a33"
+						self._dieRUID = "fad50a0e478c40fcbd383e069bc278da"
+						self._dieDuration = 0.55
+						self._hitSoundRUID = "f5b7e04a5ac6496cac77b016ea13a16f"
+						self._dieSoundRUID = "53324cebb7744fe69b7c972568192375"
+					else
+						-- "페이즈없는 예티" 팩 — die1(5프레임 실측=0.55초)은 진짜 사망. 사운드는 voice.
+						self._standRUID = "1975dd704eec461ab49bdeb0c11c54d9"
+						self._moveRUID = "842a6865f7074f94ac4a190ed90e2e21"
+						self._hitRUID = "63a1a5f280f04e55b935d6a2155edcef"
+						self._dieRUID = "13b9f2b2f7664cc5a08e663f2fe0502b"
+						self._dieDuration = 0.55
+						self._hitSoundRUID = "6f4dcabb6d9941a38f84c1cc6b5cdad8"
+						self._dieSoundRUID = "6f3ab281ca93458d9b122b8d5cbf60df"
+					end
+					-- "페이즈없는" 팩도 attack1이 없기는 마찬가지라 동일하게 hit1을 재사용한다.
+					self._attackRUID = self._hitRUID
+				end
+			else
+				self._hasPhase2 = _GameManager:GetMapHasPhase2(appearanceZone, speciesIdx)
+				if self._hasPhase2 then
+					self._phase2Revived = false
+					self._phase2Chance = _GameManager:GetMapPhase2Chance(appearanceZone, speciesIdx)
+				end
 			end
 			if self._neverAttacks then
 				self._currentScale = self._reachedScaleThreshold
@@ -700,9 +793,12 @@ script MonsterAI extends Component
 		self._isZigzag = false
 		self._neverAttacks = false
 		self._isGiantNepenthes = false
+		self._hasPhase2 = false
+		self._phase2Chance = 1.0
 		self._isSwarmMember = false
 		self._isYellowMiniBean = false
 		self._hitEffectRUID = ""
+		self._hitEffectMaxConcurrent = 1
 		self._customAttackInterval = 0
 		self._accuracyDebuffPercent = 0
 		self.FreezeStack = 0
@@ -757,9 +853,12 @@ script MonsterAI extends Component
 		self._isCharge = false
 		self._isZigzag = false
 		self._isGiantNepenthes = false
+		self._hasPhase2 = false
+		self._phase2Chance = 1.0
 		self._isSwarmMember = false
 		self._isYellowMiniBean = false
 		self._hitEffectRUID = ""
+		self._hitEffectMaxConcurrent = 1
 		self._customAttackInterval = 0
 		self._accuracyDebuffPercent = 0
 		self.FreezeStack = 0
@@ -817,9 +916,12 @@ script MonsterAI extends Component
 		self._isZigzag = false
 		self._neverAttacks = false
 		self._isGiantNepenthes = false
+		self._hasPhase2 = false
+		self._phase2Chance = 1.0
 		self._isSwarmMember = false
 		self._isYellowMiniBean = false
 		self._hitEffectRUID = ""
+		self._hitEffectMaxConcurrent = 1
 		self._customAttackInterval = 0
 		self._accuracyDebuffPercent = 0
 		self.FreezeStack = 0
@@ -870,9 +972,12 @@ script MonsterAI extends Component
 		self._isZigzag = false
 		self._neverAttacks = false
 		self._isGiantNepenthes = false
+		self._hasPhase2 = false
+		self._phase2Chance = 1.0
 		self._isSwarmMember = false
 		self._isYellowMiniBean = false
 		self._hitEffectRUID = ""
+		self._hitEffectMaxConcurrent = 1
 		self._customAttackInterval = 0
 		self._accuracyDebuffPercent = 0
 		self.FreezeStack = 0
@@ -1089,6 +1194,35 @@ script MonsterAI extends Component
 		log("MonsterAI: mini moore initialized")
 	end
 
+	-- Ep3Map1MushroomLogic.SpawnMushroom()이 스폰 직후 호출: ep3_map1 "한겨울의 주황버섯" 이스터에그
+	-- 전용 — InitializeMiniMoore와 완전히 동일한 드롭/유지시간/전투무시 정책(RollMiniMooreDrop/
+	-- EndMiniMooreLife 그대로 재사용, 유저 지정: "유지 시간도 같게, 드롭템 확률도 같게")이지만 비행이
+	-- 아니라(유저 지정: "비행형은 아님") BonusBoss.UpdateWander와 동일한 방식(_wanderMinX~Y 재사용)으로
+	-- 지정 X범위 안에서 고정 Y(지면)를 좌우로 배회한다. _isFlying=false로 두면 OnUpdate가 이 지상 배회
+	-- 분기를 자동으로 타게 된다.
+	@ExecSpace("ServerOnly")
+	method void InitializeGroundMiniMoore(integer zoneIndex, string standRUID, string moveRUID, number spawnX, number minX, number maxX, number groundY)
+		self:SetSpawnZone(zoneIndex)
+		self._isMiniMoore = true
+		self._isFlying = false
+		self.MonsterSprite = (moveRUID ~= "") and moveRUID or standRUID
+		self._standRUID = standRUID
+		self._moveRUID = moveRUID
+		self._attackRUID = ""
+		self._currentScale = 1.0
+		self._wanderMinX = minX
+		self._wanderMaxX = maxX
+		self._wanderY = groundY
+		self.Entity.TransformComponent.Position = Vector3(spawnX, groundY, 0)
+		self.Entity.TransformComponent.Scale = Vector3(self._currentScale * self._scaleMultiplier, self._currentScale * self._scaleMultiplier, 1.0)
+		self:SyncDepthOverlaySprite()
+		self:HideDepthOverlay()
+		self:PickNewWanderTarget()
+		self._miniMooreDropTimerId = _TimerService:SetTimerRepeat(self.RollMiniMooreDrop, self.MiniMooreDropInterval, self.MiniMooreDropInterval)
+		self._miniMooreLifeTimerId = _TimerService:SetTimerOnce(self.EndMiniMooreLife, self.MiniMooreLifetime)
+		log("MonsterAI: ground mini moore (mushroom) initialized")
+	end
+
 	-- MiniMooreDropInterval마다 호출 — 매 틱마다 뭔가는 무조건 떨어진다: MiniMooreDropChance(3%) 확률로
 	-- 보유 스킬 카드 하나를 강화/드롭하고(CardManager.OnEliteKilled 재사용 — 엘리트 처치 보상과 동일한
 	-- "이미 장착/해금된 카드 강화" 연출), 그 외(97%)엔 지금까지 구현된 몬스터 잡템 중 아무거나 하나를
@@ -1238,6 +1372,15 @@ script MonsterAI extends Component
 			self:UpdateWander(delta)
 			-- 비행형과 동일한 원인의 버그 — 보너스 보스도 이 분기에서 바로 return해서 지상 전용 로직(콤보
 			-- 어택 오브 회전 갱신)까지 못 내려갔다. 비행형 수정 때 같이 안 잡혔던 케이스(유저 재확인으로 발견).
+			self:UpdateComboOrbPositions(delta)
+			return
+		end
+
+		-- ep3_map1 "한겨울의 주황버섯" 이스터에그(지상형 미니무르) — 얄미운 미니무르와 동일한 드롭/전투
+		-- 무시 정책이지만 비행이 아니라 BonusBoss와 동일한 방식(UpdateWander, 고정 Y 좌우 배회)으로
+		-- 지상을 걸어다닌다. InitializeGroundMiniMoore()가 _isFlying=false로 설정해서 여기로 온다.
+		if self._isMiniMoore and not self._isFlying then
+			self:UpdateWander(delta)
 			self:UpdateComboOrbPositions(delta)
 			return
 		end
@@ -1697,6 +1840,13 @@ script MonsterAI extends Component
 		renderer.SpriteRUID = hitRUID
 		_TimerService:SetTimerOnce(function()
 			if not isvalid(self) then return end
+			-- 죽음(일반 사망이든 예티류의 1→2페이즈 변신이든)으로 이미 전환된 뒤라면 절대 건드리지 않는다 —
+			-- 이 함수는 Multicast라 서버의 TakeDamage가 같은 프레임에 보낸 PlayPhase1TransformAnimation/
+			-- PlayDeathAnimation과 클라이언트 도착 순서가 보장되지 않는다. 순서가 뒤집히면(변신 연출이 먼저
+			-- 도착해 die1로 바뀐 뒤 이 히트 복원 타이머가 나중에 stand로 되돌리는 경우) 변신 중인 몬스터가
+			-- 잠깐 원래 1페이즈 stand 포즈로 보였다가 사라진 것처럼 보이는 버그가 있었다(유저 리포트 —
+			-- "페이즈 2 변화하다가 그냥 사라져"). _dead를 한 번 더 확인해 die1/변신 중에는 복원을 건너뛴다.
+			if self._dead then return end
 			-- hit1 상태일 때만 stand로 복원 — die1로 전환된 뒤라면 그대로 둔다
 			if renderer.SpriteRUID == hitRUID then
 				renderer.SpriteRUID = standRUID
@@ -2442,6 +2592,17 @@ script MonsterAI extends Component
 			self:DieAndRevivePhase1()
 			return
 		end
+		-- 예티/다크예티/예티와페페/다크예티와페페/주니어예티(에피소드3 map2) 범용 2페이즈 — 위 거대
+		-- 네펜데스와 동일한 분기 구조. _phase2Chance(기본 1.0=항상)를 여기서 딱 1번만 굴린다 — 주니어
+		-- 예티는 0.5라 절반은 그냥 평범하게 죽고(아래 일반 사망 처리로 흘러감) 나머지 절반만 die1 재생
+		-- 후 성체 예티로 자란다.
+		-- (2026-08-25 조사 노트: 유저 리포트 "가끔 페이즈 안바뀌고 바로 죽는거같은데"에 대해 진단 로그로
+		-- 존106~108 실전 전투 28회 phase1 사망을 전수 추적 — 28/28 전부 정상적으로 revived as phase2까지
+		-- 완주 확인, 서버 상태머신 로직 자체는 문제없음. 재현되면 클라이언트 시각 레이스 쪽을 의심할 것.)
+		if self._hasPhase2 and not self._phase2Revived and _UtilLogic:RandomDouble() < self._phase2Chance then
+			self:DieAndRevivePhase1Generic()
+			return
+		end
 		self._dead = true
 		-- 죽는 연출(die 스프라이트)과 깊이 오버레이(서 있는 포즈를 검게 덧씌운 것)가 서로 어긋나 보이지
 		-- 않도록, 죽는 순간 오버레이부터 즉시 꺼버린다
@@ -2680,6 +2841,63 @@ script MonsterAI extends Component
 		local renderer = self.Entity.SpriteRendererComponent
 		if renderer ~= nil then
 			renderer.SpriteRUID = self._standRUID
+			renderer.Color = Color(1, 1, 1, 1)
+		end
+		self:SyncDepthOverlaySprite()
+		self:UpdateDepth()
+	end
+
+	-- 예티/다크예티/예티와페페/다크예티와페페(에피소드3 map2) 범용 1페이즈 사망 처리 — 거대 네펜데스의
+	-- DieAndRevivePhase1과 완전히 동일한 구조(진짜 죽지 않고 die1 재생 후 2페이즈로 부활)이되, 종마다
+	-- 다른 외형을 존 풀 테이블(appearanceZone 기준)에서 읽어야 해서 self._spawnZoneIndex/_speciesIdx를
+	-- 사용하는 별도 메서드로 분리했다.
+	@ExecSpace("ServerOnly")
+	method void DieAndRevivePhase1Generic()
+		log("Phase2Monster: phase1 died, reviving as phase2")
+		self._dead = true
+		self:HideDepthOverlay()
+		self:PlayPhase1TransformAnimation(self._dieRUID, self._dieSoundRUID)
+		_TimerService:SetTimerOnce(function()
+			if isvalid(self) and isvalid(self.Entity) then self:ReviveAsPhase2Generic() end
+		end, self._dieDuration)
+	end
+
+	-- 2페이즈로 전환 — GameManager의 존 풀 전용 Phase2 테이블(GetMapPhase2*RUID, appearanceZone+
+	-- speciesIdx 기준)에서 외형/공격을 읽어와 교체한다. appearanceZone은 InitializeStats가 계산했던
+	-- 값과 동일해야 하는데, 이 몬스터가 스폰될 당시 별칭(alias) 매핑이 없는 존(89~108, 에피소드3)에서만
+	-- 쓰이므로 self._spawnZoneIndex를 그대로 appearanceZone으로 써도 안전하다(다른 별칭 존에서 이 종을
+	-- 쓸 계획이 생기면 InitializeStats의 별칭 매핑을 여기도 복제해야 함).
+	@ExecSpace("ServerOnly")
+	method void ReviveAsPhase2Generic()
+		log("Phase2Monster: revived as phase2")
+		self._phase2Revived = true
+		self._dead = false
+		self.CurrentHp = self.MaxHp
+		local zone = self._spawnZoneIndex
+		local idx = self._speciesIdx
+		self._standRUID = _GameManager:GetMapPhase2StandRUID(zone, idx)
+		self._moveRUID = _GameManager:GetMapPhase2MoveRUID(zone, idx)
+		self._hitRUID = _GameManager:GetMapPhase2HitRUID(zone, idx)
+		self._dieRUID = _GameManager:GetMapPhase2DieRUID(zone, idx)
+		self._dieDuration = _GameManager:GetMapPhase2DieDuration(zone, idx)
+		self._hitSoundRUID = _GameManager:GetMapPhase2HitSoundRUID(zone, idx)
+		self._dieSoundRUID = _GameManager:GetMapPhase2DieSoundRUID(zone, idx)
+		self._attackRUID = _GameManager:GetMapPhase2AttackRUID(zone, idx)
+		self._attackDuration = _GameManager:GetMapPhase2AttackDuration(zone, idx)
+		-- 버그 수정(2026-08-25, 유저 리포트 "걷는 연출이랑 이런건 다 빠진거 같은데") — InitializeStats의
+		-- 스폰 시점 규칙(658번줄 부근, "접근 중엔 move, 이미 도달했거나 move가 없는 종은 stand")을 그대로
+		-- 재현해야 하는데 기존엔 무조건 standRUID로 고정해서, 아직 플레이어에게 도달하기 전에 죽어 2페이즈로
+		-- 부활한 개체는 부활 이후에도 걷는 연출 없이 제자리에 멈춰 서 있는 것처럼 보였다. _reachedPlayer는
+		-- 1페이즈 상태를 그대로 들고 있으므로(부활 시 안 건드림) 이미 도달했던 개체는 정상적으로 stand로
+		-- 시작해 다음 OnUpdate에서 바로 공격으로 이어진다.
+		local phase2Sprite = self._standRUID
+		if not self._reachedPlayer and not self._isFlying and self._moveRUID ~= "" then
+			phase2Sprite = self._moveRUID
+		end
+		self.MonsterSprite = phase2Sprite
+		local renderer = self.Entity.SpriteRendererComponent
+		if renderer ~= nil then
+			renderer.SpriteRUID = phase2Sprite
 			renderer.Color = Color(1, 1, 1, 1)
 		end
 		self:SyncDepthOverlaySprite()
@@ -3032,7 +3250,7 @@ script MonsterAI extends Component
 			local fxPos = Vector3(px + offsetX, fxY, z - 0.2)
 			-- 실제 스폰/중복 방지는 GameManager가 전담한다(문어 PlayInkSplat과 동일한 전역 가드 —
 			-- 유저 요청: "문어처럼", 여러 마리가 동시에 쏴도 화면엔 한 번에 하나만 뜨게 함).
-			_GameManager:PlayRangedHitEffect(fxPos, self._hitEffectRUID, self._hitEffectDuration, map, dropScale)
+			_GameManager:PlayRangedHitEffect(fxPos, self._hitEffectRUID, self._hitEffectDuration, map, dropScale, self._hitEffectMaxConcurrent, self._hitEffectAlpha)
 		end, delay)
 	end
 

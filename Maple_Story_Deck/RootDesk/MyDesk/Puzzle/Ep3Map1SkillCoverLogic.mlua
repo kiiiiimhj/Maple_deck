@@ -1,0 +1,85 @@
+@Logic
+script Ep3Map1SkillCoverLogic extends Logic
+
+	-- 에피소드3 map1(엘라스 산맥) 이스터에그 — MapObject_80(가리개)을 클릭할 때마다 알파가 0.5씩 빠지고
+	-- (2번 클릭), 0이 되면 가리개가 사라지면서 뒤에 있던 MapObject_100이 클릭 가능해진다. MapObject_100을
+	-- 클릭하면 보유 스킬 1종 강화(없으면 확정 포션)를 지급한다. Ep2Map3CauldronLogic(구름 2클릭 잠금해제)
+	-- + Ep2Map2SkillChestLogic(스킬/포션 보상) 패턴을 그대로 합쳐서 재사용.
+	@Sync property boolean CoverCleared = false
+	@Sync property number CoverAlpha = 1.0
+	@Sync property boolean Triggered = false
+
+	property number CoverAlphaStep = 0.5
+	property string CoverObjectPath = "/maps/ep3_map1/MapObject_80"
+	property string RewardObjectPath = "/maps/ep3_map1/MapObject_100"
+
+	property string SkillRewardMessage = "스킬을 얻었다!"
+	property string PotionRewardMessage = "회복 포션을 얻었다!"
+
+	-- 확정 지급용 포션 종류(GameManager.ApplyPotionDrop의 potionType) — 1=빨강(기본 회복)
+	property integer FallbackPotionType = 1
+
+	-- Ep3Map1SkillCoverTrigger.RequestClick()이 클릭마다 호출한다.
+	@ExecSpace("ServerOnly")
+	method void OnCoverClicked()
+		if self.CoverCleared then return end
+		self.CoverAlpha = self.CoverAlpha - self.CoverAlphaStep
+		local cover = _EntityService:GetEntityByPath(self.CoverObjectPath)
+		if self.CoverAlpha <= 0 then
+			self.CoverAlpha = 0
+			self.CoverCleared = true
+			if cover ~= nil and isvalid(cover) then cover.Enable = false end
+			log("Ep3Map1SkillCover: cover cleared, reward unlocked")
+		else
+			if cover ~= nil and isvalid(cover) then
+				local renderer = cover.SpriteRendererComponent
+				if renderer ~= nil then
+					local c = renderer.Color
+					renderer.Color = Color(c.r, c.g, c.b, self.CoverAlpha)
+				end
+			end
+			log("Ep3Map1SkillCover: cover alpha=" .. self.CoverAlpha)
+		end
+	end
+
+	-- Ep3Map1SkillRewardTrigger.RequestClick()이 클릭마다 호출한다(가리개가 안 걷혔으면 서버에서도
+	-- 한 번 더 가드 — 클라이언트 체크와 별개로 이중 방어).
+	@ExecSpace("ServerOnly")
+	method void OnRewardClicked()
+		if not self.CoverCleared then return end
+		if self.Triggered then return end
+		self.Triggered = true
+
+		local reward = _EntityService:GetEntityByPath(self.RewardObjectPath)
+		local worldPos = (reward ~= nil) and reward.TransformComponent.WorldPosition or Vector3(0, 0, 0)
+
+		local pool = _CardManager:BuildActiveUpgradePool()
+		if #pool > 0 then
+			_CardManager:GrantCardUpgradesFromPool(pool, worldPos, 0, worldPos.y, 1.0, 1, 0)
+			log("Ep3Map1SkillCover: granted 1 card upgrade from active pool")
+			_UIToast:ShowMessage(self.SkillRewardMessage)
+		else
+			_GameManager:ApplyPotionDrop(self.FallbackPotionType, worldPos, 0, worldPos.y, 1.0)
+			log("Ep3Map1SkillCover: no upgradeable skill, granted potion instead")
+			_UIToast:ShowMessage(self.PotionRewardMessage)
+		end
+	end
+
+	-- GameManager.RestartGame()이 호출 — 새 런에서는 가리개를 다시 2번 눌러 재도전할 수 있게 한다
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		self.CoverCleared = false
+		self.CoverAlpha = 1.0
+		self.Triggered = false
+		local cover = _EntityService:GetEntityByPath(self.CoverObjectPath)
+		if cover ~= nil and isvalid(cover) then
+			cover.Enable = true
+			local renderer = cover.SpriteRendererComponent
+			if renderer ~= nil then
+				local c = renderer.Color
+				renderer.Color = Color(c.r, c.g, c.b, 1.0)
+			end
+		end
+	end
+
+end

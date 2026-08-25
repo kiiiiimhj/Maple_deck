@@ -52,7 +52,7 @@ script MonsterSpawner extends Logic
 	-- (ProcessSpawnQueueTick, OnUpdate가 매 프레임 호출). 보스(항상 1마리)는 그대로 동기 유지 —
 	-- TrySpawnPersistentBoss/RelocateBossToCurrentZone이 반환값을 즉시 써야 하기 때문.
 	property integer SpawnsPerTick = 2
-	property table _spawnQueue = {}  -- {{ map, mapIndex, wave, isCurrentMap, batch }, ...}
+	property table _spawnQueue = {}  -- {{ map, mapIndex, wave, batch }, ...} (isCurrentMap은 dequeue 시점에 새로 판정 — 아래 주석 참고)
 
 	-- 성능 최적화(2026-08-24, 유저 리포트 "맵이동할때 렉 여전함" + "몬스터 많을때/공중유닛일때 끊김") —
 	-- 실측: map3/4처럼 존 10개가 파일 하나(container=nil)를 공유하면 GetZoneEntity가 그 파일의 몬스터를
@@ -546,12 +546,19 @@ script MonsterSpawner extends Logic
 		self._pendingRushPenalty = 0
 	end
 
+	-- 지정한 mapIndex가 "지금 플레이어가 있는 존"인지 판정 — SpawnBatchOnMap(큐 적재 시점)과
+	-- ProcessSpawnQueueTick(실제 스폰 시점) 양쪽에서 공유해서 쓴다(아래 버그 수정 코멘트 참고).
+	-- GetCurrentMap()이 nil(아직 어느 맵인지 모름 — 월드 시작 직후 _UserService.UserEntities가
+	-- 비어있는 순간과 겹칠 수 있음)이면 "다른 맵"으로 단정하지 않고 활성 상태로 취급한다 — 그렇지 않으면
+	-- 게임 시작하자마자 첫 맵의 몬스터가 통째로 멈춰있는 채로 태어나는 버그가 생긴다.
+	@ExecSpace("ServerOnly")
+	method boolean IsMapIndexCurrent(integer mapIndex)
+		return (self:GetCurrentMap() == nil) or (mapIndex == _MapManager.CurrentMapIndex and not _MapManager.AwayOnSideMap)
+	end
+
 	-- 지정한 맵 하나에 몬스터 무리를 스폰. allowElite=true인 호출에서만 엘리트 승급 후보가 된다.
 	-- 스폰되는 맵이 플레이어의 현재 맵이 아니라고 "확실히" 판단될 때만 새로 태어난 몬스터를 일시정지시킨다 —
 	-- 안 그러면 화면 밖 맵에서 계속 새로 스폰되는 애들이 기본값(안 멈춤)으로 태어나서 몰래 공격한다.
-	-- 반대로 GetCurrentMap()이 nil(아직 어느 맵인지 모름 — 월드 시작 직후 _UserService.UserEntities가
-	-- 비어있는 순간과 겹칠 수 있음)이면 "다른 맵"으로 단정하지 않고 활성 상태로 스폰한다 — 그렇지 않으면
-	-- 게임 시작하자마자 첫 맵의 몬스터가 통째로 멈춰있는 채로 태어나는 버그가 생긴다.
 	@ExecSpace("ServerOnly")
 	method table SpawnBatchOnMap(Entity map, integer wave, boolean isBoss, boolean allowElite, integer mapIndex, boolean isSpike, integer minCountOverride)
 		-- 버그 수정(2026-08-20, 유저 리포트 "맵4에서 10존으로 들어왔는데 7존에 몬스터가 공격해") — 예전엔
@@ -567,7 +574,7 @@ script MonsterSpawner extends Logic
 		-- 맵으로 간 동안엔 CurrentMapIndex를 일부러 그대로 두는데(MapManager.AwayOnSideMap 참고), 그
 		-- 사이 원래 존에서 새로 리스폰되는 몬스터가 이 판정만으로는 "지금 있는 맵"으로 오판돼 Pause 없이
 		-- 태어났다 — AwayOnSideMap이 켜져 있으면 인덱스가 같아도 무조건 "지금 있는 맵이 아님"으로 취급한다.
-		local isCurrentMap = (self:GetCurrentMap() == nil) or (mapIndex == _MapManager.CurrentMapIndex and not _MapManager.AwayOnSideMap)
+		local isCurrentMap = self:IsMapIndexCurrent(mapIndex)
 
 		local count = 1
 		if not isBoss then
@@ -641,8 +648,16 @@ script MonsterSpawner extends Logic
 			count = count,
 			rushPenalty = self._pendingRushPenalty,
 		}
+		-- isCurrentMap을 여기서 job에 고정해두지 않는다 — 실제 스폰은 몇 프레임 뒤
+		-- ProcessSpawnQueueTick에서 나눠 처리되는데, 그 사이 플레이어가 실제로 이 존에 도착(또는 이탈)하면
+		-- 지금 계산한 값이 낡아버린다(버그 수정, 2026-08-25 — 유저 리포트 "몬스터가 걷는 모션은 있는데
+		-- 다가오지않는 버그... 존을 이동하면 그러는거 같음": 백그라운드 존이 이 큐로 스폰을 예약해둔 채
+		-- 아직 처리 전인데 플레이어가 마침 그 존에 도착하면, 큐에 박혀있던 예전 isCurrentMap=false가
+		-- 그대로 살아남아 방금 도착한 존인데도 태어나자마자 Pause()되어 버렸다 — InitializeStats가 먼저
+		-- 걷는 스프라이트를 세팅한 뒤라 "걷는 모션은 있는데 다가오지 않는" 것처럼 보임). 대신
+		-- ProcessSpawnQueueTick이 실제로 꺼낼 때 IsMapIndexCurrent를 다시 호출해 그 순간 기준으로 새로 판정한다.
 		for i = 1, count do
-			table.insert(self._spawnQueue, { map = map, mapIndex = mapIndex, wave = wave, isCurrentMap = isCurrentMap, batch = batch })
+			table.insert(self._spawnQueue, { map = map, mapIndex = mapIndex, wave = wave, batch = batch })
 		end
 		return {}
 	end
@@ -709,7 +724,8 @@ script MonsterSpawner extends Logic
 		local n = math.min(self.SpawnsPerTick, #self._spawnQueue)
 		for i = 1, n do
 			local job = table.remove(self._spawnQueue, 1)
-			local entity = self:SpawnOneMonster(job.map, job.mapIndex, job.wave, false, job.isCurrentMap, job.batch.spawnedXs, job.batch.rushPenalty)
+			local isCurrentMapNow = self:IsMapIndexCurrent(job.mapIndex)
+			local entity = self:SpawnOneMonster(job.map, job.mapIndex, job.wave, false, isCurrentMapNow, job.batch.spawnedXs, job.batch.rushPenalty)
 			if entity ~= nil then table.insert(job.batch.spawned, entity) end
 			job.batch.remaining = job.batch.remaining - 1
 			if job.batch.remaining <= 0 then
@@ -1495,8 +1511,22 @@ script MonsterSpawner extends Logic
 		-- 단일 랜덤X+아래방향 레이캐스트(GetGroundY)를 그대로 쓰면 레이가 위에 뜬 공중 발판에 먼저
 		-- 걸려 지상형 몬스터가 허공에 스폰될 위험이 있다 — GetFlatRuns 기반 방식으로 바닥/공중 전부
 		-- 폭 비례 확률 후보에 넣어야 안전하다.
+		-- ep3_map1(mapIndex89~98)도 동일 패턴(2026-08-24, 유저 "얘도 발판바꿨으니 다 체크가 필요해") —
+		-- 실측 getFootholds(258개) 결과 존1/2/3/6/7/8/9/10(89,90,91,94,95,96,97,98)의 스폰 화면범위(±5)
+		-- 안에 지면과 분리된 공중 발판이 촘촘히 걸려 있다(groupID 2~16, ep2_map3/4와 동일한 밀도).
+		-- 존4/5(92,93)만 예외적으로 분리 공중 발판이 없지만(대신 지면 자체가 융기한 둔덕/평지 —
+		-- ZoneInfo landY로 처리), 10존 전부를 이 라우팅에 태워도 무해하므로 범위째로 추가한다.
+		-- ep3_map2(mapIndex99~108)도 map1과 동일 원본을 덤프한 맵이라 발판 패턴이 완전히 동일하다
+		-- (2026-08-25, 유저 "얘도 덤프떠서 만들었거든... 발판 확인") — 실측 결과도 map1과 일치.
+		-- ep3_map3(mapIndex109~118)도 같은 이유로 추가(2026-08-25) — 다만 발판 구조는 map1/2와 달리
+		-- 이 맵 고유(존1/2/7/8/10에 공중 발판, 존4/5에 독자적 둔덕/단) — GetFlatRuns 기반 방식이라
+		-- 코드 수정 없이 실제 발판 데이터만 따라간다.
+		-- ep3_map4(mapIndex119~128)도 같은 이유로 추가(2026-08-25) — 실측 getFootholds(289개) 결과
+		-- 존1/2/3/8(119,120,121,126)에 지면과 분리된 공중 발판, 존4/5(122,123)에 독자적 단이 있고
+		-- 나머지는 단일 지면 — GetFlatRuns 기반 방식이라 이 역시 코드 수정 없이 실제 발판을 그대로 따라간다.
 		if (mapIndex >= 13 and mapIndex <= 15) or mapIndex == 8 or mapIndex == 27 or mapIndex == 28 or mapIndex == 29
-			or (mapIndex >= 61 and mapIndex <= 64) or (mapIndex >= 65 and mapIndex <= 84) or (mapIndex >= 85 and mapIndex <= 88) then
+			or (mapIndex >= 61 and mapIndex <= 64) or (mapIndex >= 65 and mapIndex <= 84) or (mapIndex >= 85 and mapIndex <= 88)
+			or (mapIndex >= 89 and mapIndex <= 128) then
 			return self:GetSpawnPositionFromFootholds(mapIndex, isBoss, map)
 		end
 
