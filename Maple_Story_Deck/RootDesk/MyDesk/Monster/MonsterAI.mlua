@@ -202,6 +202,22 @@ script MonsterAI extends Component
 	property number _dieDuration = 0.5
 	property string _hitRUID = ""
 	property string _attackRUID = ""  -- 없는 웨이브(3/5/6/8/9/10)는 빈 문자열 → 들이받기 연출로 대체
+	-- attack1/hit1 스프라이트가 화면에 떠 있는 동안 true — PlayAttackAnimation/PlayHitAnimation(둘 다
+	-- 클라이언트에서 실행)이 직접 세팅/해제한다. OnSyncProperty가 이 플래그로 "지금 재생 중인 공격/피격
+	-- 포즈를 MonsterSprite 동기화가 되돌려버리면 안 된다"를 판단한다 — _attackRUID/_hitRUID 자체는
+	-- @Sync가 아니라 클라이언트에서 항상 ""로 읽히므로 그 값으로는 판단할 수 없다(실측으로 확인된 함정).
+	property boolean _isPlayingTransientSprite = false
+	-- 버그 수정(2026-08-27, 유저 리포트: "웨어울프나 라이칸이나 연출이 끝까지 나올때가 있고 그냥
+	-- 안나올때가 있는거 같아") — 공격 주기(AttackInterval)가 attack1 재생시간(_attackDuration)보다
+	-- 짧은 종은 이전 공격의 복귀 타이머가 살아있는 채로 다음 공격이 겹쳐 들어온다. PlayAttackAnimation/
+	-- PlayHitAnimation의 복귀 타이머는 "지금 스프라이트가 내가 세팅한 attackRUID/hitRUID와 같은가"만
+	-- 확인해서 되돌리는데, attackRUID는 종 전체가 같은 값이라 새/구 타이머를 구분 못 해 구 타이머가
+	-- 새로 시작한 재생을 조기에 stand로 끊어버리고 _isPlayingTransientSprite까지 꺼버린다(그 순간 마침
+	-- 도착한 MonsterSprite 동기화가 다시 덮어쓸 수 있는 창이 열림) — "가끔 끝까지 나오고 가끔 아예
+	-- 안 보인다"가 정확히 이 겹침 여부에 좌우된다. 매 PlayAttackAnimation/PlayHitAnimation 호출마다
+	-- 1씩 증가시켜, 각 복귀 타이머가 "내가 최신 세대일 때만" 되돌리게 한다(AttackInterval 튜닝과
+	-- 별개로, 어떤 종에서도 이 겹침 자체가 다시는 문제되지 않도록 하는 이중 안전장치).
+	property integer _transientSpriteGeneration = 0
 	-- attack1 스프라이트를 원래 포즈로 되돌리기까지 대기하는 시간 — 클립 프레임 수가 다 다른데 기존엔
 	-- 0.25초로 고정돼 있어서, 프레임이 많은 종(자이언트 쉐도우 8프레임 등)은 재생 중간에 잘려 보였다.
 	-- die1과 같은 재생 속도(초당 약 10프레임) 가정으로 종별 프레임 수에 맞춰 GetMapAttackDuration이 계산해 준다.
@@ -220,6 +236,16 @@ script MonsterAI extends Component
 	-- 원거리 히트 이펙트 동시 출력 개수 상한(GameManager._rangedHitEffectActiveCount와 짝) — 기본 1(기존
 	-- 종은 전부 이 값), 예티류만 유저 지정으로 3(GetMapHitEffectMaxConcurrent 참고).
 	property integer _hitEffectMaxConcurrent = 1
+	-- 스노우맨(원거리) 전용 — 몬스터 위치에서 플레이어 위치까지 실제로 날아가는 투사체(attack1/info/ball
+	-- 서브클립, 유저 제공). 빈 문자열이면 PlayRangedProjectile이 아무것도 재생하지 않는다(기존 원거리
+	-- 종처럼 착탄 이펙트(_hitEffectRUID)만 뜬다).
+	property string _projectileRUID = ""
+	-- 푼코/쿠스코(Ep3Map3·4PunkoEasterEggLogic) 전용 — 공격 순간 몬스터 자기 자신의 위치(중앙)에 뜨는
+	-- 연출(attack1/info/effect 서브클립, 유저 지정: "푼코 가운데서 나타나게"). _hitEffectRUID(플레이어
+	-- 위치에 뜨는 착탄 이펙트)와 달리 몬스터 자신의 WorldPosition에 뜬다는 점이 다르다. 빈 문자열이면
+	-- PlaySelfAttackEffect가 아무것도 안 한다.
+	property string _selfAttackEffectRUID = ""
+	property number _selfAttackEffectDuration = 0.5
 	-- 원거리 히트 이펙트를 쓰는 종(네펜데스/다크네펜데스/거대 네펜데스 2페이즈) 전용 공격 쿨타임
 	-- 오버라이드 — 유저 요청: "너무 빠르게 공격하는 감이 있는데 공격하고 0.7초정도는 쉬자". 0이면
 	-- 공용 AttackInterval을 그대로 쓴다. 공격 애니메이션(_attackDuration) 재생이 끝난 뒤 순수하게
@@ -546,9 +572,21 @@ script MonsterAI extends Component
 			self._hitEffectRUID = _GameManager:GetMapHitEffectRUID(appearanceZone, speciesIdx)
 			self._hitEffectDuration = _GameManager:GetMapHitEffectDuration(appearanceZone, speciesIdx)
 			self._hitEffectMaxConcurrent = _GameManager:GetMapHitEffectMaxConcurrent(appearanceZone, speciesIdx)
+			self._projectileRUID = _GameManager:GetMapProjectileRUID(appearanceZone, speciesIdx)
 			self._hitEffectScaleMultiplier = _GameManager:GetMapHitEffectScaleMultiplier(appearanceZone, speciesIdx)
 			self._hitEffectAlpha = _GameManager:GetMapHitEffectAlpha(appearanceZone, speciesIdx)
-			if self._hitEffectRUID ~= "" then
+			-- 버그 수정(2026-08-27, 유저 리포트: "웨어울프나 라이칸이나 연출이 끝까지 나올때가 있고 그냥
+			-- 안나올때가 있는거 같아") — 원래는 원거리 히트 이펙트가 있는 종만 attackDuration에 맞춰
+			-- 공격 주기를 늘렸는데, 웨어울프/라이칸스로프(근접, 히트 이펙트 없음)는 attackDuration이
+			-- 1.25초인데 기본 AttackInterval은 1.0초라 다음 공격이 이전 공격의 attack1 재생이 끝나기 전에
+			-- 겹쳐 들어왔다. PlayAttackAnimation의 복귀 타이머는 "지금 스프라이트가 내가 세팅한 attackRUID와
+			-- 같으면" 되돌리는 방식이라 새/구 타이머를 구분 못 해서, 겹치면 구(이전) 타이머가 새로 시작한
+			-- attack1을 즉시 stand로 되돌리고 _isPlayingTransientSprite까지 꺼버려 그 순간 마침 도착한
+			-- MonsterSprite 동기화가 다시 덮어쓸 수 있는 창이 열렸다 — "가끔은 끝까지 나오고 가끔은 아예
+			-- 안 보인다"는 정확히 이 겹침 타이밍(공격 시점이 서로 얼마나 가까운가)에 좌우되는 증상과 일치.
+			-- attackRUID가 있는 종은 전부(히트 이펙트 유무 무관) attackDuration이 기본 간격보다 길면
+			-- 겹치지 않을 만큼 간격을 늘린다.
+			if self._hitEffectRUID ~= "" or (self._attackRUID ~= "" and self._attackDuration > self.AttackInterval) then
 				self._customAttackInterval = self._attackDuration + 0.7
 			else
 				self._customAttackInterval = 0
@@ -1551,7 +1589,25 @@ script MonsterAI extends Component
 		if name == "MonsterSprite" and self.MonsterSprite ~= "" then
 			local renderer = self.Entity.SpriteRendererComponent
 			if renderer ~= nil then
-				renderer.SpriteRUID = self.MonsterSprite
+				-- 버그 수정(2026-08-27, 유저 리포트: "웨어울프/라이칸스로프/스노우맨 공격 연출이 안 보이고
+				-- 점프만 보임") — OnUpdate가 처음 도달(_reachedPlayer=true)하는 그 프레임에 self.MonsterSprite를
+				-- stand로 바꾼 바로 다음 줄에서 OnReachPlayer()를 호출해 PlayAttackAnimation(Multicast)도
+				-- 같은 프레임에 나간다. 이 MonsterSprite 동기화(OnSyncProperty)와 PlayAttackAnimation
+				-- Multicast는 둘 다 서버→클라이언트 메시지라 도착 순서가 보장되지 않는다 — 동기화가 나중에
+				-- 도착하면 방금 재생을 시작한 attack1(또는 hit1) 스프라이트를 여기서 즉시 stand로 되돌려버려,
+				-- 실제로는 화면에 공격 포즈가 한 프레임도 안 보이고 PlayAttackHop(위치만 바뀌는 점프 트윈)만
+				-- 보이는 문제였다(스노우맨처럼 원거리라 홉조차 없는 종은 아예 아무 반응도 없어 보였다).
+				--
+				-- ⚠ 1차 수정(current==self._attackRUID 비교)은 실측으로 무효였다 — _attackRUID/_hitRUID는
+				-- @Sync가 아니라서 클라이언트에서는 항상 기본값 ""로 읽힌다(서버에서만 실제 값을 가짐).
+				-- 라이브 디버그 로그로 "attackRUID=[]"가 매번 찍히는 걸 직접 확인. 대신 attack1/hit1
+				-- 스프라이트를 실제로 세팅하는 PlayAttackAnimation/PlayHitAnimation 자신이(둘 다 클라이언트
+				-- 에서 실행되는 Multicast라 정확한 RPC 인자를 받음) 순수 클라이언트 로컬 플래그
+				-- (_isPlayingTransientSprite, 동기화 대상 아님)를 직접 세팅/해제하게 하고 여기서는 그 플래그만
+				-- 확인한다.
+				if not self._isPlayingTransientSprite then
+					renderer.SpriteRUID = self.MonsterSprite
+				end
 			else
 				log_warning("MonsterAI: SpriteRendererComponent nil")
 			end
@@ -2053,19 +2109,30 @@ script MonsterAI extends Component
 		local renderer = self.Entity.SpriteRendererComponent
 		if renderer == nil or hitRUID == "" then return end
 		renderer.SpriteRUID = hitRUID
+		-- OnSyncProperty(MonsterSprite)가 이 재생 중에 되돌리지 못하도록 표시(MonsterAI 상단
+		-- _isPlayingTransientSprite 주석 참고). 세대 번호로 겹치는 호출 중 최신 것만 실제로 되돌린다
+		-- (위 _transientSpriteGeneration 주석 참고).
+		self._isPlayingTransientSprite = true
+		self._transientSpriteGeneration = self._transientSpriteGeneration + 1
+		local myGeneration = self._transientSpriteGeneration
 		_TimerService:SetTimerOnce(function()
 			if not isvalid(self) then return end
+			if self._transientSpriteGeneration ~= myGeneration then return end
 			-- 죽음(일반 사망이든 예티류의 1→2페이즈 변신이든)으로 이미 전환된 뒤라면 절대 건드리지 않는다 —
 			-- 이 함수는 Multicast라 서버의 TakeDamage가 같은 프레임에 보낸 PlayPhase1TransformAnimation/
 			-- PlayDeathAnimation과 클라이언트 도착 순서가 보장되지 않는다. 순서가 뒤집히면(변신 연출이 먼저
 			-- 도착해 die1로 바뀐 뒤 이 히트 복원 타이머가 나중에 stand로 되돌리는 경우) 변신 중인 몬스터가
 			-- 잠깐 원래 1페이즈 stand 포즈로 보였다가 사라진 것처럼 보이는 버그가 있었다(유저 리포트 —
 			-- "페이즈 2 변화하다가 그냥 사라져"). _dead를 한 번 더 확인해 die1/변신 중에는 복원을 건너뛴다.
-			if self._dead then return end
+			if self._dead then
+				self._isPlayingTransientSprite = false
+				return
+			end
 			-- hit1 상태일 때만 stand로 복원 — die1로 전환된 뒤라면 그대로 둔다
 			if renderer.SpriteRUID == hitRUID then
 				renderer.SpriteRUID = standRUID
 			end
+			self._isPlayingTransientSprite = false
 		end, self.HitFlashDuration)
 	end
 
@@ -3223,6 +3290,13 @@ script MonsterAI extends Component
 		self._hitEffectScaleMultiplier = scaleMultiplier
 	end
 
+	-- Ep3Map3·4PunkoEasterEggLogic 전용 — 위 _selfAttackEffectRUID 주석 참고
+	@ExecSpace("ServerOnly")
+	method void SetSelfAttackEffect(string effectRUID, number effectDuration)
+		self._selfAttackEffectRUID = effectRUID
+		self._selfAttackEffectDuration = effectDuration
+	end
+
 	-- Ep2MiniBeanEasterEggLogic 전용 — GetClosestTargets 등이 _currentScale 내림차순으로 정렬해 타겟을
 	-- 고르는데, 미니빈은 전부 고정 1.0이라 완전히 동률이었다. 동률이면 table.sort가 매번 같은 순서로
 	-- 정리해버려서(입력 순서가 고정이라 사실상 결정적) 특정 한 마리(하필 무리 공격 선점자와 겹치는
@@ -3377,23 +3451,27 @@ script MonsterAI extends Component
 			-- 원거리 비행형(미니빈 등) 전용 — 근접 비행형(_hitEffectRUID=="")은 내부에서 그냥 아무것도
 			-- 안 하고 리턴하므로 무조건 호출해도 안전하다.
 			self:PlayRangedHitEffect()
+			-- 푼코/쿠스코 전용 — 몬스터 자신의 위치에 뜨는 이펙트(_selfAttackEffectRUID=="")면 무조건
+			-- 호출해도 안전하다.
+			self:PlaySelfAttackEffect()
 		elseif self._attackRUID ~= "" then
 			self:PlayAttackAnimation(self._attackRUID, self.MonsterSprite, self._attackDuration)
 			self:FlashHideDepthOverlay(self._attackDuration)
-			-- 버그 수정(2026-08-21, 유저 리포트 "다가오다가 일정 거리 되면 그냥 어택으로 넘어가야하는데
-			-- 근접처럼 점프하는 코드가 불린다 — 네펜데스도 마찬가지") — attackRUID(공격1 스프라이트)가
-			-- 있는 종은 원거리(_isRangedInk)든 근접이든 구분 없이 전부 이 홉(제자리에서 위로 살짝 뛰었다
-			-- 착지하는 트윈)을 같이 재생하고 있었다. 근접 종은 "들이받는" 느낌을 위해 필요하지만, 원거리
-			-- 종(네펜데스/스코피 등)은 제자리에서 공격 포즈만 보여줘야 하는데 이 홉 때문에 몸이 붕 떴다
-			-- 내려오는 게 "근접처럼 점프해서 때린다"로 보였다 — 원거리 종만 홉을 생략한다.
-			if not self._isRangedInk then
-				self:PlayAttackHop()
-			end
+			-- 정책 변경(2026-08-27, 유저 지정: "앞으로 어택모션있는애들은 공격할때 점프하는거 있잖아
+			-- 그거 빼 몬스터만들때 그 모션 없는애들만 점프하는 걸로 만들어(기존 달팽이처럼)") —
+			-- attack1(전용 공격 스프라이트)이 있는 종은 그 포즈 교체만으로 공격을 표현하고, 제자리 홉은
+			-- 더 이상 같이 재생하지 않는다. 홉(PlayAttackHop)은 attack1이 아예 없는 종의 대체 연출
+			-- (else 분기, PlayLungeAnimation과 짝)로만 남긴다 — "기존 달팽이처럼".
 			-- 원거리(칼자국) 종(자이언트 쉐도우)은 자기 자신의 attack1 스프라이트 교체 위에 발톱자국
 			-- 이펙트를 추가로 띄운다 — 원거리(먹물)와 달리 대체 연출이 아니라 "얹는" 방식이라 elseif가
 			-- 아니라 이 분기 안에 같이 넣는다.
 			if self._isRangedSlash then
 				self:PlaySlashEffect()
+			end
+			-- 스노우맨(원거리) 전용 — 유저 요청: 실제로 몬스터→플레이어로 날아가는 눈덩이 투사체.
+			-- _projectileRUID가 빈 문자열인 다른 원거리 종은 내부에서 그냥 아무것도 안 함.
+			if self._isRangedInk then
+				self:PlayRangedProjectile()
 			end
 			-- 원거리(가시/먹물) 종(네펜데스/다크네펜데스/거대 네펜데스 2페이즈) 전용 히트 이펙트 — 유저
 			-- 요청: 문어(먹물)와 같은 방식으로, 공격이 플레이어에게 닿는 위치에 종별 전용 이펙트를 띄운다.
@@ -3556,6 +3634,60 @@ script MonsterAI extends Component
 		end, delay)
 	end
 
+	-- 푼코/쿠스코(Ep3Map3·4PunkoEasterEggLogic) 전용 — 유저 요청: "공격할때 이 이펙트가 몬스터 가운데서
+	-- 나타나게". PlayRangedHitEffect(플레이어 위치)와 달리 몬스터 자기 자신의 WorldPosition에 즉시
+	-- 띄운다 — 공격 순간 그 자리에서 재생되다 사라지는 연출. _selfAttackEffectRUID가 빈 문자열이면
+	-- 아무것도 안 한다.
+	@ExecSpace("ServerOnly")
+	method void PlaySelfAttackEffect()
+		if self._selfAttackEffectRUID == "" then return end
+		local map = self.Entity.CurrentMap
+		if map == nil then return end
+		local pos = self.Entity.TransformComponent.WorldPosition
+		local dropScale = _CardManager:GetEffectScaleRatio(self)
+		local fxPos = Vector3(pos.x, pos.y, pos.z - 0.1)
+
+		local fx = _SpawnService:SpawnByModelId("skilleffect", "SelfAttackFX", fxPos, map)
+		if fx == nil then return end
+		local renderer = fx.SpriteRendererComponent
+		if renderer ~= nil then renderer.SpriteRUID = self._selfAttackEffectRUID end
+		fx.TransformComponent.Scale = Vector3(dropScale, dropScale, 1)
+		fx:Destroy(self._selfAttackEffectDuration)
+	end
+
+	-- 스노우맨(원거리) 전용 — 유저 요청: "눈덩이 투사체 연출 추가". attack1 재생과 동시에 몬스터
+	-- 위치에서 스폰해 플레이어 위치까지 실제로 날아가는 투사체를 그린다. PlayRangedHitEffect(착탄
+	-- 이펙트, _attackDuration*0.5 지연 후 재생)와 같은 타이밍에 도착·소멸하도록 이동 시간을 똑같이
+	-- _attackDuration*0.5로 맞춘다 — "눈덩이가 날아가서 그 순간 맞는 이펙트가 뜬다"로 자연스럽게
+	-- 이어지게. _projectileRUID가 빈 문자열(대부분의 다른 원거리 종)이면 아무것도 안 하고 기존처럼
+	-- 착탄 이펙트만 뜬다.
+	@ExecSpace("ServerOnly")
+	method void PlayRangedProjectile()
+		if self._projectileRUID == "" then return end
+		local map = self.Entity.CurrentMap
+		if map == nil then return end
+		local startPos = self.Entity.TransformComponent.WorldPosition
+		local px = _CardManager:GetPlayerCenterX()
+		local py = _CardManager:GetPlayerCenterY()
+		local dropScale = _CardManager:GetEffectScaleRatio(self)
+		local travelDuration = self._attackDuration * 0.5
+
+		local fx = _SpawnService:SpawnByModelId("skilleffect", "SnowballFX", startPos, map)
+		if fx == nil then return end
+		local renderer = fx.SpriteRendererComponent
+		if renderer ~= nil then renderer.SpriteRUID = self._projectileRUID end
+		fx.TransformComponent.Scale = Vector3(dropScale, dropScale, 1)
+
+		_TweenLogic:PlayTween(0.0, 1.0, travelDuration, EaseType.Linear, function(t)
+			if not isvalid(fx) then return end
+			local x = startPos.x + (px - startPos.x) * t
+			local y = startPos.y + (py - startPos.y) * t
+			fx.TransformComponent.Position = Vector3(x, y, startPos.z - 0.3)
+		end)
+
+		fx:Destroy(travelDuration)
+	end
+
 	@ExecSpace("Multicast")
 	method void PlayAttackAnimation(string attackRUID, string standRUID, number duration)
 		if self:IsServer() then return end
@@ -3564,12 +3696,20 @@ script MonsterAI extends Component
 		local renderer = self.Entity.SpriteRendererComponent
 		if renderer == nil or attackRUID == "" then return end
 		renderer.SpriteRUID = attackRUID
+		-- OnSyncProperty(MonsterSprite)가 이 재생 중에 되돌리지 못하도록 표시(위 _isPlayingTransientSprite
+		-- 주석 참고). 세대 번호를 찍어서, 공격 주기가 겹쳐 들어와도 "가장 최신 호출"의 타이머만 실제로
+		-- 되돌리게 한다(위 _transientSpriteGeneration 주석 참고).
+		self._isPlayingTransientSprite = true
+		self._transientSpriteGeneration = self._transientSpriteGeneration + 1
+		local myGeneration = self._transientSpriteGeneration
 		_TimerService:SetTimerOnce(function()
 			if not isvalid(self) then return end
+			if self._transientSpriteGeneration ~= myGeneration then return end
 			-- attack1 상태일 때만 stand로 복원 — hit1/die1로 이미 전환된 뒤라면 그대로 둔다
 			if renderer.SpriteRUID == attackRUID then
 				renderer.SpriteRUID = standRUID
 			end
+			self._isPlayingTransientSprite = false
 		end, duration)
 	end
 

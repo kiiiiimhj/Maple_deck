@@ -116,10 +116,7 @@ script MapManager extends Logic
 			-- MoveByDelta 기본 델타만으로 자연스럽게 이어진다(별도 분기 불필요).
 			self.MinMapIndex = 89
 			self.MaxMapIndex = 128
-			-- 임시 테스트 변경(2026-08-26, 유저 지정: "테스트하게 임시로 map3 1존으로 시작하게 바꿔줘") —
-			-- 존3~5 화면 튕김 재현 테스트용으로 시작 지점을 ep3_map3 존1(mapIndex109)로 옮겨둔다.
-			-- 원래 값은 89(ep3_map1 존1) — 테스트 끝나면 되돌릴 것.
-			self.DesiredStartMapIndex = 109
+			self.DesiredStartMapIndex = 89
 		else
 			self.MinMapIndex = 1
 			self.MaxMapIndex = 44
@@ -161,6 +158,22 @@ script MapManager extends Logic
 	property number Ep3Map4ConfineMaxX = 144.79
 	property number Ep3Map4FixedCameraY = 1.12
 
+	-- ep3_map4_ester_1(히든맵, mapIndex129~133 — [[project_ep3map4_ester1_portal]]) 전용 카메라
+	-- Y고정 confine. 버그 수정(2026-08-27, 유저 리포트: "1존 처음 입장하면 카메라가 원하는 앵글이
+	-- 아닌데 2존 갔다가 다시 1존 가면 원하는 앵글로 바뀐다... 4번째 존에 화면 튕기는 버그도 있고") —
+	-- 이 맵은 129~133이 ResetCameraConfine의 기존 분기(65~128)에 없어 else(네이티브 ConfineCameraArea,
+	-- 맵 전체 발판 범위를 그대로 따라감)로 떨어졌었다. 이 맵도 ep3_map3/4와 동일한 "덤프떠서 만든" 원본이라
+	-- (X 발판 범위 실측 -7.08~144.78로 ep3_map3/4와 거의 동일) 존마다 실제 지면 높이가 다르다(존1~3은
+	-- -1.08 근처, 존4~5는 -0.48 근처 — 실측) — 네이티브 confine이 그 차이를 그대로 따라가면서 존 이동마다
+	-- 카메라가 위아래로 흔들렸다(존4 진입 시 특히 두드러짐). ep3_map3/4와 동일한 Y고정 패턴을 그대로
+	-- 적용해 해결 — Y값은 라이브로 "존1→존2→존1" 왕복 후(스크롤 전환으로 confine이 정상 정착한 시점)
+	-- 카메라의 실제 WorldPosition.y를 직접 읽어 확정했다(최초 입장 시 관찰된 값(1.321)은 다중 발판
+	-- 레이어(존1~3 부근에 사다리로 인한 여러 층) 때문에 부정확했던 것으로 추정 — Y고정으로 이 오차 자체가
+	-- 원천 차단된다).
+	property number Ep3Map4Ester1ConfineMinX = -7.09
+	property number Ep3Map4Ester1ConfineMaxX = 144.79
+	property number Ep3Map4Ester1FixedCameraY = -1.079
+
 	-- 몬스터 갤러리(ep2_map2_estermap_1) 전용 카메라 confine — 이 맵은 ZoneInfo 인덱스 체계 밖의
 	-- 독립 맵이라(Ep2Map4GalleryPortalTrigger의 네이티브 MoveToEntityByPath로만 진입) ResetCameraConfine의
 	-- mapIndex 분기를 안 타므로 별도 진입점(SetGalleryCameraConfine)으로 뺐다. X는 발판 실측 범위,
@@ -195,9 +208,8 @@ script MapManager extends Logic
 	-- 직접 바꾸기 전까지의 코드측 임시 우회 — 유저 접속이 확인되는 즉시 이 맵으로 이동시킨다
 	property integer DesiredStartMapIndex = 1
 
-	-- 임시 테스트 스위치(2026-08-26) — true면 MoveToMap의 레벨5 존 잠금을 통째로 무시한다. 위
-	-- DesiredStartMapIndex=109(ep3_map3 존1 시작) 테스트와 짝 — 테스트 끝나면 둘 다 원래대로 되돌릴 것.
-	property boolean TestUnlockAllZones = true
+	-- MoveToMap의 레벨5 존 잠금을 통째로 무시하는 테스트 스위치 — 기본 false(정상 잠금 적용).
+	property boolean TestUnlockAllZones = false
 
 	property boolean _startRedirectDone = false
 
@@ -491,6 +503,24 @@ script MapManager extends Logic
 			[126] = { file = "ep3_map4", container = "Zone8", spawnX = 108.5, landY = 1.12 },
 			[127] = { file = "ep3_map4", container = "Zone9", spawnX = 124.0, landY = -1.28 },
 			[128] = { file = "ep3_map4", container = "Zone10", spawnX = 139.5, landY = 0.52 },
+			-- ep3_map4_ester_1(히든맵, portal-3 전용 — [[project_ep3map4_ester1_portal]]) — MaxMapIndex(128)
+			-- 밖이라 일반 MoveByDelta/화살표 이동으로는 절대 도달 못 하고, Ep3Map4Ester1PortalLogic이
+			-- 직접 CurrentMapIndex를 129로 세팅하는 방식으로만 진입한다(SilentMoveToMap/MoveToMap은
+			-- MaxMapIndex 가드에 막혀 못 씀). 실측 결과 이 파일은 Zone2~Zone10 마커(스폰X 전용, 15.5
+			-- 간격 — 다른 그룹과 동일 패턴)까지 이미 있어 총 10존 분량 지형이 있지만, 이번엔 유저 지정대로
+			-- 5존(129~133)만 등록한다 — 존간 이동(Zone1→2...) 트리거는 아직 안 만들어서 실제로는 항상
+			-- 존1(129)에서 시작해 60초 뒤 자동 퇴장한다. container는 다른 container=nil 존 그룹(맵3/4)과
+			-- 동일하게 nil(지형이 물리적으로 이어진 한 파일 — Zone2~10은 그냥 좌표 마커일 뿐 별도 엔티티 아님).
+			-- landY 실측(getFootholds): 존1~3(x=0/15.5/31) 지면 -1.08, 존4~5(x=46.5/62)는 둔덕처럼
+			-- 한 단 높은 -0.48 — 버그 수정(2026-08-27, 유저 리포트: "3번에서 4번 이동하니깐 여전히
+			-- 튕겨") landY를 안 주면 DoScrollMapChange가 "이전 존 Y 그대로 재사용"해서 존3(-1.08)에서
+			-- 존4로 넘어갈 때 실제 둔덕 높이(-0.48)보다 낮게 착지 → 존39/존122(ep3_map4 존4)와 동일한
+			-- 원인의 튕김 버그. 5존 전부 명시적으로 지정(ep3_map3/4 관례와 동일하게 전부 명시).
+			[129] = { file = "ep3_map4_ester_1", container = nil, spawnX = 0, landY = -1.08 },
+			[130] = { file = "ep3_map4_ester_1", container = nil, spawnX = 15.5, landY = -1.08 },
+			[131] = { file = "ep3_map4_ester_1", container = nil, spawnX = 31.0, landY = -1.08 },
+			[132] = { file = "ep3_map4_ester_1", container = nil, spawnX = 46.5, landY = -0.48 },
+			[133] = { file = "ep3_map4_ester_1", container = nil, spawnX = 62.0, landY = -0.48 },
 		}
 		-- 몬스터 스폰/시작맵 리다이렉트는 GameStarted가 될 때까지 미룬다(BeginGameplay 참고) —
 		-- 타이틀 화면을 보는 동안 몬스터가 먼저 쌓이면 안 된다. 여기서는 현재 위치만 계산해둔다.
@@ -915,6 +945,13 @@ script MapManager extends Logic
 			-- MoveToMap을 호출해 자동 복귀시킨다(일반 "<" 이동이 아님). 그래서 존85의 "<"는 항상
 			-- 막다른 길이어야 한다(MapMoveUI에서 버튼 자체도 숨김).
 			return
+		elseif actualIndex == 129 and delta == -1 then
+			-- ep3_map4_ester_1 존1(입구, portal-3으로만 입장) — 왼쪽은 막다른 길. 나가는 건 오직
+			-- Ep3Map4Ester1PortalLogic의 60초 타이머 자동퇴장뿐이다(유저 지정, [[project_ep3map4_ester1_portal]]).
+			return
+		elseif actualIndex == 133 and delta == 1 then
+			-- ep3_map4_ester_1 존5(마지막) — 오른쪽은 막다른 길.
+			return
 		elseif actualIndex == 89 and delta == -1 then
 			-- 에피소드3 map1 존1(mapIndex89)의 "<" 특수 분기(유저 지정, 2026-08-25 — "맵1의 1존에서
 			-- 왼쪽 버튼누르면 맵3의 1존 나오게"). 델타 그대로 두면 88(ep2_map2_hidden 존4, 전혀 다른
@@ -1051,7 +1088,12 @@ script MapManager extends Logic
 	@ExecSpace("ServerOnly")
 	method void MoveToMap(integer fromIndex, integer targetIndex)
 		-- 범위를 벗어나면 무시 (map1에서 좌 / 마지막 맵에서 우 — 아무 반응 없음)
-		if targetIndex < self.MinMapIndex or targetIndex > self.MaxMapIndex then return end
+		-- 129~133(ep3_map4_ester_1 히든맵, portal-3 전용 — [[project_ep3map4_ester1_portal]])은
+		-- MaxMapIndex(에피3=128) 밖이지만 유효한 목적지다(ZoneInfo엔 등록돼 있음) — 정상 진행으로는
+		-- 절대 도달 못 하고(MoveByDelta의 129/133 막다른 길 분기 참고) 오직 존1(129) 진입은
+		-- Ep3Map4Ester1PortalLogic이, 존간 이동(130~132)은 이 예외를 타고 여기까지 온다.
+		local isEsterZone = targetIndex >= 129 and targetIndex <= 133
+		if (targetIndex < self.MinMapIndex or targetIndex > self.MaxMapIndex) and not isEsterZone then return end
 		if targetIndex == fromIndex then return end
 
 		-- 이전 이동이 아직 "확정 대기" 중이면 이번 요청은 무시한다(연타 방지)
@@ -1075,7 +1117,11 @@ script MapManager extends Logic
 		-- 45 이상 분기가 먼저면 89도 걸려서(89>=45) 45를 빼 localIndex=45가 되어버려 항상 잠기는 동일한
 		-- 버그가 재발한다. 큰 범위부터 먼저 체크.
 		local localIndex = targetIndex
-		if targetIndex >= 89 then localIndex = targetIndex - 88
+		if isEsterZone then
+			-- 히든맵은 레벨 잠금 대상이 아니다 — portal-3 진입 자체가 이미 아이템 게이트(자격의 증표)이므로
+			-- 별도 레벨 조건을 걸지 않는다.
+			localIndex = 0
+		elseif targetIndex >= 89 then localIndex = targetIndex - 88
 		elseif targetIndex >= 45 then localIndex = targetIndex - 44 end
 		-- 임시 테스트 변경(2026-08-26) — 시작 지점을 ep3_map3 존1(109)로 옮겨두면 localIndex가 항상
 		-- >=4라 레벨5 미만인 새 캐릭터는 어느 방향으로도 못 움직인다. TestUnlockAllZones로 이 잠금을
@@ -1252,6 +1298,14 @@ script MapManager extends Logic
 			cam.UseCustomBound = true
 			cam.LeftBottom = Vector2(self.Ep3Map4ConfineMinX, self.Ep3Map4FixedCameraY)
 			cam.RightTop = Vector2(self.Ep3Map4ConfineMaxX, self.Ep3Map4FixedCameraY)
+			cam.DeadZone = Vector2(self.DefaultDeadZone.x, 1.0)
+			cam.SoftZone = Vector2(self.DefaultSoftZone.x, 1.0)
+		elseif mapIndex >= 129 and mapIndex <= 133 then
+			-- ep3_map4_ester_1(히든맵) — 위 프로퍼티 주석 참고, ep3_map3/4와 동일 패턴.
+			cam.ConfineCameraArea = false
+			cam.UseCustomBound = true
+			cam.LeftBottom = Vector2(self.Ep3Map4Ester1ConfineMinX, self.Ep3Map4Ester1FixedCameraY)
+			cam.RightTop = Vector2(self.Ep3Map4Ester1ConfineMaxX, self.Ep3Map4Ester1FixedCameraY)
 			cam.DeadZone = Vector2(self.DefaultDeadZone.x, 1.0)
 			cam.SoftZone = Vector2(self.DefaultSoftZone.x, 1.0)
 		else
