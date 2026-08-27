@@ -116,7 +116,10 @@ script MapManager extends Logic
 			-- MoveByDelta 기본 델타만으로 자연스럽게 이어진다(별도 분기 불필요).
 			self.MinMapIndex = 89
 			self.MaxMapIndex = 128
-			self.DesiredStartMapIndex = 89
+			-- 임시 테스트 변경(2026-08-26, 유저 지정: "테스트하게 임시로 map3 1존으로 시작하게 바꿔줘") —
+			-- 존3~5 화면 튕김 재현 테스트용으로 시작 지점을 ep3_map3 존1(mapIndex109)로 옮겨둔다.
+			-- 원래 값은 89(ep3_map1 존1) — 테스트 끝나면 되돌릴 것.
+			self.DesiredStartMapIndex = 109
 		else
 			self.MinMapIndex = 1
 			self.MaxMapIndex = 44
@@ -191,6 +194,10 @@ script MapManager extends Logic
 	-- 게임을 시작할 맵 번호. DefaultUserEnterLeaveLogic.StartPoint(Maker 전용 설정, 기본 /maps/map01)를
 	-- 직접 바꾸기 전까지의 코드측 임시 우회 — 유저 접속이 확인되는 즉시 이 맵으로 이동시킨다
 	property integer DesiredStartMapIndex = 1
+
+	-- 임시 테스트 스위치(2026-08-26) — true면 MoveToMap의 레벨5 존 잠금을 통째로 무시한다. 위
+	-- DesiredStartMapIndex=109(ep3_map3 존1 시작) 테스트와 짝 — 테스트 끝나면 둘 다 원래대로 되돌릴 것.
+	property boolean TestUnlockAllZones = true
 
 	property boolean _startRedirectDone = false
 
@@ -1070,7 +1077,10 @@ script MapManager extends Logic
 		local localIndex = targetIndex
 		if targetIndex >= 89 then localIndex = targetIndex - 88
 		elseif targetIndex >= 45 then localIndex = targetIndex - 44 end
-		if localIndex >= 4 and _GameManager.Level < 5 then
+		-- 임시 테스트 변경(2026-08-26) — 시작 지점을 ep3_map3 존1(109)로 옮겨두면 localIndex가 항상
+		-- >=4라 레벨5 미만인 새 캐릭터는 어느 방향으로도 못 움직인다. TestUnlockAllZones로 이 잠금을
+		-- 통째로 우회한다 — 테스트 끝나면 false로 되돌릴 것(MapMoveUI 자물쇠 표시도 같이 되돌아감).
+		if not self.TestUnlockAllZones and localIndex >= 4 and _GameManager.Level < 5 then
 			log("MapManager: map" .. targetIndex .. " (local " .. localIndex .. ") locked until level 5")
 			return
 		end
@@ -1136,21 +1146,20 @@ script MapManager extends Logic
 			local rigidbody = userEntity.RigidbodyComponent
 			local y = (landY ~= nil) and landY or userEntity.TransformComponent.WorldPosition.y
 			if rigidbody ~= nil then
-				-- 버그 수정(2026-08-25, 유저 리포트 "존5 화면 튕김") — 직전 존과 착지 Y가 완전히 같은
-				-- 이동에서만 재현됨을 라이브로 실측 확인했다(존4→존5: -0.68→-0.68 실패 / 존1→존2:
-				-- 1.12→1.12도 동일하게 실패 / 존3→존4: 1.12→-0.68처럼 Y가 실제로 바뀌는 이동은 항상
-				-- 정상). SetPosition은 위치를 즉시 갱신하지만, Y값이 이전과 완전히 같으면 물리엔진이
-				-- "발판이 그대로다"로 오판해 새 X의 발판을 다시 인식하지 않고 그대로 허공에 남아
-				-- 떨어지는 것으로 추정된다(PositionReset/SetWorldPosition으로도 안 고쳐졌던 것과
-				-- 일치 — 물리 갱신이 아니라 발판 재탐지 자체가 안 되는 문제). Y가 같을 때만 살짝
-				-- 위로(NoHeightChangeYNudge) 띄워 실제 낙하가 한 프레임 이상 발생하게 강제하면 착지
-				-- 순간 새 발판이 정상적으로 다시 인식된다.
-				local rbCurrentY = userEntity.TransformComponent.WorldPosition.y
-				local targetY = y
-				if math.abs(y - rbCurrentY) < self.NoHeightChangeYThreshold then
-					targetY = y + self.NoHeightChangeYNudge
-				end
-				rigidbody:SetPosition(Vector2(spawnX, targetY))
+				-- 버그 수정(2026-08-25, 유저 리포트 "존5 화면 튕김") — 처음엔 직전 존과 착지 Y가 완전히
+				-- 같은 이동에서만 재현되는 줄 알고 그 경우에만 넛지를 걸었었다. SetPosition은 위치를
+				-- 즉시 갱신하지만, 물리엔진이 "발판이 그대로다"로 오판해 새 X의 발판을 다시 인식하지
+				-- 않고 그대로 허공에 남아 떨어지는 것으로 추정된다(PositionReset/SetWorldPosition으로도
+				-- 안 고쳐졌던 것과 일치 — 물리 갱신이 아니라 발판 재탐지 자체가 안 되는 문제).
+				-- 재확인(2026-08-26, 유저 리포트 "4번째가 그러네") — 존3→존4(-1.28→-0.68, Y가 실제로
+				-- 바뀌는 이동)에서도 동일 증상이 실측 확인됨(YCHK 로그: t0 -0.79 → t0.1 -1.10 →
+				-- t0.3 -2.33까지 계속 낙하하다 세이프티넷 발동). 존4의 발판(Id79~83, x=43.31~48.49,
+				-- 폭 5.14로 좁은 "섬" 지형)처럼 특정 지형에서는 Y가 달라도 같은 문제가 재현된다는 뜻이라,
+				-- "Y가 같을 때만" 조건을 없애고 항상 살짝 위로(NoHeightChangeYNudge) 띄워서 매번 실제
+				-- 낙하가 한 프레임 이상 발생하도록 강제한다 — 원래도 무해한 트릭이었고(기존 통과하던
+				-- 전환들에서 0.15만큼 잠깐 더 높이 착지하다 내려오는 건 육안으로 안 보임), 이제 모든
+				-- 존 스크롤 전환에 예외 없이 적용한다.
+				rigidbody:SetPosition(Vector2(spawnX, y + self.NoHeightChangeYNudge))
 			else
 				userEntity.TransformComponent.Position = Vector3(spawnX, y, 0)
 			end

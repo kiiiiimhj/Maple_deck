@@ -1,0 +1,58 @@
+@Logic
+script Ep3Map3ItemEasterEggLogic extends Logic
+
+	-- 에피소드3 map3 이스터에그 — SpriteRUID 3c1167b745024ac693cdcd29f6c3e462 / 251f3c7394044f0bb26384fc644c4fa3
+	-- 를 쓰는 장식 오브젝트 16개(object-15_108/112~117/124/163~170, 전부 Ep3Map3ItemEasterEggTrigger 부착)
+	-- 중, 매 런마다 서버가 미리 무작위로 딱 1개를 "당첨"으로 정해둔다(WinnerIndex). 플레이어가 어느 걸
+	-- 누르든 흔들리는 연출(PlayShake)은 항상 재생되지만, 실제로 아이템(613d49a35f90479c905e9265305a09b8
+	-- "자격의 증표")이 나오는 건 당첨 오브젝트를 눌렀을 때뿐이고 그것도 런당 1회(Claimed)뿐이다. 유저
+	-- 지정: "다시하기나 새로시작하면 드랍되는 위치가 바뀌는거" — ResetForNewRun에서 당첨을 다시 뽑는다.
+	@Sync property integer WinnerIndex = 0
+	@Sync property boolean Claimed = false
+
+	property string ItemId = "ep3_map3_qualification_token"
+	property string ItemIconRUID = "613d49a35f90479c905e9265305a09b8"
+
+	-- 당첨 판정용 슬롯 순서 — Ep3Map3ItemEasterEggTrigger.SlotIndex와 map 배치 순서가 반드시 일치해야 한다.
+	property table _candidatePaths = {
+		"/maps/ep3_map3/object-15_108", "/maps/ep3_map3/object-15_112", "/maps/ep3_map3/object-15_113",
+		"/maps/ep3_map3/object-15_114", "/maps/ep3_map3/object-15_115", "/maps/ep3_map3/object-15_116",
+		"/maps/ep3_map3/object-15_117", "/maps/ep3_map3/object-15_124", "/maps/ep3_map3/object-15_163",
+		"/maps/ep3_map3/object-15_164", "/maps/ep3_map3/object-15_165", "/maps/ep3_map3/object-15_166",
+		"/maps/ep3_map3/object-15_167", "/maps/ep3_map3/object-15_168", "/maps/ep3_map3/object-15_169",
+		"/maps/ep3_map3/object-15_170",
+	}
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		self:PickNewWinner()
+	end
+
+	@ExecSpace("ServerOnly")
+	method void PickNewWinner()
+		self.WinnerIndex = _UtilLogic:RandomIntegerRange(1, #self._candidatePaths)
+		self.Claimed = false
+		log("Ep3Map3ItemEasterEgg: new winner slot=" .. self.WinnerIndex)
+	end
+
+	-- Ep3Map3ItemEasterEggTrigger.RequestTouch()가 호출 — slotIndex는 트리거가 자기 자신의 SlotIndex를 그대로 넘긴다.
+	@ExecSpace("Server")
+	method void OnObjectTouched(integer slotIndex, Entity obj)
+		if self.Claimed then return end
+		if slotIndex ~= self.WinnerIndex then return end
+		if not isvalid(obj) then return end
+		self.Claimed = true
+
+		local worldPos = obj.TransformComponent.WorldPosition
+		_GameManager:GrantLootItemDropWithIcon(worldPos, 0, worldPos.y, self.ItemId, 1.0, self.ItemIconRUID)
+		log("Ep3Map3ItemEasterEgg: winner slot " .. slotIndex .. " touched, granted " .. self.ItemId)
+	end
+
+	-- GameManager.RestartGame()이 호출 — 새 런마다 당첨 오브젝트를 다시 뽑는다(유저 지정: "드랍되는
+	-- 위치가 바뀌는거").
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		self:PickNewWinner()
+	end
+
+end

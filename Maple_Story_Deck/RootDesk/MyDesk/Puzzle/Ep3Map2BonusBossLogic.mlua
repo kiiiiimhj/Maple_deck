@@ -1,0 +1,300 @@
+@Logic
+script Ep3Map2BonusBossLogic extends Logic
+
+	-- 에피소드3 map2 전용 보너스 보스("사랑에 빠진 커플예티"). [[Ep3Map1InvitationEasterEggLogic]]의
+	-- 초대권→비둘기 이스터에그를 완료하면 ep3_map2의 기존 네이티브 portal-3이 열린다(그 파일이 Enable
+	-- 토글 전담). 이 포탈을 누르면(OnPortalTouched) 런당 딱 1번만 입장할 수 있다(PortalUsed 플래그,
+	-- 이미 썼으면 안내 토스트만). 입장과 동시에 초대권을 소모한다.
+	--
+	-- 입장 위치(2026-08-26 확정, 유저 지정: "ep3_map2_ester_1맵의 1존에서 스폰되게 해달랬는데 랜덤으로
+	-- 생성되네" — 이전 버전의 실수 수정): 매번 랜덤한 실제 존(99~108)이 아니라, 항상 고정된 별도 아레나
+	-- 맵 ep3_map2_ester_1(ZoneInfo 인덱스 밖의 독립 맵 — [[project_ep3map1_invitation_easteregg]]의
+	-- Why 참고, Ep2Map4GalleryPortalTrigger의 몬스터 갤러리와 동일 계열)에 고정 스폰된다. 보스를 잡거나
+	-- 시간이 다 되어 자동으로 나갈 때만 존99~108 중 무작위 하나로 떨어진다(유저 지정: "랜덤은 보스
+	-- 잡고 자동으로 나갔을때 ep3_map2 랜덤 존에 떨어지는거야").
+	--
+	-- 다른 존 몬스터 공격 차단(유저 지정: "여기선 나는 보스 몬스터만 공격해야하고, 다른존의 몬스터한테
+	-- 공격받으면 안된다"): CardManager.GetMonstersInCurrentZone은 _MapManager.CurrentMapIndex로 존
+	-- 레지스트리를 조회하는데, 아레나는 ZoneInfo 밖이라 입장해도 CurrentMapIndex를 안 바꾼다 — 그래서
+	-- 입장 직전 실제 존(sourceZoneIndex)을 그대로 유지한 채 그 존 몬스터를 SetMonstersPausedForZone으로
+	-- Pause한다(Ep2Map4GalleryPortalTrigger와 동일 패턴). GetMonstersInCurrentZone은 _paused인 몬스터를
+	-- 걸러내므로, 보스를 이 보스가 sourceZoneIndex 레지스트리에 등록되면(InitializeAnimatedBonusBoss의
+	-- zoneIndex 인자로 그대로 넘김) 스킬 타겟팅에서 "그 존의 Pause된 원래 몬스터들은 제외, 보스만 포함"이
+	-- 자동으로 성립한다 — 새 코드 없이 기존 _paused 필터 하나로 해결.
+	--
+	-- 보스 체력(유저 지정, 2026-08-26 — 세 번째 개정): 처음엔 "현재 시간대 일반 몬스터 체력×5배,
+	-- 최소 3000"이었는데, 이 프로젝트 목표 플레이타임(15~30분) 안에서는 GetTimeStepHp가 12분까지
+	-- 최대 500이라 ×5=2500 — 사실상 항상 최소값 고정이나 마찬가지였다(경과시간 기준으로 3분마다
+	-- 복리 증가하는 방식도 검토했으나, "경과시간"보다 "실제로 얼마나 강해졌는지"를 더 잘 반영하는
+	-- 플레이어 레벨 기준으로 최종 확정 — 게임 시작하자마자 존이동만으로 러쉬한 유저와 10분간 성장한
+	-- 유저를 구분하려는 원래 의도에 더 맞는다). BossBaseHp(6000)에서 시작해 BossLevelsPerGrowth(2)
+	-- 레벨마다 BossGrowthRate(1.15)배씩 복리 증가 — Lv1~2는 기본값, Lv3~4는 ×1.15, Lv5~6은
+	-- ×1.15^2, ... 실제로 죽을 수 있고(MonsterAI._bonusBossKillable), 죽이면 확정 장비 1개 드롭
+	-- (GameManager.GrantWeaponItemDrop — 확률 체크만 뺀 버전이라 등급/품질 확률은 그대로 유지).
+	-- 시간초과든 처치든 종료 시퀀스(die1 연출→2초 뒤 랜덤 존 퇴장)는 100% 동일 —
+	-- MonsterAI.OnBonusBossDefeated()가 처치 시 EndBonusStage()를 직접 호출해 그대로 재사용한다.
+	--
+	-- 타이머(유저 지정: "타이머는 입장하고 1s 있다 돌아가게해줘 지금을 들어갈떄부터 돌아가는거 같아"):
+	-- 화면 전환(커버→텔레포트→리빌)이 끝난 뒤 1초 더 기다렸다가에만 Active=true로 30초 카운트다운을
+	-- 시작한다(StartBossTimer) — 몬스터 자체는 입장 즉시 이미 존재하지만, 보드/타이머 표시와 실제
+	-- 만료 타이머는 그 1초 뒤부터 계산된다.
+	@Sync property boolean Active = false
+	@Sync property integer RemainingSeconds = 0
+	@Sync property boolean PortalUsed = false
+	-- 버그 수정(2026-08-26, 유저 리포트 "스킬 연출도 안나와") — CardManager.GetCurrentMap()이 이 값을
+	-- 보고 아레나에 있는 동안은 실제 존이 아니라 아레나 맵 엔티티를 반환하게 한다(아래 CardManager.mlua
+	-- 수정 참고). 입장(OnPortalTouched) 시 true, 퇴장(EndBonusStage 완료)/재시작(ResetForNewRun) 시 false.
+	property boolean InArena = false
+
+	-- 고정 아레나
+	property string ArenaMapPath = "/maps/ep3_map2_ester_1"
+	property string ArenaMapFileName = "ep3_map2_ester_1"
+	property number ArenaSpawnX = 0
+
+	-- 종료 후 랜덤 귀환 대상 범위(실제 ep3_map2 존)
+	property integer ZoneMinIndex = 99
+	property integer ZoneMaxIndex = 108
+
+	property number Duration = 30.0
+	property number DieAnimDuration = 2.0
+	property number TimerStartDelay = 1.0
+	property number WanderHalfRange = 5.0
+	property string BonusBossModelId = "bonusboss"
+	property string AlreadyUsedMessage = "이미 입장했습니다!"
+	property string LeavingMessage = "곧 다른 맵으로 이동합니다!"
+
+	-- 보스 체력 = BossBaseHp * BossGrowthRate ^ floor((플레이어 레벨-1) / BossLevelsPerGrowth)
+	property number BossBaseHp = 6000.0
+	property integer BossLevelsPerGrowth = 3
+	property number BossGrowthRate = 1.15
+
+	-- "사랑에 빠진 커플예티" 리소스팩(유저 제공 RUID)
+	property string StandRUID = "eb340b782b084e94ad512b613a4f4c40"
+	property string MoveRUID = "115f8dc7c82941ecaa8e3a6b567cea1b"
+	property string Hit1RUID = "f56a42334ad6483ea7b47950c84424fe"
+	property string Die1RUID = "972bc2192354479d9f96bebf41e7ca03"
+	property string HitSoundRUID = "62eda9f486db48088616a3f69869f469"
+	property string DieSoundRUID = "677750c70f1a4a32b5d5dcea3bf08fcb"
+
+	property string BoardEntityPath = "/ui/DefaultGroup/BonusBossBoard"
+	property string TimerTextPath = "/ui/DefaultGroup/BonusBossBoard/Inner/TimerText"
+
+	property Entity _bonusBoss = nil
+	property number _remaining = 0
+	-- 입장 직전 플레이어가 있던 실제 존 — 그 존 몬스터를 Pause해뒀다가 나갈 때 되돌린다. -1이면 없음.
+	property integer _pausedSourceZoneIndex = -1
+
+	@ExecSpace("ServerOnly")
+	method void OnUpdate(number delta)
+		if not self.Active then return end
+		self._remaining = self._remaining - delta
+		if self._remaining < 0 then self._remaining = 0 end
+		local secs = math.ceil(self._remaining)
+		if secs ~= self.RemainingSeconds then
+			self.RemainingSeconds = secs
+		end
+	end
+
+	-- 플레이어 레벨 기준 복리 증가 — BossLevelsPerGrowth(3)레벨마다 BossGrowthRate(1.15)배.
+	@ExecSpace("ServerOnly")
+	method number ComputeBossHp()
+		local level = _GameManager.Level
+		local steps = math.floor((level - 1) / self.BossLevelsPerGrowth)
+		return self.BossBaseHp * (self.BossGrowthRate ^ steps)
+	end
+
+	-- Ep3Map2BonusPortalTrigger.RequestClick()이 호출 — 런당 1회만 허용, 초대권을 소모하고, 고정
+	-- 아레마(ep3_map2_ester_1)에 보스를 스폰한 뒤 그리로 플레이어를 이동시킨다.
+	@ExecSpace("ServerOnly")
+	method void OnPortalTouched()
+		if self.PortalUsed then
+			_UIToast:ShowMessage(self.AlreadyUsedMessage)
+			return
+		end
+		local map = _EntityService:GetEntityByPath(self.ArenaMapPath)
+		if map == nil then
+			log_error("Ep3Map2BonusBoss: arena map not found at " .. self.ArenaMapPath)
+			return
+		end
+
+		self.PortalUsed = true
+		self.InArena = true
+		_PlayerInventory:RemoveItem(_Ep3Map1InvitationEasterEggLogic.TicketItemId, 1)
+
+		-- 입장 직전 실제 존을 기억해두고 Pause — 화면 밖(다른 존)에서 계속 공격이 새어들어오는 걸 막는다
+		-- (Ep2Map4GalleryPortalTrigger와 동일 이유).
+		local sourceZoneIndex = _MapManager.CurrentMapIndex
+		self._pausedSourceZoneIndex = sourceZoneIndex
+		_MapManager:SetMonstersPausedForZone(_MonsterSpawner:GetZoneEntity(sourceZoneIndex), sourceZoneIndex, true)
+		_MapManager.AwayOnSideMap = true
+
+		local groundY = _MonsterSpawner:GetGroundY(map, self.ArenaSpawnX)
+		local pos = Vector3(self.ArenaSpawnX, groundY, 0)
+		local hp = self:ComputeBossHp()
+		local entity = _SpawnService:SpawnByModelId(self.BonusBossModelId, "CoupleYetiBoss", pos, map)
+		if entity == nil then
+			log_error("Ep3Map2BonusBoss: SpawnByModelId failed")
+			return
+		end
+		---@type MonsterAI
+		local ai = entity:GetComponent("script.MonsterAI")
+		if ai ~= nil then
+			-- zoneIndex는 sourceZoneIndex를 그대로 넘긴다 — 위 주석 참고(스킬 타겟팅이 이 값으로 조회한다).
+			ai:InitializeAnimatedBonusBoss(sourceZoneIndex, self.ArenaSpawnX, self.ArenaSpawnX - self.WanderHalfRange,
+				self.ArenaSpawnX + self.WanderHalfRange, groundY, self.StandRUID, self.MoveRUID, self.Hit1RUID,
+				self.Die1RUID, self.HitSoundRUID, self.DieSoundRUID, hp)
+		end
+		self._bonusBoss = entity
+
+		self:MoveAllUsersToArena(self.ArenaMapFileName, pos, function()
+			_TimerService:SetTimerOnce(function()
+				if isvalid(self) then self:StartBossTimer() end
+			end, self.TimerStartDelay)
+		end)
+		log("Ep3Map2BonusBoss: entered via portal, hp=" .. math.floor(hp))
+	end
+
+	-- 화면 전환이 끝난 뒤 TimerStartDelay(1초)가 지나야 실제로 카운트다운을 시작한다(유저 지정 — 위 주석 참고).
+	@ExecSpace("ServerOnly")
+	method void StartBossTimer()
+		-- 유저 지정(2026-08-26): "30초를 유저가 인지하고 공격을 하길 원한다" — 그 전까진 완전히
+		-- 공격 불가였다가(_bonusBossCombatLocked, InitializeAnimatedBonusBoss에서 true로 걸어둠)
+		-- 여기서 실제로 타이머가 보이기 시작하는 시점에만 풀어준다.
+		if isvalid(self._bonusBoss) then
+			---@type MonsterAI
+			local ai = self._bonusBoss:GetComponent("script.MonsterAI")
+			if ai ~= nil then ai._bonusBossCombatLocked = false end
+		end
+		self.Active = true
+		self._remaining = self.Duration
+		self.RemainingSeconds = math.ceil(self.Duration)
+		_TimerService:SetTimerOnce(function()
+			if isvalid(self) then self:EndBonusStage() end
+		end, self.Duration)
+	end
+
+	-- 시간초과(SetTimerOnce) 또는 처치(MonsterAI.OnBonusBossDefeated) 양쪽에서 호출된다. Active 가드로
+	-- 중복 실행(둘 다 발동하는 경우)을 막는다 — 처치 시 Active를 여기서 바로 false로 내려버리므로,
+	-- 뒤이어 자연 만료 타이머가 또 호출돼도 그냥 무시된다.
+	@ExecSpace("ServerOnly")
+	method void EndBonusStage()
+		if not self.Active then return end
+		self.Active = false
+
+		if isvalid(self._bonusBoss) then
+			---@type MonsterAI
+			local ai = self._bonusBoss:GetComponent("script.MonsterAI")
+			if ai ~= nil then
+				ai:PlayDeathAnimation(self.Die1RUID, self.DieAnimDuration)
+				ai.Entity:Destroy(self.DieAnimDuration + 0.2)
+			else
+				self._bonusBoss:Destroy()
+			end
+		end
+		self._bonusBoss = nil
+		log("Ep3Map2BonusBoss: stage ended")
+
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) then return end
+			-- 아레나 입장 때 Pause해둔 원래 존을 여기서 되돌린다 — 랜덤 존으로 옮겨가기 직전(아레나에
+			-- 아직 있는 동안은 계속 Pause 유지해야 다른 존 공격이 안 새어들어온다).
+			if self._pausedSourceZoneIndex >= 0 then
+				_MapManager:SetMonstersPausedForZone(_MonsterSpawner:GetZoneEntity(self._pausedSourceZoneIndex), self._pausedSourceZoneIndex, false)
+				_MapManager.AwayOnSideMap = false
+				self._pausedSourceZoneIndex = -1
+			end
+			self.InArena = false
+			_UIToast:ShowMessage(self.LeavingMessage)
+			local randomZone = self.ZoneMinIndex + _UtilLogic:RandomIntegerRange(0, self.ZoneMaxIndex - self.ZoneMinIndex)
+			self:MoveAllUsersToZone(randomZone, nil)
+		end, self.DieAnimDuration)
+	end
+
+	-- 커버→(중간 동작)→리빌 공통 래퍼. Map24TreasureChestLogic.OnReturnPortalTouched와 동일한 연출.
+	@ExecSpace("ServerOnly")
+	method void PlayTransition(any duringCoverFn, any onCompleteFn)
+		_MapTransitionLogic:PlayCover("left")
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) then return end
+			duringCoverFn()
+			_TimerService:SetTimerOnce(function()
+				if isvalid(self) then _MapTransitionLogic:PlayReveal("left") end
+				if onCompleteFn ~= nil then onCompleteFn() end
+			end, _MapTransitionLogic.CameraSettleDelay)
+		end, _MapTransitionLogic.CoverDuration)
+	end
+
+	-- 실제 ZoneInfo 존(99~108 등)으로 이동 — 종료 후 랜덤 귀환 전용.
+	@ExecSpace("ServerOnly")
+	method void MoveAllUsersToZone(integer targetIndex, any onComplete)
+		local mapName = _MapManager:GetMapName(targetIndex)
+		local spawnPos = _MapManager:GetSpawnPositionForIndex(targetIndex)
+		self:PlayTransition(function()
+			for _, userEntity in pairs(_UserService.UserEntities) do
+				_TeleportService:TeleportToMapPosition(userEntity, spawnPos, mapName)
+			end
+			_MapManager.CurrentMapIndex = targetIndex
+			_MapManager:SetMonstersPaused(_MonsterSpawner:GetZoneEntity(targetIndex), false)
+			_MapMoveUI:NotifyMapChanged(targetIndex)
+		end, onComplete)
+	end
+
+	-- ZoneInfo 밖의 고정 아레나 맵으로 이동 — 보너스보스 입장 전용. CurrentMapIndex는 건드리지 않는다
+	-- (그래야 스킬 타겟팅이 입장 직전 존 레지스트리를 그대로 조회한다 — 위 헤더 주석 참고).
+	@ExecSpace("ServerOnly")
+	method void MoveAllUsersToArena(string mapFileName, Vector3 pos, any onComplete)
+		self:PlayTransition(function()
+			for _, userEntity in pairs(_UserService.UserEntities) do
+				_TeleportService:TeleportToMapPosition(userEntity, pos, mapFileName)
+			end
+		end, onComplete)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnSyncProperty(string name, any value)
+		if name == "Active" then
+			self:UpdateBoardVisibility()
+		elseif name == "RemainingSeconds" then
+			self:UpdateTimerText()
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void UpdateBoardVisibility()
+		local board = _EntityService:GetEntityByPath(self.BoardEntityPath)
+		if board ~= nil then board.Enable = self.Active end
+		if self.Active then self:UpdateTimerText() end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void UpdateTimerText()
+		local textEntity = _EntityService:GetEntityByPath(self.TimerTextPath)
+		if textEntity == nil then return end
+		local renderer = textEntity.TextGUIRendererComponent
+		if renderer == nil then return end
+		local m = math.floor(self.RemainingSeconds / 60)
+		local s = self.RemainingSeconds % 60
+		renderer.Text = string.format("%02d:%02d", m, s)
+	end
+
+	-- GameManager.RestartGame()이 호출 — 새 런에서는 포탈을 다시 1회 쓸 수 있게 한다. 재시작이 보너스
+	-- 스테이지 도중 일어나도 Pause해둔 존이 영원히 묶여있지 않도록 여기서도 되돌린다.
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		if isvalid(self._bonusBoss) then
+			self._bonusBoss:Destroy()
+		end
+		self._bonusBoss = nil
+		self.Active = false
+		self.RemainingSeconds = 0
+		self._remaining = 0
+		self.PortalUsed = false
+		self.InArena = false
+		if self._pausedSourceZoneIndex >= 0 then
+			_MapManager:SetMonstersPausedForZone(_MonsterSpawner:GetZoneEntity(self._pausedSourceZoneIndex), self._pausedSourceZoneIndex, false)
+			_MapManager.AwayOnSideMap = false
+			self._pausedSourceZoneIndex = -1
+		end
+	end
+
+end

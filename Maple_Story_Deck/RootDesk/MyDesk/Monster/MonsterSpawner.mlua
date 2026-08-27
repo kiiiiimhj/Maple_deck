@@ -216,6 +216,18 @@ script MonsterSpawner extends Logic
 	property Entity _bonusBoss = nil
 	property boolean _bonusBossActive = false
 
+	-- 유저 지정(2026-08-26): "에피1 보너스보스도 유지시간 타이머 있으면 좋을듯" — ep3_map2
+	-- BonusBossBoard와 동일한 UI를 재사용(별도 엔티티 Map10BonusBossBoard로 복제). 스폰 즉시는
+	-- MonsterAI._bonusBossCombatLocked=true라 공격이 전혀 안 먹히고(InitializeBonusBoss가 건다),
+	-- BonusTimerStartDelay(1초) 뒤에야 실제로 타이머를 띄우고 공격을 풀어준다 — "30초를 유저가
+	-- 인지하고 공격하길 원한다"는 지정과 동일한 패턴을 여기도 적용.
+	property number BonusTimerStartDelay = 1.0
+	@Sync property boolean BonusBossTimerActive = false
+	@Sync property integer BonusBossRemainingSeconds = 0
+	property number _bonusBossRemaining = 0
+	property string BonusBossBoardPath = "/ui/DefaultGroup/Map10BonusBossBoard"
+	property string BonusBossTimerTextPath = "/ui/DefaultGroup/Map10BonusBossBoard/Inner/TimerText"
+
 	@ExecSpace("ServerOnly")
 	method void OnBeginPlay()
 		self._timer = self.EarlyPhaseSpawnInterval
@@ -267,6 +279,14 @@ script MonsterSpawner extends Logic
 		-- _running 게이트보다 먼저 처리한다 — 예전 동기 스폰은 _running과 무관하게(ActivateMap이 불리는
 		-- 즉시) 바로 몬스터가 태어났으므로, 큐 처리도 같은 타이밍을 최대한 그대로 유지한다.
 		self:ProcessSpawnQueueTick()
+		if self.BonusBossTimerActive then
+			self._bonusBossRemaining = self._bonusBossRemaining - delta
+			if self._bonusBossRemaining < 0 then self._bonusBossRemaining = 0 end
+			local secs = math.ceil(self._bonusBossRemaining)
+			if secs ~= self.BonusBossRemainingSeconds then
+				self.BonusBossRemainingSeconds = secs
+			end
+		end
 		if not self._running then return end
 		if self.MonsterModelId == "" then return end
 
@@ -1419,8 +1439,27 @@ script MonsterSpawner extends Logic
 		-- 보스 지속시간이 끝난 뒤 평소 웨이브가 곧바로 이어지도록 활성 맵으로 표시해둔다
 		if self._activeMaps == nil then self._activeMaps = {} end
 		self._activeMaps[10] = true
-		log("MonsterSpawner: bonus boss spawned on map10")
+		log("MonsterSpawner: bonus boss spawned on map10 (combat locked for " .. self.BonusTimerStartDelay .. "s)")
 
+		-- InitializeBonusBoss가 이미 MonsterAI._bonusBossCombatLocked=true로 걸어뒀다 — 여기서는
+		-- BonusTimerStartDelay(1초) 뒤에 실제로 타이머를 띄우면서 풀어준다(유저 지정: "30초를 유저가
+		-- 인지하고 공격을 하길 원한다").
+		_TimerService:SetTimerOnce(function()
+			if isvalid(self) then self:StartMap10BonusTimer() end
+		end, self.BonusTimerStartDelay)
+	end
+
+	-- 화면 인지 유예(BonusTimerStartDelay) 뒤 실제로 타이머를 띄우고 공격을 풀어준다.
+	@ExecSpace("ServerOnly")
+	method void StartMap10BonusTimer()
+		if isvalid(self._bonusBoss) then
+			---@type MonsterAI
+			local ai = self._bonusBoss:GetComponent("script.MonsterAI")
+			if ai ~= nil then ai._bonusBossCombatLocked = false end
+		end
+		self.BonusBossTimerActive = true
+		self._bonusBossRemaining = self.BonusBossDuration
+		self.BonusBossRemainingSeconds = math.ceil(self.BonusBossDuration)
 		_TimerService:SetTimerOnce(function()
 			if isvalid(self) then self:EndBonusStage() end
 		end, self.BonusBossDuration)
@@ -1436,7 +1475,37 @@ script MonsterSpawner extends Logic
 		end
 		self._bonusBoss = nil
 		self._bonusBossActive = false
+		self.BonusBossTimerActive = false
+		self.BonusBossRemainingSeconds = 0
+		self._bonusBossRemaining = 0
 		log("MonsterSpawner: bonus stage ended on map10")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnSyncProperty(string name, any value)
+		if name == "BonusBossTimerActive" then
+			self:UpdateBonusBossBoardVisibility()
+		elseif name == "BonusBossRemainingSeconds" then
+			self:UpdateBonusBossTimerText()
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void UpdateBonusBossBoardVisibility()
+		local board = _EntityService:GetEntityByPath(self.BonusBossBoardPath)
+		if board ~= nil then board.Enable = self.BonusBossTimerActive end
+		if self.BonusBossTimerActive then self:UpdateBonusBossTimerText() end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void UpdateBonusBossTimerText()
+		local textEntity = _EntityService:GetEntityByPath(self.BonusBossTimerTextPath)
+		if textEntity == nil then return end
+		local renderer = textEntity.TextGUIRendererComponent
+		if renderer == nil then return end
+		local m = math.floor(self.BonusBossRemainingSeconds / 60)
+		local s = self.BonusBossRemainingSeconds % 60
+		renderer.Text = string.format("%02d:%02d", m, s)
 	end
 
 	-- 스폰 위치를 정한다. 맵4~6은 발판 밴드 테이블에서 폭에 비례한 확률로 하나 골라 그 위에 스폰하고,

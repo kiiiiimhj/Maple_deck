@@ -1,0 +1,219 @@
+@Logic
+script Ep3Map2HiddenGiftLogic extends Logic
+
+	-- 에피소드3 map2 zone5 이스터에그 — 트리 앞에 쌓인 나무 상자 3개(object-15_115/116/117)가
+	-- 선물(object-15_146, OrderInLayer=-1이라 상자 뒤에 완전히 가려짐)을 가리고 있다. 상자를 각각
+	-- 드래그해서 아무 곳에나 놓으면(목표 좌표 판정 없음) 그 자리에서 바로 아래 발판까지 회전 없이
+	-- 쭉 떨어져 착지한다(Ep3Map2CrateDragTrigger). 3개를 전부 옮기면 그제서야 선물을 드래그할 수 있게
+	-- 되고(Ep3Map2HiddenGiftTrigger), 목표 좌표(TargetX/TargetY) 근처로 직접 끌어다 놓아야(유저 지정,
+	-- 2026-08-26: "146이 이동되야 스킬나오는거" — Ep2Map2SkillChestLogic과 동일한 드래그-투-타겟 방식)
+	-- 슬롯 스킬 1개(10% 확률로 2개, 그중 다시 1% 확률로 3개)를 지급한다.
+	@Sync property boolean Triggered = false
+	@Sync property integer BlockersMovedCount = 0
+
+	property string TreasureObjectPath = "/maps/ep3_map2/object-15_146"
+	property string Blocker1Path = "/maps/ep3_map2/object-15_115"
+	property string Blocker2Path = "/maps/ep3_map2/object-15_116"
+	property string Blocker3Path = "/maps/ep3_map2/object-15_117"
+	property number FallDuration = 0.35
+
+	-- 유저 지정 목표 좌표 — 선물을 이 근처로 드래그해서 놓아야 보상이 지급된다.
+	property number TargetX = 61.29166
+	property number TargetY = 2.413641
+	property number PlacementTolerance = 0.3
+
+	property any _blocker1StartPos = nil
+	property any _blocker2StartPos = nil
+	property any _blocker3StartPos = nil
+	property boolean _blocker1Moved = false
+	property boolean _blocker2Moved = false
+	property boolean _blocker3Moved = false
+	property any _treasureStartPos = nil
+
+	-- 월드 시작 시 3개 상자 + 선물의 원래 배치 좌표를 캐싱해둔다(ResetForNewRun에서 재사용).
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		self:CacheStart(self.Blocker1Path, 1)
+		self:CacheStart(self.Blocker2Path, 2)
+		self:CacheStart(self.Blocker3Path, 3)
+		local treasure = _EntityService:GetEntityByPath(self.TreasureObjectPath)
+		if treasure ~= nil then
+			self._treasureStartPos = treasure.TransformComponent.Position
+		else
+			log_error("Ep3Map2HiddenGift: treasure not found at " .. self.TreasureObjectPath)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void CacheStart(string path, integer idx)
+		local e = _EntityService:GetEntityByPath(path)
+		if e == nil then
+			log_error("Ep3Map2HiddenGift: blocker not found at " .. path)
+			return
+		end
+		local pos = e.TransformComponent.Position
+		if idx == 1 then
+			self._blocker1StartPos = pos
+		elseif idx == 2 then
+			self._blocker2StartPos = pos
+		else
+			self._blocker3StartPos = pos
+		end
+	end
+
+	-- Ep3Map2CrateDragTrigger.RequestDrop()이 상자를 드래그해서 놓을 때마다(blockerIdx=1~3) 호출한다.
+	-- 목표 좌표 판정 없이, 놓인 지점(dropX)에서 바로 아래 발판까지 회전 없이 수직으로만 떨어뜨린다.
+	@ExecSpace("ServerOnly")
+	method void OnBlockerDropped(integer blockerIdx, Entity blocker, number dropX, number dropY)
+		if not isvalid(blocker) then return end
+		local map = blocker.CurrentMap
+		local fall = self:ComputeDropFallAt(map, dropX, dropY)
+		local groundY = fall.y
+		local startY = dropY
+		local z = blocker.TransformComponent.Position.z
+		log("Ep3Map2HiddenGift: blocker " .. blockerIdx .. " dropped at (" .. dropX .. "," .. dropY .. "), falling to groundY=" .. groundY)
+		_TweenLogic:PlayTween(0.0, 1.0, self.FallDuration, EaseType.QuadEaseIn, function(t)
+			if not isvalid(blocker) then return end
+			local y = startY + (groundY - startY) * t
+			blocker.TransformComponent.Position = Vector3(dropX, y, z)
+		end)
+		self:MarkBlockerMoved(blockerIdx)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void MarkBlockerMoved(integer idx)
+		if idx == 1 and not self._blocker1Moved then
+			self._blocker1Moved = true
+			self.BlockersMovedCount = self.BlockersMovedCount + 1
+		elseif idx == 2 and not self._blocker2Moved then
+			self._blocker2Moved = true
+			self.BlockersMovedCount = self.BlockersMovedCount + 1
+		elseif idx == 3 and not self._blocker3Moved then
+			self._blocker3Moved = true
+			self.BlockersMovedCount = self.BlockersMovedCount + 1
+		end
+		if self.BlockersMovedCount >= 3 then
+			log("Ep3Map2HiddenGift: all 3 crates moved, treasure revealed")
+		end
+	end
+
+	-- Ep3Map2HiddenGiftTrigger.RequestCheckPlacement()이 선물을 드래그해서 놓을 때마다 호출한다.
+	-- 상자 3개가 전부 옮겨지기 전에는(클라이언트에서도 드래그 자체를 막지만, 서버에서도 한 번 더
+	-- 가드) 무시하고, 목표 좌표 근처가 아니면 놓친 것으로 처리한다.
+	@ExecSpace("ServerOnly")
+	method void CheckPlacement(Entity item, number x, number y)
+		if self.Triggered then return end
+		if self.BlockersMovedCount < 3 then
+			log("Ep3Map2HiddenGift: still blocked by crates, ignoring drag")
+			return
+		end
+		if not isvalid(item) then return end
+
+		local dx = x - self.TargetX
+		local dy = y - self.TargetY
+		local dist = math.sqrt(dx * dx + dy * dy)
+		if dist > self.PlacementTolerance then
+			log("Ep3Map2HiddenGift: placement missed (dist=" .. dist .. ")")
+			return
+		end
+
+		self.Triggered = true
+		item.TransformComponent.Position = Vector3(self.TargetX, self.TargetY, item.TransformComponent.Position.z)
+		log("Ep3Map2HiddenGift: placed correctly, granting reward")
+		self:GrantReward()
+	end
+
+	-- 유저 지정: 기본 1개, 10% 확률로 2개, 그 2개가 나온 경우에 한해 다시 1% 확률로 3개까지.
+	@ExecSpace("ServerOnly")
+	method integer RollDropCount()
+		local count = 1
+		if _UtilLogic:RandomDouble() < 0.10 then
+			count = 2
+			if _UtilLogic:RandomDouble() < 0.01 then
+				count = 3
+			end
+		end
+		return count
+	end
+
+	@ExecSpace("ServerOnly")
+	method void GrantReward()
+		local treasure = _EntityService:GetEntityByPath(self.TreasureObjectPath)
+		local worldPos = Vector3(0, 0, 0)
+		local fallHeight = 0
+		local groundWorldY = 0
+		if treasure ~= nil then
+			worldPos = treasure.TransformComponent.WorldPosition
+			local fall = self:ComputeDropFallAt(treasure.CurrentMap, worldPos.x, worldPos.y)
+			fallHeight = fall.x
+			groundWorldY = fall.y
+		end
+
+		local pool = _CardManager:BuildActiveUpgradePool()
+		if #pool > 0 then
+			local count = self:RollDropCount()
+			_CardManager:GrantCardUpgradesFromPool(pool, worldPos, fallHeight, groundWorldY, 1.0, count, 0)
+			log("Ep3Map2HiddenGift: granted " .. count .. " card upgrade(s)")
+		else
+			_GameManager:ApplyPotionDrop(1, worldPos, fallHeight, groundWorldY, 1.0)
+			log("Ep3Map2HiddenGift: no upgradeable skill, granted potion instead")
+		end
+		-- 선물(옮겨진 오브젝트 자신)은 그 자리에 그대로 두고 계속 보이게 둔다(다시 드래그는 Triggered
+		-- 플래그로 막음 — Ep2Map2SkillChestLogic과 동일한 정책).
+	end
+
+	-- (worldX, worldY) 바로 아래 가장 가까운 발판까지의 fallHeight(픽셀 근사)/groundWorldY를 계산한다
+	-- (이번 세션의 다른 공중드랍 로직들과 동일한 레이캐스트 패턴).
+	@ExecSpace("ServerOnly")
+	method Vector3 ComputeDropFallAt(Entity map, number worldX, number worldY)
+		local fallHeight = 0
+		local groundWorldY = worldY
+		if map ~= nil then
+			---@type FootholdComponent
+			local foothold = map:GetComponent("FootholdComponent")
+			if foothold ~= nil then
+				local hits = foothold:RaycastAll(Vector2(worldX, worldY), Vector2(0, -1), 50)
+				local groundY = nil
+				local bestDist = nil
+				for i = 1, #hits do
+					local h = hits[i]
+					local y = h:GetYByX(worldX)
+					local dist = worldY - y
+					if bestDist == nil or dist < bestDist then
+						bestDist = dist
+						groundY = y
+					end
+				end
+				if groundY ~= nil then
+					groundWorldY = groundY
+					if worldY > groundY then
+						fallHeight = (worldY - groundY) * 100
+					end
+				end
+			end
+		end
+		return Vector3(fallHeight, groundWorldY, 0)
+	end
+
+	method void ResetBlocker(string path, any startPos)
+		local e = _EntityService:GetEntityByPath(path)
+		if e ~= nil and isvalid(e) and startPos ~= nil then
+			e.TransformComponent.Position = startPos
+		end
+	end
+
+	-- GameManager.RestartGame()이 호출 — 새 런에서는 상자를 다시 옮겨 재도전할 수 있게 한다.
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		self.Triggered = false
+		self.BlockersMovedCount = 0
+		self._blocker1Moved = false
+		self._blocker2Moved = false
+		self._blocker3Moved = false
+		self:ResetBlocker(self.Blocker1Path, self._blocker1StartPos)
+		self:ResetBlocker(self.Blocker2Path, self._blocker2StartPos)
+		self:ResetBlocker(self.Blocker3Path, self._blocker3StartPos)
+		self:ResetBlocker(self.TreasureObjectPath, self._treasureStartPos)
+	end
+
+end

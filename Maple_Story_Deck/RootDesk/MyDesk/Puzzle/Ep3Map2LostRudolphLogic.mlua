@@ -1,0 +1,191 @@
+@Logic
+script Ep3Map2LostRudolphLogic extends Logic
+
+	-- 에피소드3 map2 존10(mapIndex108) 이스터에그 — "길잃은 루돌프"(터치로만 상호작용하는 NPC성 몬스터,
+	-- 일반 공격 완전 무시)가 지상 발판을 좌우로 계속 배회하다가 4~6초 간격으로 1초 동안 멈춰 선다(stand).
+	-- 서 있을 때 터치하면 성공(die1 재생 후 사라짐, 보상 없음 — 유저 지정: "그냥 사라지면 됨"). 이동
+	-- 중에 터치하면 실패 — "불량 루돌프"(원거리 몬스터, 유저 정정: "공중 유닛 아니다" — 지상형으로
+	-- 초기화, MonsterAI.InitializeGroundAlienInvader 참고) 2마리를 같은 존(zone10)에 소환한다. 불량
+	-- 루돌프는 처치해도 골드는 정상 지급되지만(유저 지정) EXP/잡템/장비/스킬 드롭은 전부 없다
+	-- (MonsterAI._isBadRudolph, MonsterAI.Die() 참고). 동시 생존 최대 10마리(유저 지정) — 이미 10마리가
+	-- 살아있으면 실패 터치를 더 해도 추가 소환되지 않는다. 연타 방지로 소환 직후 0.5초간 재소환 잠금.
+	-- 유저 정정(2026-08-26): 월드 시작 시 자동 등장이 아니라, object-15_133(Ep3Map2SkillCoverLogic의
+	-- 가리개 보상 오브젝트)을 눌러야 그때 처음 등장한다 — Ep3Map2SkillCoverLogic.OnRewardClicked()가
+	-- SpawnLostRudolph()를 호출한다(그쪽의 Triggered 플래그가 "한 런에 한 번만"을 이미 보장).
+	property integer SpawnZoneIndex = 108
+
+	-- 유저 지정(2026-08-26): 등장/실패/성공마다 토스트 메시지를 띄운다. 스킬/포션 보상 관련 메시지는
+	-- 전부 없앴다("스킬을 주는데 메세지 뜨잖아 그거 필요없어") — 이 세 메시지만 남긴다.
+	property string AppearMessage = "길잃은 루돌프가 등장했다! 터치해보자!"
+	property string MissedTouchMessage = "앗..! 멈춰있을 때 다시 시도해 보자!"
+	property string CaughtMessage = "산타에게 말을 걸어보자!"
+	-- Ep3Map2SkillCoverLogic이 "산타"를 다시 클릭해도 되는지 판단하는 데 쓴다(루돌프를 잡았는지 여부)
+	@Sync property boolean Caught = false
+
+	-- 존10(zone10, spawnX=139.5) 발판 재실측(2026-08-26, 유저 리포트 "공중발판에 스폰되는데 너무 거기만
+	-- 맴돔") — 기존 GroundY=0.56은 사실 지면이 아니라 공중 다리(bridge) 발판이었다. 맵 루트
+	-- FootholdComponent에서 x=138.6 지점 레이캐스트로 진짜 지면(y=-1.239)을 재확인(RaycastAll 2건:
+	-- -1.239=진짜 바닥, 0.561=공중 다리). 진짜 바닥의 GetContainingRunBounds는 xMin=63.85~xMax=144.85로
+	-- 여러 존에 걸친 물리 파일 전체 폭이라, 존10 화면 범위(±6, platform.md §5 PC 가시범위 절반과 동일)로
+	-- 좁혀서 옆 존까지 침범하지 않게 클램프했다.
+	property number LocalSpawnX = 0.0
+	property number LocalWanderMinX = -6.0
+	property number LocalWanderMaxX = 5.35
+	property number GroundY = -1.239
+
+	-- 리소스팩 "길잃은 루돌프"(유저 지정 RUID)
+	property string LostRudolphStandRUID = "1358a4a7597a477297139bec53910a32"
+	property string LostRudolphMoveRUID = "981e8a454b22424b8f0616ef7689a328"
+	property string LostRudolphDieRUID = "f51f502e4f894ea388f094bda05db7f4"
+	property number LostRudolphDieDuration = 0.6
+	property string LostRudolphDieSoundRUID = "7304bb67bf444207903f88deaa8cdf98"
+
+	-- 리소스팩 "불량 루돌프"(유저 지정 RUID) — 원거리 공격(attack1), skill1은 이번엔 쓰지 않는다(유저가
+	-- "원거리 몬스터"라고만 지정, 기본 공격 하나로 충분).
+	property string BadRudolphStandRUID = "a6ed6d215c3c4342904dc9a309b7420d"
+	property string BadRudolphMoveRUID = "aca50e75ea174ba7b2b89ca3bca605ad"
+	property string BadRudolphHitRUID = "6e34fd69361f4145b752232dbd4267af"
+	property string BadRudolphDieRUID = "96881e7feb9a42c9bbb54660302451a1"
+	property number BadRudolphDieDuration = 0.8
+	property string BadRudolphAttackRUID = "b0280a7f764b40d79fa03282a200160f"
+	property string BadRudolphHitSoundRUID = "ac62c4eb61e94298a445b94fc50c95e2"
+	property string BadRudolphDieSoundRUID = "847d79eddaf74e61a4666c5595ef9ac7"
+
+	property integer MaxAliveBadRudolph = 10
+	property integer BadRudolphSpawnCount = 2
+	property number BadRudolphSpawnSpread = 0.6
+	property number MissedTouchCooldown = 0.5
+	property boolean _touchLocked = false
+
+	property any _lostRudolph = nil -- 살아있는(추정) 길잃은 루돌프의 script.MonsterAI 컴포넌트
+	property table _aliveBadRudolph = {} -- 살아있는(추정) 불량 루돌프들의 script.MonsterAI 컴포넌트 목록
+
+	-- Ep3Map2SkillCoverLogic.OnRewardClicked()가 호출(object-15_133을 눌러 보상을 받는 시점) — 이미
+	-- 살아있는 길잃은 루돌프가 있으면(방어적 가드) 다시 스폰하지 않는다.
+	@ExecSpace("ServerOnly")
+	method void SpawnLostRudolph()
+		if self._lostRudolph ~= nil and isvalid(self._lostRudolph) and isvalid(self._lostRudolph.Entity) then
+			return
+		end
+		local map = _MonsterSpawner:GetZoneEntity(self.SpawnZoneIndex)
+		if map == nil then
+			log_error("Ep3Map2LostRudolph: zone entity not found for zone " .. self.SpawnZoneIndex)
+			return
+		end
+		local localPos = Vector3(self.LocalSpawnX, self.GroundY, 0)
+		local entity = _SpawnService:SpawnByModelId("lostrudolph", "LostRudolph", localPos, map)
+		if entity == nil then
+			log_error("Ep3Map2LostRudolph: SpawnByModelId failed")
+			return
+		end
+		---@type MonsterAI
+		local ai = entity:GetComponent("script.MonsterAI")
+		if ai ~= nil then
+			ai:InitializeLostRudolph(self.SpawnZoneIndex, self.LostRudolphStandRUID, self.LostRudolphMoveRUID,
+				self.LostRudolphDieRUID, self.LostRudolphDieDuration, self.LostRudolphDieSoundRUID,
+				self.LocalSpawnX, self.LocalWanderMinX, self.LocalWanderMaxX, self.GroundY)
+			self._lostRudolph = ai
+		end
+		log("Ep3Map2LostRudolph: lost rudolph spawned in zone " .. self.SpawnZoneIndex)
+		_UIToast:ShowMessage(self.AppearMessage)
+	end
+
+	-- MonsterAI.OnLostRudolphTouched()가 호출(서 있을 때 성공적으로 터치됨) — 보상은 없지만(유저 지정),
+	-- Caught=true로 켜서 Ep3Map2SkillCoverLogic이 산타의 두 번째 클릭(썰매 출발)을 받아줄 수 있게 한다.
+	@ExecSpace("ServerOnly")
+	method void OnCaught()
+		log("Ep3Map2LostRudolph: caught successfully, no reward (유저 지정)")
+		self._lostRudolph = nil
+		self.Caught = true
+		_UIToast:ShowMessage(self.CaughtMessage)
+	end
+
+	-- MonsterAI.OnLostRudolphTouched()가 호출(이동 중에 잘못 터치됨) — 연타 방지 쿨다운을 건 뒤
+	-- 불량 루돌프를 소환한다(동시 생존 상한 내에서만).
+	@ExecSpace("ServerOnly")
+	method void OnMissedTouch(Vector3 worldPos, integer zoneIndex)
+		if self._touchLocked then return end
+		self._touchLocked = true
+		_TimerService:SetTimerOnce(function()
+			if isvalid(self) then self._touchLocked = false end
+		end, self.MissedTouchCooldown)
+		_UIToast:ShowMessage(self.MissedTouchMessage)
+		self:SpawnBadRudolphPair(worldPos, zoneIndex)
+	end
+
+	method integer CountAliveBadRudolph()
+		local count = 0
+		local alive = {}
+		for i = 1, #self._aliveBadRudolph do
+			---@type MonsterAI
+			local ai = self._aliveBadRudolph[i]
+			if isvalid(ai) and isvalid(ai.Entity) then
+				count = count + 1
+				table.insert(alive, ai)
+			end
+		end
+		self._aliveBadRudolph = alive
+		return count
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SpawnBadRudolphPair(Vector3 worldPos, integer zoneIndex)
+		local map = _MonsterSpawner:GetZoneEntity(zoneIndex)
+		if map == nil then
+			log_error("Ep3Map2LostRudolph: zone entity not found for zone " .. zoneIndex)
+			return
+		end
+		local slotsLeft = self.MaxAliveBadRudolph - self:CountAliveBadRudolph()
+		if slotsLeft <= 0 then
+			log("Ep3Map2LostRudolph: missed touch, but bad rudolph cap reached (" .. self.MaxAliveBadRudolph .. ")")
+			return
+		end
+		local spawnCount = math.min(self.BadRudolphSpawnCount, slotsLeft)
+		local hp = _GameManager:GetTimeStepHp(_GameManager:GetTimeStep())
+		local speed = _GameManager:GetWaveApproachSpeed(_GameManager.Wave)
+		-- 지상형이라 존10 배회 범위(LocalWanderMinX~MaxX) 밖으로 스폰되면 안 된다 — 실패 터치 지점(worldPos)
+		-- 기준으로 스프레드를 주되, 존 경계를 벗어나지 않게 로컬 좌표에서 클램프한다.
+		local offsetX = _MonsterSpawner:GetZoneOffsetX(zoneIndex)
+		local localTouchX = worldPos.x - offsetX
+		for i = 1, spawnCount do
+			local jitter = (_UtilLogic:RandomDouble() * 2 - 1) * self.BadRudolphSpawnSpread
+			local localX = math.max(self.LocalWanderMinX, math.min(self.LocalWanderMaxX, localTouchX + jitter))
+			local localPos = Vector3(localX, self.GroundY, 0)
+			local entity = _SpawnService:SpawnByModelId(_MonsterSpawner.MonsterModelId, "BadRudolph", localPos, map)
+			if entity == nil then
+				log_error("Ep3Map2LostRudolph: BadRudolph spawn failed")
+			else
+				---@type MonsterAI
+				local ai = entity:GetComponent("script.MonsterAI")
+				if ai ~= nil then
+					ai:InitializeGroundAlienInvader(zoneIndex, hp, speed, self.BadRudolphStandRUID, self.BadRudolphMoveRUID, self.BadRudolphHitRUID, self.BadRudolphDieRUID, self.BadRudolphDieDuration, self.BadRudolphAttackRUID, localX, self.GroundY)
+					ai:SetIsBadRudolph(true)
+					ai._hitSoundRUID = self.BadRudolphHitSoundRUID
+					ai._dieSoundRUID = self.BadRudolphDieSoundRUID
+					table.insert(self._aliveBadRudolph, ai)
+				end
+			end
+		end
+		log("Ep3Map2LostRudolph: missed touch, spawned " .. spawnCount .. " bad rudolph(s), alive=" .. self:CountAliveBadRudolph())
+	end
+
+	-- GameManager.RestartGame()이 호출 — 새 런에서는 남은 불량 루돌프/길잃은 루돌프를 정리만 한다.
+	-- 다시 스폰하지 않는다 — object-15_127→133을 다시 눌러야(Ep3Map2SkillCoverLogic.ResetForNewRun이
+	-- Triggered를 풀어주므로 재도전 가능) SpawnLostRudolph()가 다시 호출된다.
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		self._touchLocked = false
+		self.Caught = false
+		if self._lostRudolph ~= nil and isvalid(self._lostRudolph) and isvalid(self._lostRudolph.Entity) then
+			self._lostRudolph.Entity:Destroy(0)
+		end
+		self._lostRudolph = nil
+		for i = 1, #self._aliveBadRudolph do
+			---@type MonsterAI
+			local ai = self._aliveBadRudolph[i]
+			if isvalid(ai) and isvalid(ai.Entity) then ai.Entity:Destroy(0) end
+		end
+		self._aliveBadRudolph = {}
+	end
+
+end

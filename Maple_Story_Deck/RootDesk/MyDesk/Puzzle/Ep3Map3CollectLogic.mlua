@@ -1,0 +1,213 @@
+@Logic
+script Ep3Map3CollectLogic extends Logic
+
+	-- 에피소드3 map3 이스터에그: object-15_131(Ep3Map3CollectTrigger가 붙은 오브젝트) — Ep3Map2CollectLogic과
+	-- 동일한 수집 패턴이지만 유저 지정으로 목표가 2종류다: 에피3 map3(존1~10 = mapIndex109~118) 몬스터
+	-- 전용 잡템 4종(werewolf_fang/lycan_claw/snowman_crystal/flyeye_eyeball) 중 서로 다른 2종을
+	-- 무작위로 고정하고, 각각 25개씩(유저 지정 "잡템 25개씩 2종류 랜덤") 모아와야 한다.
+	-- 버그 수정(2026-08-26, 유저 지적: "2개 얹혀줘야 내가하지 퀘스트 템 2개랑 xN 2개 있어야지") —
+	-- 처음엔 공용 GiftBubble.model(아이콘/텍스트 슬롯 1개)을 그대로 써서 한 번에 목표 하나씩만
+	-- 순차로 보여줬는데, 유저가 두 목표를 동시에(아이콘 2개+진행수 2개) 보고 싶어했다. 공용 모델을
+	-- 직접 고치면 이걸 쓰는 다른 모든 이스터에그(GiftNpc/Ep3Map2Collect/SkillChest/HiddenGift)에
+	-- 영향이 가므로, `GiftBubble.model`을 복제해 아이콘/텍스트 슬롯 2쌍(Icon1/Count1, Icon2/Count2)을
+	-- 가진 전용 모델 `DualGiftBubble.model`(modelId "dualgiftbubble")을 새로 만들어 이 이스터에그만
+	-- 쓰게 했다. 배경 버블 Scale.x도 0.488→0.62로 살짝 넓혀서 두 쌍이 나란히 들어갈 여유를 줬다.
+	-- 보상은 Ep3Map2CollectLogic과 동일 정책(흰 포션 확정 + 보유 슬롯 스킬 1개, 강화할 스킬 없으면
+	-- 포션만) — 유저가 보상을 따로 지정하지 않아서 가장 가까운 선례를 그대로 재사용함(다르게 원하면
+	-- 알려줄 것).
+	-- 말풍선 위치는 유저가 직접 Maker Hierarchy에서 CollectBubblePreview 엔티티(DualGiftBubble.model
+	-- 그대로 배치한 순수 위치 참고용, 게임 로직과 연결 안 됨)를 드래그해 잡을 수 있게 배치해뒀다.
+	-- 유저가 원하는 자리로 옮긴 뒤 그 결과 좌표를 BubbleXOffset/BubbleYOffset(오브젝트 월드좌표
+	-- 기준 상대 오프셋)에 반영하면 된다 — Icon1/Icon2/Count1/Count2 개별 위치를 더 조정하고 싶으면
+	-- DualGiftBubble.model 자체를 고치면 된다(요청하면 바로 반영 가능).
+	@Sync property boolean Redeemed = false
+	@Sync property string PickedItemId1 = ""
+	@Sync property string PickedItemId2 = ""
+
+	property integer GiftAmount = 25
+	property number BubbleShowDuration = 2.0
+	property string BubbleModelId = "dualgiftbubble"
+	-- 유저가 Maker에서 CollectBubblePreview를 직접 옮긴 결과 반영(2026-08-26, 오브젝트 월드좌표
+	-- 기준 상대 오프셋 — object-15_131 Position(46.20799, -0.666326463) 대비 프리뷰 최종 위치
+	-- (45.2118034, 0.2948975)의 차이)
+	property number BubbleXOffset = -0.9961866
+	property number BubbleYOffset = 0.961223963
+	property string TextFont = "Maple"
+	property Color TextOutlineColor = Color(0, 0, 0, 1)
+	property number TextOutlineWidth = 0.4188931
+	property number TextFaceDilate = 0.3590512
+	property Color TextFontColor = Color(1, 1, 1, 1)
+	property number TextFontSize = 3
+	property Vector2 TextRectSize = Vector2(0.59, 0.45)
+
+	-- 에피3 map3(존1~10) 신규 몬스터 4종 전용 잡템 — GameManager.GetMonsterLootItemId의 [109]~[118]
+	-- 풀 중 이 맵에서 처음 등장한 종만(예티류 재사용 잡템 제외, Ep3Map2CollectLogic과 동일한 범위 원칙)
+	property table _map3ItemPool = {
+		"werewolf_fang", "lycan_claw", "snowman_crystal", "flyeye_eyeball",
+	}
+
+	property any _activeBubble = nil
+
+	-- Ep3Map3CollectTrigger.RequestTouch()가 호출
+	@ExecSpace("ServerOnly")
+	method void OnObjectTouched(Entity touchedObject)
+		if self.Redeemed then return end
+
+		local map = touchedObject.CurrentMap
+		if map == nil then return end
+		local worldPos = touchedObject.TransformComponent.WorldPosition
+		local bubblePos = Vector3(worldPos.x + self.BubbleXOffset, worldPos.y + self.BubbleYOffset, worldPos.z - 0.5)
+
+		if self.PickedItemId1 == "" then
+			self:PickTwoDistinctItems()
+		end
+
+		local have1 = _PlayerInventory:GetItemCount(self.PickedItemId1)
+		local have2 = _PlayerInventory:GetItemCount(self.PickedItemId2)
+
+		if have1 < self.GiftAmount or have2 < self.GiftAmount then
+			-- 두 목표를 동시에 보여준다 — 아직 하나라도 못 채웠으면 진행상황 말풍선만 띄우고 끝.
+			local itemDef1 = _PlayerInventory:GetItemDef(self.PickedItemId1)
+			local itemDef2 = _PlayerInventory:GetItemDef(self.PickedItemId2)
+			local remaining1 = math.max(0, self.GiftAmount - have1)
+			local remaining2 = math.max(0, self.GiftAmount - have2)
+			self:SpawnDualBubble(map, bubblePos, itemDef1.icon, "X" .. remaining1, itemDef2.icon, "X" .. remaining2, true)
+			log("Ep3Map3Collect: still collecting - " .. self.PickedItemId1 .. " (" .. have1 .. "/" .. self.GiftAmount ..
+				") + " .. self.PickedItemId2 .. " (" .. have2 .. "/" .. self.GiftAmount .. ")")
+			return
+		end
+
+		-- 두 목표 모두 채워짐 — 교환 완료
+		self.Redeemed = true
+		_PlayerInventory:RemoveItem(self.PickedItemId1, self.GiftAmount)
+		_PlayerInventory:RemoveItem(self.PickedItemId2, self.GiftAmount)
+
+		local fall = self:ComputeDropFall(touchedObject)
+		local fallHeight = fall.x
+		local groundWorldY = fall.y
+
+		-- 흰 포션은 스킬 유무와 무관하게 항상 지급(Ep3Map2CollectLogic과 동일 정책 재사용)
+		_GameManager:ApplyPotionDrop(2, worldPos, fallHeight, groundWorldY, 1.0)
+
+		local pool = _CardManager:BuildActiveUpgradePool()
+		if #pool > 0 then
+			_CardManager:GrantCardUpgradesFromPool(pool, worldPos, fallHeight, groundWorldY, 1.0, 1, 0)
+			log("Ep3Map3Collect: redeemed " .. self.PickedItemId1 .. "+" .. self.PickedItemId2 .. " x" .. self.GiftAmount .. " each for white potion + 1 card upgrade")
+		else
+			log("Ep3Map3Collect: redeemed " .. self.PickedItemId1 .. "+" .. self.PickedItemId2 .. " x" .. self.GiftAmount .. " each for white potion (no upgradeable skill)")
+		end
+
+		-- 완료 연출(2026-08-27, 유저 지적: "하트말고 퀘스트 템으로 보여줘야지 xn개도") — 하트 대신
+		-- 실제로 모은 퀘스트 아이템 아이콘을 그대로 보여주고, 개수도 "X{GiftAmount}"로 함께 표시한다.
+		local itemDef1 = _PlayerInventory:GetItemDef(self.PickedItemId1)
+		local itemDef2 = _PlayerInventory:GetItemDef(self.PickedItemId2)
+		self:SpawnDualBubble(map, bubblePos, itemDef1.icon, "X" .. self.GiftAmount, itemDef2.icon, "X" .. self.GiftAmount, true)
+	end
+
+	-- 4종 중 서로 다른 2종을 무작위로 뽑는다(첫 뽑기에서 같은 게 나오면 다시 뽑는 단순 재시도 방식 —
+	-- 후보가 4개뿐이라 무한루프 위험 없음)
+	@ExecSpace("ServerOnly")
+	method void PickTwoDistinctItems()
+		self.PickedItemId1 = self._map3ItemPool[_UtilLogic:RandomIntegerRange(1, #self._map3ItemPool)]
+		repeat
+			self.PickedItemId2 = self._map3ItemPool[_UtilLogic:RandomIntegerRange(1, #self._map3ItemPool)]
+		until self.PickedItemId2 ~= self.PickedItemId1
+	end
+
+	-- Ep3Map2CollectLogic.ComputeDropFall과 동일 로직 재사용
+	@ExecSpace("ServerOnly")
+	method Vector3 ComputeDropFall(Entity refEntity)
+		local worldPos = refEntity.TransformComponent.WorldPosition
+		local fallHeight = 0
+		local groundWorldY = worldPos.y
+		local map = refEntity.CurrentMap
+		if map ~= nil then
+			---@type FootholdComponent
+			local foothold = map:GetComponent("FootholdComponent")
+			if foothold ~= nil then
+				local hits = foothold:RaycastAll(Vector2(worldPos.x, worldPos.y), Vector2(0, -1), 50)
+				local groundY = nil
+				local bestDist = nil
+				for i = 1, #hits do
+					local h = hits[i]
+					local y = h:GetYByX(worldPos.x)
+					local dist = worldPos.y - y
+					if bestDist == nil or dist < bestDist then
+						bestDist = dist
+						groundY = y
+					end
+				end
+				if groundY ~= nil and worldPos.y > groundY then
+					fallHeight = (worldPos.y - groundY) * 100
+					groundWorldY = groundY
+				end
+			end
+		end
+		return Vector3(fallHeight, groundWorldY, 0)
+	end
+
+	-- DualGiftBubble.model(Icon1/Count1/Icon2/Count2)을 스폰하고 두 슬롯을 동시에 채운다.
+	-- 슬롯별 위치/크기는 DualGiftBubble.model 자체에 이미 배치돼 있으므로 여기서는 SpriteRUID/Text
+	-- 내용만 채운다(Ep3Map2CollectLogic.SpawnBubble과 달리 Position/Scale 재적용 없음).
+	@ExecSpace("ServerOnly")
+	method void SpawnDualBubble(Entity map, Vector3 pos, string icon1Ruid, string text1, string icon2Ruid, string text2, boolean showText)
+		if self._activeBubble ~= nil and isvalid(self._activeBubble) then
+			self._activeBubble:Destroy()
+			self._activeBubble = nil
+		end
+		local bubble = _SpawnService:SpawnByModelId(self.BubbleModelId, "Ep3Map3CollectBubble", pos, map)
+		if bubble == nil then
+			log_error("Ep3Map3Collect: DualGiftBubble spawn failed")
+			return
+		end
+		self._activeBubble = bubble
+
+		self:FillSlot(bubble, "Icon1", "Count1", icon1Ruid, text1, showText)
+		self:FillSlot(bubble, "Icon2", "Count2", icon2Ruid, text2, showText)
+
+		_TimerService:SetTimerOnce(function()
+			if isvalid(bubble) then bubble:Destroy() end
+			if self._activeBubble == bubble then self._activeBubble = nil end
+		end, self.BubbleShowDuration)
+	end
+
+	-- 슬롯 하나(아이콘+텍스트 쌍)를 채운다 — SpawnDualBubble이 두 슬롯에 각각 호출한다.
+	@ExecSpace("ServerOnly")
+	method void FillSlot(Entity bubble, string iconChildName, string countChildName, string iconRuid, string text, boolean showText)
+		local icon = bubble:GetChildByName(iconChildName)
+		if icon ~= nil and icon.SpriteRendererComponent ~= nil then
+			icon.SpriteRendererComponent.SpriteRUID = iconRuid
+			icon.Enable = true
+		end
+
+		local count = bubble:GetChildByName(countChildName)
+		if count ~= nil then
+			local textRenderer = count.TextRendererComponent
+			if textRenderer ~= nil then
+				textRenderer.Text = text
+				textRenderer.Font = self.TextFont
+				textRenderer.FontColor = self.TextFontColor
+				textRenderer.FontSize = self.TextFontSize
+				textRenderer.OutlineColor = self.TextOutlineColor
+				textRenderer.OutlineWidth = self.TextOutlineWidth
+				textRenderer.FaceDilate = self.TextFaceDilate
+				textRenderer.RectSize = self.TextRectSize
+				textRenderer.Wrapping = false
+			end
+			count.Enable = showText
+		end
+	end
+
+	-- GameManager.RestartGame()이 호출 — 새 런에서는 다시 교환 도전 가능하고, 두 목표도 재추첨된다
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		self.Redeemed = false
+		self.PickedItemId1 = ""
+		self.PickedItemId2 = ""
+		if self._activeBubble ~= nil and isvalid(self._activeBubble) then
+			self._activeBubble:Destroy()
+		end
+		self._activeBubble = nil
+	end
+
+end

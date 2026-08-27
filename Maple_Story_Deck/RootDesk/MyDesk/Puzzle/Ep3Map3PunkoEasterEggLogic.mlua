@@ -1,0 +1,163 @@
+@Logic
+script Ep3Map3PunkoEasterEggLogic extends Logic
+
+	-- 에피소드3 map3 이스터에그: object-15_73(Ep3Map3PunkoEasterEggTrigger)을 누르면 그 자리(터치
+	-- 시점의 현재 존)에 "푼코"(mob 리소스팩) 군집형 비행 몬스터 5마리가 나타난다(유저 지정, 런당 1회).
+	-- Zone21AlienEasterEggLogic과 동일하게 InitializeAlienInvader로 정상 존 몬스터 풀을 거치지 않는
+	-- 일회성 특수 몬스터를 직접 초기화하고, Ep2MiniBeanEasterEggLogic과 동일한 "군집형 비행"(무리로
+	-- 좁게 뭉쳐 날아다니고, MonsterAI._isSwarmMember로 무리 전체 중 한 프레임에 딱 1번만 데미지가
+	-- 통과) 세팅을 적용한다. 유저 지정대로 크기는 20% 줄인다(PunkoScale=0.8, MonsterAI.SetScaleMultiplier —
+	-- 미니빈 때는 쓸 일이 없어서 이번에 새로 추가한 셋터).
+	--
+	-- MiniBean과 달리 이 오브젝트는 포탈이 아니라(존 이동이 없다) 눌린 그 자리에 바로 소환되므로,
+	-- 존을 이동해도 따라오게 하는 복잡한 로직(RepositionFlyingCenter 등)은 필요 없다 — 플레이어가
+	-- 존을 벗어나면 다른 일반 몬스터와 동일하게 MapManager.SetMonstersPausedForZone에 의해 그냥
+	-- 일시정지된다(SetNeverPauses를 안 켠다).
+	--
+	-- 10% 확률로(런당 1번만 시도) "쿠스코"(mob 리소스팩) 1마리가 추가로 같이 등장한다 — 노란 미니빈과
+	-- 달리 이 쿠스코는 공격도 정상적으로 한다(유저 지정: "얘도 공격함"). 다만 잡으면 일반 잡템 대신
+	-- 스킬 카드 1개(슬롯 강화)를 지급한다(MonsterAI.SetSkillDropOnDeath — _neverAttacks는 안 건드리고
+	-- _isYellowMiniBean만 켜는 새 셋터, Ep2MiniBeanEasterEggLogic의 SetYellowMiniBean과 달리 공격을
+	-- 막지 않는다. Die()의 보상 분기 자체는 재사용 — _CardManager:OnYellowMiniBeanCaught).
+	--
+	-- ⚠ 잡템 레지스트리 키는 반드시 실존 mapIndex(터치 시점의 진짜 현재 존)를 그대로 써야 한다 —
+	-- Zone21AlienEasterEggLogic처럼 가상의 음수 zoneIndex를 InitializeAlienInvader에 넘기면(잡템 풀
+	-- 오염 방지 목적) MonsterAI.SetSpawnZone이 그 가상 값으로 _zoneMonsterRegistry에 등록해버려서,
+	-- CardManager.GetMonstersInCurrentZone(모든 카드/스킬 타겟팅의 단일 진입점, 실제 현재 존으로만
+	-- 조회)이 이 몬스터들을 절대 찾지 못한다 — 실측 확인(라이브 테스트: 가상 인덱스로 스폰 후
+	-- GetMonstersInCurrentZone 결과 0개, 플레이어가 공격 자체를 못하는 완전히 못 잡는 몬스터가 됨).
+	-- [[feedback_arena_map_zoneindex_leak_checklist]]와 동일한 버그 계열이라 실존 zoneIndex를 그대로
+	-- 쓰기로 함 — 대신 잡템은 그 존의 정상 잡템 풀과 섞이지만(테마상 사소한 불일치), 유저가 푼코 5마리
+	-- 전용 드롭템을 따로 지정하지 않았으므로 치명적이지 않다.
+	@Sync property boolean Triggered = false
+
+	property integer PunkoCount = 5
+	property number PunkoScale = 0.8
+	property number PunkoClusterRadius = 1.5
+
+	-- 푼코(mob "푼코") 리소스팩 — fly=대기/이동, hit1=피격(1프레임), die1=사망(6프레임/10fps=0.6초),
+	-- attack1=공격(16프레임/10fps=1.6초, 이 프로젝트 관례상 초당 약 10프레임 가정 — GetMapAttackDuration
+	-- 주석 "11프레임=1.1초"와 동일 계산), attack1/info/hit=원거리 히트 이펙트 서브클립(1프레임,
+	-- MonsterAI.PlayRangedHitEffect가 사용). 사운드는 audio/Attack1·Damage·Die 3종만 쓴다
+	-- (audio/CharDam1은 보이스 변형이라 생략 — 필요하면 나중에 교체 가능).
+	property string PunkoStandRUID = "726c62b6df8041f08c2800c21fe37c80"
+	property string PunkoHitRUID = "91ce8cbfc34448ac91aa27325e670661"
+	property string PunkoDieRUID = "635d23d29836479ebfe5e65e406b7391"
+	property number PunkoDieDuration = 0.6
+	property string PunkoAttackRUID = "30ce6805019f4e839dd175a3e9ff043c"
+	property number PunkoAttackDuration = 1.6
+	-- 공격 주기가 애니메이션 길이(1.6초)보다 짧으면 끝나기 전에 다음 공격이 겹쳐 들어온다
+	-- (Ep2MiniBeanEasterEggLogic과 동일 이유) — 여유를 두고 늘린다.
+	property number PunkoAttackInterval = 1.8
+	property string PunkoHitEffectRUID = "5ab37f49c0834d208589df737f38e60d"
+	property number PunkoHitEffectDuration = 0.5
+	property string PunkoAttackSoundRUID = "33e3a058f68d4e35a8b4725e75ecb0bf"
+	property string PunkoHitSoundRUID = "189e069b0dce4c5e9d492db58b5c637b"
+	property string PunkoDieSoundRUID = "fd2706788a214047a5602c75b1d1d80f"
+
+	-- 쿠스코(mob "쿠스코") — 유저 지정 10% 확률로 추가 등장, 공격도 하지만 잡으면 잡템 대신 스킬 1개.
+	property number CuscoChance = 0.10
+	property boolean _cuscoRolledThisRun = false
+	property string CuscoStandRUID = "a1f17c79feb04c1e94a2564ec3d775c1"
+	property string CuscoHitRUID = "36f03c59522f4990995541913217aac2"
+	property string CuscoDieRUID = "c1180c316d1e463fbc2dc57aa1c63de6"
+	property number CuscoDieDuration = 0.6
+	property string CuscoAttackRUID = "862068b071464e4abf1ee00e9c9485cf"
+	property number CuscoAttackDuration = 1.6
+	property number CuscoAttackInterval = 1.8
+	property string CuscoHitEffectRUID = "0e9a366cd35340bd89ab0cf78fc3d755"
+	property number CuscoHitEffectDuration = 0.5
+	property string CuscoAttackSoundRUID = "07e6a9f9ce9f43a18a2e5c9bd9cdd663"
+	property string CuscoHitSoundRUID = "c4903934d512491a921b41d125402acd"
+	property string CuscoDieSoundRUID = "e240444937e84de485d823c77de3f1ec"
+
+	-- Ep3Map3PunkoEasterEggTrigger.RequestTouch()가 호출
+	@ExecSpace("ServerOnly")
+	method void OnObjectTouched()
+		if self.Triggered then return end
+		self.Triggered = true
+		self:SpawnPunkoSwarm()
+		_UIToast:ShowMessage("푼코 무리가 나타났다!")
+		log("Ep3Map3PunkoEasterEgg: triggered!")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SpawnPunkoSwarm()
+		local zoneIndex = _MapManager.CurrentMapIndex
+		local map = _MonsterSpawner:GetZoneEntity(zoneIndex)
+		if map == nil then
+			log_error("Ep3Map3PunkoEasterEgg: zone entity not found for " .. zoneIndex)
+			return
+		end
+		local offsetX = _MonsterSpawner:GetZoneOffsetX(zoneIndex)
+		-- 현재 난이도 기준 체력/속도로 스케일(다른 이스터에그와 동일한 이유 — 언제 발견하든 그 시점
+		-- 난이도에 맞게 나온다)
+		local hp = _GameManager:GetTimeStepHp(_GameManager:GetTimeStep())
+		local speed = _GameManager:GetWaveApproachSpeed(_GameManager.Wave)
+
+		for i = 1, self.PunkoCount do
+			local fx = (_UtilLogic:RandomDouble() * 2 - 1) * self.PunkoClusterRadius + offsetX
+			local fy = _MonsterSpawner.FlyingMinY + _UtilLogic:RandomDouble() * (_MonsterSpawner.FlyingMaxY - _MonsterSpawner.FlyingMinY)
+			local worldPos = Vector3(fx, fy, 0)
+			local localPos = _MonsterSpawner:ToLocalSpawnPos(map, worldPos)
+
+			local entity = _SpawnService:SpawnByModelId(_MonsterSpawner.MonsterModelId, "Punko", localPos, map)
+			if entity == nil then
+				log_error("Ep3Map3PunkoEasterEgg: SpawnByModelId failed")
+			else
+				---@type MonsterAI
+				local ai = entity:GetComponent("script.MonsterAI")
+				if ai ~= nil then
+					ai:InitializeAlienInvader(zoneIndex, hp, speed, self.PunkoStandRUID, self.PunkoHitRUID, self.PunkoDieRUID, self.PunkoDieDuration, self.PunkoAttackRUID)
+					ai:SetSwarmMember(true)
+					ai:SetSkipAttackLunge(true)
+					ai:SetScaleMultiplier(self.PunkoScale)
+					ai:SetRangedHitEffect(self.PunkoHitEffectRUID, self.PunkoHitEffectDuration, 1.0)
+					ai:SetAttackDuration(self.PunkoAttackDuration)
+					ai.FlyAttackInterval = self.PunkoAttackInterval
+					ai:SetAlienInvaderSounds(self.PunkoAttackSoundRUID, self.PunkoHitSoundRUID, self.PunkoDieSoundRUID)
+				end
+			end
+		end
+
+		-- 쿠스코(런당 1번만 시도, 유저 지정 10%) — 공격도 하지만 잡으면 잡템 대신 스킬 1개
+		if not self._cuscoRolledThisRun then
+			self._cuscoRolledThisRun = true
+			if _UtilLogic:RandomDouble() < self.CuscoChance then
+				local fx = (_UtilLogic:RandomDouble() * 2 - 1) * self.PunkoClusterRadius + offsetX
+				local fy = _MonsterSpawner.FlyingMinY + _UtilLogic:RandomDouble() * (_MonsterSpawner.FlyingMaxY - _MonsterSpawner.FlyingMinY)
+				local worldPos = Vector3(fx, fy, 0)
+				local localPos = _MonsterSpawner:ToLocalSpawnPos(map, worldPos)
+				local entity = _SpawnService:SpawnByModelId(_MonsterSpawner.MonsterModelId, "Cusco", localPos, map)
+				if entity == nil then
+					log_error("Ep3Map3PunkoEasterEgg: Cusco SpawnByModelId failed")
+				else
+					---@type MonsterAI
+					local ai = entity:GetComponent("script.MonsterAI")
+					if ai ~= nil then
+						ai:InitializeAlienInvader(zoneIndex, hp, speed, self.CuscoStandRUID, self.CuscoHitRUID, self.CuscoDieRUID, self.CuscoDieDuration, self.CuscoAttackRUID)
+						ai:SetSwarmMember(true)
+						ai:SetSkipAttackLunge(true)
+						ai:SetScaleMultiplier(self.PunkoScale)
+						ai:SetRangedHitEffect(self.CuscoHitEffectRUID, self.CuscoHitEffectDuration, 1.0)
+						ai:SetAttackDuration(self.CuscoAttackDuration)
+						ai.FlyAttackInterval = self.CuscoAttackInterval
+						ai:SetAlienInvaderSounds(self.CuscoAttackSoundRUID, self.CuscoHitSoundRUID, self.CuscoDieSoundRUID)
+						ai:SetSkillDropOnDeath(true)
+						log("Ep3Map3PunkoEasterEgg: cusco spawned")
+					end
+				end
+			end
+		end
+
+		log("Ep3Map3PunkoEasterEgg: spawned " .. self.PunkoCount .. " punko")
+	end
+
+	-- GameManager.RestartGame()이 호출 — 새 런에서는 오브젝트를 다시 눌러 재도전할 수 있다
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		self.Triggered = false
+		self._cuscoRolledThisRun = false
+	end
+
+end

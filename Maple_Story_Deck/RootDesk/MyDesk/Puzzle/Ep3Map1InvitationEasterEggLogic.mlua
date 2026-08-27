@@ -1,0 +1,147 @@
+@Logic
+script Ep3Map1InvitationEasterEggLogic extends Logic
+
+	-- 에피소드4 map1 이스터에그(ep3_map1에 배치) — 3단계 플로우:
+	--   1) MapObject_106(Ep3Map1InvitationTicketTrigger) 클릭 → "초대권"(ep4_invitation_ticket)을
+	--      확정 지급(런당 1번, Ep2Map1ChestEasterEggLogic과 동일한 ScheduleLootDrop 패턴).
+	--   2) 초대권을 보유한 상태에서 MapObject_111(Ep3Map1InvitationPigeonTrigger) 클릭 → 비둘기
+	--      (InvitationPigeon 모델, "이름 모를 비둘기" fly 애니메이션)를 작은 크기로 스폰해 점점
+	--      커지면서 11시 방향으로 화면 밖까지 날아가게 하고, 도착 시 안내 토스트를 띄운다.
+	--   3) 도착 직후 RevealBonusPortal()이 ep3_map2의 기존 네이티브 portal-3(평소 enable=false로
+	--      숨겨둠)를 활성화한다(유저 지정, 2026-08-26: "완료하면 포털이 여기에 생겨"). 이 포탈은
+	--      [[project_ep3map2_bonusboss_easteregg]]의 랜덤 보너스 보스가 현재 있는 존으로 즉시
+	--      이동시켜준다(Ep3Map2BonusPortalTrigger+Ep3Map2BonusBossLogic.OnPortalTouched).
+	-- 초대권은 소모하지 않는다(erdas_essence와 동일 정책 — 재도전해도 다시 지급 안 하고 계속 보유).
+	-- 다시하기(RestartGame)에서 ResetForNewRun()으로 세 단계(포탈 비활성화 포함) 모두 재도전 가능.
+	@Sync property boolean TicketGranted = false
+	@Sync property boolean PigeonTriggered = false
+
+	property string TicketItemId = "ep4_invitation_ticket"
+
+	-- RootDesk/MyDesk/Models/MapObjects/InvitationPigeon.model의 EntryKey(id 부분, 소문자)
+	property string PigeonModelId = "invitationpigeon"
+
+	-- 유저 지정: "작은상태로 점차 커지면서 fly 상태로 11시로 화면밖까지 날아간다" — 이후 "비둘기가
+	-- 너무 작다, 3배정도 더 키워줘"(2026-08-26) 요청으로 시작/끝 크기 모두 3배 상향(0.3→0.9, 1.0→3.0,
+	-- 커지는 비율 자체는 그대로 유지)
+	property number PigeonStartScale = 0.9
+	property number PigeonEndScale = 3.0
+	property number PigeonFlyDuration = 2.2
+	-- PC 화면 절반 대각선(√(6.4²+3.6²)≈7.35)보다 충분히 크게 잡아 어느 위치에서 스폰돼도 화면 밖까지
+	-- 확실히 벗어나게 한다
+	property number PigeonFlyDistance = 14.0
+	-- 11시 방향 = 12시(위)에서 9시(왼쪽) 쪽으로 30도 회전한 방향
+	property number PigeonDirX = -0.5
+	property number PigeonDirY = 0.8660254
+
+	property string PortalHintMessage = "맵 어딘가에 변화가 생겼습니다!"
+
+	-- 유저 지정(2026-08-26): "포탈은 언제 생성되냐면... 완료하면 포털이 여기에 생겨!" — 비둘기
+	-- 이스터에그를 완료하면 ep3_map2의 기존 네이티브 portal-3(평소 enable=false로 숨겨둠)를 활성화한다.
+	-- 실제 텔레포트 동작은 Ep3Map2BonusPortalTrigger+Ep3Map2BonusBossLogic.OnPortalTouched가 담당 —
+	-- 여기서는 Enable 토글만 책임진다.
+	property string BonusPortalPath = "/maps/ep3_map2/portal-3"
+
+	-- 유저 지정: "초대권 없는 상태에서 111 누르면 말풍선 만들어줘, 이미지는 초대권 이미지" —
+	-- Ep2Map1GiftNpcLogic.SpawnBubble(GiftBubble.model 재사용, Ep2Map4PiecePuzzleLogic도 동일하게
+	-- 크로스 Logic으로 재사용 중인 패턴)을 그대로 호출해 초대권 아이콘만 보여준다(텍스트 없음 —
+	-- 하트 아이콘 단독 표시와 동일한 showText=false 사용법). 오프셋/배율은 여기서 유저가 직접 인스펙터로
+	-- 조절할 수 있게 프로퍼티로 노출한다(유저 지정, 2026-08-26: "크기랑 위치 내가 수정할수있게").
+	-- BubbleScale=1.0이 GiftBubble.model에 구워둔 원본 크기 그대로다(SpawnBubble이 배율로 곱해서 적용).
+	-- 유저가 Maker 하이어라키의 InvitationBubblePreview(giftbubble 모델)를 직접 드래그해서 잡은 값을
+	-- 그대로 반영(2026-08-26). 프리뷰 오브젝트는 반영 후 삭제.
+	property number BubbleXOffset = -0.828674
+	property number BubbleYOffset = 0.484236477
+	property number BubbleScale = 1.0
+	-- 유저가 Maker 하이어라키에서 InvitationBubblePreview의 Icon 자식을 직접 드래그/리사이즈해서 잡은
+	-- 값(2026-08-26) — SpawnBubble이 이제 아이콘 위치/크기도 호출측이 직접 지정해야 해서 여기 반영한다.
+	property Vector3 TicketIconPosition = Vector3(-0.0164, -0.3476, -0.0002)
+	property Vector3 TicketIconScale = Vector3(1.02903032, 1.02903008, 1)
+
+	-- Ep3Map1InvitationTicketTrigger.RequestClick()이 호출 — 클릭된 오브젝트 엔티티를 그대로 받는다
+	@ExecSpace("ServerOnly")
+	method void OnTicketObjectTouched(Entity obj)
+		if self.TicketGranted then return end
+		if not isvalid(obj) then return end
+
+		self.TicketGranted = true
+		local worldPos = obj.TransformComponent.WorldPosition
+		local itemDef = _PlayerInventory:GetItemDef(self.TicketItemId)
+		_GameManager:ScheduleLootDrop(worldPos, itemDef.icon, 0, worldPos.y, function()
+			_PlayerInventory:AddItem(self.TicketItemId, 1)
+		end, 1.0)
+		log("Ep3Map1InvitationEasterEgg: ticket granted from MapObject_106")
+	end
+
+	-- Ep3Map1InvitationPigeonTrigger.RequestClick()이 호출 — 클릭된 오브젝트 엔티티를 그대로 받는다
+	@ExecSpace("ServerOnly")
+	method void OnPigeonObjectTouched(Entity obj)
+		if self.PigeonTriggered then return end
+		if not isvalid(obj) then return end
+
+		local map = obj.CurrentMap
+		if map == nil then return end
+
+		if _PlayerInventory:GetItemCount(self.TicketItemId) < 1 then
+			log("Ep3Map1InvitationEasterEgg: no ticket, showing bubble")
+			local worldPos = obj.TransformComponent.WorldPosition
+			local bubblePos = Vector3(worldPos.x + self.BubbleXOffset, worldPos.y + self.BubbleYOffset, worldPos.z - 0.5)
+			local itemDef = _PlayerInventory:GetItemDef(self.TicketItemId)
+			_Ep2Map1GiftNpcLogic:SpawnBubble(map, bubblePos, itemDef.icon, "", false, self.BubbleScale, self.TicketIconPosition, self.TicketIconScale)
+			return
+		end
+
+		self.PigeonTriggered = true
+		local startPos = obj.TransformComponent.Position
+		local pigeon = _SpawnService:SpawnByModelId(self.PigeonModelId, "InvitationPigeon", startPos, map)
+		if pigeon == nil then
+			log_error("Ep3Map1InvitationEasterEgg: failed to spawn " .. self.PigeonModelId)
+			return
+		end
+		pigeon.TransformComponent.Scale = Vector3(self.PigeonStartScale, self.PigeonStartScale, 1)
+
+		local endPos = Vector3(
+			startPos.x + self.PigeonDirX * self.PigeonFlyDistance,
+			startPos.y + self.PigeonDirY * self.PigeonFlyDistance,
+			startPos.z
+		)
+		_TweenLogic:PlayTween(0.0, 1.0, self.PigeonFlyDuration, EaseType.Linear, function(t)
+			if not isvalid(pigeon) then return end
+			local x = startPos.x + (endPos.x - startPos.x) * t
+			local y = startPos.y + (endPos.y - startPos.y) * t
+			pigeon.TransformComponent.Position = Vector3(x, y, startPos.z)
+			local s = self.PigeonStartScale + (self.PigeonEndScale - self.PigeonStartScale) * t
+			pigeon.TransformComponent.Scale = Vector3(s, s, 1)
+		end)
+
+		_TimerService:SetTimerOnce(function()
+			if isvalid(pigeon) then pigeon:Destroy() end
+			if not isvalid(self) then return end
+			_UIToast:ShowMessage(self.PortalHintMessage)
+			self:RevealBonusPortal()
+		end, self.PigeonFlyDuration)
+
+		log("Ep3Map1InvitationEasterEgg: pigeon launched toward 11 o'clock")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void RevealBonusPortal()
+		local portal = _EntityService:GetEntityByPath(self.BonusPortalPath)
+		if portal == nil then
+			log_error("Ep3Map1InvitationEasterEgg: bonus portal not found at " .. self.BonusPortalPath)
+			return
+		end
+		portal.Enable = true
+		log("Ep3Map1InvitationEasterEgg: bonus portal revealed")
+	end
+
+	-- GameManager.RestartGame()이 호출 — 새 런에서는 두 단계 모두 다시 도전할 수 있게 한다
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		self.TicketGranted = false
+		self.PigeonTriggered = false
+		local portal = _EntityService:GetEntityByPath(self.BonusPortalPath)
+		if portal ~= nil then portal.Enable = false end
+	end
+
+end

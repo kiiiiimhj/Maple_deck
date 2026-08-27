@@ -33,6 +33,11 @@ script Ep2Map1GiftNpcLogic extends Logic
 	-- 직접 오른쪽으로 옮기면(요청의 2단계) 그 결과를 여기 그대로 반영한다.
 	property Vector3 HeartIconPosition = Vector3(-0.4361, -0.2908, 0)
 	property Vector3 HeartIconScale = Vector3(5.788959, 5.78895855, 1)
+	-- 잡템 아이콘(하트가 아닌 일반 케이스) 전용 위치/크기 — GiftBubble.model에 원래 구워져 있던 Icon
+	-- 자식의 기본값 그대로(SpawnBubble이 이제 항상 명시적으로 iconPos/iconScale을 요구하므로, 기존
+	-- 동작을 그대로 보존하기 위해 이 값을 하드코딩해둔다)
+	property Vector3 DefaultIconPosition = Vector3(-0.7126, -0.2924, 0)
+	property Vector3 DefaultIconScale = Vector3(2.73173356, 2.73173332, 1)
 	-- 아래 Text* 값들도 GiftBubblePreview에서 유저가 직접 튜닝한 값을 그대로 반영(폰트/크기/아웃라인/
 	-- 텍스트 박스 크기). SpawnBubble이 매번 이 값들로 덮어쓰므로, 모델 파일이 아니라 여기가 유일한
 	-- 소스다 — 다음에 또 튜닝하면 여기 값만 바꾸면 된다.
@@ -71,7 +76,7 @@ script Ep2Map1GiftNpcLogic extends Logic
 		if have < self.GiftAmount then
 			local remaining = self.GiftAmount - have
 			local itemDef = _PlayerInventory:GetItemDef(self.PickedItemId)
-			self:SpawnBubble(map, bubblePos, itemDef.icon, "X" .. remaining, true)
+			self:SpawnBubble(map, bubblePos, itemDef.icon, "X" .. remaining, true, 1.0, self.DefaultIconPosition, self.DefaultIconScale)
 			log("Ep2Map1GiftNpc: still collecting - " .. self.PickedItemId .. " (" .. have .. "/" .. self.GiftAmount .. ", " .. remaining .. " left)")
 			return
 		end
@@ -94,7 +99,7 @@ script Ep2Map1GiftNpcLogic extends Logic
 
 		self.Redeemed = true
 		_PlayerInventory:RemoveItem(self.PickedItemId, self.GiftAmount)
-		self:SpawnBubble(map, bubblePos, self.HeartIconRUID, "", false)
+		self:SpawnBubble(map, bubblePos, self.HeartIconRUID, "", false, 1.0, self.HeartIconPosition, self.HeartIconScale)
 		_CardManager:GrantCardUpgradesFromPool(pool, worldPos, 0, worldPos.y, 1.0, 1, 0)
 		log("Ep2Map1GiftNpc: redeemed " .. self.PickedItemId .. " x" .. self.GiftAmount .. " for a card upgrade")
 	end
@@ -104,8 +109,16 @@ script Ep2Map1GiftNpcLogic extends Logic
 	-- Icon/Count 둘 다 모델 기본값이 Enable=false라서(스폰 직후 잠깐 원본 기본 아이콘/큰 텍스트가
 	-- 비쳤다 사라지는 깜빡임 방지 — 유저 지적), 여기서 값부터 전부 채운 뒤 맨 마지막에 Enable=true로
 	-- 켠다. 순서를 반대로 하면(먼저 켜고 나중에 값 채우면) 다시 깜빡일 수 있다.
+	-- scale은 GiftBubble.model에 구워둔 원본 크기(1.0 기준) 대비 배율이다 — 호출측이 자기 전용 크기
+	-- 프로퍼티를 노출해서 유저가 직접 조절할 수 있게 한다(유저 지정, 2026-08-26: "말풍선 크기랑
+	-- 위치 내가 수정할수있게"). 기존 호출부는 전부 1.0을 넘겨 원래 크기 그대로 유지한다.
+	-- iconPos/iconScale은 Icon 자식의 위치/크기를 호출측이 매번 명시적으로 지정한다(이전엔 하트만
+	-- 특수 취급하고 나머지는 GiftBubble.model에 구워둔 기본값에 암묵적으로 의존했는데, 그러면 다른
+	-- 호출측(예: 초대권 아이콘)이 자기만의 위치/크기를 쓸 방법이 없었다 — 유저 지적: "아이콘 위치
+	-- 크기도 내가 맞춘 대로 반영해야지" 2026-08-26). 기존 호출부는 전부 모델 기본값(DefaultIconPosition/
+	-- DefaultIconScale, 하트는 HeartIconPosition/HeartIconScale)을 그대로 넘겨 외형 변화 없음.
 	@ExecSpace("ServerOnly")
-	method void SpawnBubble(Entity map, Vector3 pos, string iconRuid, string text, boolean showText)
+	method void SpawnBubble(Entity map, Vector3 pos, string iconRuid, string text, boolean showText, number scale, Vector3 iconPos, Vector3 iconScale)
 		if self._activeBubble ~= nil and isvalid(self._activeBubble) then
 			self._activeBubble:Destroy()
 			self._activeBubble = nil
@@ -117,15 +130,14 @@ script Ep2Map1GiftNpcLogic extends Logic
 		end
 		self._activeBubble = bubble
 
+		local baseScale = bubble.TransformComponent.Scale
+		bubble.TransformComponent.Scale = Vector3(baseScale.x * scale, baseScale.y * scale, baseScale.z)
+
 		local icon = bubble:GetChildByName("Icon")
 		if icon ~= nil and icon.SpriteRendererComponent ~= nil then
 			icon.SpriteRendererComponent.SpriteRUID = iconRuid
-			-- 하트일 때만 전용 위치/크기로 덮어쓴다 — 잡템 아이콘일 때는 GiftBubble.model에 구워둔
-			-- 기본 Position/Scale을 그대로 쓴다(매번 새로 스폰되므로 이전 하트 오버라이드가 남지 않는다)
-			if iconRuid == self.HeartIconRUID then
-				icon.TransformComponent.Position = self.HeartIconPosition
-				icon.TransformComponent.Scale = self.HeartIconScale
-			end
+			icon.TransformComponent.Position = iconPos
+			icon.TransformComponent.Scale = iconScale
 			icon.Enable = true
 		end
 

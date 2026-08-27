@@ -2569,6 +2569,23 @@ script GameManager extends Logic
 		return pool[i]
 	end
 
+	-- MonsterAI.Die()가 2페이즈로 이미 진화한 상태(_phase2Revived=true)로 죽을 때 쓴다 — 유저 리포트
+	-- (2026-08-26, "다크 예티 잡으면 뿔나오잖아 근데 그게 예티 뿔로나와 다크 예티 잡템이 아니라"):
+	-- ReviveAsPhase2Generic은 외형(스프라이트/사운드)만 진화 후 걸로 갈아끼우고 _speciesIdx/스폰존은
+	-- 스폰 시점(진화 전) 값 그대로 두므로, GetMonsterLootItemId를 그대로 쓰면 진화 전 몬스터의 잡템이
+	-- 나온다. 진화 목적지는 GetMapPhase2StandRUID가 이미 갖고 있는 값과 1:1 대응(예티↔라이트, 다크예티/
+	-- 다크예티와페페↔다크)이므로, 그 stand RUID→잡템ID 매핑만 추가한다(주니어예티 라이트/다크 성장 포함 —
+	-- 존99~103/119~128의 성체 진화 목적지도 이 표를 그대로 조회한다).
+	@ExecSpace("ServerOnly")
+	method string GetMonsterLootItemIdPhase2(integer mapIndex, integer idx)
+		local standRUID = self:GetMapPhase2StandRUID(mapIndex, idx)
+		if standRUID == "f6467914a7f84409b2937fa3668db94d" then return "dark_yeti_horn"           -- 다크예티
+		elseif standRUID == "2fa39477afb34d8cb6412b7fe5085f42" then return "yeti_horn"             -- 예티
+		elseif standRUID == "70329bd13ca243198d1afac3f77143a6" then return "dark_yeti_pepe_ice_shard" -- 다크예티와페페
+		end
+		return ""
+	end
+
 	@ExecSpace("ServerOnly")
 	method string GetMapPhase2MoveRUID(integer mapIndex, integer idx)
 		local pools = {
@@ -3320,13 +3337,28 @@ script GameManager extends Logic
 
 	@ExecSpace("ServerOnly")
 	method void StartGame(boolean timeAttack, integer characterIndex, string userId, integer episode)
+		-- 버그 수정(2026-08-26, 유저 리포트 "아르카나 말고 다른 캐릭 골랐는데 에너지볼트같은 공격이
+		-- 적한테 들어가네") — GameOver 없이(죽지 않은 채) 타이틀로 돌아가 "게임 시작"을 다시 누르면
+		-- TitleUI.OnStartClicked가 RequestStartGame(다시하기 아님)을 호출한다. 이땐 GameStarted가 이미
+		-- true라 아래에서 바로 return하는데, 그 전에도 SelectedCharacter는 새로 골든 캐릭터로 이미
+		-- 바뀐 상태였다 — 문제는 카드 슬롯(Slot1Card 등)이 리셋되지 않아 이전 캐릭터(예: 아르카나)가
+		-- 배정해둔 카드(예: 에너지볼트, 카드9)가 그대로 남아 계속 틱된다는 것. 캐릭터가 실제로
+		-- 바뀐 경우에만 ResetAllCards()로 슬롯을 비운다(같은 캐릭터로 다시 누른 경우는 진행 중인 런을
+		-- 그대로 이어가야 하므로 건드리지 않는다).
+		local characterChanged = self.GameStarted and characterIndex ~= self.SelectedCharacter
 		self.SelectedCharacter = characterIndex
 		self.SelectedEpisode = episode
 		self.TimeAttackMode = timeAttack
 		self.TimeAttackRemaining = timeAttack and self.TimeAttackDuration or 0
 		-- 타이틀 화면에서 처음 한 번만 실제 웨이브 스폰을 활성화한다. 그 전까지 OnBeginPlay에서
 		-- 곧바로 스폰을 켜두면, 유저가 타이틀 화면을 보는 동안에도 몬스터가 쌓이게 된다.
-		if self.GameStarted then return end
+		if self.GameStarted then
+			if characterChanged then
+				_CardManager:ResetAllCards()
+				log("GameManager: character changed without dying (" .. characterIndex .. "), cards reset")
+			end
+			return
+		end
 		_MapManager:SetEpisodeRange(episode)
 		-- MapManager.OnUpdate의 자동 시작-리다이렉트는 월드 시작 직후(에피소드를 고르기 한참 전) 이미
 		-- 에피1 기본값(존1)으로 1회 소비돼버린 상태다 — 에피소드2/3를 골랐다면 여기서 명시적으로 다시
@@ -3470,6 +3502,31 @@ script GameManager extends Logic
 		-- 에피3 map1 가리개 스킬 이스터에그(MapObject_80→100)도 동일한 정책으로 초기화 — 가리개를
 		-- 다시 보이게(알파1.0) 되돌려서 재도전할 수 있게 한다
 		_Ep3Map1SkillCoverLogic:ResetForNewRun()
+		-- 에피4 map1 이스터에그 준비 작업(선행 배치, MapObject_106→111)도 동일한 정책으로 초기화
+		_Ep3Map1InvitationEasterEggLogic:ResetForNewRun()
+		-- 에피3 map2 잡템 수집 이스터에그(object-15_131)도 동일한 정책으로 초기화 — 다시 도전 가능 +
+		-- 잡템 목표도 재추첨된다
+		_Ep3Map2CollectLogic:ResetForNewRun()
+		-- 에피3 map3 잡템 수집 이스터에그(object-15_131, 2종×25개)도 동일한 정책으로 초기화
+		_Ep3Map3CollectLogic:ResetForNewRun()
+		-- 에피3 map2 가리개 스킬 이스터에그(object-15_127→133)도 동일한 정책으로 초기화 — 가리개를
+		-- 다시 보이게(알파1.0) 되돌려서 재도전할 수 있게 한다
+		_Ep3Map2SkillCoverLogic:ResetForNewRun()
+		-- 에피3 map2 존10 "길잃은 루돌프" 이스터에그도 동일한 정책으로 초기화 — 남은 불량 루돌프를
+		-- 정리하고 길잃은 루돌프를 다시 스폰한다
+		_Ep3Map2LostRudolphLogic:ResetForNewRun()
+		-- 에피3 map2 zone5 "상자 뒤에 숨은 선물" 이스터에그도 동일한 정책으로 초기화 — 상자 3개를
+		-- 원래 자리로 되돌리고 선물을 다시 보이게 한다
+		_Ep3Map2HiddenGiftLogic:ResetForNewRun()
+		-- 에피3 map2 랜덤 보너스 보스(커플예티)도 동일한 정책으로 초기화 — 떠 있던 보스를 정리하고
+		-- 다음 스폰 간격을 새로 굴리게 한다
+		_Ep3Map2BonusBossLogic:ResetForNewRun()
+		-- 에피3 map3 "자격의 증표" 이스터에그(object-15_108 등 16개 중 1개 당첨)도 동일한 정책으로
+		-- 초기화 — 유저 지정: "다시하기나 새로시작하면 드랍되는 위치가 바뀌는거" — 당첨 오브젝트를 새로 뽑는다
+		_Ep3Map3ItemEasterEggLogic:ResetForNewRun()
+		-- 에피3 map3 "푼코" 군집형 비행 이스터에그(object-15_73)도 동일한 정책으로 초기화 — 새 런에서
+		-- 다시 눌러 소환할 수 있고, 쿠스코 등장 확률도 다시 판정된다
+		_Ep3Map3PunkoEasterEggLogic:ResetForNewRun()
 		_MonsterSpawner:ResetEliteTracking()
 		-- 지쳐버린 기사(Tired Knight) 존별 스폰 여부도 초기화 — 새 런에서 존마다 다시 1마리씩 등장한다
 		_MonsterSpawner:ResetTiredKnightTracking()
@@ -3663,10 +3720,16 @@ script GameManager extends Logic
 	@ExecSpace("ServerOnly")
 	method void GrantWeaponItemDrop(Vector3 worldPos, number fallHeight, number groundWorldY, number dropScale)
 		if self.GameOver then return end
-		local mapName = _MapManager:GetMapName(_MapManager.CurrentMapIndex)
-		local users = _UserService:GetUsersByMapName(mapName)
-		if #users == 0 then return end
-		local userId = users[1].PlayerComponent.UserId
+		-- 2026-08-26: CurrentMapIndex 기반 GetUsersByMapName 대신 접속 유저 목록을 직접 쓴다 —
+		-- 존 인덱스 밖의 고정 아레나(ep3_map2_ester_1 보너스보스 등)에 있을 때는 CurrentMapIndex가
+		-- 그 맵을 가리키지 않아 GetUsersByMapName이 0명을 반환해 드랍이 조용히 씹혔다(월드당
+		-- 플레이어 1명뿐이라 이 방식으로 바꿔도 기존 동작은 동일하다).
+		local userId = nil
+		for _, u in pairs(_UserService.UserEntities) do
+			userId = u.PlayerComponent.UserId
+			break
+		end
+		if userId == nil then return end
 
 		local grade = (_UtilLogic:RandomDouble() < self.WeaponDropMagicChance) and _GearGradeEnum.Magic or _GearGradeEnum.None
 		local quality = _QualityEnum:RollDropQuality()

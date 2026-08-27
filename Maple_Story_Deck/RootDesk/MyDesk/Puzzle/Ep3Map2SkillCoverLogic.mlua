@@ -1,0 +1,258 @@
+@Logic
+script Ep3Map2SkillCoverLogic extends Logic
+
+	-- 에피소드3 map2 이스터에그 — object-15_127(가리개)을 클릭할 때마다 알파가 0.5씩 빠지고
+	-- (2번 클릭), 0이 되면 가리개가 사라지면서 뒤에 있던 object-15_133("산타", 유저 확인)이 클릭
+	-- 가능해진다. 유저 재설계(2026-08-26, "알파0되고 뒤에 오브젝트 누르면 스킬주던거 없애주고"):
+	-- 산타를 클릭해도 더 이상 그 자리에서 바로 스킬/포션을 주지 않는다 — 대신 2단계 퀘스트로 바뀐다.
+	--   1) 산타 첫 클릭 → 스킬/포션 없이 "길잃은 루돌프"만 등장시킨다(Ep3Map2LostRudolphLogic.
+	--      SpawnLostRudolph — 등장 메시지는 그쪽에서 띄움). 말풍선(SkillRewardBubble)은 그대로 유지.
+	--   2) 플레이어가 길잃은 루돌프를 정지 중에 터치해서 잡으면(Ep3Map2LostRudolphLogic.OnCaught)
+	--      "산타에게 말을 걸어보자!" 메시지가 뜨고 Caught 플래그가 켜진다.
+	--   3) 산타를 다시 클릭 → 이번엔 산타가 사라지고, 유저가 미리 배치해둔 썰매(object-15_138)가 그
+	--      자리에서 나타나 왼쪽으로 날아가며 화면 밖으로 사라진다. 날아가는 도중 포션 1개(빨강/흰색
+	--      무작위)+보유 슬롯 스킬 1개(있으면)를 떨어뜨린다(공중 드랍이라 실제 발판까지 낙하 연출).
+	-- 아직 루돌프를 못 잡은 상태(Caught=false)에서 산타를 또 눌러도 반응 없음(2단계로 못 넘어감).
+	@Sync property boolean CoverCleared = false
+	@Sync property number CoverAlpha = 1.0
+	@Sync property boolean RudolphRequested = false -- 산타 첫 클릭(길잃은 루돌프 등장) 완료 여부
+	@Sync property boolean Triggered = false -- 산타 두 번째 클릭(썰매 출발)까지 완전히 끝났는지
+
+	property number CoverAlphaStep = 0.5
+	property string CoverObjectPath = "/maps/ep3_map2/object-15_127"
+	property string RewardObjectPath = "/maps/ep3_map2/object-15_133" -- "산타" 오브젝트(유저 확인)
+
+	-- 유저 지정(2026-08-26): "누르면 바로주는게 아니라 말풍선에 이미지 넣고" — 산타 첫 클릭(길잃은
+	-- 루돌프 등장) 시 말풍선(GiftBubble.model 재사용)을 잠깐 띄운다. 유저가 직접 위치/크기를 조정할
+	-- 수 있도록 ep3_map2.map에 SkillRewardBubble이라는 이름으로 미리 배치해뒀다(Icon 자식에 지정
+	-- 이미지 적용, Count 자식은 숨김) — 여기서는 그 배치된 엔티티를 찾아 Enable만 토글한다.
+	property string RewardBubblePath = "/maps/ep3_map2/SkillRewardBubble"
+	property number BubbleShowDuration = 2.0
+
+	-- 산타의 썰매(2단계 보상 연출) — 유저 지정(2026-08-26): 새 엔티티를 스폰하지 않고, 유저가 Maker에서
+	-- 직접 배치해둔 object-15_138(이미 썰매 RUID/사이즈/기울기까지 세팅됨, 기본 Enable=false로 숨겨둠)을
+	-- 그대로 움직인다 — 시작 위치/사이즈는 그 엔티티 값을 그대로 쓰고, 출발 시 보이게 했다가 왼쪽으로
+	-- 날아가며 화면 밖으로 사라지면 다시 숨긴다.
+	property string SleighObjectPath = "/maps/ep3_map2/object-15_138"
+	property number SantaFlyDistance = 14.0 -- 화면(PC 가시폭 12.8) 밖으로 확실히 나가는 수평 이동 거리(왼쪽)
+	-- 유저 지정(2026-08-26, "속도 좀만 더 느리게+아이템 너무 늦게 뿌려짐"): 비행 시간을 늘리고,
+	-- 드랍 시점을 진행률(%) 대신 "출발 후 몇 초" 절대 시간으로 바꿔서 더 이르게 뿌린다.
+	property number SantaFlyDuration = 4.0
+	property number SantaPotionDropDelay = 0.5 -- 출발 후 이 초 뒤에 포션 드랍
+	property number SantaSkillDropDelay = 0.7 -- 출발 후 이 초 뒤에 스킬 드랍
+
+	-- object-15_138의 원래 배치 좌표(월드) — OnBeginPlay에서 한 번 캐싱해둔다. 비행 중 X만 바꾸므로,
+	-- 다음 판(ResetForNewRun 이후 재도전)에도 항상 이 좌표에서 다시 출발하도록 매번 여기로 되돌린다.
+	property boolean _sleighStartCaptured = false
+	property number _sleighStartWorldX = 0.0
+	property number _sleighStartWorldY = 0.0
+
+	-- 월드 시작 시 한 번, object-15_138(썰매)의 원래 배치 좌표를 캐싱하고 확실히 숨겨둔다.
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		local sleigh = _EntityService:GetEntityByPath(self.SleighObjectPath)
+		if sleigh ~= nil and isvalid(sleigh) then
+			local wp = sleigh.TransformComponent.WorldPosition
+			self._sleighStartWorldX = wp.x
+			self._sleighStartWorldY = wp.y
+			self._sleighStartCaptured = true
+			sleigh.Enable = false
+		else
+			log_error("Ep3Map2SkillCover: sleigh object not found at " .. self.SleighObjectPath)
+		end
+	end
+
+	-- Ep3Map2SkillCoverTrigger.RequestClick()이 클릭마다 호출한다.
+	@ExecSpace("ServerOnly")
+	method void OnCoverClicked()
+		if self.CoverCleared then return end
+		self.CoverAlpha = self.CoverAlpha - self.CoverAlphaStep
+		local cover = _EntityService:GetEntityByPath(self.CoverObjectPath)
+		if self.CoverAlpha <= 0 then
+			self.CoverAlpha = 0
+			self.CoverCleared = true
+			if cover ~= nil and isvalid(cover) then cover.Enable = false end
+			log("Ep3Map2SkillCover: cover cleared, reward unlocked")
+		else
+			if cover ~= nil and isvalid(cover) then
+				local renderer = cover.SpriteRendererComponent
+				if renderer ~= nil then
+					local c = renderer.Color
+					renderer.Color = Color(c.r, c.g, c.b, self.CoverAlpha)
+				end
+			end
+			log("Ep3Map2SkillCover: cover alpha=" .. self.CoverAlpha)
+		end
+	end
+
+	-- Ep3Map2SkillRewardTrigger.RequestClick()이 산타(object-15_133)를 클릭할 때마다 호출한다
+	-- (가리개가 안 걷혔으면 서버에서도 한 번 더 가드 — 클라이언트 체크와 별개로 이중 방어).
+	@ExecSpace("ServerOnly")
+	method void OnRewardClicked()
+		if not self.CoverCleared then return end
+		if self.Triggered then return end
+		if not self.RudolphRequested then
+			-- 1단계: 첫 클릭 — 스킬/포션 없이 길잃은 루돌프만 등장시킨다
+			self.RudolphRequested = true
+			self:ShowRewardBubble()
+			_Ep3Map2LostRudolphLogic:SpawnLostRudolph()
+			return
+		end
+		if not _Ep3Map2LostRudolphLogic.Caught then
+			-- 아직 루돌프를 못 잡았으면 산타를 다시 눌러도 반응 없음
+			return
+		end
+		-- 2단계: 루돌프를 잡은 뒤 산타를 다시 클릭 — 썰매가 출발하며 보상을 뿌린다
+		self.Triggered = true
+		self:StartSantaDeparture()
+	end
+
+	-- ep3_map2.map에 미리 배치해둔 SkillRewardBubble(GiftBubble.model)을 잠깐 보였다가 다시 숨긴다 —
+	-- 위치/크기는 유저가 Maker에서 직접 조정한 값을 그대로 쓴다(여기서는 손대지 않음).
+	@ExecSpace("ServerOnly")
+	method void ShowRewardBubble()
+		local bubble = _EntityService:GetEntityByPath(self.RewardBubblePath)
+		if bubble == nil then
+			log_error("Ep3Map2SkillCover: SkillRewardBubble not found at " .. self.RewardBubblePath)
+			return
+		end
+		bubble.Enable = true
+		_TimerService:SetTimerOnce(function()
+			if isvalid(bubble) then bubble.Enable = false end
+		end, self.BubbleShowDuration)
+	end
+
+	-- 산타(object-15_133)를 숨기고, 유저가 미리 배치해둔 썰매(object-15_138)를 그 자리에서 보이게 한
+	-- 뒤 왼쪽으로 날려보낸다. 출발 후 SantaPotionDropDelay/SantaSkillDropDelay초 시점에 각각 포션
+	-- (빨/흰 무작위)+보유 슬롯 스킬 1개(있으면)를 떨어뜨린다(공중 드랍 → 발판까지 낙하 연출).
+	@ExecSpace("ServerOnly")
+	method void StartSantaDeparture()
+		local santa = _EntityService:GetEntityByPath(self.RewardObjectPath)
+		if santa == nil or not isvalid(santa) then
+			log_error("Ep3Map2SkillCover: santa object not found at " .. self.RewardObjectPath)
+			return
+		end
+		local sleigh = _EntityService:GetEntityByPath(self.SleighObjectPath)
+		if sleigh == nil or not isvalid(sleigh) or not self._sleighStartCaptured then
+			log_error("Ep3Map2SkillCover: sleigh object not found/captured at " .. self.SleighObjectPath)
+			return
+		end
+		local map = santa.CurrentMap
+		santa.Enable = false
+
+		local baseX = self._sleighStartWorldX
+		local flyY = self._sleighStartWorldY
+		local startLocal = _MonsterSpawner:ToLocalSpawnPos(map, Vector3(baseX, flyY, 0))
+		sleigh.TransformComponent.Position = Vector3(startLocal.x, sleigh.TransformComponent.Position.y, sleigh.TransformComponent.Position.z)
+		sleigh.Enable = true
+
+		local droppedPotion = false
+		local droppedSkill = false
+		_TweenLogic:PlayTween(0.0, 1.0, self.SantaFlyDuration, EaseType.Linear, function(t)
+			if not isvalid(self) or not isvalid(sleigh) then return end
+			local curX = baseX - self.SantaFlyDistance * t -- 왼쪽으로 이동
+			local localPos = _MonsterSpawner:ToLocalSpawnPos(map, Vector3(curX, flyY, 0))
+			sleigh.TransformComponent.Position = Vector3(localPos.x, sleigh.TransformComponent.Position.y, sleigh.TransformComponent.Position.z)
+			local elapsed = t * self.SantaFlyDuration
+			if not droppedPotion and elapsed >= self.SantaPotionDropDelay then
+				droppedPotion = true
+				self:DropSantaLoot(map, curX, flyY, true)
+			end
+			if not droppedSkill and elapsed >= self.SantaSkillDropDelay then
+				droppedSkill = true
+				self:DropSantaLoot(map, curX, flyY, false)
+			end
+			if t >= 1.0 then
+				self:ResetSleighToStart(sleigh, map)
+			end
+		end)
+	end
+
+	-- 썰매를 다시 숨기고 원래 배치 좌표(X)로 되돌린다 — 비행 종료 시점, 그리고 ResetForNewRun에서 공용으로 쓴다.
+	@ExecSpace("ServerOnly")
+	method void ResetSleighToStart(Entity sleigh, Entity map)
+		if sleigh == nil or not isvalid(sleigh) or not self._sleighStartCaptured then return end
+		local localStart = _MonsterSpawner:ToLocalSpawnPos(map, Vector3(self._sleighStartWorldX, self._sleighStartWorldY, 0))
+		sleigh.TransformComponent.Position = Vector3(localStart.x, sleigh.TransformComponent.Position.y, sleigh.TransformComponent.Position.z)
+		sleigh.Enable = false
+	end
+
+	-- 썰매가 날아가는 도중 한 지점에서 포션(isPotion=true) 또는 스킬(false) 하나를 떨어뜨린다 — 공중
+	-- 드랍이므로 그 지점 바로 아래 실제 발판까지 낙하하는 연출을 계산해서 넘긴다(SkillChestLogic.
+	-- ComputeDropFall과 동일한 레이캐스트 방식).
+	@ExecSpace("ServerOnly")
+	method void DropSantaLoot(Entity map, number worldX, number worldY, boolean isPotion)
+		local fall = self:ComputeDropFallAt(map, worldX, worldY)
+		local worldPos = Vector3(worldX, worldY, 0)
+		if isPotion then
+			local potionType = (_UtilLogic:RandomDouble() < 0.5) and 1 or 2
+			_GameManager:ApplyPotionDrop(potionType, worldPos, fall.x, fall.y, 1.0)
+			log("Ep3Map2SkillCover: santa sleigh dropped potion type=" .. potionType)
+		else
+			local pool = _CardManager:BuildActiveUpgradePool()
+			if #pool > 0 then
+				_CardManager:GrantCardUpgradesFromPool(pool, worldPos, fall.x, fall.y, 1.0, 1, 0)
+				log("Ep3Map2SkillCover: santa sleigh dropped 1 card upgrade")
+			else
+				log("Ep3Map2SkillCover: santa sleigh had no upgradeable skill, skipped")
+			end
+		end
+	end
+
+	-- (worldX, worldY) 바로 아래 가장 가까운 발판까지의 fallHeight/groundWorldY를 계산한다.
+	@ExecSpace("ServerOnly")
+	method Vector3 ComputeDropFallAt(Entity map, number worldX, number worldY)
+		local fallHeight = 0
+		local groundWorldY = worldY
+		if map ~= nil then
+			---@type FootholdComponent
+			local foothold = map:GetComponent("FootholdComponent")
+			if foothold ~= nil then
+				local hits = foothold:RaycastAll(Vector2(worldX, worldY), Vector2(0, -1), 50)
+				local groundY = nil
+				local bestDist = nil
+				for i = 1, #hits do
+					local h = hits[i]
+					local y = h:GetYByX(worldX)
+					local dist = worldY - y
+					if bestDist == nil or dist < bestDist then
+						bestDist = dist
+						groundY = y
+					end
+				end
+				if groundY ~= nil and worldY > groundY then
+					fallHeight = (worldY - groundY) * 100
+					groundWorldY = groundY
+				end
+			end
+		end
+		return Vector3(fallHeight, groundWorldY, 0)
+	end
+
+	-- GameManager.RestartGame()이 호출 — 새 런에서는 가리개를 다시 2번 눌러 재도전할 수 있게 한다
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		self.CoverCleared = false
+		self.CoverAlpha = 1.0
+		self.RudolphRequested = false
+		self.Triggered = false
+		local cover = _EntityService:GetEntityByPath(self.CoverObjectPath)
+		if cover ~= nil and isvalid(cover) then
+			cover.Enable = true
+			local renderer = cover.SpriteRendererComponent
+			if renderer ~= nil then
+				local c = renderer.Color
+				renderer.Color = Color(c.r, c.g, c.b, 1.0)
+			end
+		end
+		local santa = _EntityService:GetEntityByPath(self.RewardObjectPath)
+		if santa ~= nil and isvalid(santa) then santa.Enable = true end
+		local bubble = _EntityService:GetEntityByPath(self.RewardBubblePath)
+		if bubble ~= nil and isvalid(bubble) then bubble.Enable = false end
+		local sleigh = _EntityService:GetEntityByPath(self.SleighObjectPath)
+		if sleigh ~= nil and isvalid(sleigh) then
+			self:ResetSleighToStart(sleigh, santa ~= nil and santa.CurrentMap or sleigh.CurrentMap)
+		end
+	end
+
+end

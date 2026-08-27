@@ -1,0 +1,57 @@
+@Component
+script Ep3Map3PunkoEasterEggTrigger extends Component
+
+	-- 에피소드3 map3 이스터에그: object-15_73(이 엔티티 자신) — 누르면 그 자리에 푼코 무리(+10% 확률로
+	-- 쿠스코 1마리)가 나타난다(Ep3Map3PunkoEasterEggLogic). 런당 1회만 동작(Triggered 플래그로 방지).
+	property any _touchHandler = nil
+	property any _shakeTween = nil
+	property number ShakeDuration = 0.35
+	property number ShakeAngle = 10
+
+	method void OnBeginPlay()
+		if self:IsClient() then
+			self._touchHandler = self.Entity:ConnectEvent(TouchEvent, self.OnTouched)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnTouched(TouchEvent event)
+		-- 게임오버 팝업/타이틀(로비) 화면이 떠 있는 동안은 뒤에 있는 월드 오브젝트가 눌리면 안 된다
+		if _GameManager.GameOver then return end
+		if _TitleUI.titleGroup.Enable then return end
+		self:PlayShake()
+		self:RequestTouch()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayShake()
+		if self._shakeTween ~= nil then
+			self._shakeTween:Stop()
+			self._shakeTween = nil
+		end
+		local transform = self.Entity.TransformComponent
+		self._shakeTween = _TweenLogic:PlayTween(0.0, 1.0, self.ShakeDuration, EaseType.Linear, function(t)
+			if not isvalid(self) or not isvalid(self.Entity) then return end
+			local angle = self.ShakeAngle * math.sin(t * math.pi * 3) * (1.0 - t)
+			transform.ZRotation = angle
+			if t >= 1.0 then
+				transform.ZRotation = 0
+				self._shakeTween = nil
+			end
+		end)
+	end
+
+	-- self.Entity를 그대로 서버로 넘길 필요가 없다(스폰 위치는 터치 시점의 현재 존 기준이라 오브젝트
+	-- 자신의 좌표를 안 씀) — 다른 이스터에그 트리거와 달리 인자 없이 그냥 호출한다.
+	@ExecSpace("Server")
+	method void RequestTouch()
+		_Ep3Map3PunkoEasterEggLogic:OnObjectTouched()
+	end
+
+	method void OnEndPlay()
+		if self:IsClient() and self._touchHandler ~= nil then
+			self.Entity:DisconnectEvent(TouchEvent, self._touchHandler)
+		end
+	end
+
+end

@@ -1,0 +1,85 @@
+@Component
+script Ep3Map2CrateDragTrigger extends Component
+
+	-- 에피소드3 map2 zone5 이스터에그 — 트리 앞에 쌓인 나무 상자 3개(object-15_115/116/117) 중
+	-- 하나에 부착한다. 드래그해서 아무 곳에나 놓으면(목표 좌표 판정 없음) Ep3Map2HiddenGiftLogic이
+	-- 그 지점에서 바로 아래 발판까지 회전 없이 쭉 떨어뜨린다. 3개를 전부 옮기면 뒤에 가려져 있던
+	-- 선물이 터치 가능해진다(Ep2Map2SkillChestTrigger와 동일한 마우스 드래그 패턴 재사용, 목표
+	-- 좌표 판정만 뺐다).
+	property integer BlockerIndex = 0 -- 1/2/3 (맵에 부착할 때 componentOverrides로 지정)
+
+	property any _touchHandler = nil
+	property any _holdHandler = nil
+	property any _releaseHandler = nil
+
+	property boolean _dragging = false
+	property integer _activeTouchId = 0
+	property number _dragOffsetX = 0
+	property number _dragOffsetY = 0
+
+	method void OnBeginPlay()
+		if self:IsClient() then
+			self._touchHandler = self.Entity:ConnectEvent(TouchEvent, self.OnTouched)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnTouched(TouchEvent event)
+		if _GameManager.GameOver then return end
+		if _TitleUI.titleGroup.Enable then return end
+		if _Ep3Map2HiddenGiftLogic.Triggered then return end
+		if self._dragging then return end
+		self._dragging = true
+		self._activeTouchId = event.TouchId
+
+		local worldTouch = _UILogic:ScreenToWorldPosition(event.TouchPoint)
+		local pos = self.Entity.TransformComponent.Position
+		self._dragOffsetX = pos.x - worldTouch.x
+		self._dragOffsetY = pos.y - worldTouch.y
+
+		self._holdHandler = _InputService:ConnectEvent(ScreenTouchHoldEvent, self.OnDragHold)
+		self._releaseHandler = _InputService:ConnectEvent(ScreenTouchReleaseEvent, self.OnDragRelease)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnDragHold(ScreenTouchHoldEvent event)
+		if not self._dragging then return end
+		if event.TouchId ~= self._activeTouchId then return end
+		local worldTouch = _UILogic:ScreenToWorldPosition(event.TouchPoint)
+		local pos = self.Entity.TransformComponent.Position
+		self.Entity.TransformComponent.Position = Vector3(worldTouch.x + self._dragOffsetX, worldTouch.y + self._dragOffsetY, pos.z)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnDragRelease(ScreenTouchReleaseEvent event)
+		if not self._dragging then return end
+		if event.TouchId ~= self._activeTouchId then return end
+		self._dragging = false
+		if self._holdHandler ~= nil then
+			_InputService:DisconnectEvent(ScreenTouchHoldEvent, self._holdHandler)
+			self._holdHandler = nil
+		end
+		if self._releaseHandler ~= nil then
+			_InputService:DisconnectEvent(ScreenTouchReleaseEvent, self._releaseHandler)
+			self._releaseHandler = nil
+		end
+
+		local pos = self.Entity.TransformComponent.Position
+		self:RequestDrop(pos.x, pos.y)
+	end
+
+	-- 놓인 좌표는 서버가 받아서 낙하 연출/발판 착지를 처리한다(목표 판정 없음 — 항상 성공).
+	@ExecSpace("Server")
+	method void RequestDrop(number x, number y)
+		_Ep3Map2HiddenGiftLogic:OnBlockerDropped(self.BlockerIndex, self.Entity, x, y)
+	end
+
+	method void OnEndPlay()
+		if self:IsClient() then
+			if self._touchHandler ~= nil then self.Entity:DisconnectEvent(TouchEvent, self._touchHandler) end
+			if self._holdHandler ~= nil then _InputService:DisconnectEvent(ScreenTouchHoldEvent, self._holdHandler) end
+			if self._releaseHandler ~= nil then _InputService:DisconnectEvent(ScreenTouchReleaseEvent, self._releaseHandler) end
+		end
+	end
+
+end

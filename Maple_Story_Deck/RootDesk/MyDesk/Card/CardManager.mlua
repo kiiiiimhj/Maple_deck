@@ -2620,7 +2620,7 @@ script CardManager extends Logic
 	property string ShadeAttackIconRUID = "92a5020c978c46bdabab910598118b86"
 	property string ShadeAttackEffectRUID1 = "ef25dcbf917042529e80b16545a66dcb"
 	-- 유저 지정: 사운드 없는 스킬 전수조사 후 일괄 보강 — 전용 리소스팩 번들 오디오(_audio/Use) 사용
-	property string ShadeBasicAttackSoundRUID = "aac82d427e0f4fa8b3c08209084055d3"
+	property string ShadeBasicAttackSoundRUID = "c48925b3dd9341a5b595be499182df90"
 
 	method void PlayShadeBasicAttackSound()
 		_SoundService:PlaySound(self.ShadeBasicAttackSoundRUID, 1.0)
@@ -9077,6 +9077,14 @@ script CardManager extends Logic
 	method number ClampKnockbackDestX(MonsterAI target, number destX)
 		if not isvalid(target) or not isvalid(target.Entity) or not isvalid(target.Entity.TransformComponent) then return destX end
 		if target._isFlying then return destX end
+		-- 버그 수정(2026-08-26, 유저 리포트 "보너스보스가 넉백맞고 사라짐") — 보너스보스(Ep3Map2BonusBossLogic)는
+		-- 실제로는 ZoneInfo 밖 고정 아레나(ep3_map2_ester_1)에 서 있지만, 스킬 타겟팅을 위해 _spawnZoneIndex에
+		-- "플레이어가 입장 직전에 있던 실제 존"(예: 101)을 등록해둔다(InitializeAnimatedBonusBoss 주석 참고).
+		-- 그런데 이 메서드는 그 _spawnZoneIndex로 발판 밴드/존 컨테이너 오프셋을 조회하므로, 보너스보스한테는
+		-- 아레나와 전혀 무관한 "실제 존"의 좌표계로 clamp를 계산해버려 엉뚱한 destX가 나온다 — 발판을 평평하게
+		-- 바꾼 것과 무관하게 항상 있던 버그. 보너스보스는 애초에 ApplyKnockback도 제외되어 있으니(§ApplyKnockback)
+		-- 여기서도 동일하게 제외한다.
+		if target._isBonusBoss then return destX end
 		local zoneIdx = target._spawnZoneIndex
 		local bands = _MonsterSpawner:GetZonePlatformBands(zoneIdx)
 		local pos = target.Entity.TransformComponent.Position
@@ -10892,6 +10900,17 @@ script CardManager extends Logic
 	-- 갱신됨) 기준으로 존11의 루트 또는 존12의 자식 컨테이너를 구분해서 반환한다.
 	@ExecSpace("ServerOnly")
 	method Entity GetCurrentMap()
+		-- 버그 수정(2026-08-26, 유저 리포트 "스킬 연출도 안나와") — 보너스보스 아레나(ep3_map2_ester_1)는
+		-- ZoneInfo 밖 별도 맵이라 입장해도 CurrentMapIndex가 안 바뀐다(Ep3Map2BonusBossLogic.
+		-- MoveAllUsersToArena 주석 참고). 이 메서드가 그대로 CurrentMapIndex 기준 존 엔티티를 반환하면
+		-- SpawnEffectWithModel 등 모든 스킬이펙트가 실제로 플레이어가 서 있는 아레나가 아니라 엉뚱한
+		-- (입장 직전) 실제 존에 스폰돼 화면에 안 보인다 — 아레나에 있는 동안은 아레나 맵 엔티티를
+		-- 우선 반환한다. GetMonstersInCurrentZone은 이 반환값을 안 쓰므로(zoneIndex 레지스트리 기반)
+		-- 영향 없음.
+		if isvalid(_Ep3Map2BonusBossLogic) and _Ep3Map2BonusBossLogic.InArena then
+			local arena = _EntityService:GetEntityByPath(_Ep3Map2BonusBossLogic.ArenaMapPath)
+			if arena ~= nil then return arena end
+		end
 		return _MonsterSpawner:GetZoneEntity(_MapManager.CurrentMapIndex)
 	end
 
