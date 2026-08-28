@@ -70,6 +70,18 @@ script GameManager extends Logic
 	-- 값을 건드리지 않는다(같은 모드로 재시작 — 로비로 나가서 다시 고르기 전까지 유지).
 	@Sync property boolean TimeAttackMode = false
 	property number TimeAttackDuration = 1200
+
+	-- 랭킹 보드 id — RankingConfigDataSet.csv의 Id 열과 반드시 일치해야 한다(1=무제한, 2=타임어택)
+	property integer RankBoardIdUnlimited = 1
+	property integer RankBoardIdTimeAttack = 2
+	-- 랭킹 저장값의 하위 자릿수를 생존 초로 쓰기 위한 배율(동점 타이브레이커). 자세한 설명은 EncodeRankScore 참고
+	property integer RankScoreTimeScale = 10000
+
+	-- 입장 로딩 화면이 화면을 가리고 있는 동안 몬스터 스폰 시작을 미루는 시간(초).
+	-- ⚠ LoadingUI.FadeInSeconds + LoadingUI.HoldSeconds 와 같은 값이어야 한다 — 화면이 밝아지는
+	-- 순간에 맞춰 전투가 시작되도록 맞춰둔 값이다. 한쪽만 고치면 어긋난다(검은 화면에서 이미
+	-- 맞고 있거나, 밝아진 뒤 한참 아무것도 안 나오거나).
+	property number EntryDelaySeconds = 1.55
 	@Sync property number TimeAttackRemaining = 0
 	-- 카운트가 0이 된 뒤(절망의 칼날 등장 이후) 상태 — GameOverUI가 "이어하기/다시하기 둘 다"와
 	-- "다시하기만" 중 어느 쪽을 보여줄지 이 두 플래그로 판정한다. _timeAttackOvertimeDeath는
@@ -3339,7 +3351,79 @@ script GameManager extends Logic
 		self._goldBonusCheckpoint = self.Gold
 		-- 가방 환전은 여기서 하지 않는다 — "이어하기"를 고르면 가방 아이템은 그대로 유지되어야 하므로,
 		-- 실제로 "처음부터 다시하기"를 선택했을 때(RestartGame)만 환전+초기화한다
+		--
+		-- 랭킹 등록은 여기(죽은 시점)에서 한 번만 한다. "이어하기"로 런이 이어지면 가방이 더 쌓이므로
+		-- 다음 게임오버 때 더 높은 점수로 다시 등록되고, SetScoreAndWait가 기존 최고점보다 높을 때만
+		-- 갱신하므로 중복 등록이어도 최고 기록만 남는다.
+		-- SetScoreAndWait는 DataStorage 왕복(AndWait)이라 전투 코드 흐름을 그대로 붙잡으면 안 된다 —
+		-- 타이머로 한 프레임 넘겨서 실행한다.
+		_TimerService:SetTimerOnce(function() self:SubmitRankingScore() end, 0)
 		log("Game Over!")
+	end
+
+	-- 이번 런의 랭킹 점수 = 가방에 쌓인 잡템의 환산값 합계. GameOverUI가 "N 점"으로 보여주는
+	-- 그 숫자와 정확히 같은 계산식이다(클라 표시값 ↔ 랭킹 등록값 불일치를 막기 위해 의도적으로 동일).
+	@ExecSpace("ServerOnly")
+	method integer CalcRunScore()
+		local defs = _PlayerInventory:GetAllItemDefs()
+		local orderedIds = _PlayerInventory:GetOrderedItemIds()
+		local total = 0
+		for i, itemId in ipairs(orderedIds) do
+			local def = defs[itemId]
+			if def ~= nil then
+				total = total + _PlayerInventory:GetItemCount(itemId) * def.coinValue
+			end
+		end
+		return total
+	end
+
+	-- 랭킹 보드에 저장하는 실제 값. SortableDataStorage는 정수 하나로만 정렬하므로 "동점이면 생존
+	-- 시간이 긴 쪽이 위" 규칙을 값 자체에 인코딩한다 — 상위 자리는 환산값, 하위 4자리는 생존 초.
+	-- 표시할 때는 RankScoreTimeScale로 나눠서 환산값만 보여준다(= 게임오버 화면의 숫자와 동일).
+	@ExecSpace("ServerOnly")
+	method integer EncodeRankScore(integer score, integer survivalSeconds)
+		local tail = survivalSeconds
+		if tail < 0 then tail = 0 end
+		if tail > self.RankScoreTimeScale - 1 then tail = self.RankScoreTimeScale - 1 end
+		return score * self.RankScoreTimeScale + tail
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SubmitRankingScore()
+		-- 이번 런의 기록을 해당 모드의 랭킹 보드에 등록한다(기존 최고점보다 높을 때만 갱신).
+		local score = self:CalcRunScore()
+		if score <= 0 then
+			log("GameManager: ranking submit skipped (score=0)")
+			return
+		end
+
+		local boardId = self.RankBoardIdUnlimited
+		if self.TimeAttackMode then
+			boardId = self.RankBoardIdTimeAttack
+		end
+
+		local configData = _RankingConfigDataSetLogic:GetData(boardId)
+		if configData == nil then
+			log_error("GameManager: ranking configData is nil. boardId=" .. tostring(boardId))
+			return
+		end
+
+		local survivalSeconds = math.floor(_MonsterSpawner._elapsedPlayTime)
+		local stored = self:EncodeRankScore(score, survivalSeconds)
+		local cycleIndex = configData:GetCycleIndex(_DateTimeLogic:GetTimeElapsed())
+
+		for _, userEntity in ipairs(_UserService.UserEntities.Values) do
+			if isvalid(userEntity) and userEntity.PlayerDBManager.IsLoadSuccess then
+				local tag = userEntity.PlayerComponent.Nickname
+				userEntity.PlayerRanking:SetScoreAndWait(boardId, cycleIndex, stored, tag, "", false)
+			end
+		end
+
+		-- 방금 등록한 기록이 곧바로 목록에 보이도록 조회 캐시를 버린다 — 안 그러면 로비로 돌아가
+		-- 랭킹을 열었을 때 LiveCacheSeconds 동안 직전(내 기록 없는) 목록이 그대로 보인다
+		_RankingViewLogic:InvalidateLiveCache(boardId)
+
+		log(string.format("GameManager: ranking submitted. boardId=%d score=%d survival=%ds stored=%d", boardId, score, survivalSeconds, stored))
 	end
 
 	-- 클라이언트의 "게임 시작" 버튼 요청 (타이틀 화면) — 캐릭터 선택 팝업의 "무제한 모드" 체크박스
@@ -3386,7 +3470,14 @@ script GameManager extends Logic
 			_MapManager:SilentMoveToMap(_MapManager.CurrentMapIndex, _MapManager.DesiredStartMapIndex)
 		end
 		self.GameStarted = true
-		_MapManager:BeginGameplay()
+		-- 입장 로딩 화면이 화면을 가리고 있는 동안은 몬스터를 풀지 않는다 — 화면만 가리고 스폰은
+		-- 그대로 돌리면 "인식도 못 했는데 죽어있는" 문제가 오히려 심해진다(유저 리포트가 바로 그것).
+		-- 화면이 밝아지는 순간(EntryDelaySeconds 경과)에 맞춰 전투를 시작한다.
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) then return end
+			_MapManager:BeginGameplay()
+			log("GameManager: gameplay begun after entry loading")
+		end, self.EntryDelaySeconds)
 		_CardManager:InitWeaponSkillForRun(userId)
 		-- 장비 등급 스킬(무기 외 4부위 포함)의 런 상태도 같은 시점에 초기화한다
 		_GearEffectLogic:InitForRun(userId)
@@ -3548,7 +3639,13 @@ script GameManager extends Logic
 		_MonsterSpawner:ResetEliteTracking()
 		-- 지쳐버린 기사(Tired Knight) 존별 스폰 여부도 초기화 — 새 런에서 존마다 다시 1마리씩 등장한다
 		_MonsterSpawner:ResetTiredKnightTracking()
-		_MonsterSpawner:RestartSpawning()
+		-- StartGame과 같은 이유로 스폰 재개도 입장 로딩 시간만큼 미룬다(GameOverUI의 "다시하기"도
+		-- 로딩 화면을 띄운다) — 검은 화면 뒤에서 몹이 이미 달려오고 있으면 안 된다
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) then return end
+			_MonsterSpawner:RestartSpawning()
+			log("GameManager: spawning restarted after entry loading")
+		end, self.EntryDelaySeconds)
 		self:NotifyExpChanged(self.Exp, self.ExpNeeded, self.Level, true)
 		log("Game restarted (full reset)")
 	end

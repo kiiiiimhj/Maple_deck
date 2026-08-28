@@ -1,0 +1,351 @@
+@Logic
+script RankUI extends Logic
+
+	-- 로비(TitleGroup.ui) 랭킹 탭 화면.
+	--
+	-- 레이아웃은 전부 .ui 하이라키에 실제 엔티티로 만들어져 있고(RankPanel/Tabs, RankPanel/Board/...),
+	-- 이 스크립트는 값만 채운다 — 이미지/크기/폰트/색은 Maker 하이라키에서 직접 수정하면 된다.
+	-- 4~100위 목록은 GridView가 RowTemplate 하나를 복제해 채우므로, 행 디자인을 바꾸고 싶으면
+	-- RankPanel/Board/ListArea/RowTemplate 하나만 고치면 전체에 반영된다.
+
+	property Entity rankPanel = "06fe7223-8b8e-403a-a901-295fcdda2a77"
+
+	property ButtonComponent tabUnlimited = "b4ce6bf5-e92e-479d-8783-34080848824b"
+	property ButtonComponent tabTimeAttack = "02564745-7f21-47af-aeef-2c08bd7e9453"
+	property TextComponent tabUnlimitedLabel = "37a7365e-1424-435a-bcce-fe816903a99f"
+	property TextComponent tabTimeAttackLabel = "ded1412e-795a-46ef-a858-82787b61348b"
+
+	property GridViewComponent listArea = "f5830545-edb1-43a6-bcee-c3e633cbb41c"
+	property Entity rowTemplate = "927dad8f-69f8-4235-909e-7c418535fcb5"
+	property SliderComponent scrollBar = "e978609f-86a6-4de5-a0ca-a5b3c5d84217"
+
+	property Entity medalRow1 = "d7689069-b5a6-4d9a-bc3d-b67ab8984a82"
+	property Entity medalRow2 = "b78cffb5-3763-4cc6-a938-d49dd948945b"
+	property Entity medalRow3 = "c7c7daf4-080a-417b-ab6d-cd41d941dc60"
+	property Entity myRankRow = "33c462ee-8288-4045-8059-a1450d66b5d5"
+	property Entity emptyText = "5aade462-f3ef-44e5-af91-97e11385b98d"
+
+	-- RankingConfigDataSet.csv의 Id 열과 일치해야 한다(GameManager의 RankBoardId* 와도 동일)
+	property integer BoardIdUnlimited = 1
+	property integer BoardIdTimeAttack = 2
+	-- GameManager:EncodeRankScore가 하위 4자리에 생존 초를 넣어 저장한다 — 표시할 땐 이 값으로 나눈다
+	property integer RankScoreTimeScale = 10000
+	property integer ViewCount = 100
+
+	-- 선택된 탭 색 (하이라키에서 색을 바꾸고 싶으면 이 값을 고치면 된다)
+	property Color TabOnColor = Color(0.85, 0.63, 0.24, 1)
+	property Color TabOffColor = Color(0.34, 0.21, 0.11, 1)
+
+	-- 서버가 "아직 준비 안 됨"(myRank=-1)을 보냈을 때 다시 물어보는 간격/횟수.
+	-- 로비 진입 직후엔 플레이어 DB 로드가 안 끝나 있어서 첫 요청이 이 경로를 탄다
+	property number RetryDelaySeconds = 1.0
+	property integer MaxRetryCount = 10
+	property integer _retryCount = 0
+
+	property integer _boardId = 1
+	-- 4위 이하만 담긴 목록 (1~3위는 위쪽 메달 고정행이 따로 표시한다)
+	property table _restList = {}
+
+	property any _tabUnlimitedHandler = nil
+	property any _tabTimeAttackHandler = nil
+	property any _sliderHandler = nil
+	property any _gridHandler = nil
+
+	-- UIGridScrollBar와 같은 echo 상쇄 카운터. "값이 얼마나 다른가"가 아니라 "내가 보낸 게 몇 개
+	-- 아직 안 돌아왔는가"로 거른다 — 값 비교 방식은 늦게 도착한 echo를 진짜 변경으로 오인해 핸들이
+	-- 튀는 문제가 이 프로젝트에서 이미 확인됐다(UIGridScrollBar 주석 참고).
+	property integer _pendingFromSlider = 0
+	property integer _pendingFromGrid = 0
+	property number _lastScrollValue = 0
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		self._boardId = self.BoardIdUnlimited
+
+		self._tabUnlimitedHandler = self.tabUnlimited.Entity:ConnectEvent(ButtonClickEvent, function() self:SelectBoard(self.BoardIdUnlimited) end)
+		self._tabTimeAttackHandler = self.tabTimeAttack.Entity:ConnectEvent(ButtonClickEvent, function() self:SelectBoard(self.BoardIdTimeAttack) end)
+
+		-- GridView는 RowTemplate을 복제해서 보이는 만큼만 그린다. index는 0-based로 들어온다.
+		self.listArea.ItemEntity = self.rowTemplate
+		self.listArea.OnRefresh = function(index, entity) self:OnRowRefresh(index + 1, entity) end
+		self.listArea.TotalCount = 0
+
+		self._sliderHandler = self.scrollBar.Entity:ConnectEvent(SliderValueChangedEvent, self.OnSliderChanged)
+		self._gridHandler = self.listArea.Entity:ConnectEvent(ScrollPositionChangedEvent, self.OnGridScrolled)
+
+		self:RefreshTabVisual()
+		self:ClearRows()
+		log("RankUI started")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		if self._tabUnlimitedHandler then self.tabUnlimited.Entity:DisconnectEvent(ButtonClickEvent, self._tabUnlimitedHandler) end
+		if self._tabTimeAttackHandler then self.tabTimeAttack.Entity:DisconnectEvent(ButtonClickEvent, self._tabTimeAttackHandler) end
+		if self._sliderHandler then self.scrollBar.Entity:DisconnectEvent(SliderValueChangedEvent, self._sliderHandler) end
+		if self._gridHandler then self.listArea.Entity:DisconnectEvent(ScrollPositionChangedEvent, self._gridHandler) end
+	end
+
+	-- TitleUI가 랭킹 탭을 눌렀을 때 호출 — 현재 선택된 보드를 서버에 다시 요청한다.
+	@ExecSpace("ClientOnly")
+	method void Open()
+		self:Request()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SelectBoard(integer boardId)
+		-- 상단 탭(무제한/타임어택) 전환
+		if self._boardId == boardId then return end
+		self._boardId = boardId
+		self._retryCount = 0
+		self:RefreshTabVisual()
+		self:ClearRows()
+		self:Request()
+		log("RankUI: board switched to " .. tostring(boardId))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshTabVisual()
+		-- 선택된 탭만 밝게, 라벨도 함께 강조한다
+		local onUnlimited = (self._boardId == self.BoardIdUnlimited)
+		local a = self.tabUnlimited.Entity.SpriteGUIRendererComponent
+		local c = self.tabTimeAttack.Entity.SpriteGUIRendererComponent
+		if onUnlimited then
+			a.Color = self.TabOnColor
+			c.Color = self.TabOffColor
+		else
+			a.Color = self.TabOffColor
+			c.Color = self.TabOnColor
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Request()
+		-- 서버에 상위 100명 + 내 기록을 요청한다. 응답은 RankingViewLogic이 SetRanking으로 돌려준다.
+		_RankingViewLogic:RequestDataListWithUserData(self._boardId, 1, self.ViewCount)
+		log("RankUI: requested boardId=" .. tostring(self._boardId))
+	end
+
+	-- 서버 응답 진입점 (RankingViewLogic:ResponseDataListWithUserData가 호출)
+	-- rows: { { rank, name, score }, ... } 순수 테이블. @Struct는 RPC로 못 넘기므로 서버가 펼쳐서 보낸다.
+	-- myRank 0 = 상위 목록 밖이라 순위 미상 / myScore 0 = 아직 기록 없음
+	@ExecSpace("ClientOnly")
+	method void SetRanking(integer id, table rows, integer myRank, integer myScore)
+		-- 탭을 빠르게 여러 번 눌러 이전 보드의 응답이 늦게 도착한 경우는 버린다
+		if id ~= self._boardId then
+			log("RankUI: stale response ignored (id=" .. tostring(id) .. ")")
+			return
+		end
+
+		-- 서버가 "아직 플레이어 DB 로딩 중"이라고 답한 경우 — 화면을 건드리지 않고 잠시 뒤 다시 요청한다.
+		-- 로비에 들어가자마자 랭킹 탭을 열면 이 경로를 탄다
+		if myRank < 0 then
+			if self._retryCount >= self.MaxRetryCount then
+				log("RankUI: give up retrying (id=" .. tostring(id) .. ")")
+				return
+			end
+			self._retryCount = self._retryCount + 1
+			log("RankUI: server not ready, retry #" .. tostring(self._retryCount))
+			_TimerService:SetTimerOnce(function()
+				if isvalid(self) and self._boardId == id then self:Request() end
+			end, self.RetryDelaySeconds)
+			return
+		end
+		self._retryCount = 0
+
+		local count = 0
+		if rows ~= nil then count = #rows end
+		log(string.format("RankUI: SetRanking id=%d count=%d myRank=%d", id, count, myRank))
+
+		-- 1~3위는 메달 고정행에
+		self:SetMedalRow(self.medalRow1, rows, 1)
+		self:SetMedalRow(self.medalRow2, rows, 2)
+		self:SetMedalRow(self.medalRow3, rows, 3)
+
+		-- 4위 이하는 스크롤 목록에
+		local rest = {}
+		if rows ~= nil then
+			for i = 4, #rows do
+				rest[#rest + 1] = rows[i]
+			end
+		end
+		self._restList = rest
+		self.listArea.TotalCount = #rest
+		-- 목록 자체가 바뀌는 갱신이므로 resetPos와 force를 같은 값으로 묶는다
+		-- (둘을 다르게 주면 이전 내용이 남거나 플리커가 생긴다 — UIInventoryGrid 주석 참고)
+		self.listArea:Refresh(true, true)
+		self:SyncSliderFromGrid()
+
+		self:SetMyRow(myRank, myScore, count)
+
+		if isvalid(self.emptyText) then
+			self.emptyText.Enable = (count == 0)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetMedalRow(Entity row, table rows, integer index)
+		-- 상위 3위 고정행 하나를 채운다. 해당 순위가 비어 있으면 이름/점수만 "-"로 두고 행은 남긴다
+		-- (행 자체를 끄면 표 모양이 무너져서 빈 자리로 보이게 유지한다)
+		if not isvalid(row) then return end
+
+		local data = nil
+		if rows ~= nil then data = rows[index] end
+
+		local rankText = row:GetChildByName("RankText")
+		local nameText = row:GetChildByName("NameText")
+		local scoreText = row:GetChildByName("ScoreText")
+
+		if data == nil then
+			if isvalid(rankText) then rankText.TextComponent.Text = tostring(index) end
+			if isvalid(nameText) then nameText.TextComponent.Text = "-" end
+			if isvalid(scoreText) then scoreText.TextComponent.Text = "-" end
+			return
+		end
+
+		if isvalid(rankText) then rankText.TextComponent.Text = tostring(data.rank) end
+		if isvalid(nameText) then nameText.TextComponent.Text = self:DisplayName(data.name) end
+		if isvalid(scoreText) then scoreText.TextComponent.Text = self:FormatNumber(self:DecodeScore(data.score)) end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetMyRow(integer myRank, integer myScore, integer listCount)
+		-- 하단 "내 순위" 고정행. 상위 100 안에 들면 순위까지, 밖이면 점수만 보여준다.
+		-- listCount는 이번에 받은 목록 길이 — "N위 밖"이라고 단정해도 되는지 판단하는 데 쓴다
+		if not isvalid(self.myRankRow) then return end
+
+		local rankText = self.myRankRow:GetChildByName("RankText")
+		local nameText = self.myRankRow:GetChildByName("NameText")
+		local scoreText = self.myRankRow:GetChildByName("ScoreText")
+
+		local myName = "-"
+		if isvalid(_UserService.LocalPlayer) then
+			myName = _UserService.LocalPlayer.PlayerComponent.Nickname
+		end
+		if isvalid(nameText) then nameText.TextComponent.Text = myName end
+
+		if myScore <= 0 then
+			if isvalid(rankText) then rankText.TextComponent.Text = "-" end
+			if isvalid(scoreText) then scoreText.TextComponent.Text = "기록 없음" end
+			return
+		end
+
+		if isvalid(scoreText) then scoreText.TextComponent.Text = self:FormatNumber(self:DecodeScore(myScore)) end
+
+		if myRank > 0 then
+			if isvalid(rankText) then rankText.TextComponent.Text = tostring(myRank) end
+			return
+		end
+
+		-- 기록은 있는데 순위가 안 잡힌 경우. 목록이 꽉 찼을 때만 진짜로 "밖"이라고 단정할 수 있다 —
+		-- 목록이 ViewCount보다 짧은데 내가 없다면 그건 순위 밖이 아니라 집계가 아직 안 따라온 것이다
+		-- (예전에 "혼자 플레이했는데 100위 밖"으로 잘못 표시된 원인)
+		if isvalid(rankText) then
+			if listCount >= self.ViewCount then
+				rankText.TextComponent.Text = tostring(self.ViewCount) .. "위 밖"
+			else
+				rankText.TextComponent.Text = "집계 중"
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnRowRefresh(integer index, Entity entity)
+		-- GridView가 보이는 행을 그릴 때마다 호출 — DataStorage 접근 금지, 캐시(_restList)만 읽는다
+		local data = self._restList[index]
+		if data == nil then return end
+
+		local rankText = entity:GetChildByName("RankText")
+		local nameText = entity:GetChildByName("NameText")
+		local scoreText = entity:GetChildByName("ScoreText")
+
+		if isvalid(rankText) then rankText.TextComponent.Text = tostring(data.rank) end
+		if isvalid(nameText) then nameText.TextComponent.Text = self:DisplayName(data.name) end
+		if isvalid(scoreText) then scoreText.TextComponent.Text = self:FormatNumber(self:DecodeScore(data.score)) end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ClearRows()
+		-- 탭 전환 직후 이전 보드 내용이 잠깐 남아 보이지 않게 비운다
+		self._restList = {}
+		self.listArea.TotalCount = 0
+		self.listArea:Refresh(true, true)
+		self:SetMedalRow(self.medalRow1, nil, 1)
+		self:SetMedalRow(self.medalRow2, nil, 2)
+		self:SetMedalRow(self.medalRow3, nil, 3)
+	end
+
+	-- 저장값은 (환산값 * RankScoreTimeScale + 생존초)라 표시할 땐 상위 자리만 쓴다.
+	-- 하위 자리는 동점 시 생존 시간이 긴 쪽이 위로 오게 하려고 넣은 것이라 화면에는 보이지 않는다.
+	@ExecSpace("ClientOnly")
+	method integer DecodeScore(integer stored)
+		return stored // self.RankScoreTimeScale
+	end
+
+	@ExecSpace("ClientOnly")
+	method string DisplayName(string tag)
+		if tag == nil or tag == "" then return "모험가" end
+		return tag
+	end
+
+	@ExecSpace("ClientOnly")
+	method string FormatNumber(integer n)
+		-- 천 단위 콤마: 253353 -> "253,353" (GameOverUI와 동일한 방식)
+		local s = tostring(n)
+		local formatted = s
+		local count = 0
+		formatted, count = s:reverse():gsub("(%d%d%d)", "%1,")
+		formatted = formatted:reverse()
+		if formatted:sub(1, 1) == "," then formatted = formatted:sub(2) end
+		return formatted
+	end
+
+	-- ── 스크롤바 ↔ GridView 양방향 동기화 (UIGridScrollBar와 동일한 카운터 방식) ──
+
+	@ExecSpace("ClientOnly")
+	method void SyncSliderFromGrid()
+		self._pendingFromSlider = 0
+		local pos = self.listArea:GetScrollNormalizedPosition(UITransformAxis.Vertical)
+		self._pendingFromGrid = self._pendingFromGrid + 1
+		self.scrollBar.Value = pos
+		self._lastScrollValue = pos
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnSliderChanged(SliderValueChangedEvent event)
+		if self._pendingFromGrid > 0 then
+			self._pendingFromGrid = self._pendingFromGrid - 1
+			return
+		end
+		local currentGridPos = self.listArea:GetScrollNormalizedPosition(UITransformAxis.Vertical)
+		if math.abs(event.Value - currentGridPos) < 0.0001 then
+			self._lastScrollValue = event.Value
+			return
+		end
+		self._pendingFromSlider = self._pendingFromSlider + 1
+		self.listArea:SetScrollNormalizedPosition(UITransformAxis.Vertical, event.Value)
+		-- 값이 한 번에 크게 뛴 경우(트랙 직접 클릭 등)만 안전장치로 다시 그린다 — 매 이벤트마다 부르면
+		-- 핸들은 매끄럽게 움직이는데 내용만 뚝뚝 갱신돼 떨려 보인다
+		if math.abs(event.Value - self._lastScrollValue) > 0.05 then
+			self.listArea:Refresh(false, false)
+		end
+		self._lastScrollValue = event.Value
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnGridScrolled(ScrollPositionChangedEvent event)
+		if self._pendingFromSlider > 0 then
+			self._pendingFromSlider = self._pendingFromSlider - 1
+			return
+		end
+		local currentSliderValue = self.scrollBar.Value
+		if math.abs(event.NormalizedPosition.y - currentSliderValue) < 0.0001 then
+			self._lastScrollValue = event.NormalizedPosition.y
+			return
+		end
+		self._pendingFromGrid = self._pendingFromGrid + 1
+		self.scrollBar.Value = event.NormalizedPosition.y
+		self._lastScrollValue = event.NormalizedPosition.y
+	end
+
+end

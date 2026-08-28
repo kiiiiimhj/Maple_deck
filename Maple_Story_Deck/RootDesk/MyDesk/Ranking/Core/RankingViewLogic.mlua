@@ -1,0 +1,300 @@
+@Logic
+script RankingViewLogic extends Logic
+
+	-- ranking-advanced-package의 Sample/RankingViewLogic을 이 프로젝트에 맞게 옮긴 것.
+	-- 원본은 응답을 _RankingSampleUILogic:GetUI()로 찾은 샘플 UI 엔티티에 넘겼지만, 이 프로젝트의
+	-- 랭킹 화면은 TitleGroup.ui의 RankPanel + @Logic(_RankUI)이라 UI 엔티티 조회 없이 바로 _RankUI를
+	-- 호출한다. CalculateRanks* 계열은 Core의 RankingSnapshotData가 _RankingViewLogic:CalculateRanks를
+	-- 직접 부르므로 이름/시그니처를 그대로 유지해야 한다(패키지 원본 그대로).
+	--
+	-- ⚠ 목록 조회는 패키지의 공유메모리 스냅샷을 쓰지 않는다. 스냅샷은 RefreshIntervalMinutes(최소
+	-- 30분) 주기로만 갱신되는 캐시라서, 방금 런을 끝낸 플레이어가 곧바로 랭킹을 열면 자기 기록이
+	-- 아직 안 들어간 빈 목록을 보게 된다(2026-08-28 실측: 점수는 Score updated 로그로 정상 등록됐는데
+	-- 이후 모든 조회가 count=0 myRank=0). 그건 월드 인스턴스가 여러 개일 때 DataStorage 크레딧을
+	-- 아끼기 위한 설계이고 이 게임의 기대("죽자마자 내 등수 확인")와 정반대다.
+	-- 그래서 SortableDataStorage를 직접 읽고, 탭 연타로 조회가 남발되지 않게 짧은 서버 캐시만 둔다.
+
+	-- 같은 보드를 이 시간(초) 안에 다시 요청하면 DataStorage를 다시 읽지 않고 캐시를 준다
+	property integer LiveCacheSeconds = 30
+
+	-- boardId -> { builtAt = 초, entries = { { rank, name, score, profileCode }, ... } }
+	property table _liveCache = {}
+
+	@ExecSpace("Server")
+	method void RequestDataListWithUserData(integer id, integer pageNo, integer pageSize)
+		-- 현재 랭킹 목록 + 요청자 본인의 기록을 함께 요청한다.
+		self:ProcessDataListWithUserData(senderUserId, id, pageNo, pageSize)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ProcessDataListWithUserData(string userId, integer id, integer pageNo, integer pageSize)
+		-- SortableDataStorage에서 직접 읽은 상위 N명 + 요청자 본인 기록을 모아 응답한다.
+		local userEntity = _UserService:GetUserEntityByUserId(userId)
+		if not isvalid(userEntity) then
+			return
+		end
+
+		-- 월드 부팅 직후엔 플레이어 DB 로드가 아직 안 끝나 있다. 패키지 원본은 여기서 그냥 return해서
+		-- 클라이언트가 응답을 영영 못 받고 빈 화면으로 남았다(2026-08-28 실측: 부팅 직후 자동 요청은
+		-- 응답 로그가 아예 없고, 다시 클릭해야 떴다). "아직 준비 안 됨"을 명시적으로 알려서 재시도하게 한다.
+		if not userEntity.PlayerDBManager.IsLoadSuccess then
+			log("RankingViewLogic: player DB not loaded yet, ask client to retry. id=" .. tostring(id))
+			self:ResponseDataListWithUserData(id, {}, -1, 0, userId)
+			return
+		end
+
+		local configData = _RankingConfigDataSetLogic:GetData(id)
+		if configData == nil then
+			log_error("RankingViewLogic: configData is nil. id=" .. tostring(id))
+			self:ResponseDataListWithUserData(id, {}, 0, 0, userId)
+			return
+		end
+
+		local cycleIndex = configData:GetCycleIndex(_DateTimeLogic:GetTimeElapsed())
+
+		-- 본인 기록 점수 — 상위 N 밖이라 순위를 모르더라도 점수는 보여줄 수 있다
+		local myScore = 0
+		local myUserData = userEntity.PlayerRanking:GetUserData(id, cycleIndex)
+		if myUserData ~= nil then
+			myScore = myUserData.Score
+		end
+
+		local entries = self:GetLiveEntriesAndWait(id, cycleIndex, configData)
+
+		-- @Struct(RankingData/UserRankingData)는 서버↔클라 RPC 파라미터로 넘길 수 없다(LEA-4002).
+		-- profileCode는 화면에 쓰지 않으므로 여기서 떼고 순수 테이블만 보낸다.
+		local myProfileCode = userEntity.PlayerComponent.ProfileCode
+		local myRank = 0
+		local rows = {}
+		for i = 1, #entries do
+			local e = entries[i]
+			rows[i] = { rank = e.rank, name = e.name, score = e.score }
+			if e.profileCode == myProfileCode then
+				myRank = e.rank
+				myScore = e.score
+			end
+		end
+
+		log(string.format("RankingViewLogic: respond id=%d count=%d myRank=%d myScore=%d", id, #rows, myRank, myScore))
+		self:ResponseDataListWithUserData(id, rows, myRank, myScore, userId)
+	end
+
+	-- SortableDataStorage를 직접 정렬 조회해 상위 ViewCount명을 만든다(LiveCacheSeconds 동안 캐시).
+	@ExecSpace("ServerOnly")
+	method table GetLiveEntriesAndWait(integer id, integer cycleIndex, RankingConfigData configData)
+		local nowSec = _UtilLogic.ServerElapsedSeconds
+		local cached = self._liveCache[id]
+		if cached ~= nil and cached.cycleIndex == cycleIndex and (nowSec - cached.builtAt) < self.LiveCacheSeconds then
+			return cached.entries
+		end
+
+		local entries = {}
+
+		local ds = _RankingDataStorageLogic:GetSortableDS(id, cycleIndex)
+		if ds == nil then
+			log_error("RankingViewLogic: GetSortableDS failed. id=" .. tostring(id))
+			return entries
+		end
+
+		-- 패키지 원본(TryUpdateSharedMemory)과 같은 페이징 방식. 열거형 자리에는 정수 리터럴이 아니라
+		-- 반드시 enum 멤버를 넘겨야 한다(SortDirection.Descending)
+		local errorCode, pages = ds:GetSortedAndWait(SortDirection.Descending, 1, math.maxinteger)
+		if errorCode ~= 0 then
+			log_error(string.format("RankingViewLogic: GetSortedAndWait failed. errorCode=%d id=%d", errorCode, id))
+			return entries
+		end
+
+		local viewCount = configData.ViewCount
+		local done = false
+		while not done do
+			local items = pages:GetCurrentPageDatas()
+			if items == nil then
+				break
+			end
+
+			for _, item in pairs(items) do
+				local value = item.Value
+				-- 0점 이하는 기록 없음으로 간주하고 거기서 끊는다(내림차순이라 뒤는 전부 0 이하)
+				if value <= 0 then
+					done = true
+					break
+				end
+
+				if viewCount <= #entries then
+					done = true
+					break
+				end
+
+				local keyInfo = item.KeyInfo
+				entries[#entries + 1] = {
+					rank = 0,
+					name = keyInfo.Tag,
+					score = value,
+					profileCode = keyInfo.Key,
+				}
+			end
+
+			if done or pages.IsLastPage == true then
+				break
+			end
+
+			pages:MoveToNextPageAndWait()
+		end
+
+		-- 동점 처리 규칙(RankingConfigDataSet.csv의 RankModeEnum)에 맞춰 순위를 매긴다.
+		-- CalculateRanks*는 .Rank/.Score(대문자) 필드를 쓰는 @Struct용이라, 순수 테이블인 여기서는
+		-- 같은 규칙을 직접 적용한다.
+		self:AssignRanks(configData.RankModeEnum, entries)
+
+		self._liveCache[id] = { builtAt = nowSec, cycleIndex = cycleIndex, entries = entries }
+		return entries
+	end
+
+	-- 순수 테이블(entries) 버전 순위 매기기. CalculateRanks*(@Struct용)와 규칙은 동일하다.
+	@ExecSpace("ServerOnly")
+	method void AssignRanks(integer rankingMode, table entries)
+		if #entries == 0 then
+			return
+		end
+
+		if rankingMode == _RankingModeEnum.Index then
+			for i = 1, #entries do
+				entries[i].rank = i
+			end
+			return
+		end
+
+		local prevRank = 1
+		local prevScore = entries[1].score
+		local dense = (rankingMode == _RankingModeEnum.DenseRank)
+
+		for i = 1, #entries do
+			local e = entries[i]
+			if prevScore == e.score then
+				e.rank = prevRank
+				continue
+			end
+
+			if dense then
+				prevRank += 1
+			else
+				prevRank = i
+			end
+			e.rank = prevRank
+			prevScore = e.score
+		end
+	end
+
+	-- 새 기록이 등록됐으니 다음 조회 때 DataStorage를 다시 읽게 한다(GameManager가 제출 직후 호출).
+	@ExecSpace("ServerOnly")
+	method void InvalidateLiveCache(integer id)
+		self._liveCache[id] = nil
+		log("RankingViewLogic: live cache invalidated. id=" .. tostring(id))
+	end
+
+	-- rows: { { rank, name, score }, ... } — 순수 테이블만 넘긴다(@Struct는 RPC 불가)
+	-- myRank -1 = 서버가 아직 준비 안 됨(클라가 재시도) / 0 = 상위 목록 밖이라 순위 미상
+	-- myScore 0 = 아직 기록 없음
+	@ExecSpace("Client")
+	method void ResponseDataListWithUserData(integer id, table rows, integer myRank, integer myScore)
+		-- 서버가 보낸 목록을 랭킹 화면에 그린다.
+		_RankUI:SetRanking(id, rows, myRank, myScore)
+	end
+
+	@ExecSpace("Server")
+	method void RequestForceUpdate(integer id)
+		-- 관리자만 — 공유 메모리 스냅샷을 즉시 강제 갱신한다(갱신 주기를 기다리지 않고 확인할 때).
+		if not _AdminLogic:IsAdmin(senderUserId) then
+			return
+		end
+
+		_RankingDataStorageLogic:TryForceUpdateSharedMemory(id)
+	end
+
+	method void CalculateRanks(integer rankingMode, table rankingDataList)
+		-- RankingSnapshotData:SetData가 호출한다 — 목록에 순위를 매긴다.
+		if rankingMode == _RankingModeEnum.Index then
+			self:CalculateRanks_Index(rankingDataList)
+		elseif rankingMode == _RankingModeEnum.Rank then
+			self:CalculateRanks_Rank(rankingDataList)
+		elseif rankingMode == _RankingModeEnum.DenseRank then
+			self:CalculateRanks_DenseRank(rankingDataList)
+		else
+			self:CalculateRanks_Index(rankingDataList)
+		end
+	end
+
+	method void CalculateRanks_Index(table rankingDataList)
+		-- 순서대로 1, 2, 3... 동점이어도 다른 순위를 준다.
+		---@type table<RankingData>
+		local dataList = rankingDataList
+		if #dataList == 0 then
+			return
+		end
+
+		for i = 1, #dataList do
+			---@type RankingData
+			local data = dataList[i]
+			data.Rank = i
+		end
+	end
+
+	method void CalculateRanks_Rank(table rankingDataList)
+		-- 동점이면 같은 순위를 주고 그만큼 다음 순위를 건너뛴다(1, 2, 2, 4...).
+		---@type table<RankingData>
+		local dataList = rankingDataList
+		if #dataList == 0 then
+			return
+		end
+
+		---@type RankingData
+		local firstRankData = dataList[1]
+		local prevRank = 1
+		local prevScore = firstRankData.Score
+
+		for i = 1, #dataList do
+			---@type RankingData
+			local data = dataList[i]
+			local score = data.Score
+
+			if prevScore == score then
+				data.Rank = prevRank
+				continue
+			end
+
+			prevRank = i
+			data.Rank = prevRank
+			prevScore = score
+		end
+	end
+
+	method void CalculateRanks_DenseRank(table rankingDataList)
+		-- 동점이면 같은 순위를 주되 다음 순위를 건너뛰지 않는다(1, 2, 2, 3...).
+		---@type table<RankingData>
+		local dataList = rankingDataList
+		if #dataList == 0 then
+			return
+		end
+
+		---@type RankingData
+		local firstRankData = dataList[1]
+		local prevRank = 1
+		local prevScore = firstRankData.Score
+
+		for i = 1, #dataList do
+			---@type RankingData
+			local data = dataList[i]
+			local score = data.Score
+
+			if prevScore == score then
+				data.Rank = prevRank
+				continue
+			end
+
+			prevRank += 1
+			data.Rank = prevRank
+			prevScore = score
+		end
+	end
+
+end

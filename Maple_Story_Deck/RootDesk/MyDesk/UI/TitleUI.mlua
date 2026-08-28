@@ -73,7 +73,11 @@ script TitleUI extends Logic
 		self._skillHandler = self.btnSkill.Entity:ConnectEvent(ButtonClickEvent, function() self:ShowTab("skill") end)
 		self._battleHandler = self.btnBattle.Entity:ConnectEvent(ButtonClickEvent, function() self:ShowTab("battle") end)
 		self._relicHandler = self.btnRelic.Entity:ConnectEvent(ButtonClickEvent, function() self:ShowTab("relic") end)
-		self._rankHandler = self.btnRank.Entity:ConnectEvent(ButtonClickEvent, function() self:ShowTab("rank") end)
+		-- 랭킹 탭은 패널을 보여주는 것만으로는 부족하다 — 열 때마다 서버에 최신 목록을 다시 요청한다
+		self._rankHandler = self.btnRank.Entity:ConnectEvent(ButtonClickEvent, function()
+			self:ShowTab("rank")
+			_RankUI:Open()
+		end)
 		self._equipHandler = self.btnEquip.Entity:ConnectEvent(ButtonClickEvent, function() _InventoryBootstrap:OpenInventory() end)
 		self._shopIconAnimEndHandler = self.shopIcon.Entity:ConnectEvent(SpriteGUIAnimPlayerEndEvent, self.OnShopIconAnimEnd)
 		-- 시작 시 기본 탭인 전투가 눌린 상태로 보이도록 연출까지 함께 적용한다
@@ -176,6 +180,13 @@ script TitleUI extends Logic
 		_SoundService:StopBGM(true)
 		-- GameManager 쪽 API는 timeAttack(=무제한 모드의 반대)을 받는다 — 여기서 극성을 뒤집는다
 		local timeAttack = not unlimitedMode
+		-- 입장 로딩 화면을 먼저 띄운다. 화면이 완전히 검어진 뒤에 타이틀을 닫으므로, 로비가 사라지는
+		-- 순간과 에피2/3의 맵 점프가 전부 검은 화면 뒤에 감춰진다(예전엔 에피2/3만 0.35초 지연으로
+		-- 따로 가렸는데, 이제 모든 에피소드가 같은 경로를 탄다). 서버는 GameManager.EntryDelaySeconds
+		-- 만큼 몬스터 스폰 시작을 미뤄서, 화면이 밝아질 때 몹이 막 다가오기 시작하도록 맞춰져 있다
+		_LoadingUI:PlayEntry(function()
+			if isvalid(self) then self.titleGroup.Enable = false end
+		end)
 		-- 요청을 먼저 보내서 서버가 곧바로 처리를 시작하게 한다(아래 화면 닫기 지연과 병렬로 진행됨).
 		-- 게임오버 팝업의 X(로비로 가기)를 거쳐 돌아온 경우, 런이 GameOver=true 상태로 멈춰있을 수 있다.
 		-- GameStarted는 최초 1회만 켜지는 플래그라 RequestStartGame()만으로는 죽은 런이 재개되지 않으므로,
@@ -185,21 +196,8 @@ script TitleUI extends Logic
 		else
 			_GameManager:RequestStartGame(timeAttack, characterIndex, episode)
 		end
-		-- 에피소드1은 월드 시작 직후(로비 화면 뒤에서) 이미 존1로 리다이렉트가 끝나있는 상태라 화면을
-		-- 즉시 닫아도 바로 그 자리가 정답이다 — 종전처럼 지연 없이 닫는다.
-		-- 에피소드2/3는 다르다: MapManager.OnUpdate의 최초 리다이렉트는 접속 즉시(에피소드를 고르기
-		-- 한참 전) 에피1 기본값(존1=map01)으로 이미 소비돼버려서, 여기서 서버가 SetEpisodeRange+
-		-- SilentMoveToMap으로 해당 에피소드 맵으로 한 번 더(서버 왕복이 필요한) 점프해야 한다. 화면을 같은
-		-- 프레임에 즉시 닫으면 그 왕복 시간 동안 에피1 맵이 잠깐 노출됐다가 스냅되는 게
-		-- 그대로 보인다(유저 리포트: "EP1꺼가 떴다가 사라짐"). 서버가 실제로 맵을 옮길 시간을
-		-- 벌어주기 위해 화면을 닫는 시점만 짧게 늦춘다(와이프 커버 지속시간과 비슷한 여유값).
-		if episode == 2 or episode == 3 then
-			_TimerService:SetTimerOnce(function()
-				if isvalid(self) then self.titleGroup.Enable = false end
-			end, 0.35)
-		else
-			self.titleGroup.Enable = false
-		end
+		-- 타이틀을 닫는 건 위 PlayEntry의 onCovered 콜백이 맡는다(화면이 검어진 뒤에 닫음).
+		-- 그래서 여기서 따로 닫지 않는다 — 에피소드별 분기도 더 이상 필요 없다.
 	end
 
 	@ExecSpace("ClientOnly")

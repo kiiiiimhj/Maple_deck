@@ -253,6 +253,14 @@ script CardManager extends Logic
 	property ButtonComponent choiceBtn1 = "dca81800-b071-410b-b2cb-d33ec977488a"
 	property ButtonComponent choiceBtn2 = "a8324fff-1c67-492e-a60f-ee76c786a2e3"
 	property ButtonComponent choiceBtn3 = "2a1cbc75-3a0a-46fe-a2a4-e5f24a707167"
+	-- 버그 수정(2026-08-28, 유저 지정: "카드 7~9(우측 레벨업 선택 카드)에 누르고 있으면 툴팁, 떼면 닫히게,
+	-- 단 누르고 있다 떼도 카드가 선택되면 안 됨") — 선택 카드와 같은 엔티티에 UITouchReceiveComponent를
+	-- 얹어 누름/뗌을 직접 잡는다. 기존 ButtonClickEvent 기반 선택(SelectLevelUpChoice)은 완전히 제거하고,
+	-- 아래 Down/Up 핸들러 안에서 "누른 시간이 짧으면(=가볍게 탭) 선택, 길면(=툴팁이 뜬 홀드) 선택 안 함"으로
+	-- 직접 판정한다.
+	property UITouchReceiveComponent choiceTouch1 = "dca81800-b071-410b-b2cb-d33ec977488a"
+	property UITouchReceiveComponent choiceTouch2 = "a8324fff-1c67-492e-a60f-ee76c786a2e3"
+	property UITouchReceiveComponent choiceTouch3 = "2a1cbc75-3a0a-46fe-a2a4-e5f24a707167"
 	property TextComponent choiceTitle1 = "b65ff3ca-0884-4c51-a33f-bc189beb63bd"
 	property TextComponent choiceTitle2 = "c3c308e8-524b-41ee-9105-83da52be8b59"
 	property TextComponent choiceTitle3 = "b6447111-b12e-476a-b2d0-0c946f40d844"
@@ -5143,6 +5151,10 @@ script CardManager extends Logic
 	-- 유저 지정(2026-08-18): "사라질땐 알파 빠지면서 자연스럽게" — 연막탄(SmokeGrenadeFadeOutDuration=0.4)과
 	-- 동일 패턴으로 지속시간 끝나기 이 시간 전부터 알파를 0으로 낮춘다.
 	property number Card191FogFadeOutDuration = 0.4
+	-- 유저 지정(2026-08-28): "어비셜엔 스턴 3초로 넣어줘" — 다크 플레어(179)와 달리 매 틱마다 걸면
+	-- 사실상 영구 CC가 되므로(스턴 지속 3초 > 틱 간격 1초), 착탄(첫 틱) 시점 1회만 반경 안 전체
+	-- 몬스터에게 건다. 레벨 무관 고정(다크 플레어 Card179StunDuration과 동일 패턴).
+	property number AbyssalFlareStunDuration = 3.0
 
 	-- 타당 기준 데미지(레벨별 고정값 — 유저 지정 표, 틱 대미지 계산의 기준값)
 	method number GetAbyssalFlareDamage(integer level)
@@ -5168,12 +5180,20 @@ script CardManager extends Logic
 		return 2
 	end
 
-	-- 1단계: 캐스트(다크 플레어와 동일 연출/타이밍). 타겟 수는 레벨 무관 항상 1명(유저 표).
+	-- 유저 지정(2026-08-28): "그럼 얘도 2개로 쭉 가야겠다" — 다크 플레어 Lv3~5와 동일하게, 레벨(1~3)
+	-- 무관 항상 착탄 2개로 고정한다(원래는 항상 1개였음).
+	method integer GetAbyssalFlareTargetCount()
+		return 2
+	end
+
+	-- 1단계: 캐스트(다크 플레어와 동일 연출/타이밍). 착탄 지점 수는 GetAbyssalFlareTargetCount()(레벨
+	-- 무관 고정 2) — DarkFlareAttack과 동일하게 타겟마다 독립적으로 캐스트+ResolveAbyssalFlareStab을
+	-- 반복한다(각자 자기 위치에 반경 판정+스턴+틱 장판을 따로 깐다).
 	@ExecSpace("ServerOnly")
 	method void AbyssalFlareAttack(number damage, boolean isCrit, table forcedTargets)
 		local targets = forcedTargets
 		if targets == nil then
-			targets = self:GetClosestTargets(1)
+			targets = self:GetClosestTargets(self:GetAbyssalFlareTargetCount())
 		end
 		if #targets == 0 then
 			if self._shadowPartnerCopyActive and isvalid(self._shadowPartnerFallbackTarget) then
@@ -5184,32 +5204,35 @@ script CardManager extends Logic
 		end
 		local map = self:GetCurrentMap()
 		if map == nil then return end
-		local target = targets[1]
-		if not isvalid(target) or not isvalid(target.Entity) then return end
 
-		local p = self:WorldToCurrentMapLocal(target.Entity.TransformComponent.WorldPosition)
-		local capturedPos = Vector3(p.x, p.y + self.Card179CastYOffset, p.z - 0.1)
-		-- 버그 수정(2026-08-17, 유저 지적: "연무 범위는 틱대미지 들어가야하는데 안들어가는듯") — 틱
-		-- 판정용 중심좌표는 다른 몬스터의 mp(Entity.TransformComponent.Position, 로컬)와 같은 좌표계여야
-		-- 하는데, WorldToCurrentMapLocal로 변환한 capturedPos(연출 배치용)를 그대로 재사용해서 좌표계가
-		-- 어긋나 있었다(연막탄의 centerPos와 동일하게 분리) — 틱 판정은 target 자신의 로컬 Position을 쓴다.
-		local centerPos = target.Entity.TransformComponent.Position
-		local scaleRatio = self:GetEffectScaleRatio(target)
+		for _, target in ipairs(targets) do
+			if isvalid(target) and isvalid(target.Entity) then
+				local p = self:WorldToCurrentMapLocal(target.Entity.TransformComponent.WorldPosition)
+				local capturedPos = Vector3(p.x, p.y + self.Card179CastYOffset, p.z - 0.1)
+				-- 버그 수정(2026-08-17, 유저 지적: "연무 범위는 틱대미지 들어가야하는데 안들어가는듯") — 틱
+				-- 판정용 중심좌표는 다른 몬스터의 mp(Entity.TransformComponent.Position, 로컬)와 같은
+				-- 좌표계여야 하는데, WorldToCurrentMapLocal로 변환한 capturedPos(연출 배치용)를 그대로
+				-- 재사용해서 좌표계가 어긋나 있었다(연막탄의 centerPos와 동일하게 분리) — 틱 판정은 target
+				-- 자신의 로컬 Position을 쓴다.
+				local centerPos = target.Entity.TransformComponent.Position
+				local scaleRatio = self:GetEffectScaleRatio(target)
 
-		local fx = self:SpawnEffectWithModel(self.Card179CastRUID, capturedPos, 0, 1.0, self.Card179CastScale * scaleRatio, 1.0, "skilleffectlong")
-		if fx ~= nil then fx:Destroy(self.Card179CastDuration) end
+				local fx = self:SpawnEffectWithModel(self.Card179CastRUID, capturedPos, 0, 1.0, self.Card179CastScale * scaleRatio, 1.0, "skilleffectlong")
+				if fx ~= nil then fx:Destroy(self.Card179CastDuration) end
 
-		local capturedMap = map
-		local capturedDamage = damage
-		local capturedIsCrit = isCrit
-		local capturedScaleRatio = scaleRatio
-		local hitDelay = math.max(0, self.Card179CastDuration - self.Card179HitLeadTime)
-		_TimerService:SetTimerOnce(function()
-			if not isvalid(self) then return end
-			self:ResolveAbyssalFlareStab(capturedPos, centerPos, capturedScaleRatio, capturedDamage, capturedIsCrit, capturedMap)
-		end, hitDelay)
+				local capturedMap = map
+				local capturedDamage = damage
+				local capturedIsCrit = isCrit
+				local capturedScaleRatio = scaleRatio
+				local hitDelay = math.max(0, self.Card179CastDuration - self.Card179HitLeadTime)
+				_TimerService:SetTimerOnce(function()
+					if not isvalid(self) then return end
+					self:ResolveAbyssalFlareStab(capturedPos, centerPos, capturedScaleRatio, capturedDamage, capturedIsCrit, capturedMap)
+				end, hitDelay)
+			end
+		end
 
-		log("AbyssalFlareAttack: target=1")
+		log("AbyssalFlareAttack: targets=" .. #targets)
 	end
 
 	-- 2단계: "칼이 꼽히는" 연출(수동 프레임 스왑, 다크 플레어와 동일 기법) + 사운드. 유저 지정:
@@ -5257,6 +5280,9 @@ script CardManager extends Logic
 		local halfWidth = self.Card191FogHalfWidth
 		local halfHeight = self.Card191FogHalfHeight
 		local capturedMap = map
+		-- 착탄(첫 틱) 시점에만 스턴을 걸기 위한 클로저 플래그 — 이 함수 자체가 매번 새로 만들어지는
+		-- (ResolveAbyssalFlareStab 호출마다 독립된) 클로저라 재시전 간 간섭 없음.
+		local firstTick = true
 		local applyTick = function()
 			if not isvalid(capturedMap) then return end
 			local monsters = self:GetMonstersInCurrentZone(capturedMap)
@@ -5272,10 +5298,14 @@ script CardManager extends Logic
 						hitCount = hitCount + 1
 						if isCrit then m:TakeDamageCrit(tickDamage * 2)
 						else m:TakeDamage(tickDamage) end
+						if firstTick then
+							m:ApplyStun(self.AbyssalFlareStunDuration, true)
+						end
 					end
 				end
 			end
-			log("AbyssalFlare: tick dmg=" .. math.floor(tickDamage) .. " hit=" .. hitCount)
+			log("AbyssalFlare: tick dmg=" .. math.floor(tickDamage) .. " hit=" .. hitCount .. " stun=" .. tostring(firstTick))
+			firstTick = false
 		end
 
 		applyTick()
@@ -9962,6 +9992,14 @@ script CardManager extends Logic
 	property TextComponent tooltipDmg = "23e460d7-77a0-4906-8284-d293d3a85748"
 	property TextComponent tooltipCd = "8a0eef9f-0bf6-452a-a641-ccbaadf74212"
 	property TextComponent tooltipExtra = "44c7b4c3-6481-407f-9ec5-d981eebb1823"
+	-- 버그 수정(2026-08-28) — 툴팁 꼬리(삼각형). 하단 슬롯 툴팁(아래쪽에서 위로 뜸, 꼬리 아래쪽 방향)과
+	-- 우측 레벨업 선택 카드 미리보기(카드 왼쪽에서 뜸, 꼬리 오른쪽 방향)가 이 꼬리 하나를 공유하므로,
+	-- 두 ShowXXXTooltip 메서드가 각자 실행될 때마다 이 꼬리의 위치/모양을 자기 것으로 다시 그린다.
+	property Entity tooltipTail = "814efd2c-135f-4cdb-afa8-b531608c045c"
+	-- 버그 수정(2026-08-28, 유저 지정: "Lv.1~5 변경사항 목록으로 보여줘") — 우측 선택 카드 홀드 미리보기
+	-- 전용 필드. 하단 슬롯 툴팁(tooltipDmg/Cd/Extra)과는 완전히 분리해서, 서로 다른 두 모드가 같은
+	-- 텍스트 필드를 두고 부딪히지 않게 한다.
+	property TextGUIRendererComponent tooltipChangelog = "88383116-50d3-461f-991d-d3f1c4517a96"
 	property ButtonComponent slotBtn1 = "5b6b4c7d-d3c2-4b53-8f33-620eb97e4016"
 	property ButtonComponent slotBtn2 = "af45836e-1c6b-4ea1-82c0-f4239fb8d814"
 	property ButtonComponent slotBtn3 = "8a207abb-b05d-4a1c-b7ed-189206160352"
@@ -10029,9 +10067,31 @@ script CardManager extends Logic
 	property string _choiceType2 = ""
 	property string _choiceType3 = ""
 	property integer _pendingLevelUps = 0
+	-- 버그 수정(2026-08-28) — 기존엔 ButtonClickEvent 핸들러 1개씩이었지만, 이제 선택 카드는 UITouchDown/
+	-- UpEvent 2개를 각각 잡으므로 정리(DisconnectEvent)용 핸들러 id도 카드당 2개씩 저장해둔다.
 	property any _choiceClickHandler1 = nil
 	property any _choiceClickHandler2 = nil
 	property any _choiceClickHandler3 = nil
+	property any _choiceUpHandler1 = nil
+	property any _choiceUpHandler2 = nil
+	property any _choiceUpHandler3 = nil
+	-- 버그 수정(2026-08-28) — _choiceCard1~3/_choiceType1~3(위)은 @Sync가 아닌 서버 전용 내부 상태라
+	-- 클라이언트에서 읽을 수 없다. 홀드 미리보기 툴팁은 클라이언트에서 실행되므로, ShowLevelUpChoices
+	-- (Multicast, 서버→클라 RPC)가 도착하는 시점에 카드/타입을 별도로 클라 로컬 필드에 복사해둔다.
+	property integer _clientChoiceCard1 = 0
+	property integer _clientChoiceCard2 = 0
+	property integer _clientChoiceCard3 = 0
+	property string _clientChoiceType1 = ""
+	property string _clientChoiceType2 = ""
+	property string _clientChoiceType3 = ""
+	-- 누름 시작 시각(ElapsedSeconds) — 뗄 때 이 값과의 차이로 "가벼운 탭(선택)"과 "홀드(미리보기만,
+	-- 선택 안 함)"를 구분한다.
+	property number _choiceHoldStart1 = 0
+	property number _choiceHoldStart2 = 0
+	property number _choiceHoldStart3 = 0
+	-- 이 시간(초) 미만으로 눌렀다 떼면 "탭"으로 보고 선택을 실행한다. 이보다 오래 누르고 있으면 홀드로
+	-- 보고 툴팁만 보여주고 뗄 때 선택하지 않는다.
+	property number ChoiceTapThreshold = 0.25
 
 	-- 클라이언트 쿨타임 연출 — 캐스트마다 새 타이머를 만들지 않고
 	-- 단일 반복 타이머가 활성 쿨타임 목록을 매 틱 갱신한다 (다수 동시 캐스트 시 타이머 고갈 방지)
@@ -10875,6 +10935,20 @@ script CardManager extends Logic
 		end
 	end
 
+	-- 우측 레벨업 선택 카드(Card6/Card7/Card8 엔티티, choiceBtn1~3) 위치.
+	-- 버그 수정(2026-08-28) — 이 세 엔티티는 .ui에서 AnchorsMin/Max=(1,0)(우하단 코너 기준)이라
+	-- anchoredPosition이 (-170, 440/265/90)으로 저장돼 있는데, 이건 화면 우하단 모서리 기준 오프셋이라
+	-- tooltipPanel(중앙 기준, Anchors=(0.5,0.5))과 좌표계가 다르다. 우하단 모서리는 중앙 기준으로
+	-- (960, -540)이므로, 여기서 미리 중앙 기준 좌표로 환산해서 돌려준다: x = 960-170 = 790,
+	-- y = -540 + {440|265|90}. (라이브 스크린샷으로 실측 검증 완료 — 실측 전엔 원본 값을 그대로 써서
+	-- 미리보기 툴팁이 화면 좌상단 구석에 엉뚱하게 떴었다.)
+	method Vector2 GetChoiceUIPosition(integer choiceIndex)
+		if choiceIndex == 1 then return Vector2(790, -100)
+		elseif choiceIndex == 2 then return Vector2(790, -275)
+		else return Vector2(790, -450)
+		end
+	end
+
 	method SpriteGUIRendererComponent GetDropIcon(integer dropIdx)
 		if dropIdx == 2 then return self.dropFlyIcon2
 		elseif dropIdx == 3 then return self.dropFlyIcon3
@@ -10959,7 +11033,12 @@ script CardManager extends Logic
 		[168] = { idx = 52, grade = 3 }, [169] = { idx = 53, grade = 3 }, [170] = { idx = 54, grade = 3 },
 	}
 
-	@ExecSpace("ServerOnly")
+	-- 버그 수정(2026-08-28, 유저 리포트 "스틸은 왜 데미지 0인데") — 이 아래 SkillInventory 조회 6개
+	-- (GetSkillInvLevel/Level2/LevelByIndex/DamageMult/CooldownMult/TierPercent)가 전부 ServerOnly였다.
+	-- GetCardDamage가 이들을 곱연산 체인에 넣어 쓰는데, ShowTooltip은 슬롯 클릭(클라이언트)에서 바로
+	-- 호출되므로 ServerOnly 호출은 조용히 기본값(0)을 반환해 전체 곱셈 체인이 0이 됐다(GearEffectLogic의
+	-- GetFlatAtk/GetDamageMult와 동일한 버그 클래스, 그때 못 고친 나머지 절반). 전부 `_SkillInventory.Levels`
+	-- (@Sync SyncTable, 클라에도 이미 동기화됨)만 읽는 순수 조회라 부작용 없이 ServerOnly를 뗄 수 있다.
 	method integer GetSkillInvLevel(integer cardIdx)
 		local skillIdx = self._skillInvCardIdxMap[cardIdx]
 		if skillIdx == nil then return 0 end
@@ -10969,7 +11048,6 @@ script CardManager extends Logic
 	end
 
 	-- _skillInvCardIdxMap2(레이온/실피드) 전용 조회 — GetSkillInvLevel과 동일 동작이지만 map2를 본다.
-	@ExecSpace("ServerOnly")
 	method integer GetSkillInvLevel2(integer cardIdx)
 		local def = self._skillInvCardIdxMap2[cardIdx]
 		if def == nil then return 0 end
@@ -10992,7 +11070,6 @@ script CardManager extends Logic
 
 	-- 패시브(매직부스터/매직아머/매직크리티컬/프리징이펙트)는 카드 인덱스가 아니라 SkillInventory
 	-- 스킬 인덱스로 직접 조회한다(자기 자신 전용 cardIdx가 없는 전역 효과라서)
-	@ExecSpace("ServerOnly")
 	method integer GetSkillInvLevelByIndex(integer skillIndex)
 		local key = tostring(skillIndex)
 		if _SkillInventory.Levels[key] ~= nil then return _SkillInventory.Levels[key] end
@@ -11001,7 +11078,6 @@ script CardManager extends Logic
 
 	-- 액티브 14개 스킬 공통 Lv3 보너스: 대미지 +10% (Lv1,2는 효과 없음)
 	-- 레이온/실피드 30개(_skillInvCardIdxMap2)는 등급별로 10%(일반/매직) / 15%(레어) — 유저 확정표
-	@ExecSpace("ServerOnly")
 	method number GetSkillInvDamageMult(integer cardIdx)
 		if self:GetSkillInvLevel(cardIdx) >= 3 then return 1.10 end
 		local def2 = self._skillInvCardIdxMap2[cardIdx]
@@ -11014,7 +11090,6 @@ script CardManager extends Logic
 
 	-- 액티브 14개 스킬 공통 Lv6 보너스: 쿨타임 -5% (썬더볼트 제외, Lv4,5는 효과 없음)
 	-- 레이온/실피드 30개는 등급별로 -5%(일반/매직) / -8%(레어) — 유저 확정표
-	@ExecSpace("ServerOnly")
 	method number GetSkillInvCooldownMult(integer cardIdx)
 		if self._skillInvNoCooldownBonus[cardIdx] then return 1.0 end
 		if self:GetSkillInvLevel(cardIdx) >= 6 then return 0.95 end
@@ -11620,8 +11695,694 @@ script CardManager extends Logic
 		return 0
 	end
 
+	-- 버그 수정(2026-08-28) — 위 GetSlotLevelNum의 쓰기 버전. 우측 레벨업 선택 카드를 홀드 미리보기할 때,
+	-- "다음 레벨이 되면 수치가 어떻게 바뀌는지"를 실제 라이브 계산식(GetCardDamage 등)으로 그대로 뽑아보기
+	-- 위해 해당 카드의 레벨 프로퍼티를 잠깐 다음 레벨로 올렸다가(ShowChoicePreviewTooltip), 텍스트를 다
+	-- 만든 직후 즉시 원래 값으로 되돌린다(클라이언트 로컬 값만 잠깐 바뀌는 것이라 서버/다른 클라에는
+	-- 전혀 영향 없음 — @Sync 프로퍼티의 클라 로컬 쓰기는 되돌아오지 않는 편도 동기화라 안전).
+	method void SetCardLevelDirect(integer cardIdx, integer level)
+		if cardIdx == 2 then self.Card2UpgradeCount = level
+		elseif cardIdx == 3 then self.ColdBeamLevel = level
+		elseif cardIdx == 4 then self.ThunderBoltLevel = level
+		elseif cardIdx == 5 then self.Card5UpgradeCount = level
+		elseif cardIdx == 7 then self.MagicBoosterLevel = level
+		elseif cardIdx == 8 then self.MagicCriticalLevel = level
+		elseif cardIdx == 9 then self.EnergyBoltLevel = level
+		elseif cardIdx == 10 then self.FreezingEffectLevel = level
+		elseif cardIdx == 11 then self.IceCutterLevel = level
+		elseif cardIdx == 12 then self.KingPepeLevel = level
+		elseif cardIdx == 13 then self.ThunderCutterLevel = level
+		elseif cardIdx == 14 then self.AquaTrapLevel = level
+		elseif cardIdx == 15 then self.HailStoneLevel = level
+		elseif cardIdx == 16 then self.ThunderStormLevel = level
+		elseif cardIdx == 17 then self.IceStrikeLevel = level
+		elseif cardIdx == 18 then self.MagicArmorLevel = level
+		elseif cardIdx == 19 then self.ChainLightningLevel = level
+		elseif cardIdx == 20 then self.DoubleCutterLevel = level
+		elseif cardIdx == 21 then self.GrandPepeLevel = level
+		elseif cardIdx == 22 then self.MeditationLevel = level
+		elseif cardIdx == 23 then self.HailBurstLevel = level
+		elseif cardIdx == 24 then self.AquaSurgeLevel = level
+		elseif cardIdx == 101 then self.WindPoemLevel = level
+		elseif cardIdx == 102 then self.ArrowBlowLevel = level
+		elseif cardIdx == 103 then self.IceQuiverLevel = level
+		elseif cardIdx == 104 then self.FireQuiverLevel = level
+		elseif cardIdx == 105 then self.PhoenixLevel = level
+		elseif cardIdx == 106 then self.RetreatShotLevel = level
+		elseif cardIdx == 107 then self.UncounterArrowLevel = level
+		elseif cardIdx == 108 then self.FleshMirageLevel = level
+		elseif cardIdx == 114 then self.ArrowIllusionLevel = level
+		elseif cardIdx == 115 then self.EvolveLevel = level
+		elseif cardIdx == 116 then self.StormPoemLevel = level
+		elseif cardIdx == 117 then self.EnhancedArrowBlowLevel = level
+		elseif cardIdx == 118 then self.ArrowFletterLevel = level
+		elseif cardIdx == 119 then self.UncounterArrowVLevel = level
+		elseif cardIdx == 120 then self.FlashBomberLevel = level
+		elseif cardIdx == 109 then self.BowAccelerationLevel = level
+		elseif cardIdx == 110 then self.PiercingWillLevel = level
+		elseif cardIdx == 111 then self.CriticalShotLevel = level
+		elseif cardIdx == 112 then self.FinalAttackBowLevel = level
+		elseif cardIdx == 113 then self.RapidFireLevel = level
+		elseif cardIdx == 151 then self.ComboAttackLevel = level
+		elseif cardIdx == 152 then self.SlashLevel = level
+		elseif cardIdx == 153 then self.BrandishLevel = level
+		elseif cardIdx == 154 then self.FlashSlashLevel = level
+		elseif cardIdx == 155 then self.ChargeLevel = level
+		elseif cardIdx == 156 then self.AuraBladeLevel = level
+		elseif cardIdx == 157 then self.RagingBlowLevel = level
+		elseif cardIdx == 158 then self.LeapAttackLevel = level
+		elseif cardIdx == 159 then self.ScarringSwordLevel = level
+		elseif cardIdx == 160 then self.BraveSlashLevel = level
+		elseif cardIdx == 161 then self.ChanceAttackLevel = level
+		elseif cardIdx == 162 then self.ComaLevel = level
+		elseif cardIdx == 163 then self.SelfRecoveryLevel = level
+		elseif cardIdx == 164 then self.WarriorMasteryLevel = level
+		elseif cardIdx == 165 then self.SpiritBladeLevel = level
+		elseif cardIdx == 166 then self.BurningRushLevel = level
+		elseif cardIdx == 167 then self.SlashStormLevel = level
+		elseif cardIdx == 168 then self.SolarBladeLevel = level
+		elseif cardIdx == 169 then self.ScarringBladeLevel = level
+		elseif cardIdx == 170 then self.FuriousBlowLevel = level
+		elseif cardIdx == 171 then self.DoubleStepLevel = level
+		elseif cardIdx == 173 then self.SavageBlowLevel = level
+		elseif cardIdx == 174 then self.SmokeGrenadeLevel = level
+		elseif cardIdx == 175 then self.MuspelheimLevel = level
+		elseif cardIdx == 176 then self.StealLevel = level
+		elseif cardIdx == 177 then self.MesoExplosionLevel = level
+		elseif cardIdx == 178 then self.ShadowPartnerLevel = level
+		elseif cardIdx == 179 then self.DarkFlareLevel = level
+		elseif cardIdx == 180 then self.DaggerAccelLevel = level
+		elseif cardIdx == 181 then self.CriticalEdgeLevel = level
+		elseif cardIdx == 182 then self.KarmaLevel = level
+		elseif cardIdx == 183 then self.PhysicalTrainingLevel = level
+		elseif cardIdx == 184 then self.DarkSightLevel = level
+		elseif cardIdx == 185 then self.AssassinateLevel = level
+		elseif cardIdx == 186 then self.SonicBlowLevel = level
+		elseif cardIdx == 187 then self.SmokeRampageLevel = level
+		elseif cardIdx == 188 then self.AzureEdgeLevel = level
+		elseif cardIdx == 189 then self.MesoDetonationLevel = level
+		elseif cardIdx == 190 then self.DualShadowPartnerLevel = level
+		elseif cardIdx == 191 then self.AbyssalFlareLevel = level
+		end
+	end
+
+	-- 버그 수정(2026-08-28, 유저 지정: "Lv.1: 해금! ... Lv.2: 공격 대상 +1 ... 이런식으로 다 해줘, 범위는
+	-- '범위 0.6 증가' 이런식 말고 '광역 범위 증가'처럼 유저가 직관적으로 알 수 있게") — 80장 전체의
+	-- 레벨별 "무엇이 얼마나 바뀌는지" 변경사항을 이 표 하나로 관리한다. 실제 수치는 이번 세션에 라이브로
+	-- 재검증한 skills_all_levels 시트 기준(=CardManager 자신의 GetCardDamage 등 라이브 계산식과 100%
+	-- 일치)이고, 문구는 원본 수치 대신 "무엇이 강화됐는지"만 알 수 있게 의역했다(예: 범위/반경 증가는
+	-- 항상 "광역 범위 증가"로 통일, 확률/지속시간/타수는 해당 키워드 + 증가 방향만 표기).
+	-- index 1 = Lv1(해금 시점 기본 정보), index N = LvN에서 Lv(N-1) 대비 바뀐 점.
+	method table GetCardLevelChangelog(integer cardIdx)
+		if cardIdx == 3 then
+			return {
+				"해금! (대미지 110, 타겟 1명, 슬로우 3초)",
+				"공격 대상 +1",
+				"피해량 +50",
+				"공격 대상 +1",
+				"피해량 +50",
+			}
+		elseif cardIdx == 4 then
+			return {
+				"해금! (대미지 90, 타겟 2명)",
+				"스턴 효과 신규 획득 (확률 25%, 지속 2초)",
+				"피해량 +40",
+				"공격 대상 +1, 스턴 지속시간 +1초",
+				"피해량 +40, 스턴 확률 +5%",
+			}
+		elseif cardIdx == 7 then
+			return {
+				"해금! (모든 스킬 쿨타임 -5%, 영구)",
+				"쿨타임 감소량 +2%",
+				"쿨타임 감소량 +3%",
+				"쿨타임 감소량 +2%",
+				"쿨타임 감소량 +3%",
+			}
+		elseif cardIdx == 8 then
+			return {
+				"해금! (크리티컬 확률 10%, 영구)",
+				"크리티컬 확률 +2%",
+				"크리티컬 확률 +3%",
+				"크리티컬 확률 +2%",
+				"크리티컬 확률 +3%",
+			}
+		elseif cardIdx == 9 then
+			return {
+				"해금! (대미지 150)",
+				"2연발로 강화, 피해량 대폭 증가",
+				"치명타 확률 20% 신규 획득",
+				"피해량 +100",
+				"명중 시 광역 폭발 피해 신규 획득",
+			}
+		elseif cardIdx == 10 then
+			return {
+				"해금! (아이스 보너스 +5%/스택, 패시브)",
+				"아이스 보너스 +1%p",
+				"적중 시 번개 연쇄 효과 신규 획득",
+				"번개 연쇄 대상 +1마리",
+				"번개 연쇄 대상 +1마리, 5스택 시 빙결 폭발 신규 획득",
+			}
+		elseif cardIdx == 11 then
+			return {
+				"해금! (대미지 110, 광역 범위, 타겟 1명)",
+				"출혈 효과 신규 획득",
+				"공격 대상 +1",
+				"피해량 +50",
+				"출혈 피해량 증가",
+			}
+		elseif cardIdx == 12 then
+			return {
+				"해금! (대미지 300, 고정 위치, 광역 범위 1/4)",
+				"쿨타임 감소",
+				"광역 범위 증가",
+				"피해량 +70",
+				"쿨타임 감소, 확률적 2연타 효과 신규 획득",
+			}
+		elseif cardIdx == 13 then
+			return {
+				"해금! (대미지 100, 광역 범위, 1타)",
+				"타격 횟수 증가",
+				"피해량 +50, 넉백 효과 신규 획득",
+				"타격 횟수 증가",
+				"피해량 +50",
+			}
+		elseif cardIdx == 14 then
+			return {
+				"해금! (대미지 75, 타겟 2명, 속박 1초)",
+				"피해량 +50",
+				"공격 대상 +1, 속박 지속시간 증가",
+				"피해량 +50",
+				"공격 대상 +1",
+			}
+		elseif cardIdx == 15 then
+			return {
+				"해금! (대미지 120, 타겟 1명, 빙결 스택 +1)",
+				"공격 대상 +1",
+				"피해량 +50",
+				"쿨타임 감소",
+				"공격 대상 +1",
+			}
+		elseif cardIdx == 16 then
+			return {
+				"해금! (대미지 350, 광역 범위, 3연타, 스턴 40% 3초)",
+				"피해량 +88, 공격 대상 +1",
+				"피해량 +87, 스턴 확률 +10%",
+			}
+		elseif cardIdx == 17 then
+			return {
+				"해금! (대미지 250, 타겟 3명, 슬로우+빙결 스택 2)",
+				"피해량 +50",
+				"피해량 +50, 공격 대상 +1",
+			}
+		elseif cardIdx == 18 then
+			return {
+				"해금! (피격 피해 -5%, 영구)",
+				"피해 감소량 +2%",
+				"피해 감소량 +3%",
+				"피해 감소량 +2%",
+				"피해 감소량 +3%",
+			}
+		elseif cardIdx == 19 then
+			return {
+				"해금! (대미지 300, 연쇄 3명, 치명타+20%, 마지막 착탄 +50%)",
+				"피해량 +50, 연쇄 대상 +1, 마지막 착탄 보너스 +10%",
+				"피해량 +50, 연쇄 대상 +1, 마지막 착탄 보너스 +10%",
+			}
+		elseif cardIdx == 20 then
+			return {
+				"해금! (대미지 300, 광역+관통, 출혈, 넉백)",
+				"피해량 +50",
+				"피해량 +50",
+			}
+		elseif cardIdx == 21 then
+			return {
+				"해금! (대미지 400, 고정 위치, 광역 범위 3/4, 확률적 2연타 25%)",
+				"피해량 +50, 2연타 확률 +5%",
+				"피해량 +50, 광역 범위 증가, 2연타 확률 +10%",
+			}
+		elseif cardIdx == 22 then
+			return {
+				"해금! (피해량 +3%, 영구)",
+				"피해량 증가 +3%p",
+				"피해량 증가 +3%p",
+				"피해량 증가 +3%p",
+				"피해량 증가 +3%p",
+			}
+		elseif cardIdx == 23 then
+			return {
+				"해금! (대미지 200, 타겟 3명, 빙결 스택+1, 바닥 범위기 60%)",
+				"피해량 +50, 바닥 범위기 확률 +10%",
+				"피해량 +50, 공격 대상 +1, 바닥 범위기 확률 +10%",
+			}
+		elseif cardIdx == 24 then
+			return {
+				"해금! (대미지 200, 타겟 4명, 속박 3초, 종료 직전 추가타 50%)",
+				"피해량 +40, 공격 대상 +1, 추가타 확률 +10%",
+				"피해량 +40, 공격 대상 +1, 추가타 확률 +10%",
+			}
+		elseif cardIdx == 101 then
+			return {
+				"해금! (대미지 45, 타겟 3명)",
+				"공격 대상 +1",
+				"피해량 +20",
+				"공격 대상 +1",
+				"피해량 +20",
+			}
+		elseif cardIdx == 102 then
+			return {
+				"해금! (대미지 120)",
+				"강화 화살 효과 신규 획득 (확률 20%)",
+				"피해량 +50, 강화 화살 대미지 +10%",
+				"강화 화살 대미지 +20%",
+				"피해량 +40, 강화 화살 대미지 +20%",
+			}
+		elseif cardIdx == 103 then
+			return {
+				"해금! (대미지 100, 착탄 1곳, 슬로우 40% 2초)",
+				"착탄 지점 +1, 슬로우 지속시간 +1초",
+				"피해량 +50, 슬로우 확률 +10%",
+				"착탄 지점 +1, 슬로우 지속시간 +1초",
+				"피해량 +50, 슬로우 확률 +10%",
+			}
+		elseif cardIdx == 104 then
+			return {
+				"해금! (대미지 100, 착탄 1곳, 슬로우 대상 추가 피해 +39%)",
+				"착탄 지점 +1, 슬로우 대상 추가 피해 증가",
+				"피해량 +50, 슬로우 대상 추가 피해 증가",
+				"착탄 지점 +1, 슬로우 대상 추가 피해 증가",
+				"피해량 +50, 슬로우 대상 추가 피해 증가",
+			}
+		elseif cardIdx == 105 then
+			return {
+				"해금! (대미지 120, 유지 3초, 슬로우 대상 추가 피해 +39%)",
+				"지속시간 +1초, 광역 범위 증가, 슬로우 대상 추가 피해 증가",
+				"피해량 +30, 지속시간 +1초, 슬로우 대상 추가 피해 증가",
+				"피해량 +30, 지속시간 +1초, 슬로우 대상 추가 피해 증가",
+				"피해량 +50, 지속시간 +1초, 광역 범위 증가, 슬로우 대상 추가 피해 증가",
+			}
+		elseif cardIdx == 106 then
+			return {
+				"해금! (대미지 80, 화살 2발, 관통 1회)",
+				"피해량 +20, 화살 개수 +1",
+				"피해량 +20, 관통 횟수 +1",
+				"피해량 +20, 화살 개수 +1",
+				"피해량 +20, 관통 횟수 +1",
+			}
+		elseif cardIdx == 107 then
+			return {
+				"해금! (대미지 100, 착탄 1곳, 세로 범위기)",
+				"피해량 +20",
+				"피해량 +20, 착탄 지점 +1, 쿨타임 감소",
+				"피해량 +20",
+				"피해량 +40",
+			}
+		elseif cardIdx == 108 then
+			return {
+				"해금! (대미지 100, 타겟 1명, 중앙으로 넉백, 충돌 대상 30% 대미지)",
+				"공격 대상 +1",
+				"피해량 +40, 충돌 대미지 +10%",
+				"피해량 +20, 충돌 대미지 +10%",
+				"피해량 +40, 충돌 대미지 +10%",
+			}
+		elseif cardIdx == 109 then
+			return {
+				"해금! (쿨타임 -5%, 영구)",
+				"쿨타임 감소량 +2%",
+				"쿨타임 감소량 +3%",
+				"쿨타임 감소량 +2%",
+				"쿨타임 감소량 +3%",
+			}
+		elseif cardIdx == 110 then
+			return {
+				"해금! (크리티컬 확률 10%, 영구)",
+				"크리티컬 확률 +2%",
+				"크리티컬 확률 +3%",
+				"크리티컬 확률 +2%",
+				"크리티컬 확률 +3%",
+			}
+		elseif cardIdx == 111 then
+			return {
+				"해금! (크리티컬 대미지 +10%, 영구)",
+				"크리티컬 대미지 +10%",
+				"크리티컬 대미지 +10%",
+				"크리티컬 대미지 +10%",
+				"크리티컬 대미지 +10%",
+			}
+		elseif cardIdx == 112 then
+			return {
+				"해금! (추가 공격 확률 10%, 대미지 100%, 영구)",
+				"추가 공격 확률 +5%, 대미지 +20%",
+				"추가 공격 확률 +5%, 대미지 +20%",
+				"추가 공격 확률 +5%, 대미지 +20%",
+				"추가 공격 확률 +5%, 대미지 +20%",
+			}
+		elseif cardIdx == 113 then
+			return {
+				"해금! (피해량 +5%, 영구)",
+				"피해량 증가 +3%p",
+				"피해량 증가 +4%p",
+				"피해량 증가 +4%p",
+				"피해량 증가 +4%p",
+			}
+		elseif cardIdx == 114 then
+			return {
+				"해금! (대미지 200, 착탄 2곳, 슬로우+스턴 2초, 슬로우 대상 추가 피해 +120%)",
+				"피해량 +40, 슬로우+스턴 지속시간 +1초, 슬로우 대상 추가 피해 증가",
+				"피해량 +20, 광역 범위 증가, 슬로우+스턴 지속시간 +1초, 슬로우 대상 추가 피해 증가",
+			}
+		elseif cardIdx == 115 then
+			return {
+				"해금! (대미지 300, 유지 5초, 자체 크리티컬 10%, 슬로우 대상 추가 피해 +120%)",
+				"피해량 +20, 지속시간 +1초, 크리티컬 +5%, 슬로우 대상 추가 피해 증가",
+				"피해량 +20, 지속시간 +1초, 크리티컬 +5%, 슬로우 대상 추가 피해 증가",
+			}
+		elseif cardIdx == 116 then
+			return {
+				"해금! (대미지 100, 최대 5명 연사, 추가 타격 확률 15%)",
+				"피해량 +20, 연사 대상 +1, 추가 타격 대미지 증가",
+				"피해량 +20, 연사 대상 +1, 추가 타격 확률 +5%, 대미지 증가",
+			}
+		elseif cardIdx == 117 then
+			return {
+				"해금! (대미지 230, 연사 2발, 강화 확률 20%, 강화 시 3연타)",
+				"피해량 +20, 강화 확률 +5%",
+				"피해량 +50, 연사 개수 +1, 강화 확률 +5%",
+			}
+		elseif cardIdx == 118 then
+			return {
+				"해금! (대미지 180, 화살 5발, 관통 4회, 자체 크리티컬 +10%)",
+				"피해량 +20, 쿨타임 감소, 크리티컬 +5%",
+				"피해량 +20, 화살 개수 +1, 크리티컬 +5%",
+			}
+		elseif cardIdx == 119 then
+			return {
+				"해금! (대미지 250, 착탄 3곳, 세로 범위기, 자체 크리티컬 +10%)",
+				"피해량 +50, 크리티컬 +5%",
+				"피해량 +50, 착탄 지점 +1, 크리티컬 +5%",
+			}
+		elseif cardIdx == 120 then
+			return {
+				"해금! (대미지 180, 타겟 2명, 중앙으로 넉백, 충돌 대미지 80%, 정지 시 폭발 50%)",
+				"피해량 +20, 충돌 대미지 증가, 폭발 대미지 증가",
+				"피해량 +20, 충돌 대미지 증가, 폭발 대미지 대폭 증가",
+			}
+		elseif cardIdx == 151 then
+			return {
+				"해금! (콤보 스택 확률 10%, 영구)",
+				"스택 확률 +5%",
+				"스택 확률 +5%",
+				"스택 확률 +10%",
+				"스택 확률 +5%",
+			}
+		elseif cardIdx == 152 then
+			return {
+				"해금! (대미지 130, 타겟 1명, 콤보스택 +1)",
+				"피해량 +20, 공격 대상 +1",
+				"피해량 +20",
+				"피해량 +30",
+				"피해량 +40, 공격 대상 +1",
+			}
+		elseif cardIdx == 153 then
+			return {
+				"해금! (대미지 120, 타겟 1명, 콤보스택 +1)",
+				"피해량 +20, 쿨타임 감소",
+				"피해량 +20, 공격 대상 +1",
+				"피해량 +20",
+				"피해량 +20",
+			}
+		elseif cardIdx == 154 then
+			return {
+				"해금! (대미지 120, 타겟 1명, 관통 이동 판정, 콤보스택 +1)",
+				"피해량 +20, 공격 대상 +1",
+				"피해량 +20",
+				"피해량 +20",
+				"피해량 +20, 공격 대상 +1",
+			}
+		elseif cardIdx == 155 then
+			return {
+				"해금! (대미지 100, 타겟 1명, 중앙으로 돌진, 충돌 대상 30% 대미지)",
+				"공격 대상 +1",
+				"피해량 +40, 충돌 대미지 +10%",
+				"피해량 +20, 충돌 대미지 +10%",
+				"피해량 +40, 충돌 대미지 +10%",
+			}
+		elseif cardIdx == 156 then
+			return {
+				"해금! (대미지 120, 타겟 1명, 수직 상승 관통 연출, 콤보스택 +1)",
+				"피해량 +20",
+				"피해량 +20, 공격 대상 +1",
+				"피해량 +20",
+				"피해량 +20",
+			}
+		elseif cardIdx == 157 then
+			return {
+				"해금! (대미지 100, 타겟 1명, 일반 2연타, 확률적 4연타 10%)",
+				"피해량 +20",
+				"피해량 +20, 공격 대상 +1",
+				"피해량 +20",
+				"피해량 +40",
+			}
+		elseif cardIdx == 158 then
+			return {
+				"해금! (대미지 120, 타겟 1명, 속박(도약) 1초, 콤보스택 +1)",
+				"피해량 +20, 공격 대상 +1",
+				"피해량 +20",
+				"피해량 +40",
+				"피해량 +40, 공격 대상 +1",
+			}
+		elseif cardIdx == 159 then
+			return {
+				"해금! (대미지 120, 지속 4초, 2초마다 2연타)",
+				"피해량 +20",
+				"피해량 +20, 지속시간 +1초",
+				"피해량 +40",
+				"피해량 +40",
+			}
+		elseif cardIdx == 160 then
+			return {
+				"해금! (대미지 350, 타겟 3명, 콤보스택 +2, 스턴 2초 100%)",
+				"피해량 +50",
+				"피해량 +50, 공격 대상 +1",
+			}
+		elseif cardIdx == 161 then
+			return {
+				"해금! (크리티컬 확률 10%, 영구)",
+				"크리티컬 확률 +2%",
+				"크리티컬 확률 +3%",
+				"크리티컬 확률 +2%",
+				"크리티컬 확률 +3%",
+			}
+		elseif cardIdx == 162 then
+			return {
+				"해금! (콤보 폭발 대미지 220%, 영구)",
+				"폭발 대미지 +10%",
+				"폭발 대미지 +10%",
+				"폭발 대미지 +10%",
+				"폭발 대미지 +10%",
+			}
+		elseif cardIdx == 163 then
+			return {
+				"해금! (10초마다 체력 3% 회복, 영구)",
+				"회복량 +1%",
+				"회복량 +1%",
+				"회복량 +1%",
+				"회복량 +1%",
+			}
+		elseif cardIdx == 164 then
+			return {
+				"해금! (피해량 +5%, 영구)",
+				"피해량 증가 +3%p",
+				"피해량 증가 +4%p",
+				"피해량 증가 +4%p",
+				"피해량 증가 +4%p",
+			}
+		elseif cardIdx == 165 then
+			return {
+				"해금! (대미지 300, 타겟 3명, 광역 2타 범위공격 50%)",
+				"피해량 +84, 범위 2타 대미지 +10%",
+				"피해량 +126, 공격 대상 +1, 범위 2타 대미지 +10%",
+			}
+		elseif cardIdx == 166 then
+			return {
+				"해금! (대미지 200, 중앙으로 돌진, 충돌 대미지 60%, 착지 시 범위 폭발 60%)",
+				"피해량 +20, 충돌·폭발 대미지 +10%",
+				"피해량 +40, 충돌·폭발 대미지 +10%",
+			}
+		elseif cardIdx == 167 then
+			return {
+				"해금! (대미지 300, 타겟 3명, 콤보스택 +2)",
+				"피해량 +50",
+				"피해량 +50, 공격 대상 +1",
+			}
+		elseif cardIdx == 168 then
+			return {
+				"해금! (대미지 230, 타겟 2명, 부채꼴 검기 4개 발사, 콤보스택 +1)",
+				"피해량 +30",
+				"피해량 +40, 공격 대상 +1, 검기 개수 증가",
+			}
+		elseif cardIdx == 169 then
+			return {
+				"해금! (대미지 280, 지속 4초, 2초마다 2연타)",
+				"피해량 +40",
+				"피해량 +40, 지속시간 +1초",
+			}
+		elseif cardIdx == 170 then
+			return {
+				"해금! (대미지 230, 타겟 3명, 일반 2연타, 확률적 4연타 15%)",
+				"피해량 +30, 4연타 확률 +5%",
+				"피해량 +40, 4연타 확률 +10%",
+			}
+		elseif cardIdx == 171 then
+			return {
+				"해금! (대미지 150, 타겟 1명, 2연타)",
+				"피해량 +54, 공격 대상 +1, 타격 강도 증가",
+				"피해량 +76, 타격 강도 증가",
+				"피해량 +72, 타격 강도 증가",
+				"피해량 +116, 공격 대상 +1, 타격 강도 증가",
+			}
+		elseif cardIdx == 173 then
+			return {
+				"해금! (대미지 117, 타겟 1명, 3연타)",
+				"피해량 +33, 공격 대상 +1, 타격 강도 증가",
+				"피해량 +84, 타격 강도 증가",
+				"피해량 +66, 타격 강도 증가",
+				"피해량 +114, 공격 대상 +1, 타격 강도 증가",
+			}
+		elseif cardIdx == 174 then
+			return {
+				"해금! (초당 대미지 20, 타겟 1명, 명중 -20%, 지속 3초)",
+				"초당 대미지 +10, 공격 대상 +1, 명중 감소 +10%",
+				"초당 대미지 +20, 명중 감소 +10%, 지속시간 +1초",
+				"초당 대미지 +10, 명중 감소 +10%",
+				"초당 대미지 +30, 공격 대상 +1, 명중 감소 +10%, 지속시간 +1초",
+			}
+		elseif cardIdx == 175 then
+			return {
+				"해금! (대미지 130, 타겟 1명, 크리티컬 확률 +10%)",
+				"피해량 +20, 크리티컬 +5%",
+				"피해량 +30, 공격 대상 +1, 크리티컬 +5%",
+				"피해량 +20, 크리티컬 +5%",
+				"피해량 +60, 크리티컬 +5%",
+			}
+		elseif cardIdx == 176 then
+			return {
+				"해금! (대미지 100, 타겟 2명, 메소 드랍 100%, 아이템 드랍 50%)",
+				"피해량 +20",
+				"피해량 +20, 공격 대상 +1",
+				"피해량 +20",
+				"피해량 +40, 공격 대상 +1",
+			}
+		elseif cardIdx == 177 then
+			return {
+				"해금! (대미지 150, 착지한 메소 전부 동시 폭발, 기본공격 시 메소 드랍 5%)",
+				"피해량 +30, 메소 드랍 확률 +5%",
+				"피해량 +30, 광역 범위 증가, 메소 드랍 확률 +5%",
+				"피해량 +30, 메소 드랍 확률 +5%",
+				"피해량 +30, 메소 드랍 확률 +5%",
+			}
+		elseif cardIdx == 178 then
+			return {
+				"해금! (지속 5초, 기본공격/스킬 복사 대미지 60%, 소환 1체)",
+				"복사 대미지 +10%",
+				"지속시간 +1초, 복사 대미지 +10%",
+				"복사 대미지 +10%",
+				"복사 대미지 +10%",
+			}
+		elseif cardIdx == 179 then
+			return {
+				"해금! (대미지 140, 타겟 1명, 스턴 100%, 지속 2초)",
+				"피해량 +20",
+				"피해량 +30, 공격 대상 +1",
+				"피해량 +20",
+				"피해량 +30",
+			}
+		elseif cardIdx == 180 then
+			return {
+				"해금! (쿨타임 -5%, 영구)",
+				"쿨타임 감소량 +2%",
+				"쿨타임 감소량 +3%",
+				"쿨타임 감소량 +2%",
+				"쿨타임 감소량 +3%",
+			}
+		elseif cardIdx == 181 then
+			return {
+				"해금! (크리티컬 확률 10%, 영구)",
+				"크리티컬 확률 +2%",
+				"크리티컬 확률 +3%",
+				"크리티컬 확률 +2%",
+				"크리티컬 확률 +3%",
+			}
+		elseif cardIdx == 182 then
+			return {
+				"해금! (크리티컬 대미지 +10%, 영구)",
+				"크리티컬 대미지 +10%",
+				"크리티컬 대미지 +10%",
+				"크리티컬 대미지 +10%",
+				"크리티컬 대미지 +10%",
+			}
+		elseif cardIdx == 183 then
+			return {
+				"해금! (피해량 +5%, 영구)",
+				"피해량 증가 +3%p",
+				"피해량 증가 +4%p",
+				"피해량 증가 +4%p",
+				"피해량 증가 +4%p",
+			}
+		elseif cardIdx == 184 then
+			return {
+				"해금! (공격 회피 3%, 영구)",
+				"회피 확률 +2%",
+				"회피 확률 +2%",
+				"회피 확률 +2%",
+				"회피 확률 +3%",
+			}
+		elseif cardIdx == 185 then
+			return {
+				"해금! (대미지 560, 타겟 3명, 2연타)",
+				"피해량 +100, 타격 강도 증가",
+				"피해량 +108, 공격 대상 +1, 타격 강도 증가",
+			}
+		elseif cardIdx == 186 then
+			return {
+				"해금! (대미지 494, 타겟 4명, 5연타, 범위 공격)",
+				"피해량 +86, 타격 강도 증가",
+				"피해량 +133, 타격 강도 증가",
+			}
+		elseif cardIdx == 187 then
+			return {
+				"해금! (초당 대미지 90, 추가 대미지 108, 타겟 3명, 지속 5초)",
+				"초당 대미지 +10, 추가 대미지 +32",
+				"초당 대미지 +10, 추가 대미지 +36",
+			}
+		elseif cardIdx == 188 then
+			return {
+				"해금! (대미지 352, 타겟 2명(넉백), 크리티컬 확률 +30%, 메소·아이템 드랍)",
+				"피해량 +56, 크리티컬 +5%",
+				"피해량 +60, 크리티컬 +5%",
+			}
+		elseif cardIdx == 189 then
+			return {
+				"해금! (대미지 300, 메소 1개당, 스턴 확률 50% 1초, 메소 드랍 30%)",
+				"피해량 +20, 스턴 확률 +10%",
+				"피해량 +20, 스턴 확률 +10%, 스턴 지속시간 +1초",
+			}
+		elseif cardIdx == 190 then
+			return {
+				"해금! (스킬 복사 110%, 기본공격 복사 110%, 분신 2체)",
+				"스킬 복사 +10%, 기본공격 복사 +20%",
+				"스킬 복사 +10%, 기본공격 복사 +20%",
+			}
+		elseif cardIdx == 191 then
+			return {
+				"해금! (초당 틱 대미지 78, 타겟 2명, 착탄 시 스턴 3초, 연무 지속 2초)",
+				"초당 틱 대미지 +34, 연무 지속시간 +1초",
+				"초당 틱 대미지 +38, 연무 지속시간 +1초",
+			}
+		end
+		return {}
+	end
+
 	-- SkillInventory 3단계 공통 헬퍼 — Lv3/6/9에서만 값이 상승(패시브 4종 전용, 메디테이션 제외)
-	@ExecSpace("ServerOnly")
 	method number GetSkillInvTierPercent(integer skillIndex, number lv1, number lv2, number lv3)
 		local lv = self:GetSkillInvLevelByIndex(skillIndex)
 		if lv >= 9 then return lv3
@@ -11748,9 +12509,14 @@ script CardManager extends Logic
 			self._potionTimer = 0
 			log("CardManager started")
 		else
-			self._choiceClickHandler1 = self.choiceBtn1.Entity:ConnectEvent(ButtonClickEvent, function() self:SelectLevelUpChoice(1) end)
-			self._choiceClickHandler2 = self.choiceBtn2.Entity:ConnectEvent(ButtonClickEvent, function() self:SelectLevelUpChoice(2) end)
-			self._choiceClickHandler3 = self.choiceBtn3.Entity:ConnectEvent(ButtonClickEvent, function() self:SelectLevelUpChoice(3) end)
+			-- 버그 수정(2026-08-28, 유저 지정) — 선택 카드 클릭 즉시 선택 방식은 제거. 이제 누름(Down)에서
+			-- 미리보기 툴팁을 띄우고, 뗌(Up)에서 "짧게 눌렀다 뗐으면" 실제 선택을 실행한다(OnChoiceTouchUp).
+			self._choiceClickHandler1 = self.choiceTouch1.Entity:ConnectEvent(UITouchDownEvent, function() self:OnChoiceTouchDown(1) end)
+			self._choiceClickHandler2 = self.choiceTouch2.Entity:ConnectEvent(UITouchDownEvent, function() self:OnChoiceTouchDown(2) end)
+			self._choiceClickHandler3 = self.choiceTouch3.Entity:ConnectEvent(UITouchDownEvent, function() self:OnChoiceTouchDown(3) end)
+			self._choiceUpHandler1 = self.choiceTouch1.Entity:ConnectEvent(UITouchUpEvent, function() self:OnChoiceTouchUp(1) end)
+			self._choiceUpHandler2 = self.choiceTouch2.Entity:ConnectEvent(UITouchUpEvent, function() self:OnChoiceTouchUp(2) end)
+			self._choiceUpHandler3 = self.choiceTouch3.Entity:ConnectEvent(UITouchUpEvent, function() self:OnChoiceTouchUp(3) end)
 
 			self.slotBtn1.Entity:ConnectEvent(ButtonClickEvent, function() self:ShowTooltip(1) ; self:CheatCycleSlotLevel(1) end)
 			self.slotBtn2.Entity:ConnectEvent(ButtonClickEvent, function() self:ShowTooltip(2) ; self:CheatCycleSlotLevel(2) end)
@@ -12438,6 +13204,50 @@ script CardManager extends Logic
 			return
 		end
 
+		self:BuildTooltipTextForCard(cardIdx)
+		-- 버그 수정(2026-08-28) — 우측 선택 카드 미리보기(ShowChoicePreviewTooltip)가 tooltipName을
+		-- 켜고 tooltipChangelog를 채워두고 갔을 수 있으므로, 하단 슬롯 모드에서는 매번 원래대로(이름
+		-- 비표시, 변경사항 표 비움) 되돌린다.
+		self.tooltipName.Entity:SetEnable(false)
+		self.tooltipChangelog.Text = ""
+
+		-- 버그 수정(2026-08-28) — 하단 슬롯 툴팁은 슬롯 위로, 꼬리는 아래(슬롯 방향)를 가리켜야 한다.
+		-- 이 꼬리는 우측 레벨업 선택 카드 미리보기(ShowChoicePreviewTooltip)와 공유되므로, 여기서 매번
+		-- "아래 방향" 모양/위치로 다시 그려서 이전에 그 미리보기가 오른쪽 방향으로 바꿔놨어도 항상 정상화된다.
+		local tailTf = self.tooltipTail:GetComponent(UITransformComponent)
+		if tailTf ~= nil then tailTf["anchoredPosition"] = Vector2(0, -142) end
+		local tailPoly = self.tooltipTail:GetComponent(PolygonGUIRendererComponent)
+		if tailPoly ~= nil then
+			tailPoly.Points:Clear()
+			tailPoly.Points:AddRange({ Vector2(-10, 8), Vector2(10, 8), Vector2(0, -8) })
+		end
+
+		local slotPos = self:GetSlotUIPosition(slotIdx)
+		local tx = math.max(-740, math.min(740, slotPos.x))
+		local ty = slotPos.y + 237.5
+		local tf = self.tooltipPanel:GetComponent(UITransformComponent)
+		if tf ~= nil then
+			tf["anchoredPosition"] = Vector2(tx, ty)
+		end
+
+		self.tooltipPanel:SetEnable(true)
+
+		-- 3초 후 자동 닫기 (토큰으로 중복 방지)
+		self._tooltipToken = self._tooltipToken + 1
+		local token = self._tooltipToken
+		_TimerService:SetTimerOnce(function()
+			if self._tooltipToken == token then
+				self.tooltipPanel:SetEnable(false)
+			end
+		end, 3.0)
+	end
+
+	-- 버그 수정(2026-08-28) — ShowTooltip(하단 슬롯1~6, 클릭+3초 자동닫기)의 원래 거대한 텍스트 생성
+	-- 로직을 cardIdx 하나만 받는 이 메서드로 분리했다. ShowChoicePreviewTooltip(우측 레벨업 선택 카드,
+	-- 홀드/뗌)도 이 메서드를 그대로 재사용해서, "카드별 대미지/쿨타임/특수효과 표기 규칙"이 두 곳에
+	-- 중복되지 않고 한 곳(여기)에만 있다.
+	@ExecSpace("ClientOnly")
+	method void BuildTooltipTextForCard(integer cardIdx)
 		-- 이름 (카드 2~4: 강화 횟수 표시)
 		local name = ""
 		if cardIdx == 2 then
@@ -12489,84 +13299,92 @@ script CardManager extends Logic
 		elseif _CardRegistry:HasCard(cardIdx) then name = _CardRegistry:GetName(cardIdx) .. " Lv." .. self:GetSlotLevelNum(cardIdx)
 		end
 
-		-- 데미지
+		-- 대미지
+		-- 버그 수정(2026-08-28, 유저 지정: "대미지:이거로 통일해, 1타 2타 나눠 쓰지 말고 합산해서 깔끔하게,
+		-- %도 빼줘") — 라벨이 "데미지"/"대미지"/"타격당 데미지"/"범위 타격"/"1타당"/"타당"/공백 등으로
+		-- 제각각이었고, 다단타 스킬은 1타/2타/3타를 따로 나열하고 있었다. 전부 "대미지 : " 라벨 + 합산된
+		-- 숫자 1개로 통일한다. (초당)/(DoT)/(타격당)처럼 "1회성이 아니다"를 알려주는 표시는 남기되, 그
+		-- 옆에 붙던 (N%) 같은 중복 퍼센트 표기는 뺀다(숫자 자체가 이미 그 비율 반영값이라 중복).
 		local dmg = ""
-		if cardIdx == 2 then dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
-		elseif cardIdx == 3 then dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
-		elseif cardIdx == 4 then dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
-		elseif cardIdx == 5 then dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
+		if cardIdx == 2 then dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx))
+		elseif cardIdx == 3 then dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx))
+		elseif cardIdx == 4 then dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx))
+		elseif cardIdx == 5 then dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx))
 		elseif cardIdx == 7 then
 			dmg = "쿨타임 -" .. math.floor(self:GetMagicBoosterReduction() * 100) .. "%  (영구)"
 		elseif cardIdx == 8 then
 			dmg = "크리티컬 " .. math.floor(self:GetMagicCriticalChance() * 100) .. "%  (영구)"
 		elseif cardIdx == 9 then
+			-- ×1/×2 표기 대신 실제 맞는 총합(기준데미지×타수) 1개 숫자로.
 			local lv = self.EnergyBoltLevel
-			local hits = (lv >= 2) and "  ×2" or "  ×1"
-			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx)) .. hits
+			local hitCount = (lv >= 2) and 2 or 1
+			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx) * hitCount)
 		elseif cardIdx == 10 then
-			local bonusPct = (self.FreezingEffectLevel >= 2) and 6 or 5
-			dmg = "아이스 보너스 : +" .. bonusPct .. "%/스택"
+			dmg = "아이스 보너스 : +" .. ((self.FreezingEffectLevel >= 2) and 6 or 5) .. "%/스택"
 		elseif cardIdx == 11 then
-			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx)) .. "  (반경 " .. string.format("%.1f", self:GetIceCutterRadius(self.IceCutterLevel)) .. ")"
+			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx)) .. "  (반경 " .. string.format("%.1f", self:GetIceCutterRadius(self.IceCutterLevel)) .. ")"
 		elseif cardIdx == 12 then
-			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
+			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx))
 		elseif cardIdx == 13 then
-			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx)) .. "  (반경 " .. string.format("%.1f", self.Card13Radius) .. ")"
+			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx)) .. "  (반경 " .. string.format("%.1f", self.Card13Radius) .. ")"
 		elseif cardIdx == 14 then
-			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
+			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx))
 		elseif cardIdx == 15 then
-			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
+			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx))
 		elseif cardIdx == 16 then
+			-- 3연타 개별 표기(d1/d2/d3) 대신 합산 1개 숫자로.
 			local d1 = self:GetThunderStormHitDamage(self.ThunderStormLevel, 1)
 			local d2 = self:GetThunderStormHitDamage(self.ThunderStormLevel, 2)
 			local d3 = self:GetThunderStormHitDamage(self.ThunderStormLevel, 3)
-			dmg = "데미지 : " .. d1 .. "/" .. d2 .. "/" .. d3 .. "  (반경 " .. string.format("%.1f", self.Card16Radius) .. ")"
+			dmg = "대미지 : " .. math.floor(d1 + d2 + d3) .. "  (반경 " .. string.format("%.1f", self.Card16Radius) .. ")"
 		elseif cardIdx == 17 then
-			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
+			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx))
 		elseif cardIdx == 18 then
 			dmg = "피해 감소 : -" .. math.floor(self:GetMagicArmorReduction() * 100) .. "%  (영구)"
 		elseif cardIdx == 19 then
-			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
+			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx))
 		elseif cardIdx == 20 then
-			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
+			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx))
 		elseif cardIdx == 21 then
-			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
+			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx))
 		elseif cardIdx == 22 then
-			dmg = "데미지 증가 : +" .. self:GetMeditationPercent() .. "%  (영구)"
+			dmg = "대미지 증가 : +" .. self:GetMeditationPercent() .. "%  (영구)"
 		elseif cardIdx == 23 then
-			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
+			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx))
 		elseif cardIdx == 24 then
-			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
+			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx))
 		elseif cardIdx == 101 then
-			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
+			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx))
 		elseif cardIdx == 102 then
-			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
+			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx))
 		elseif cardIdx == 103 then
-			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
+			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx))
 		elseif cardIdx == 104 then
-			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
+			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx))
 		elseif cardIdx == 105 then
-			dmg = "타격당 데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
+			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx)) .. "  (타격당)"
 		elseif cardIdx == 106 then
-			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
+			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx))
 		elseif cardIdx == 107 then
-			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
+			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx))
 		elseif cardIdx == 118 then
-			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
+			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx))
 		elseif cardIdx == 119 then
-			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
+			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx))
 		elseif cardIdx == 120 then
-			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
+			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx))
 		elseif cardIdx == 108 then
-			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
+			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx))
 		elseif cardIdx == 114 then
-			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
+			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx))
 		elseif cardIdx == 115 then
-			dmg = "어택1 : " .. math.floor(self:GetCardDamage(cardIdx) * self:GetEvolveAttack1Ratio(self.EvolveLevel)) .. "  |  히트연출 : " .. math.floor(self:GetCardDamage(cardIdx) * 0.50)
+			-- 어택1(50%)+히트연출(50%) 나눠 쓰지 않고 합산 1개 숫자로(둘 합쳐 항상 카드 기준 데미지 100%).
+			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx) * self:GetEvolveAttack1Ratio(self.EvolveLevel) + self:GetCardDamage(cardIdx) * 0.50)
 		elseif cardIdx == 116 then
-			dmg = "1타당 : " .. math.floor(self:GetCardDamage(cardIdx))
+			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx))
 		elseif cardIdx == 117 then
-			dmg = "1타당 : " .. math.floor(self:GetCardDamage(cardIdx)) .. "  |  연사 " .. self:GetEnhancedArrowBlowArrowCount(self.EnhancedArrowBlowLevel) .. "발  |  강화 시 " .. self.Card117EnhancedHitCount .. "연타"
+			-- "연사 N발" 정보는 Extra 줄로 옮기고(아래 extraStr 117 분기), 여기는 순수 1타 데미지만.
+			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx))
 		elseif cardIdx == 109 then
 			dmg = "쿨타임 -" .. math.floor(self:GetBowAccelerationReduction() * 100) .. "%  (영구)"
 		elseif cardIdx == 110 then
@@ -12576,27 +13394,27 @@ script CardManager extends Logic
 		elseif cardIdx == 112 then
 			dmg = "추가 공격 확률 " .. math.floor(self:GetFinalAttackBowChance() * 100) .. "%  (영구)"
 		elseif cardIdx == 113 then
-			dmg = "데미지 증가 : +" .. self:GetRapidFirePercent() .. "%  (영구)"
+			dmg = "대미지 증가 : +" .. self:GetRapidFirePercent() .. "%  (영구)"
 		elseif cardIdx == 151 then
 			dmg = "스택 확률 : " .. math.floor(_CardRegistry:GetChance(151, self.ComboAttackLevel) * 100) .. "%  (영구)"
 		elseif cardIdx == 152 then
-			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
+			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx))
 		elseif cardIdx == 153 then
-			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
+			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx))
 		elseif cardIdx == 154 then
-			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
+			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx))
 		elseif cardIdx == 155 then
-			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
+			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx))
 		elseif cardIdx == 156 then
-			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
+			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx))
 		elseif cardIdx == 157 then
-			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
+			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx))
 		elseif cardIdx == 158 then
-			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
+			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx))
 		elseif cardIdx == 159 then
-			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
+			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx))
 		elseif cardIdx == 160 then
-			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
+			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx))
 		elseif cardIdx == 161 then
 			dmg = "크리티컬 " .. math.floor(_CardRegistry:GetChance(161, self.ChanceAttackLevel) * 100) .. "%  (영구)"
 		elseif cardIdx == 162 then
@@ -12616,47 +13434,63 @@ script CardManager extends Logic
 		elseif cardIdx == 184 then
 			dmg = "공격 회피 " .. math.floor(_CardRegistry:GetChance(184, self.DarkSightLevel) * 100) .. "%  (영구)"
 		elseif cardIdx == 165 then
-			dmg = "1타 : " .. math.floor(self:GetCardDamage(cardIdx)) .. "  |  2타 : " .. math.floor(self:GetCardDamage(cardIdx) * self:GetSpiritBladeSecondHitPercent(self.SpiritBladeLevel))
+			-- 1타/2타 나눠 쓰지 않고 합산 1개 숫자로.
+			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx) + self:GetCardDamage(cardIdx) * self:GetSpiritBladeSecondHitPercent(self.SpiritBladeLevel))
 		elseif cardIdx == 166 then
-			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
+			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx))
 		elseif cardIdx == 167 then
-			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
+			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx))
 		elseif cardIdx == 168 then
-			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
+			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx))
 		elseif cardIdx == 169 then
-			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
+			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx))
 		elseif cardIdx == 170 then
-			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
+			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx))
 		elseif cardIdx == 171 then
-			dmg = "1타 : " .. math.floor(self:GetCardDamage(cardIdx) * self:GetDoubleStepPercent(self.DoubleStepLevel, 1)) .. "  |  2타 : " .. math.floor(self:GetCardDamage(cardIdx) * self:GetDoubleStepPercent(self.DoubleStepLevel, 2))
+			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx) * self:GetDoubleStepPercent(self.DoubleStepLevel, 1) + self:GetCardDamage(cardIdx) * self:GetDoubleStepPercent(self.DoubleStepLevel, 2))
 		elseif cardIdx == 185 then
-			dmg = "1타 : " .. math.floor(self:GetCardDamage(cardIdx) * self:GetAssassinatePercent(self.AssassinateLevel, 1)) .. "  |  2타 : " .. math.floor(self:GetCardDamage(cardIdx) * self:GetAssassinatePercent(self.AssassinateLevel, 2))
+			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx) * self:GetAssassinatePercent(self.AssassinateLevel, 1) + self:GetCardDamage(cardIdx) * self:GetAssassinatePercent(self.AssassinateLevel, 2))
 		elseif cardIdx == 186 then
-			dmg = "타당 : " .. math.floor(self:GetCardDamage(cardIdx) * self:GetSonicBlowPercent(self.SonicBlowLevel))
+			-- "타당" 낱개 표기 대신 5연타(레벨 무관 고정) 합산 1개 숫자로.
+			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx) * self:GetSonicBlowPercent(self.SonicBlowLevel) * 5)
 		elseif cardIdx == 187 then
+			-- (초당) 표시는 유지, %는 제거, "보너스"→"추가 대미지"로 라벨 정정.
 			local base187 = self:GetCardDamage(cardIdx)
-			dmg = "초당 : " .. math.floor(base187) .. "  (DoT)  |  보너스 : " .. math.floor(base187 * self:GetSmokeRampageBonusPercent(self.SmokeRampageLevel)) .. "  (" .. math.floor(self:GetSmokeRampageBonusPercent(self.SmokeRampageLevel) * 100) .. "%)"
+			dmg = "대미지 : " .. math.floor(base187) .. "  (초당)  |  추가 대미지 : " .. math.floor(base187 * self:GetSmokeRampageBonusPercent(self.SmokeRampageLevel))
 		elseif cardIdx == 188 then
 			local base188 = self:GetCardDamage(cardIdx)
-			dmg = "범위 타격 : " .. math.floor(base188 * self:GetAzureEdgeExplosionPercent(self.AzureEdgeLevel)) .. "  (" .. math.floor(self:GetAzureEdgeExplosionPercent(self.AzureEdgeLevel) * 100) .. "%)"
+			dmg = "대미지 : " .. math.floor(base188 * self:GetAzureEdgeExplosionPercent(self.AzureEdgeLevel))
 		elseif cardIdx == 189 then
+			-- 1타/2타(둘 다 동일값) 나눠 쓰지 않고 합산 1개 숫자로("메소 1개당" 단서는 유지).
 			local base189 = self:GetCardDamage(cardIdx) * self.Card189HitPercent
-			dmg = "메소 1개당 1타 : " .. math.floor(base189) .. "  |  2타 : " .. math.floor(base189)
+			dmg = "대미지 : " .. math.floor(base189 * 2) .. "  (메소 1개당)"
 		elseif cardIdx == 190 then
-			dmg = "스킬 복사 " .. math.floor(self:GetDualShadowPartnerSkillPercent(self.DualShadowPartnerLevel) * 100) .. "%  |  기본공격 복사 " .. math.floor(self:GetDualShadowPartnerBasicPercent(self.DualShadowPartnerLevel) * 100) .. "%  (원본 카드 데미지 기준)"
+			dmg = "스킬 복사 " .. math.floor(self:GetDualShadowPartnerSkillPercent(self.DualShadowPartnerLevel) * 100) .. "%  |  기본공격 복사 " .. math.floor(self:GetDualShadowPartnerBasicPercent(self.DualShadowPartnerLevel) * 100) .. "%  (원본 카드 대미지 기준)"
 		elseif cardIdx == 191 then
+			-- (초당 틱) 표시는 유지, %는 제거.
 			local lv191 = self.AbyssalFlareLevel
-			dmg = "초당 틱 : " .. math.floor(self:GetCardDamage(cardIdx) * self:GetAbyssalFlareTickPercent(lv191)) .. "  (" .. math.floor(self:GetAbyssalFlareTickPercent(lv191) * 100) .. "%)"
+			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx) * self:GetAbyssalFlareTickPercent(lv191)) .. "  (초당 틱)"
 		elseif cardIdx == 173 then
+			-- 1타/2타/3타 나눠 쓰지 않고 합산 1개 숫자로.
 			local lv173 = self.SavageBlowLevel
 			local base173 = self:GetCardDamage(cardIdx)
-			dmg = "1타 : " .. math.floor(base173 * self:GetSavageBlowPercent(lv173, 1)) .. "  |  2타 : " .. math.floor(base173 * self:GetSavageBlowPercent(lv173, 2)) .. "  |  3타 : " .. math.floor(base173 * self:GetSavageBlowPercent(lv173, 3))
+			dmg = "대미지 : " .. math.floor(base173 * self:GetSavageBlowPercent(lv173, 1) + base173 * self:GetSavageBlowPercent(lv173, 2) + base173 * self:GetSavageBlowPercent(lv173, 3))
 		elseif cardIdx == 174 then
-			dmg = "초당 : " .. math.floor(self:GetCardDamage(cardIdx)) .. "  (DoT)"
+			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx)) .. "  (초당)"
 		elseif cardIdx == 175 then
-			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx)) .. "  (넉백 후 범위 100%)"
+			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx)) .. "  (넉백 후 범위 100%)"
 		elseif cardIdx == 176 then
-			dmg = "데미지 : " .. math.floor(self:GetCardDamage(cardIdx))
+			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx))
+		elseif cardIdx == 177 then
+			-- 버그 수정(2026-08-28, 라이브 재추출 중 발견) — 이 dmg 분기 자체가 통째로 빠져 있어서
+			-- 메소 익스플로전은 항상 데미지 줄이 빈칸으로 떴다(GetCardDamage 계산 자체는 정상 작동).
+			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx))
+		elseif cardIdx == 178 then
+			-- 쉐도우 파트너는 원본 카드 데미지의 %를 복제하는 소환 스킬이라 자체 고정 데미지가 없다
+			-- (extraStr의 "기본공격/스킬 복사 대미지 X%"가 실질적인 수치 정보) — 의도적으로 공란 유지.
+		elseif cardIdx == 179 then
+			-- 버그 수정(2026-08-28, 라이브 재추출 중 발견) — 177과 동일하게 분기 누락으로 항상 공란이었다.
+			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx))
 		end
 
 		-- 쿨타임 (부스터 활성 중이면 실효 쿨타임 추가 표시)
@@ -12809,7 +13643,8 @@ script CardManager extends Logic
 		elseif cardIdx == 117 then
 			local eabLv = self.EnhancedArrowBlowLevel
 			local enhancePct = math.floor(self:GetEnhancedArrowBlowEnhanceChance(eabLv) * 100)
-			extraStr = "강화 확률(화살마다) " .. enhancePct .. "%  |  강화 시 " .. self.Card117EnhancedHitCount .. "연타(" .. string.format("%.2f", self.Card117EnhancedHitInterval) .. "초 간격)"
+			-- 유저 지정(2026-08-28): 데미지 줄을 "대미지 : X"로 단순화하면서 빠진 "연사 N발" 정보를 여기로 이동.
+			extraStr = "연사 " .. self:GetEnhancedArrowBlowArrowCount(eabLv) .. "발  |  강화 확률(화살마다) " .. enhancePct .. "%  |  강화 시 " .. self.Card117EnhancedHitCount .. "연타(" .. string.format("%.2f", self.Card117EnhancedHitInterval) .. "초 간격)"
 		elseif cardIdx == 112 then
 			extraStr = "추가 공격 대미지 " .. math.floor(self:GetFinalAttackBowMultiplier() * 100) .. "%"
 		elseif cardIdx == 152 then
@@ -12865,7 +13700,10 @@ script CardManager extends Logic
 			extraStr = "지속 " .. string.format("%.0f", self.Card190Duration) .. "초  |  분신 2체(스킬 복사 1 + 기본공격 전용 1, 서로 독립 행동)"
 		elseif cardIdx == 191 then
 			local lv191e = self.AbyssalFlareLevel
-			extraStr = "타겟 1명  |  연무 지속 " .. self:GetAbyssalFlareDuration(lv191e) .. "초  |  반경 " .. string.format("%.1f", self.Card191FogRadius) .. "  |  스턴 없음(대신 매초 틱)"
+			-- 버그 수정(2026-08-28) — 존재하지 않는 self.Card191FogRadius(원형 반경 필드) 참조로
+			-- string.format이 nil을 받아 [LEA-2005] BadArgument로 ShowTooltip 자체가 터지고 있었다.
+			-- 실제 판정은 타원(Card191FogHalfWidth/HalfHeight)이라 가로/세로로 표기(메소 익스플로전과 동일 패턴).
+			extraStr = "타겟 " .. self:GetAbyssalFlareTargetCount() .. "명  |  연무 지속 " .. self:GetAbyssalFlareDuration(lv191e) .. "초  |  범위 가로 " .. string.format("%.1f", self.Card191FogHalfWidth * 2) .. " x 세로 " .. string.format("%.1f", self.Card191FogHalfHeight * 2) .. "  |  착탄시 스턴 " .. string.format("%.0f", self.AbyssalFlareStunDuration) .. "초(100%)  |  이후 매초 틱"
 		elseif cardIdx == 173 then
 			local lv173e = self.SavageBlowLevel
 			extraStr = "타겟 " .. self:GetSavageBlowTargetCount(lv173e) .. "명  |  3연타(" .. math.floor(self:GetSavageBlowPercent(lv173e, 1) * 100) .. "/" .. math.floor(self:GetSavageBlowPercent(lv173e, 2) * 100) .. "/" .. math.floor(self:GetSavageBlowPercent(lv173e, 3) * 100) .. "%)  |  " .. string.format("%.2f", self.SavageBlowHitLifetime / 3) .. "초 간격"
@@ -12886,32 +13724,123 @@ script CardManager extends Logic
 			extraStr = "타겟 " .. self:GetDarkFlareTargetCount(self.DarkFlareLevel) .. "명  |  스턴 100%  |  지속 " .. self.Card179StunDuration .. "초"
 		end
 
+		-- 버그 수정(2026-08-28, 유저 지정: "Extra 부분은 한줄로 다쓰지말고 |이게 구분이라고 생각하면
+		-- 좋을듯 다음줄에 적어주면 좋겠어") — 위 80장 전체 분기가 여전히 "  |  " 같은 구분자로 한 줄에
+		-- 이어붙이는데, 엔진 자동 줄바꿈은 "|" 위치를 무시하고 글자수 기준으로만 끊어서 한 항목이
+		-- 중간에 잘려 다음 줄로 넘어가는 문제가 있었다(예: "명중" / "-20%(...)"). 분기마다 손대는
+		-- 대신, 여기 한 곳에서 "|" 기준으로 쪼개 각 항목을 트리밍한 뒤 실제 줄바꿈(\n)으로 재조립한다.
+		if extraStr ~= "" then
+			local segments = {}
+			for part in string.gmatch(extraStr, "([^|]+)") do
+				local trimmed = part:match("^%s*(.-)%s*$")
+				if trimmed ~= "" then
+					table.insert(segments, trimmed)
+				end
+			end
+			extraStr = table.concat(segments, "\n")
+		end
+
 		self.tooltipName.Text  = name
 		self.tooltipDmg.Text   = dmg
 		self.tooltipCd.Text    = cdStr
 		self.tooltipExtra.Text = extraStr
 
-		-- 클릭한 슬롯 위로 위치 이동 (꼬리 tip이 슬롯 상단 5px 위에 위치하도록)
-		-- 슬롯 top = slotPos.y + 82.5, tail tip = ty - 70 → ty = slotPos.y + 82.5 + 5 + 70
-		local slotPos = self:GetSlotUIPosition(slotIdx)
-		local tx = math.max(-740, math.min(740, slotPos.x))
-		local ty = slotPos.y + 158
+		log("툴팁: " .. name .. " / " .. dmg .. " / " .. cdStr .. " / " .. extraStr)
+	end
+
+	-- 유저 지정(2026-08-28): 하단 슬롯1~6의 툴팁(위 ShowTooltip)은 클릭+3초 자동닫기 그대로 유지하고,
+	-- 이 메서드는 별도로 우측 레벨업 선택 카드(choiceTouch1~3)용 누름/뗌 툴팁 전용으로 쓴다.
+	@ExecSpace("ClientOnly")
+	method void HideTooltip()
+		self.tooltipPanel:SetEnable(false)
+	end
+
+	-- 버그 수정(2026-08-28, 유저 지정: "카드 7~9(우측 레벨업 선택 카드)에 누르고 있으면 툴팁, 떼면
+	-- 닫히게, 단 누르고 있다 떼도 카드가 선택되면 안 됨") — BuildTooltipTextForCard를 그대로 재사용하되,
+	-- "현재 보유 레벨"이 아니라 "이 선택지를 고르면 될 다음 레벨" 기준으로 수치를 보여줘야 하므로, 텍스트를
+	-- 만드는 그 순간에만 레벨 프로퍼티를 다음 레벨로 잠깐 올렸다가 즉시 원래 값으로 되돌린다(위
+	-- SetCardLevelDirect 주석 참고). 위치는 슬롯 툴팁과 달리 선택 카드의 왼쪽에 뜨고, 꼬리도 오른쪽
+	-- (카드 방향)을 가리키도록 다시 그린다. 자동 닫기 타이머는 없다 — 뗄 때(OnChoiceTouchUp)만 닫는다.
+	@ExecSpace("ClientOnly")
+	method void ShowChoicePreviewTooltip(integer choiceIndex)
+		local cardIdx = 0
+		local upgradeType = ""
+		if choiceIndex == 1 then cardIdx = self._clientChoiceCard1 ; upgradeType = self._clientChoiceType1
+		elseif choiceIndex == 2 then cardIdx = self._clientChoiceCard2 ; upgradeType = self._clientChoiceType2
+		else cardIdx = self._clientChoiceCard3 ; upgradeType = self._clientChoiceType3
+		end
+		if cardIdx <= 0 then return end
+		-- 포션(Card6)은 대미지/쿨타임 개념이 없는 지속회복 아이템이라 레벨별 변경사항 표도 없다
+		-- (GetCardLevelChangelog에 cardIdx==6 분기가 아예 없음) — 미리보기 자체를 건너뛴다.
+		if cardIdx == 6 then return end
+
+		local curLevel = self:GetSlotLevelNum(cardIdx)
+		local nextLevel = (upgradeType == "unlock") and 1 or (curLevel + 1)
+
+		-- 버그 수정(2026-08-28, 유저 지정: "Lv.1~5 전체 변경사항 목록으로, 이 레벨을 뽑으면 어디가 노란색으로
+		-- 강조되게") — 하단 슬롯 툴팁(BuildTooltipTextForCard, 절대 수치 1줄)과 달리, 여기는 해금부터
+		-- 지금 뽑으면 도달할 레벨까지 전체 이력을 한 번에 보여준다. 뽑으면 적용될 그 레벨 줄만
+		-- <color=#FFFF00>(노란색)로 감싸고, 나머지는 기본 흰색 그대로 둔다(TooltipChangelog의
+		-- IsRichText 기본값 true 덕분에 별도 세팅 없이 바로 동작).
+		local changelog = self:GetCardLevelChangelog(cardIdx)
+		local lines = {}
+		for i, entry in ipairs(changelog) do
+			local line = "Lv." .. i .. ": " .. entry
+			if i == nextLevel then
+				line = "<color=#FFFF00>" .. line .. "</color>"
+			end
+			table.insert(lines, line)
+		end
+
+		self.tooltipName.Text = self:GetSlotBaseName(cardIdx)
+		self.tooltipName.Entity:SetEnable(true)
+		self.tooltipDmg.Text = ""
+		self.tooltipCd.Text = ""
+		self.tooltipExtra.Text = ""
+		self.tooltipChangelog.Text = table.concat(lines, "\n")
+
+		local tailTf = self.tooltipTail:GetComponent(UITransformComponent)
+		if tailTf ~= nil then tailTf["anchoredPosition"] = Vector2(122, 0) end
+		local tailPoly = self.tooltipTail:GetComponent(PolygonGUIRendererComponent)
+		if tailPoly ~= nil then
+			tailPoly.Points:Clear()
+			tailPoly.Points:AddRange({ Vector2(-8, -10), Vector2(-8, 10), Vector2(8, 0) })
+		end
+
+		local basePos = self:GetChoiceUIPosition(choiceIndex)
+		local tx = math.max(-740, math.min(740, basePos.x - 207))
+		local ty = basePos.y
 		local tf = self.tooltipPanel:GetComponent(UITransformComponent)
 		if tf ~= nil then
 			tf["anchoredPosition"] = Vector2(tx, ty)
 		end
 
 		self.tooltipPanel:SetEnable(true)
-		log("툴팁: " .. name .. " / " .. dmg .. " / " .. cdStr .. " / " .. extraStr)
+	end
 
-		-- 3초 후 자동 닫기 (토큰으로 중복 방지)
-		self._tooltipToken = self._tooltipToken + 1
-		local token = self._tooltipToken
-		_TimerService:SetTimerOnce(function()
-			if self._tooltipToken == token then
-				self.tooltipPanel:SetEnable(false)
-			end
-		end, 3.0)
+	@ExecSpace("ClientOnly")
+	method void OnChoiceTouchDown(integer choiceIndex)
+		if choiceIndex == 1 then self._choiceHoldStart1 = _UtilLogic.ElapsedSeconds
+		elseif choiceIndex == 2 then self._choiceHoldStart2 = _UtilLogic.ElapsedSeconds
+		else self._choiceHoldStart3 = _UtilLogic.ElapsedSeconds
+		end
+		self:ShowChoicePreviewTooltip(choiceIndex)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnChoiceTouchUp(integer choiceIndex)
+		self:HideTooltip()
+		local startTime = 0
+		if choiceIndex == 1 then startTime = self._choiceHoldStart1
+		elseif choiceIndex == 2 then startTime = self._choiceHoldStart2
+		else startTime = self._choiceHoldStart3
+		end
+		local held = _UtilLogic.ElapsedSeconds - startTime
+		-- 짧게 눌렀다 뗀 경우(=탭)만 실제 선택으로 이어진다. 툴팁이 뜰 만큼 오래 누르고 있었으면(홀드)
+		-- 선택하지 않는다(유저 지정: "누르고 있을 때 카드 선택되면 안 된다").
+		if held < self.ChoiceTapThreshold then
+			self:SelectLevelUpChoice(choiceIndex)
+		end
 	end
 
 	-- ── 매 프레임 (서버) ─────────────────────────────────────────
@@ -16623,6 +17552,10 @@ script CardManager extends Logic
 		self.choiceCard1:SetEnable(true)
 		self.choiceCard2:SetEnable(true)
 		self.choiceCard3:SetEnable(true)
+		-- 홀드 미리보기 툴팁이 참조할 수 있도록 클라 로컬 필드에도 저장(위 프로퍼티 선언부 주석 참고)
+		self._clientChoiceCard1 = card1 ; self._clientChoiceType1 = type1
+		self._clientChoiceCard2 = card2 ; self._clientChoiceType2 = type2
+		self._clientChoiceCard3 = card3 ; self._clientChoiceType3 = type3
 	end
 
 	@ExecSpace("Server")
@@ -18525,6 +19458,10 @@ script CardManager extends Logic
 		self.choiceCard1:SetEnable(false)
 		self.choiceCard2:SetEnable(false)
 		self.choiceCard3:SetEnable(false)
+		-- 홀드 미리보기 툴팁이 오래된 선택지를 참조하지 않도록 클라 로컬 상태도 같이 비운다
+		self._clientChoiceCard1 = 0 ; self._clientChoiceType1 = ""
+		self._clientChoiceCard2 = 0 ; self._clientChoiceType2 = ""
+		self._clientChoiceCard3 = 0 ; self._clientChoiceType3 = ""
 	end
 
 	-- ── 엘리트 몬스터 드롭 ───────────────────────────────────────
@@ -18998,9 +19935,12 @@ script CardManager extends Logic
 
 	method void OnEndPlay()
 		if self:IsClient() then
-			if self._choiceClickHandler1 then self.choiceBtn1.Entity:DisconnectEvent(ButtonClickEvent, self._choiceClickHandler1) end
-			if self._choiceClickHandler2 then self.choiceBtn2.Entity:DisconnectEvent(ButtonClickEvent, self._choiceClickHandler2) end
-			if self._choiceClickHandler3 then self.choiceBtn3.Entity:DisconnectEvent(ButtonClickEvent, self._choiceClickHandler3) end
+			if self._choiceClickHandler1 then self.choiceTouch1.Entity:DisconnectEvent(UITouchDownEvent, self._choiceClickHandler1) end
+			if self._choiceClickHandler2 then self.choiceTouch2.Entity:DisconnectEvent(UITouchDownEvent, self._choiceClickHandler2) end
+			if self._choiceClickHandler3 then self.choiceTouch3.Entity:DisconnectEvent(UITouchDownEvent, self._choiceClickHandler3) end
+			if self._choiceUpHandler1 then self.choiceTouch1.Entity:DisconnectEvent(UITouchUpEvent, self._choiceUpHandler1) end
+			if self._choiceUpHandler2 then self.choiceTouch2.Entity:DisconnectEvent(UITouchUpEvent, self._choiceUpHandler2) end
+			if self._choiceUpHandler3 then self.choiceTouch3.Entity:DisconnectEvent(UITouchUpEvent, self._choiceUpHandler3) end
 			if self._cooldownTimerId ~= 0 then
 				_TimerService:ClearTimer(self._cooldownTimerId)
 				self._cooldownTimerId = 0
