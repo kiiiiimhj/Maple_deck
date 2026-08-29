@@ -1,12 +1,38 @@
 @Logic
 script HidePlayer extends Logic
 
+	-- 네이티브 DefaultPlayer를 "화면"과 "입력" 양쪽에서 무력화하는 클라이언트 전용 로직.
+	-- 이 게임은 플레이어 아바타를 직접 조작하지 않는 자동전투라, 아바타는 항상 숨기고
+	-- 점프 입력도 받지 않는다(점프는 숨겨진 몸통만 띄워서 카메라를 튀게 하는 노이즈다).
+	property boolean _jumpDisabled = false
+
 	@ExecSpace("ClientOnly")
 	method void OnUpdate(number delta)
 		-- 매 프레임 강제로 숨겨서 리스폰/재시작 등으로 다시 보이게 되는 것을 막는다.
 		local player = _UserService.LocalPlayer
 		if player == nil then return end
-		if player.Visible then player.Visible = false end
+		local wasVisible = player.Visible
+		if wasVisible then player.Visible = false end
+		-- 최초 1회, 그리고 "다시 보이게 된" 프레임(= 리스폰/재시작으로 플레이어가 초기화된
+		-- 시점)마다 점프 키 해제를 다시 걸어준다 — 숨김 처리와 같은 트리거를 공유한다.
+		if self._jumpDisabled == false or wasVisible then
+			self:DisableJumpKeys(player)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void DisableJumpKeys(Entity player)
+		-- MSW 기본 점프 키 매핑(Space / LeftAlt / RightAlt)을 통째로 해제한다.
+		-- 아래방향키+점프키인 다운점프도 점프 키가 사라지므로 함께 막힌다.
+		local controller = player.PlayerControllerComponent
+		if controller == nil then return end
+		controller:RemoveActionKey(KeyboardKey.Space)
+		controller:RemoveActionKey(KeyboardKey.LeftAlt)
+		controller:RemoveActionKey(KeyboardKey.RightAlt)
+		if self._jumpDisabled == false then
+			self._jumpDisabled = true
+			log("[HidePlayer] jump keys removed (Space / LeftAlt / RightAlt)")
+		end
 	end
 
 end
