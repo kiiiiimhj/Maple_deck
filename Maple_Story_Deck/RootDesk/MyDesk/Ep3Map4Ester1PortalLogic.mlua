@@ -1,0 +1,221 @@
+@Logic
+script Ep3Map4Ester1PortalLogic extends Logic
+
+	@Sync
+	property boolean PortalRevealed = false
+
+	@Sync
+	property boolean Active = false
+
+	@Sync
+	property integer RemainingSeconds = 0
+
+	property string PortalPath = "/maps/ep3_map4/portal-3"
+
+	property string RequiredItemId = "ep3_map3_qualification_token"
+
+	property integer RequiredAmount = 1
+
+	property string RequirementIconRUID = "613d49a35f90479c905e9265305a09b8"
+
+	property string RequirementText = "x1"
+
+	property string UsedMessage = "자격의 증표를 사용했습니다"
+
+	property string RevealMessage = "숨겨진 포탈이 나타났다!"
+
+	property string TimeUpMessage = "제한시간이 종료되어 원래 위치로 돌아갑니다"
+
+	property number BubbleXOffset = -0.882965
+
+	property number BubbleYOffset = 0.925143239
+
+	property Vector3 RequirementIconPosition = Vector3(-0.6002, -0.3029, -0.0001)
+
+	property Vector3 RequirementIconScale = Vector3(2.73173356, 2.73173332, 1)
+
+	property integer EnterZoneIndex = 129
+
+	property number Duration = 60.0
+
+	property string BoardEntityPath = "/ui/DefaultGroup/Ep3Map4Ester1Board"
+
+	property string TimerTextPath = "/ui/DefaultGroup/Ep3Map4Ester1Board/Inner/TimerText"
+
+	property number _remaining = 0
+
+	property integer _originZoneIndex = -1
+
+	@ExecSpace("ServerOnly")
+	method void OnUpdate(number delta)
+		if not self.Active then return end
+		self._remaining = self._remaining - delta
+		if self._remaining <= 0 then
+			self._remaining = 0
+			self:ExitEsterMap()
+			return
+		end
+		local secs = math.ceil(self._remaining)
+		if secs ~= self.RemainingSeconds then
+			self.RemainingSeconds = secs
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void RevealPortal()
+		if self.PortalRevealed then return end
+		self.PortalRevealed = true
+		local portal = _EntityService:GetEntityByPath(self.PortalPath)
+		if portal ~= nil then portal.Enable = true end
+		_UIToast:ShowMessage(self.RevealMessage)
+		log("Ep3Map4Ester1Portal: portal revealed")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnPortalTouched(Entity clickedEntity)
+		if self.Active then return end -- 이미 히든맵에 있으면 무시(중복 입장 방지)
+		local have = _PlayerInventory:GetItemCount(self.RequiredItemId)
+		if have < self.RequiredAmount then
+			self:ShowRequirementBubble(clickedEntity)
+			return
+		end
+		_PlayerInventory:RemoveItem(self.RequiredItemId, self.RequiredAmount)
+		_UIToast:ShowMessage(self.UsedMessage)
+		self:EnterEsterMap()
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ShowRequirementBubble(Entity clickedEntity)
+		if not isvalid(clickedEntity) then return end
+		local map = clickedEntity.CurrentMap
+		if map == nil then return end
+		local worldPos = clickedEntity.TransformComponent.WorldPosition
+		local bubblePos = Vector3(worldPos.x + self.BubbleXOffset, worldPos.y + self.BubbleYOffset, worldPos.z - 0.5)
+		_Ep2Map1GiftNpcLogic:SpawnBubble(map, bubblePos, self.RequirementIconRUID, self.RequirementText, true,
+			1.0, self.RequirementIconPosition, self.RequirementIconScale)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void EnterEsterMap()
+		local origin = _MapManager.CurrentMapIndex
+		self._originZoneIndex = origin
+		local mapName = _MapManager:GetMapName(self.EnterZoneIndex)
+		local map = _EntityService:GetEntityByPath("/maps/" .. mapName)
+		if map == nil then
+			log_error("Ep3Map4Ester1Portal: arena map not found at /maps/" .. mapName)
+			self._originZoneIndex = -1
+			return
+		end
+		local offsetX = _MonsterSpawner:GetZoneOffsetX(self.EnterZoneIndex)
+		-- 버그 수정(2026-08-27, 유저 리포트: "3번에서 4번 이동하니깐 여전히 튕겨") — GetGroundY의
+		-- 레이캐스트가 존1~3 부근 다중 발판 레이어(사다리 등) 중 엉뚱한 층을 집을 수 있었다. 이제
+		-- ZoneInfo[129].landY(실측 확정값)를 그대로 쓴다 — GetGroundY는 landY가 없을 때만 폴백.
+		local zoneInfo = _MapManager:GetZoneInfo(self.EnterZoneIndex)
+		local groundY = (zoneInfo ~= nil and zoneInfo.landY ~= nil) and zoneInfo.landY or _MonsterSpawner:GetGroundY(map, offsetX)
+		local pos = Vector3(offsetX, groundY, 0)
+		
+		_MapTransitionLogic:PlayCover("left")
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) then return end
+			for _, userEntity in pairs(_UserService.UserEntities) do
+				_TeleportService:TeleportToMapPosition(userEntity, pos, mapName)
+			end
+			_MapManager:SetMonstersPausedForZone(_MonsterSpawner:GetZoneEntity(origin), origin, true)
+			_MapManager.CurrentMapIndex = self.EnterZoneIndex
+			_MapManager:SetMonstersPausedForZone(map, self.EnterZoneIndex, false)
+			-- 버그 수정(2026-08-27, 유저 리포트: "카메라 앵글이 더 y축 아래로 간느낌, 바닥이 위로 다
+			-- 올라가있어") — DoMapChange/DoScrollMapChange는 존 이동마다 항상 ResetCameraConfine을
+			-- 호출하는데(그래야 ep3_map3/4의 Y고정 커스텀 confine이 새 존 기준으로 재계산되거나 해제됨),
+			-- 이 히든맵 진입 시퀀스엔 이 호출이 빠져있었다 — 그래서 입장 직전 존(예: ep3_map3, Y고정
+			-- confine 적용 중)의 카메라 confine이 그대로 눌러앉아 이 맵의 실제 지형과 안 맞았다.
+			-- 129~133은 ResetCameraConfine의 mapIndex 분기에 없어 else(네이티브 기본 confine, 실제
+			-- 발판 높이를 따라감)로 떨어진다 — 이 맵 자체 지형 기준으로 정상 동작한다.
+			_MapManager:ResetCameraConfine(self.EnterZoneIndex)
+			if _GameManager.GameStarted then
+				_MonsterSpawner:ActivateMap(self.EnterZoneIndex)
+			end
+			_MapMoveUI:NotifyMapChanged(self.EnterZoneIndex)
+			_TimerService:SetTimerOnce(function()
+				if isvalid(self) then _MapTransitionLogic:PlayReveal("left") end
+			end, _MapTransitionLogic.CameraSettleDelay)
+		end, _MapTransitionLogic.CoverDuration)
+		
+		self.Active = true
+		self._remaining = self.Duration
+		self.RemainingSeconds = math.ceil(self.Duration)
+		log("Ep3Map4Ester1Portal: entered from zone " .. origin)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ExitEsterMap()
+		if not self.Active then return end
+		self.Active = false
+		self.RemainingSeconds = 0
+		_UIToast:ShowMessage(self.TimeUpMessage)
+		
+		local current = _MapManager.CurrentMapIndex
+		local target = self._originZoneIndex
+		if target < 0 then target = 1 end -- 방어적 폴백(이론상 도달 안 함)
+		local mapName = _MapManager:GetMapName(target)
+		local spawnPos = _MapManager:GetSpawnPositionForIndex(target)
+		
+		_MapTransitionLogic:PlayCover("left")
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) then return end
+			for _, userEntity in pairs(_UserService.UserEntities) do
+				_TeleportService:TeleportToMapPosition(userEntity, spawnPos, mapName)
+			end
+			_MapManager:SetMonstersPausedForZone(_MonsterSpawner:GetZoneEntity(current), current, true)
+			_MapManager.CurrentMapIndex = target
+			_MapManager:SetMonstersPausedForZone(_MonsterSpawner:GetZoneEntity(target), target, false)
+			-- 카메라 confine도 원래 존 기준으로 복원(위 EnterEsterMap 주석 참고)
+			_MapManager:ResetCameraConfine(target)
+			_MapMoveUI:NotifyMapChanged(target)
+			_TimerService:SetTimerOnce(function()
+				if isvalid(self) then _MapTransitionLogic:PlayReveal("left") end
+			end, _MapTransitionLogic.CameraSettleDelay)
+		end, _MapTransitionLogic.CoverDuration)
+		
+		self._originZoneIndex = -1
+		log("Ep3Map4Ester1Portal: time up, returned to zone " .. target)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnSyncProperty(string name, any value)
+		if name == "Active" then
+			self:UpdateBoardVisibility()
+		elseif name == "RemainingSeconds" then
+			self:UpdateTimerText()
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void UpdateBoardVisibility()
+		local board = _EntityService:GetEntityByPath(self.BoardEntityPath)
+		if board ~= nil then board.Enable = self.Active end
+		if self.Active then self:UpdateTimerText() end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void UpdateTimerText()
+		local textEntity = _EntityService:GetEntityByPath(self.TimerTextPath)
+		if textEntity == nil then return end
+		local renderer = textEntity.TextGUIRendererComponent
+		if renderer == nil then return end
+		local m = math.floor(self.RemainingSeconds / 60)
+		local s = self.RemainingSeconds % 60
+		renderer.Text = string.format("%02d:%02d", m, s)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		self.PortalRevealed = false
+		self.Active = false
+		self.RemainingSeconds = 0
+		self._remaining = 0
+		self._originZoneIndex = -1
+		local portal = _EntityService:GetEntityByPath(self.PortalPath)
+		if portal ~= nil then portal.Enable = false end
+	end
+
+end

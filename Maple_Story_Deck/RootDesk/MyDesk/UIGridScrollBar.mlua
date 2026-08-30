@@ -1,0 +1,83 @@
+@Component
+script UIGridScrollBar extends Component
+
+	property GridViewComponent TargetGrid = nil
+
+	property any _sliderHandler = nil
+
+	property any _gridHandler = nil
+
+	property integer _pendingFromSlider = 0
+
+	property integer _pendingFromGrid = 0
+
+	property number _lastValue = 0
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		self.TargetGrid = self.Entity.Parent:GetChildByName("Grid").GridViewComponent
+		log("[UIGridScrollBar] OnBeginPlay target=" .. tostring(self.TargetGrid))
+		
+		self._sliderHandler = self.Entity:ConnectEvent(SliderValueChangedEvent, self.OnSliderChanged)
+		self._gridHandler = self.TargetGrid.Entity:ConnectEvent(ScrollPositionChangedEvent, self.OnGridScrolled)
+		
+		self:SyncFromGrid()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		if self._sliderHandler then self.Entity:DisconnectEvent(SliderValueChangedEvent, self._sliderHandler) end
+		if self._gridHandler then self.TargetGrid.Entity:DisconnectEvent(ScrollPositionChangedEvent, self._gridHandler) end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SyncFromGrid()
+		self._pendingFromSlider = 0
+		local pos = self.TargetGrid:GetScrollNormalizedPosition(UITransformAxis.Vertical)
+		self._pendingFromGrid = self._pendingFromGrid + 1
+		self.Entity.SliderComponent.Value = pos
+		self._lastValue = pos
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnSliderChanged(SliderValueChangedEvent event)
+		-- 그리드→슬라이더 방향으로 내가 방금 쓴 값의 echo면 카운터만 소모하고 무시한다.
+		if self._pendingFromGrid > 0 then
+			self._pendingFromGrid = self._pendingFromGrid - 1
+			return
+		end
+		-- 그리드가 이미 같은 위치면(값이 실제로 안 바뀌는 no-op) 카운터를 올리지 않는다 — 엔진이
+		-- 변화 없는 값에는 echo 이벤트를 안 쏘는 경우가 있어서, 여기서 미리 +1 해두면 그 echo가
+		-- 영원히 안 돌아와 카운터가 밀린 채로 남고, 그 빚을 다음 진짜 드래그 스텝들이 대신
+		-- 갚느라(echo로 오인돼 무시당하느라) 초반 한두 스텝이 먹히는 문제가 실측으로 확인됐다.
+		local currentGridPos = self.TargetGrid:GetScrollNormalizedPosition(UITransformAxis.Vertical)
+		if math.abs(event.Value - currentGridPos) < 0.0001 then
+			self._lastValue = event.Value
+			return
+		end
+		self._pendingFromSlider = self._pendingFromSlider + 1
+		self.TargetGrid:SetScrollNormalizedPosition(UITransformAxis.Vertical, event.Value)
+		if math.abs(event.Value - self._lastValue) > 0.05 then
+			self.TargetGrid:Refresh(false, false)
+		end
+		self._lastValue = event.Value
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnGridScrolled(ScrollPositionChangedEvent event)
+		if self._pendingFromSlider > 0 then
+			self._pendingFromSlider = self._pendingFromSlider - 1
+			return
+		end
+		-- 대칭 가드: 슬라이더가 이미 같은 값이면(no-op) echo 카운터를 올리지 않는다.
+		local currentSliderValue = self.Entity.SliderComponent.Value
+		if math.abs(event.NormalizedPosition.y - currentSliderValue) < 0.0001 then
+			self._lastValue = event.NormalizedPosition.y
+			return
+		end
+		self._pendingFromGrid = self._pendingFromGrid + 1
+		self.Entity.SliderComponent.Value = event.NormalizedPosition.y
+		self._lastValue = event.NormalizedPosition.y
+	end
+
+end

@@ -1,0 +1,162 @@
+@Logic
+script Ep3Map3PunkoEasterEggLogic extends Logic
+
+	@Sync
+	property boolean Triggered = false
+
+	property integer PunkoCount = 5
+
+	property number PunkoScale = 0.8
+
+	property number PunkoClusterRadius = 1.5
+
+	property string PunkoStandRUID = "726c62b6df8041f08c2800c21fe37c80"
+
+	property string PunkoHitRUID = "91ce8cbfc34448ac91aa27325e670661"
+
+	property string PunkoDieRUID = "635d23d29836479ebfe5e65e406b7391"
+
+	property number PunkoDieDuration = 0.6
+
+	property string PunkoAttackRUID = "30ce6805019f4e839dd175a3e9ff043c"
+
+	property number PunkoAttackDuration = 1.6
+
+	property number PunkoAttackInterval = 1.8
+
+	property string PunkoHitEffectRUID = "5ab37f49c0834d208589df737f38e60d"
+
+	property number PunkoHitEffectDuration = 0.5
+
+	property string PunkoAttackSoundRUID = "33e3a058f68d4e35a8b4725e75ecb0bf"
+
+	property string PunkoHitSoundRUID = "189e069b0dce4c5e9d492db58b5c637b"
+
+	property string PunkoDieSoundRUID = "fd2706788a214047a5602c75b1d1d80f"
+
+	property string PunkoSelfEffectRUID = "7d7b85634d2b4934ae8c3919c1aea0e2"
+
+	property number PunkoSelfEffectDuration = 1.6
+
+	property number CuscoChance = 0.10
+
+	property boolean _cuscoRolledThisRun = false
+
+	property string CuscoStandRUID = "a1f17c79feb04c1e94a2564ec3d775c1"
+
+	property string CuscoHitRUID = "36f03c59522f4990995541913217aac2"
+
+	property string CuscoDieRUID = "c1180c316d1e463fbc2dc57aa1c63de6"
+
+	property number CuscoDieDuration = 0.6
+
+	property string CuscoAttackRUID = "862068b071464e4abf1ee00e9c9485cf"
+
+	property number CuscoAttackDuration = 1.6
+
+	property number CuscoAttackInterval = 1.8
+
+	property string CuscoHitEffectRUID = "0e9a366cd35340bd89ab0cf78fc3d755"
+
+	property number CuscoHitEffectDuration = 0.5
+
+	property string CuscoAttackSoundRUID = "07e6a9f9ce9f43a18a2e5c9bd9cdd663"
+
+	property string CuscoHitSoundRUID = "c4903934d512491a921b41d125402acd"
+
+	property string CuscoDieSoundRUID = "e240444937e84de485d823c77de3f1ec"
+
+	property string CuscoSelfEffectRUID = "f26e1b11a8d94f19886b9f6da982190d"
+
+	property number CuscoSelfEffectDuration = 1.6
+
+	@ExecSpace("ServerOnly")
+	method void OnObjectTouched()
+		if self.Triggered then return end
+		self.Triggered = true
+		self:SpawnPunkoSwarm()
+		_UIToast:ShowMessage("푼코 무리가 나타났다!")
+		log("Ep3Map3PunkoEasterEgg: triggered!")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SpawnPunkoSwarm()
+		local zoneIndex = _MapManager.CurrentMapIndex
+		local map = _MonsterSpawner:GetZoneEntity(zoneIndex)
+		if map == nil then
+			log_error("Ep3Map3PunkoEasterEgg: zone entity not found for " .. zoneIndex)
+			return
+		end
+		local offsetX = _MonsterSpawner:GetZoneOffsetX(zoneIndex)
+		-- 현재 난이도 기준 체력/속도로 스케일(다른 이스터에그와 동일한 이유 — 언제 발견하든 그 시점
+		-- 난이도에 맞게 나온다)
+		local hp = _GameManager:GetTimeStepHp(_GameManager:GetTimeStep())
+		local speed = _GameManager:GetWaveApproachSpeed(_GameManager.Wave)
+		
+		for i = 1, self.PunkoCount do
+			local fx = (_UtilLogic:RandomDouble() * 2 - 1) * self.PunkoClusterRadius + offsetX
+			local fy = _MonsterSpawner.FlyingMinY + _UtilLogic:RandomDouble() * (_MonsterSpawner.FlyingMaxY - _MonsterSpawner.FlyingMinY)
+			local worldPos = Vector3(fx, fy, 0)
+			local localPos = _MonsterSpawner:ToLocalSpawnPos(map, worldPos)
+		
+			local entity = _SpawnService:SpawnByModelId(_MonsterSpawner.MonsterModelId, "Punko", localPos, map)
+			if entity == nil then
+				log_error("Ep3Map3PunkoEasterEgg: SpawnByModelId failed")
+			else
+				---@type MonsterAI
+				local ai = entity:GetComponent("script.MonsterAI")
+				if ai ~= nil then
+					ai:InitializeAlienInvader(zoneIndex, hp, speed, self.PunkoStandRUID, self.PunkoHitRUID, self.PunkoDieRUID, self.PunkoDieDuration, self.PunkoAttackRUID)
+					ai:SetSwarmMember(true)
+					ai:SetSkipAttackLunge(true)
+					ai:SetScaleMultiplier(self.PunkoScale)
+					ai:SetRangedHitEffect(self.PunkoHitEffectRUID, self.PunkoHitEffectDuration, 1.0)
+					ai:SetAttackDuration(self.PunkoAttackDuration)
+					ai.FlyAttackInterval = self.PunkoAttackInterval
+					ai:SetAlienInvaderSounds(self.PunkoAttackSoundRUID, self.PunkoHitSoundRUID, self.PunkoDieSoundRUID)
+					ai:SetSelfAttackEffect(self.PunkoSelfEffectRUID, self.PunkoSelfEffectDuration)
+				end
+			end
+		end
+		
+		-- 쿠스코(런당 1번만 시도, 유저 지정 10%) — 공격도 하지만 잡으면 잡템 대신 스킬 1개
+		if not self._cuscoRolledThisRun then
+			self._cuscoRolledThisRun = true
+			if _UtilLogic:RandomDouble() < self.CuscoChance then
+				local fx = (_UtilLogic:RandomDouble() * 2 - 1) * self.PunkoClusterRadius + offsetX
+				local fy = _MonsterSpawner.FlyingMinY + _UtilLogic:RandomDouble() * (_MonsterSpawner.FlyingMaxY - _MonsterSpawner.FlyingMinY)
+				local worldPos = Vector3(fx, fy, 0)
+				local localPos = _MonsterSpawner:ToLocalSpawnPos(map, worldPos)
+				local entity = _SpawnService:SpawnByModelId(_MonsterSpawner.MonsterModelId, "Cusco", localPos, map)
+				if entity == nil then
+					log_error("Ep3Map3PunkoEasterEgg: Cusco SpawnByModelId failed")
+				else
+					---@type MonsterAI
+					local ai = entity:GetComponent("script.MonsterAI")
+					if ai ~= nil then
+						ai:InitializeAlienInvader(zoneIndex, hp, speed, self.CuscoStandRUID, self.CuscoHitRUID, self.CuscoDieRUID, self.CuscoDieDuration, self.CuscoAttackRUID)
+						ai:SetSwarmMember(true)
+						ai:SetSkipAttackLunge(true)
+						ai:SetScaleMultiplier(self.PunkoScale)
+						ai:SetRangedHitEffect(self.CuscoHitEffectRUID, self.CuscoHitEffectDuration, 1.0)
+						ai:SetAttackDuration(self.CuscoAttackDuration)
+						ai.FlyAttackInterval = self.CuscoAttackInterval
+						ai:SetAlienInvaderSounds(self.CuscoAttackSoundRUID, self.CuscoHitSoundRUID, self.CuscoDieSoundRUID)
+						ai:SetSelfAttackEffect(self.CuscoSelfEffectRUID, self.CuscoSelfEffectDuration)
+						ai:SetSkillDropOnDeath(true)
+						log("Ep3Map3PunkoEasterEgg: cusco spawned")
+					end
+				end
+			end
+		end
+		
+		log("Ep3Map3PunkoEasterEgg: spawned " .. self.PunkoCount .. " punko")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		self.Triggered = false
+		self._cuscoRolledThisRun = false
+	end
+
+end

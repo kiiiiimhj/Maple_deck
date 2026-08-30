@@ -1,0 +1,121 @@
+@Logic
+script Ep2Map2HiddenExpBoostLogic extends Logic
+
+	@Sync
+	property boolean Active = false
+
+	@Sync
+	property integer RemainingSeconds = 0
+
+	property number BoostDuration = 180.0
+
+	property number BoostMultiplier = 2.0
+
+	property integer ZoneMinIndex = 85
+
+	property integer ZoneMaxIndex = 88
+
+	property string BoardEntityPath = "/ui/DefaultGroup/ExpBoostBoard"
+
+	property string TimerTextPath = "/ui/DefaultGroup/ExpBoostBoard/Inner/TimerText"
+
+	property integer ReturnMapIndex = 61
+
+	property number _remaining = 0
+
+	property boolean _consumed = false
+
+	property boolean _wasInZone = false
+
+	@ExecSpace("ServerOnly")
+	method void OnEnterZone()
+		if self._consumed then return end
+		if self._remaining <= 0 then
+			self._remaining = self.BoostDuration
+		end
+		self.Active = true
+		self.RemainingSeconds = math.floor(self._remaining)
+		_GameManager.ExpBoostMultiplier = self.BoostMultiplier
+		log("Ep2Map2HiddenExpBoostLogic: entered zone, remaining=" .. self.RemainingSeconds)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnLeaveZone()
+		if not self.Active then return end
+		self.Active = false
+		_GameManager.ExpBoostMultiplier = 1.0
+		log("Ep2Map2HiddenExpBoostLogic: left zone, remaining=" .. self.RemainingSeconds)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnUpdate(number delta)
+		local inZone = _MapManager.CurrentMapIndex >= self.ZoneMinIndex and _MapManager.CurrentMapIndex <= self.ZoneMaxIndex
+		if inZone and not self._wasInZone then
+			self:OnEnterZone()
+		elseif not inZone and self._wasInZone then
+			self:OnLeaveZone()
+		end
+		self._wasInZone = inZone
+		
+		if not self.Active then return end
+		self._remaining = self._remaining - delta
+		if self._remaining <= 0 then
+			self._remaining = 0
+			self.Active = false
+			self._consumed = true
+			_GameManager.ExpBoostMultiplier = 1.0
+			log("Ep2Map2HiddenExpBoostLogic: boost expired")
+			self:ReturnToEntrance()
+		end
+		local secs = math.floor(self._remaining)
+		if secs ~= self.RemainingSeconds then
+			self.RemainingSeconds = secs
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ReturnToEntrance()
+		local current = _MapManager.CurrentMapIndex
+		if current < self.ZoneMinIndex or current > self.ZoneMaxIndex then return end
+		log("Ep2Map2HiddenExpBoostLogic: returning to zone " .. self.ReturnMapIndex)
+		_MapManager:MoveToMap(current, self.ReturnMapIndex)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnSyncProperty(string name, any value)
+		if name == "Active" then
+			self:UpdateBoardVisibility()
+		elseif name == "RemainingSeconds" then
+			self:UpdateTimerText()
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void UpdateBoardVisibility()
+		local board = _EntityService:GetEntityByPath(self.BoardEntityPath)
+		if board ~= nil then board.Enable = self.Active end
+		if self.Active then self:UpdateTimerText() end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void UpdateTimerText()
+		local textEntity = _EntityService:GetEntityByPath(self.TimerTextPath)
+		if textEntity == nil then return end
+		local renderer = textEntity.TextGUIRendererComponent
+		if renderer == nil then return end
+		local m = math.floor(self.RemainingSeconds / 60)
+		local s = self.RemainingSeconds % 60
+		renderer.Text = string.format("%02d:%02d", m, s)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		self.Active = false
+		self._remaining = 0
+		self.RemainingSeconds = 0
+		self._consumed = false
+		self._wasInZone = false
+		_GameManager.ExpBoostMultiplier = 1.0
+	end
+
+end

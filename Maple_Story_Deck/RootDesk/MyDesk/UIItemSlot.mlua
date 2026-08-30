@@ -1,0 +1,151 @@
+@Component
+script UIItemSlot extends Component
+
+	property string ExistBackgroundRUID = "dc47ae63ae6d4b489caae625640c06b8"
+
+	property string EmptyBackgroundRUID = "dc47ae63ae6d4b489caae625640c06b8"
+
+	property SpriteGUIRendererComponent IconBackground = nil
+
+	property SpriteGUIRendererComponent ImageGrade = nil
+
+	property SpriteGUIRendererComponent IconItem = nil
+
+	property SpriteGUIRendererComponent IconRedDot = nil
+
+	property SpriteGUIRendererComponent IconLock = nil
+
+	property SpriteGUIRendererComponent IconTime = nil
+
+	property TextComponent TextCount = nil
+
+	property Entity ImageDim = nil
+
+	property TextComponent SelectedCheckText = nil
+
+	property TextComponent QualityText = nil
+
+	property SpriteGUIRendererComponent QualityBg = nil
+
+	property any ItemStruct = nil
+
+	property any OnItemClickedFunc = nil
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		local entity = self.Entity
+		self.IconBackground = entity.SpriteGUIRendererComponent
+		self.ImageGrade = entity:GetChildByName("Grade").SpriteGUIRendererComponent
+		self.IconItem = entity:GetChildByName("IconItem").SpriteGUIRendererComponent
+		self.IconRedDot = entity:GetChildByName("RedDot").SpriteGUIRendererComponent
+		self.IconLock = entity:GetChildByName("IconLock").SpriteGUIRendererComponent
+		self.IconTime = entity:GetChildByName("IconTime").SpriteGUIRendererComponent
+		self.TextCount = entity:GetChildByName("Count").TextComponent
+		self.ImageDim = entity:GetChildByName("Dim")
+		self.SelectedCheckText = entity:GetChildByName("SelectedCheckText").TextComponent
+		self.QualityText = entity:GetChildByName("QualityText").TextComponent
+		self.QualityBg = entity:GetChildByName("QualityBg").SpriteGUIRendererComponent
+		
+		entity:ConnectEvent(ButtonClickEvent, function() 
+			if self.OnItemClickedFunc then
+				self.OnItemClickedFunc()
+			end 
+		end)
+		entity.ButtonComponent.Enable = false
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Set(ItemStruct itemStruct)
+		if itemStruct == nil then
+			self:Clear()
+			return
+		end
+		
+		self.ItemStruct = itemStruct
+		self.Entity.ButtonComponent.Enable = true
+		self.SelectedCheckText.Enable = false
+		
+		self.IconBackground.ImageRUID = self.ExistBackgroundRUID
+		local itemData = itemStruct:GetItemData()
+		self.IconItem.ImageRUID = itemStruct:GetDisplayRUID()
+		self.IconItem.Enable = true
+		self.IconLock.Enable = itemStruct.Lock
+		self.IconTime.Enable = itemStruct.EndDateSeconds ~= 0
+		
+		if itemData.NonStackable then
+			self.TextCount.Enable = false
+		else
+			self.TextCount.Text = tostring(itemStruct.Count)
+			self.TextCount.Enable = true
+		end
+		
+		local playerInventory = _UserService.LocalPlayer.PkgPlayerInventory
+		self.IconRedDot.Enable = playerInventory:IsNewItem(itemStruct.GUID)
+		
+		local itemGearData = itemStruct:GetGearData()
+		if itemGearData == nil then
+			self.ImageGrade.Enable = false
+			self.ImageDim.Enable = false
+			self.IconBackground.Outline = false
+			self.QualityText.Enable = false
+			self.QualityBg.Enable = false
+			return
+		end
+		
+		-- 유저 요청으로 장착중/장착불가 반투명 오버레이(ImageDim)는 뺐다 — 항상 false로 고정
+		local itemGearStruct = itemStruct:GetGearStruct()
+		self.ImageDim.Enable = false
+		
+		-- 품질 등급 배지(장비 정보 팝업 QualityText와 동일 규칙, 유저 요청으로 인벤토리 슬롯에도 표시):
+		-- 무기는 실제 품질(F~S), 그 외 장비는 아직 품질 카탈로그가 없어 "A" 고정
+		self.QualityText.Enable = true
+		self.QualityBg.Enable = true
+		-- .model에 저장한 FontColor 기본값이 스폰 시점엔 적용 안 되는 걸 실측(TextComponent Values 한계로
+		-- 추정) — Text/Enable처럼 스크립트에서 직접 세팅
+		self.QualityText.FontColor = Color(1, 1, 1, 1)
+		if _WeaponTierDataLogic:IsWeaponItem(itemStruct.ItemId) then
+			self.QualityText.Text = _QualityEnum:GetKoreanName(itemGearStruct.Quality)
+		else
+			self.QualityText.Text = "A"
+		end
+		
+		-- 슬롯 테두리: 장착 여부 상관없이 항상 등급색(노말 회색/레어 초록/에픽 보라/레전드 노랑/미스틱 주황 —
+		-- 유저 지정, 장착중 파란 테두리 우선순위는 유저 요청으로 제거)
+		self.IconBackground.Outline = true
+		self.IconBackground.OutlineWidth = 4
+		self.IconBackground.OutlineColor = _GearGradeEnum:GetEnumColor(itemGearStruct.Grade)
+		
+		-- 합성 진행도(ComposeCount) 원형 뱃지: 장비는 항상 NonStackable이라 TextCount(원래 개수
+		-- 표시용)가 위에서 이미 꺼져있는 상태라 재사용하고, 배경은 ImageGrade(원래 등급 오버레이용,
+		-- 지금은 CountBadge 원형 이미지로 고정)를 재사용한다. 다음 등급이 있고 진행중(ComposeCount>0)일 때만 표시
+		local nextGrade = _GearGradeEnum:GetNextGrade(itemGearStruct.Grade)
+		if nextGrade ~= -1 and itemGearStruct.ComposeCount > 0 then
+			self.TextCount.Text = tostring(itemGearStruct.ComposeCount)
+			self.TextCount.Enable = true
+			self.ImageGrade.Enable = true
+		else
+			self.ImageGrade.Enable = false
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Clear()
+		self.ItemStruct = nil
+		self.Entity.ButtonComponent.Enable = false
+		
+		self.IconBackground.ImageRUID = self.EmptyBackgroundRUID
+		self.ImageGrade.Enable = false
+		self.IconItem.Enable = false
+		self.QualityText.Enable = false
+		self.QualityBg.Enable = false
+		
+		self.IconRedDot.Enable = false
+		self.IconTime.Enable = false
+		self.IconLock.Enable = false
+		self.TextCount.Enable = false
+		self.ImageDim.Enable = false
+		self.SelectedCheckText.Enable = false
+		self.IconBackground.Outline = false
+	end
+
+end

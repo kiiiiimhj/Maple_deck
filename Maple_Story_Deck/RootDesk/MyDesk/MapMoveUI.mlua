@@ -1,0 +1,196 @@
+@Logic
+script MapMoveUI extends Logic
+
+	property ButtonComponent btnMapLeft = "0e741f46-3a04-4117-be4d-54aa6898a335"
+
+	property ButtonComponent btnMapRight = "4489416c-b03d-4478-bc37-514ac3a40990"
+
+	property ButtonComponent btnMapUp = "2c899ef8-3dfd-49aa-ad4d-0ad3fa2e0d46"
+
+	property ButtonComponent btnMapDown = "ebf77f70-837b-4ae3-a13d-5bb9f8d84b51"
+
+	property SpriteGUIRendererComponent lockIcon = "cbd1ed65-3756-41a9-8e89-4bec9ecc3778"
+
+	property TextComponent rightArrowText = "4489416c-b03d-4478-bc37-514ac3a40990"
+
+	property any _leftHandler = nil
+
+	property any _rightHandler = nil
+
+	property any _upHandler = nil
+
+	property any _downHandler = nil
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		self._leftHandler = self.btnMapLeft.Entity:ConnectEvent(ButtonClickEvent, self.OnLeftClicked)
+		self._rightHandler = self.btnMapRight.Entity:ConnectEvent(ButtonClickEvent, self.OnRightClicked)
+		self._upHandler = self.btnMapUp.Entity:ConnectEvent(ButtonClickEvent, self.OnUpClicked)
+		self._downHandler = self.btnMapDown.Entity:ConnectEvent(ButtonClickEvent, self.OnDownClicked)
+		self:UpdateLockVisual()
+		self:UpdateButtonVisibility(_MapManager.CurrentMapIndex)
+		log("MapMoveUI started")
+	end
+
+	@ExecSpace("Multicast")
+	method void NotifyBossDefeated(boolean bossDefeated)
+		if not self:IsClient() then return end
+		local showLock = (self:GetLocalZoneIndex(_MapManager.CurrentMapIndex) == 3) and (not bossDefeated)
+		self:ApplyLockState(showLock)
+		log("MapMoveUI: NotifyBossDefeated bossDefeated=" .. tostring(bossDefeated) .. " showLock=" .. tostring(showLock))
+	end
+
+	@ExecSpace("Multicast")
+	method void NotifyZone15Solved()
+		if not self:IsClient() then return end
+		if _MapManager.CurrentMapIndex ~= 15 then return end
+		self:ApplyLockState(false)
+		log("MapMoveUI: NotifyZone15Solved")
+	end
+
+	@ExecSpace("Multicast")
+	method void NotifyMapChanged(integer mapIndex)
+		if not self:IsClient() then return end
+		local showLock = false
+		if self:GetLocalZoneIndex(mapIndex) == 3 then
+			-- 임시 테스트 변경(2026-08-26) — MapManager.TestUnlockAllZones가 켜져 있으면 실제 잠금도
+			-- 풀려있으니 자물쇠 표시도 같이 꺼준다(테스트 끝나면 MapManager 쪽과 함께 되돌릴 것).
+			showLock = _GameManager.Level < 5 and not _MapManager.TestUnlockAllZones
+		elseif mapIndex == 15 then
+			showLock = not _Zone15PuzzleLogic.IsSolved
+		end
+		self:ApplyLockState(showLock)
+		self:UpdateButtonVisibility(mapIndex)
+	end
+
+	@ExecSpace("ClientOnly")
+	method integer GetLocalZoneIndex(integer mapIndex)
+		if mapIndex >= 89 then return mapIndex - 88 end
+		if mapIndex >= 45 then return mapIndex - 44 end
+		return mapIndex
+	end
+
+	@ExecSpace("ClientOnly")
+	method void UpdateButtonVisibility(integer mapIndex)
+		-- 맵21(mapIndex==35)은 존1~34 순환 밖의 비밀 구역(택시 이스터에그) — 일반 좌/우 이동 버튼은
+		-- 여기서 의미가 없으므로 둘 다 숨긴다. 복귀는 Map21RelicEasterEgg의 전용 "<" 버튼(실피드를
+		-- 이미 획득했을 때만 노출)으로만 한다.
+		if isvalid(self.btnMapUp) then self.btnMapUp.Entity.Enable = (mapIndex == 6 or mapIndex == 19 or mapIndex == 40 or mapIndex == 49 or mapIndex == 79 or mapIndex == 93 or mapIndex == 121) end
+		if isvalid(self.btnMapDown) then self.btnMapDown.Entity.Enable = (mapIndex == 7 or mapIndex == 15 or mapIndex == 29 or mapIndex == 59 or mapIndex == 69 or mapIndex == 99 or mapIndex == 114) end
+		-- map1 존1(mapIndex==45)은 map2 존10(64)의 ">"로만 도달하는 순환 고리의 시작점이라 "<"가 어디로도
+		-- 갈 곳이 없다(유저 지정 — "버튼은 안 쓰니깐 숨겨주면 좋겠네") — 존7/존35와 동일하게 숨긴다.
+		-- 존85(ep2_map2_hidden 존1)도 숨긴다 — 유저 지정: "여기 나가는길은 없고 시간이 끝나면 자동으로
+		-- 복귀". 이 히든존은 나가는 경로가 없다(3분 타이머 만료 시 Ep2Map2HiddenExpBoostLogic이 자동
+		-- 복귀시킨다) — "<" 버튼 자체가 무의미해서 숨긴다. 서버 쪽 차단은 MapManager.MoveByDelta 참고.
+		-- 존89(에피소드3 map1 존1)는 원래 mapIndex45와 동일한 이유로 숨겼었지만, 이제 map3 존1(109)로
+		-- 직행하는 전용 곁가지가 생겨서(유저 지정, 2026-08-25) 다시 보여준다(MapManager.MoveByDelta 참고).
+		if isvalid(self.btnMapLeft) then self.btnMapLeft.Entity.Enable = (mapIndex ~= 7 and mapIndex ~= 35 and mapIndex ~= 45 and mapIndex ~= 85) end
+		-- 존88(ep2_map2_hidden 존4)도 히든존의 끝(막다른 길)이라 ">"를 숨긴다 — MapManager.MoveByDelta의
+		-- "actualIndex==88 and delta==1" 차단과 짝이다.
+		if isvalid(self.btnMapRight) then self.btnMapRight.Entity.Enable = (mapIndex ~= 18 and mapIndex ~= 35 and mapIndex ~= 88) end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void UpdateLockVisual()
+		-- 자물쇠는 (a) 지금 맵3에 있고 아직 보스를 못 잡았을 때, 또는 (b) 존15에 있고 아직 불꽃
+		-- 이스터에그를 못 풀었을 때만 보여준다. 그 외 맵은 항상 ">"가 맞다
+		local mapIndex = _MapManager.CurrentMapIndex
+		local showLock = false
+		if self:GetLocalZoneIndex(mapIndex) == 3 then
+			-- 임시 테스트 변경(2026-08-26) — MapManager.TestUnlockAllZones가 켜져 있으면 실제 잠금도
+			-- 풀려있으니 자물쇠 표시도 같이 꺼준다(테스트 끝나면 MapManager 쪽과 함께 되돌릴 것).
+			showLock = _GameManager.Level < 5 and not _MapManager.TestUnlockAllZones
+		elseif mapIndex == 15 then
+			showLock = not _Zone15PuzzleLogic.IsSolved
+		end
+		self:ApplyLockState(showLock)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ApplyLockState(boolean showLock)
+		if isvalid(self.lockIcon) then self.lockIcon.Enable = showLock end
+		if isvalid(self.rightArrowText) then self.rightArrowText.Enable = not showLock end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnLeftClicked()
+		_MapManager:RequestMoveLeft()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnRightClicked()
+		-- 존15 자물쇠가 걸려있는 동안 ">"를 누르면 이동 대신 힌트 토스트만 띄운다
+		if _MapManager.CurrentMapIndex == 15 and not _Zone15PuzzleLogic.IsSolved then
+			_UIToast:ShowMessage("불꽃과 기둥은 답을 알고있다")
+			return
+		end
+		_MapManager:RequestMoveRight()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUpClicked()
+		if _MapManager.CurrentMapIndex == 19 then
+			_MapManager:RequestMoveToZone15()
+			return
+		end
+		if _MapManager.CurrentMapIndex == 40 then
+			_MapManager:RequestMoveToZone29()
+			return
+		end
+		if _MapManager.CurrentMapIndex == 49 then
+			_MapManager:RequestMoveToMap2Zone5()
+			return
+		end
+		if _MapManager.CurrentMapIndex == 79 then
+			_MapManager:RequestMoveToMap3Zone5()
+			return
+		end
+		if _MapManager.CurrentMapIndex == 93 then
+			_MapManager:RequestMoveToEp3Map2Zone1()
+			return
+		end
+		if _MapManager.CurrentMapIndex == 121 then
+			_MapManager:RequestMoveToEp3Map3Zone6()
+			return
+		end
+		_MapManager:RequestMoveToMap7()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnDownClicked()
+		if _MapManager.CurrentMapIndex == 15 then
+			_MapManager:RequestMoveToZone19()
+			return
+		end
+		if _MapManager.CurrentMapIndex == 29 then
+			_MapManager:RequestMoveToZone40()
+			return
+		end
+		if _MapManager.CurrentMapIndex == 59 then
+			_MapManager:RequestMoveToMap1Zone5()
+			return
+		end
+		if _MapManager.CurrentMapIndex == 69 then
+			_MapManager:RequestMoveToMap4Zone5()
+			return
+		end
+		if _MapManager.CurrentMapIndex == 99 then
+			_MapManager:RequestMoveToEp3Map1Zone5()
+			return
+		end
+		if _MapManager.CurrentMapIndex == 114 then
+			_MapManager:RequestMoveToEp3Map4Zone3()
+			return
+		end
+		_MapManager:RequestMoveLeft()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		if self._leftHandler then self.btnMapLeft.Entity:DisconnectEvent(ButtonClickEvent, self._leftHandler) end
+		if self._rightHandler then self.btnMapRight.Entity:DisconnectEvent(ButtonClickEvent, self._rightHandler) end
+		if self._upHandler then self.btnMapUp.Entity:DisconnectEvent(ButtonClickEvent, self._upHandler) end
+		if self._downHandler then self.btnMapDown.Entity:DisconnectEvent(ButtonClickEvent, self._downHandler) end
+	end
+
+end

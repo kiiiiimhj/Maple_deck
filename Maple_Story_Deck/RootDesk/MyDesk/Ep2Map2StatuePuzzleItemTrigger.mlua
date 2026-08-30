@@ -1,0 +1,83 @@
+@Component
+script Ep2Map2StatuePuzzleItemTrigger extends Component
+
+	property integer ItemIndex = 1
+
+	property any _touchHandler = nil
+
+	property any _holdHandler = nil
+
+	property any _releaseHandler = nil
+
+	property boolean _dragging = false
+
+	property integer _activeTouchId = 0
+
+	property number _dragOffsetX = 0
+
+	property number _dragOffsetY = 0
+
+	method void OnBeginPlay()
+		if self:IsClient() then
+			self._touchHandler = self.Entity:ConnectEvent(TouchEvent, self.OnTouched)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnTouched(TouchEvent event)
+		if _GameManager.GameOver then return end
+		if _TitleUI.titleGroup.Enable then return end
+		if self._dragging then return end
+		self._dragging = true
+		self._activeTouchId = event.TouchId
+		
+		local worldTouch = _UILogic:ScreenToWorldPosition(event.TouchPoint)
+		local pos = self.Entity.TransformComponent.Position
+		self._dragOffsetX = pos.x - worldTouch.x
+		self._dragOffsetY = pos.y - worldTouch.y
+		
+		self._holdHandler = _InputService:ConnectEvent(ScreenTouchHoldEvent, self.OnDragHold)
+		self._releaseHandler = _InputService:ConnectEvent(ScreenTouchReleaseEvent, self.OnDragRelease)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnDragHold(ScreenTouchHoldEvent event)
+		if not self._dragging then return end
+		if event.TouchId ~= self._activeTouchId then return end
+		local worldTouch = _UILogic:ScreenToWorldPosition(event.TouchPoint)
+		local pos = self.Entity.TransformComponent.Position
+		self.Entity.TransformComponent.Position = Vector3(worldTouch.x + self._dragOffsetX, worldTouch.y + self._dragOffsetY, pos.z)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnDragRelease(ScreenTouchReleaseEvent event)
+		if not self._dragging then return end
+		if event.TouchId ~= self._activeTouchId then return end
+		self._dragging = false
+		if self._holdHandler ~= nil then
+			_InputService:DisconnectEvent(ScreenTouchHoldEvent, self._holdHandler)
+			self._holdHandler = nil
+		end
+		if self._releaseHandler ~= nil then
+			_InputService:DisconnectEvent(ScreenTouchReleaseEvent, self._releaseHandler)
+			self._releaseHandler = nil
+		end
+		
+		local pos = self.Entity.TransformComponent.Position
+		self:RequestCheckPlacement(pos.x, pos.y)
+	end
+
+	@ExecSpace("Server")
+	method void RequestCheckPlacement(number x, number y)
+		_Ep2Map2StatuePuzzleLogic:CheckItemPlacement(self.ItemIndex, self.Entity, x, y)
+	end
+
+	method void OnEndPlay()
+		if self:IsClient() then
+			if self._touchHandler ~= nil then self.Entity:DisconnectEvent(TouchEvent, self._touchHandler) end
+			if self._holdHandler ~= nil then _InputService:DisconnectEvent(ScreenTouchHoldEvent, self._holdHandler) end
+			if self._releaseHandler ~= nil then _InputService:DisconnectEvent(ScreenTouchReleaseEvent, self._releaseHandler) end
+		end
+	end
+
+end

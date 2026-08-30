@@ -1,0 +1,153 @@
+@Logic
+script Ep2Map1GiftNpcLogic extends Logic
+
+	@Sync
+	property boolean Redeemed = false
+
+	@Sync
+	property string PickedItemId = ""
+
+	property integer GiftAmount = 30
+
+	property string HeartIconRUID = "7ecb5769578f4b05808afaad17ee83ac"
+
+	property number BubbleShowDuration = 2.0
+
+	property string BubbleModelId = "giftbubble"
+
+	property number BubbleXOffset = -0.7652970
+
+	property number BubbleYOffset = 0.9155867
+
+	property Vector3 HeartIconPosition = Vector3(-0.4361, -0.2908, 0)
+
+	property Vector3 HeartIconScale = Vector3(5.788959, 5.78895855, 1)
+
+	property Vector3 DefaultIconPosition = Vector3(-0.7126, -0.2924, 0)
+
+	property Vector3 DefaultIconScale = Vector3(2.73173356, 2.73173332, 1)
+
+	property string TextFont = "Maple"
+
+	property Color TextOutlineColor = Color(0, 0, 0, 1)
+
+	property number TextOutlineWidth = 0.4188931
+
+	property number TextFaceDilate = 0.3590512
+
+	property Color TextFontColor = Color(1, 1, 1, 1)
+
+	property number TextFontSize = 3
+
+	property Vector2 TextRectSize = Vector2(0.59, 0.45)
+
+	property table _map1ItemPool = {
+		"star_pixie_dust", "luna_pixie_moon_shard", "nepenthes_seed", "luster_pixie_wing",
+		"ghost_pixie_veil", "dark_nepenthes_seed", "giant_nepenthes_seed",
+	}
+
+	property any _activeBubble = nil
+
+	@ExecSpace("ServerOnly")
+	method void OnObjectTouched(Entity npcEntity)
+		if self.Redeemed then return end
+		
+		local map = npcEntity.CurrentMap
+		if map == nil then return end
+		local worldPos = npcEntity.TransformComponent.WorldPosition
+		local bubblePos = Vector3(worldPos.x + self.BubbleXOffset, worldPos.y + self.BubbleYOffset, worldPos.z - 0.5)
+		
+		if self.PickedItemId == "" then
+			self.PickedItemId = self._map1ItemPool[_UtilLogic:RandomIntegerRange(1, #self._map1ItemPool)]
+		end
+		
+		local have = _PlayerInventory:GetItemCount(self.PickedItemId)
+		if have < self.GiftAmount then
+			local remaining = self.GiftAmount - have
+			local itemDef = _PlayerInventory:GetItemDef(self.PickedItemId)
+			self:SpawnBubble(map, bubblePos, itemDef.icon, "X" .. remaining, true, 1.0, self.DefaultIconPosition, self.DefaultIconScale)
+			log("Ep2Map1GiftNpc: still collecting - " .. self.PickedItemId .. " (" .. have .. "/" .. self.GiftAmount .. ", " .. remaining .. " left)")
+			return
+		end
+		
+		-- 목표치 충족 — 실제 인게임 스킬 강화가 있어야 교환이 성립한다(엘리트/보물상자와 동일 풀).
+		-- 버그 수정(2026-08-21, 유저 리포트 "레벨5라 줄 보상이 없을때는 파워엘릭서 드롭해줘 ㅋㅋ 하트나오고
+		-- 지금 레벨5일때 또 작은 하트 달린 말풍선이 나오네") — 강화할 카드가 하나도 없으면(전부 5레벨
+		-- 만렙) 예전엔 Redeemed를 안 켜고 매번 다시 갈라진 하트 말풍선만 반복해서 띄웠는데, 이제는
+		-- 교환을 그대로 완료시켜(잡템 소모 + Redeemed=true) 파워엘릭서(ApplyPotionDrop potionType=3 —
+		-- 보스 확정 드롭과 동일한 완전회복+전체 쿨타임 초기화)를 대신 지급한다. 트레저박스가 이미
+		-- 같은 상황에서 흰 포션(potionType=2)으로 대체하는 것과 동일한 패턴.
+		local pool = _CardManager:BuildActiveUpgradePool()
+		if #pool == 0 then
+			self.Redeemed = true
+			_PlayerInventory:RemoveItem(self.PickedItemId, self.GiftAmount)
+			_GameManager:ApplyPotionDrop(3, worldPos, 0, worldPos.y, 1.0)
+			log("Ep2Map1GiftNpc: all skills maxed, granted Power Elixir instead of " .. self.PickedItemId .. " x" .. self.GiftAmount)
+			return
+		end
+		
+		self.Redeemed = true
+		_PlayerInventory:RemoveItem(self.PickedItemId, self.GiftAmount)
+		self:SpawnBubble(map, bubblePos, self.HeartIconRUID, "", false, 1.0, self.HeartIconPosition, self.HeartIconScale)
+		_CardManager:GrantCardUpgradesFromPool(pool, worldPos, 0, worldPos.y, 1.0, 1, 0)
+		log("Ep2Map1GiftNpc: redeemed " .. self.PickedItemId .. " x" .. self.GiftAmount .. " for a card upgrade")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SpawnBubble(Entity map, Vector3 pos, string iconRuid, string text, boolean showText, number scale, Vector3 iconPos, Vector3 iconScale)
+		if self._activeBubble ~= nil and isvalid(self._activeBubble) then
+			self._activeBubble:Destroy()
+			self._activeBubble = nil
+		end
+		local bubble = _SpawnService:SpawnByModelId(self.BubbleModelId, "GiftBubble", pos, map)
+		if bubble == nil then
+			log_error("Ep2Map1GiftNpc: GiftBubble spawn failed")
+			return
+		end
+		self._activeBubble = bubble
+		
+		local baseScale = bubble.TransformComponent.Scale
+		bubble.TransformComponent.Scale = Vector3(baseScale.x * scale, baseScale.y * scale, baseScale.z)
+		
+		local icon = bubble:GetChildByName("Icon")
+		if icon ~= nil and icon.SpriteRendererComponent ~= nil then
+			icon.SpriteRendererComponent.SpriteRUID = iconRuid
+			icon.TransformComponent.Position = iconPos
+			icon.TransformComponent.Scale = iconScale
+			icon.Enable = true
+		end
+		
+		local count = bubble:GetChildByName("Count")
+		if count ~= nil then
+			local textRenderer = count.TextRendererComponent
+			if textRenderer ~= nil then
+				textRenderer.Text = text
+				textRenderer.Font = self.TextFont
+				textRenderer.FontColor = self.TextFontColor
+				textRenderer.FontSize = self.TextFontSize
+				textRenderer.OutlineColor = self.TextOutlineColor
+				textRenderer.OutlineWidth = self.TextOutlineWidth
+				textRenderer.FaceDilate = self.TextFaceDilate
+				textRenderer.RectSize = self.TextRectSize
+				textRenderer.Wrapping = false
+			end
+			count.Enable = showText
+		end
+		
+		_TimerService:SetTimerOnce(function()
+			if isvalid(bubble) then bubble:Destroy() end
+			if self._activeBubble == bubble then self._activeBubble = nil end
+		end, self.BubbleShowDuration)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		self.Redeemed = false
+		self.PickedItemId = ""
+		if self._activeBubble ~= nil and isvalid(self._activeBubble) then
+			self._activeBubble:Destroy()
+		end
+		self._activeBubble = nil
+	end
+
+end

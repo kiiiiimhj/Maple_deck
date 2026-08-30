@@ -1,0 +1,76 @@
+@Logic
+script Zone21AlienEasterEggLogic extends Logic
+
+	@Sync
+	property boolean Triggered = false
+
+	property integer _touchCount = 0
+
+	property string AlienStandRUID = "d4ae577677034eaaa0b902e3c20edf15"
+
+	property string AlienHitRUID = "3a7a801833a5499da7cb3c47034860ba"
+
+	property string AlienDieRUID = "b20afa308a3c46949aa4555d480257a0"
+
+	property number AlienDieDuration = 1.45
+
+	property string AlienAttackRUID = "5dc23024fff6431ea8699ff131b5c784"
+
+	property integer AlienCount = 7
+
+	property integer AlienZoneIndex = 21
+
+	@ExecSpace("ServerOnly")
+	method void OnObjectTouched()
+		if self.Triggered then return end
+		self._touchCount = self._touchCount + 1
+		log("Zone21AlienEasterEgg: touch " .. self._touchCount .. "/2")
+		if self._touchCount < 2 then return end
+		
+		self.Triggered = true
+		self:SpawnAlienWave()
+		_UIToast:ShowMessage("외계인의 습격이 일어납니다!")
+		log("Zone21AlienEasterEgg: triggered!")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SpawnAlienWave()
+		local map = _MonsterSpawner:GetZoneEntity(self.AlienZoneIndex)
+		if map == nil then
+			log_error("Zone21AlienEasterEgg: zone entity not found")
+			return
+		end
+		local offsetX = _MonsterSpawner:GetZoneOffsetX(self.AlienZoneIndex)
+		-- 현재 난이도 기준 체력/속도로 스케일해서, 이스터에그를 언제 발견하든 그 시점 난이도에 맞게 나온다.
+		-- 2026-08-03 3차 재설계: 순수 시간 단계 기반(GetTimeStep/GetTimeStepHp)으로 되돌림
+		local hp = _GameManager:GetTimeStepHp(_GameManager:GetTimeStep())
+		local speed = _GameManager:GetWaveApproachSpeed(_GameManager.Wave)
+		
+		for i = 1, self.AlienCount do
+			-- 비행형 스폰 공식(MonsterSpawner.GetSpawnPosition 존7+ 비행형 분기와 동일) 재사용
+			local fx = (_UtilLogic:RandomDouble() * 10) - 5 + offsetX
+			local fy = _MonsterSpawner.FlyingMinY + _UtilLogic:RandomDouble() * (_MonsterSpawner.FlyingMaxY - _MonsterSpawner.FlyingMinY)
+			local worldPos = Vector3(fx, fy, 0)
+			local localPos = _MonsterSpawner:ToLocalSpawnPos(map, worldPos)
+		
+			local entity = _SpawnService:SpawnByModelId(_MonsterSpawner.MonsterModelId, "AlienInvader", localPos, map)
+			if entity == nil then
+				log_error("Zone21AlienEasterEgg: SpawnByModelId failed")
+			else
+				---@type MonsterAI
+				local ai = entity:GetComponent("script.MonsterAI")
+				if ai ~= nil then
+					ai:InitializeAlienInvader(self.AlienZoneIndex, hp, speed, self.AlienStandRUID, self.AlienHitRUID, self.AlienDieRUID, self.AlienDieDuration, self.AlienAttackRUID)
+				end
+			end
+		end
+		log("Zone21AlienEasterEgg: spawned " .. self.AlienCount .. " alien invaders")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		self.Triggered = false
+		self._touchCount = 0
+	end
+
+end

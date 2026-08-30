@@ -1,0 +1,1498 @@
+@Logic
+script MonsterSpawner extends Logic
+
+	property string MonsterModelId = "monster"
+
+	property number MinInterval = 0.6
+
+	property number IntervalDecay = 0.1
+
+	property number TimePressureGraceSeconds = 180.0
+
+	property number TimePressurePerMinute = 0.03
+
+	property number TimePressureMaxReduction = 0.5
+
+	property number _elapsedPlayTime = 0
+
+	property integer BaseSpawnCount = 2
+
+	property integer SpawnCountVariance = 2
+
+	property number SpawnCountRampSeconds = 180.0
+
+	property integer MaxSpawnCount = 6
+
+	property integer SpikeWaveInterval = 3
+
+	property number SpikeCountMultiplier = 2.0
+
+	property integer _lastSpikeWave = 0
+
+	property number DoubleSpawnAfterSeconds = 120.0
+
+	property number DoubleSpawnMultiplier = 1.5
+
+	property integer MinMonstersOnArrival = 6
+
+	property integer SpawnsPerTick = 2
+
+	property table _spawnQueue = {}
+
+	property table _zoneMonsterRegistry = {}
+
+	property integer _pendingRushPenalty = 0
+
+	property number EmptyMapSpawnDelay = 2.0
+
+	property number _emptyMapTimer = 0
+
+	property integer _emptyMapTrackedIndex = -1
+
+	property number MinSpawnSeparationX = 0.6
+
+	property number SmallVariantChance = 0.25
+
+	property integer MaxMonstersPerMap = 20
+
+	property integer MaxMonstersPerMapBackground = 10
+
+	property number _timer = 0
+
+	property boolean _running = false
+
+	property integer _lastEliteWave = 0
+
+	property number MinEliteRespawnDelay = 180.0
+
+	property number MaxEliteRespawnDelay = 300.0
+
+	property number _nextEliteTimer = -1
+
+	property any _activeMaps = nil
+
+	property any _tiredKnightSpawnedZones = nil
+
+	property boolean _tiredKnightUnlocked = false
+
+	property any _flatRunsCache = nil
+
+	property Entity _currentBoss = nil
+
+	property number FirstBossTime = 600.0
+
+	property number BossRepeatInterval = 600.0
+
+	property number _nextBossTimer = -1
+
+	property integer _bossZone = -1
+
+	property number RangedTileMinX = 9.5
+
+	property number RangedTileMaxX = 14.8
+
+	property number FlyingMinY = -0.3
+
+	property number FlyingMaxY = 2.0
+
+	property number MinFlatRunWidth = 0.5
+
+	property number EdgeMarginGround = 0.4
+
+	property number EdgeMarginAerial = 0.15
+
+	property number AerialHeightThreshold = 0.3
+
+	property number FlatSlopeTolerance = 0.05
+
+	property any _baselineGroundYCache = nil
+
+	property string Zone15ExcludedFootholdOwnerId1 = "9e591620-aa5a-49c1-b23b-d9907ec6f3ba"
+
+	property string Zone15ExcludedFootholdOwnerId2 = "35bc9d79-4793-4039-8357-b37c2cda364a"
+
+	property string Zone15ExcludedFootholdOwnerId3 = "7b48d3a1-c42a-4f2c-8a13-efefddea1917"
+
+	property string BonusBossModelId = "bonusboss"
+
+	property string BonusBossSpriteRUID = "0d577f299dbd49c996f2dac8aee99a23"
+
+	property number BonusBossChance = 0.30
+
+	property number BonusBossDuration = 30.0
+
+	property boolean _map10Visited = false
+
+	property Entity _bonusBoss = nil
+
+	property boolean _bonusBossActive = false
+
+	property number BonusTimerStartDelay = 1.0
+
+	@Sync
+	property boolean BonusBossTimerActive = false
+
+	@Sync
+	property integer BonusBossRemainingSeconds = 0
+
+	property number _bonusBossRemaining = 0
+
+	property string BonusBossBoardPath = "/ui/DefaultGroup/Map10BonusBossBoard"
+
+	property string BonusBossTimerTextPath = "/ui/DefaultGroup/Map10BonusBossBoard/Inner/TimerText"
+
+	property number EarlyPhaseSpawnInterval = 2.0
+
+	@ExecSpace("ServerOnly")
+	method void RegisterZoneMonster(integer zoneIndex, MonsterAI ai)
+		if self._zoneMonsterRegistry[zoneIndex] == nil then
+			self._zoneMonsterRegistry[zoneIndex] = {}
+		end
+		self._zoneMonsterRegistry[zoneIndex][ai] = true
+	end
+
+	@ExecSpace("ServerOnly")
+	method void UnregisterZoneMonster(integer zoneIndex, MonsterAI ai)
+		local bucket = self._zoneMonsterRegistry[zoneIndex]
+		if bucket ~= nil then bucket[ai] = nil end
+	end
+
+	@ExecSpace("ServerOnly")
+	method table GetMonstersInZone(integer zoneIndex)
+		local bucket = self._zoneMonsterRegistry[zoneIndex]
+		if bucket == nil then return {} end
+		local result = {}
+		for ai, _ in pairs(bucket) do
+			if isvalid(ai) and isvalid(ai.Entity) then
+				table.insert(result, ai)
+			else
+				bucket[ai] = nil
+			end
+		end
+		return result
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		self._timer = self.EarlyPhaseSpawnInterval
+		self._elapsedPlayTime = 0
+		self._nextBossTimer = self.FirstBossTime
+		-- 타이틀 화면에서 "게임 시작"을 누르기 전까지는 웨이브 타이머가 돌면 안 된다 —
+		-- MapManager.BeginGameplay()가 GameManager.StartGame() 시점에 BeginGameplay()를 호출해서 켠다.
+		self._running = false
+		-- MapManager의 OnBeginPlay가 이것보다 먼저 실행돼 ActivateMap()으로 이미 _activeMaps를
+		-- 채워놨을 수 있으므로, nil일 때만 초기화한다 (무조건 덮어쓰면 그 활성화가 날아간다)
+		if self._activeMaps == nil then self._activeMaps = {} end
+	end
+
+	method number GetSpawnInterval(integer wave)
+		if wave <= 5 then return 4.0 end
+		return math.max(self.MinInterval, 6.0 - self.IntervalDecay * (wave - 6))
+	end
+
+	method number GetEffectiveSpawnInterval(integer wave)
+		if self._elapsedPlayTime < self.SpawnCountRampSeconds then
+			return self.EarlyPhaseSpawnInterval
+		end
+		local base = self:GetSpawnInterval(wave)
+		return math.max(self.MinInterval, base * self:GetTimePressureMultiplier())
+	end
+
+	method number GetTimePressureMultiplier()
+		local minutesPastGrace = math.max(0, (self._elapsedPlayTime - self.TimePressureGraceSeconds) / 60)
+		local reduction = math.min(self.TimePressureMaxReduction, minutesPastGrace * self.TimePressurePerMinute)
+		return 1.0 - reduction
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnUpdate(number delta)
+		-- _running 게이트보다 먼저 처리한다 — 예전 동기 스폰은 _running과 무관하게(ActivateMap이 불리는
+		-- 즉시) 바로 몬스터가 태어났으므로, 큐 처리도 같은 타이밍을 최대한 그대로 유지한다.
+		self:ProcessSpawnQueueTick()
+		if self.BonusBossTimerActive then
+			self._bonusBossRemaining = self._bonusBossRemaining - delta
+			if self._bonusBossRemaining < 0 then self._bonusBossRemaining = 0 end
+			local secs = math.ceil(self._bonusBossRemaining)
+			if secs ~= self.BonusBossRemainingSeconds then
+				self.BonusBossRemainingSeconds = secs
+			end
+		end
+		if not self._running then return end
+		if self.MonsterModelId == "" then return end
+		
+		self._elapsedPlayTime = self._elapsedPlayTime + delta
+		
+		self._timer = self._timer - delta
+		if self._timer <= 0 then
+			self:SpawnWave()
+			-- 2026-08-03: 보스가 시간 기반 반복 이벤트로 분리되면서, 일반 웨이브 스폰 간격은 이제
+			-- Wave 값과 무관하게 항상 시간 압박이 적용된 곡선을 그대로 따른다(보스 전용 20초 고정 분기 제거).
+			self._timer = self:GetEffectiveSpawnInterval(_GameManager.Wave)
+			log("MonsterSpawner: next interval " .. self._timer .. "s (wave " .. _GameManager.Wave .. ", timePressure x" .. self:GetTimePressureMultiplier() .. ", elapsed " .. math.floor(self._elapsedPlayTime) .. "s)")
+		end
+		
+		-- 2026-08-05(2차, 유저 지정): "적이 없은지 2초 지나면 즉시 스폰" — 비는 즉시 채우면 너무
+		-- 민감해서(마지막 한 마리 잡은 순간 바로 다시 몰림) EmptyMapSpawnDelay(2초) 연속으로 비어있을
+		-- 때만 발동하도록 디바운스. 맵이 바뀌거나 몬스터가 다시 생기면 타이머를 리셋한다.
+		-- 버그 수정(2026-08-24, 유저 리포트 "발록 스테이지인데 다른 존 몹들을 공격함") — 존10에 무적
+		-- 보너스 보스가 떠 있는 동안은 SpawnWave와 동일하게 이 응급 스폰도 건너뛴다. InitializeBonusBoss가
+		-- SetSpawnZone을 빠뜨렸던 게 근본 원인(수정 완료)이지만, 등록 타이밍이 어긋나는 경우까지 대비해
+		-- 이 가드를 별도로 둔다 — 안 그러면 "이 존 몬스터 수=0" 오판이 재발할 때마다 무적 보스가 있는
+		-- 화면에 일반 웨이브 몬스터(맵9 풀)가 2초마다 계속 끼어든다.
+		local emergencyMap = self:GetCurrentMap()
+		if emergencyMap ~= nil and not self:IsNoMonsterZone(_MapManager.CurrentMapIndex)
+			and not (_MapManager.CurrentMapIndex == 10 and self._bonusBossActive) then
+			-- 버그 수정(2026-08-20): SpawnBatchOnMap과 같은 이유로 존별 카운트여야 한다 — 안 그러면 맵3/4에서
+			-- 다른 존에 몬스터가 남아있는 한 지금 있는 존이 비어도 "안 비었다"고 오판해 응급 스폰이 영원히 발동 안 한다.
+			-- 성능 최적화(2026-08-24, 유저 리포트 "몬스터 많을때 끊김") — 이 블록은 OnUpdate 안이라
+			-- 매 프레임 실행된다. map:GetChildComponentsByTypeName 전체 스캔을 매 프레임 돌리면
+			-- container=nil 공유맵(몬스터 100마리 이상까지 실측)에서 매 프레임 지속적인 렉이 됐다 —
+			-- 존별 레지스트리로 교체(위 _zoneMonsterRegistry 코멘트 참고).
+			local currentCount = #self:GetMonstersInZone(_MapManager.CurrentMapIndex)
+			if currentCount == 0 then
+				if self._emptyMapTrackedIndex ~= _MapManager.CurrentMapIndex then
+					self._emptyMapTrackedIndex = _MapManager.CurrentMapIndex
+					self._emptyMapTimer = 0
+				end
+				self._emptyMapTimer = self._emptyMapTimer + delta
+				if self._emptyMapTimer >= self.EmptyMapSpawnDelay then
+					self:SpawnBatchOnMap(emergencyMap, _GameManager.Wave, false, true, _MapManager.CurrentMapIndex, false, self.MinMonstersOnArrival)
+					self._emptyMapTimer = 0
+				end
+			else
+				self._emptyMapTimer = 0
+				self._emptyMapTrackedIndex = -1
+			end
+		end
+		
+		if self._nextEliteTimer > 0 then
+			self._nextEliteTimer = self._nextEliteTimer - delta
+			if self._nextEliteTimer <= 0 then
+				self._nextEliteTimer = -1
+				self:SpawnRandomElite()
+			end
+		end
+		
+		-- 뱀서식 시간 기반 보스: 첫 등장/재등장 타이머가 만료되면(그리고 아직 살아있는 보스가 없으면) 스폰한다
+		if self._nextBossTimer > 0 then
+			self._nextBossTimer = self._nextBossTimer - delta
+			if self._nextBossTimer <= 0 then
+				self._nextBossTimer = -1
+				self:TrySpawnPersistentBoss()
+			end
+		end
+		
+		-- 살아있는 보스가 플레이어와 다른 존에 남아있으면(플레이어가 다른 맵/존으로 이동) 그 존으로
+		-- 다시 소환해서 쫓아가게 한다 — 안전지대(IsNoMonsterZone)로 도망친 동안은 잠시 대기한다.
+		if isvalid(self._currentBoss) then
+			local currentZone = _MapManager.CurrentMapIndex
+			if currentZone ~= self._bossZone and not self:IsNoMonsterZone(currentZone) then
+				self:RelocateBossToCurrentZone()
+			end
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SpawnWave()
+		local wave = _GameManager.Wave
+		local currentMap = self:GetCurrentMap()
+		
+		-- 2026-08-03: 보스는 더 이상 Wave==10에서 여기 갈라져 나오지 않는다 — 시간 기반 반복 이벤트로
+		-- 분리되어 OnUpdate의 _nextBossTimer/TrySpawnPersistentBoss가 전담한다. 이 메서드는 항상
+		-- "지금까지 나온 몬스터들이 섞인 일반 웨이브"만 스폰한다(예전 wave==11+ else 분기와 동일 로직).
+		
+		-- 웨이브 스파이크: SpikeWaveInterval의 배수 웨이브에 진입한 첫 SpawnWave 틱에서만 한 번,
+		-- 이번 틱에 스폰되는 모든 활성 맵에 동시에 스폰 수 버스트를 건다 (같은 웨이브 동안 반복 적용 방지)
+		local isSpikeTick = (wave % self.SpikeWaveInterval == 0) and wave ~= self._lastSpikeWave
+		if isSpikeTick then
+			self._lastSpikeWave = wave
+			log("MonsterSpawner: wave " .. wave .. " spike burst")
+		end
+		
+		-- 일반 웨이브: 활성화된(=한 번 이상 방문한) 맵에만 동시 스폰. 엘리트는 플레이어가 있는 맵의 무리에서만 뽑는다
+		if self._activeMaps == nil then return end
+		for idx = _MapManager.MinMapIndex, _MapManager.MaxMapIndex do
+			-- 맵10에 보너스 보스가 떠 있는 동안은 평소 웨이브 몬스터를 같이 스폰하지 않는다
+			if idx == 10 and self._bonusBossActive then continue end
+			-- 존18(그림자 존 안전지대)은 몬스터가 아예 없어야 한다
+			if self:IsNoMonsterZone(idx) then continue end
+			if self._activeMaps[idx] then
+				local map = self:GetZoneEntity(idx)
+				if map ~= nil then
+					self:SpawnBatchOnMap(map, wave, false, map == currentMap, idx, isSpikeTick, 0)
+				end
+			end
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean IsNoMonsterZone(integer mapIndex)
+		-- 44(map24, 진 힐라의 보물상자): 일반 웨이브 스폰 대상이 아니다 — Map24TreasureChestLogic이 직접 스폰
+		return mapIndex == 18 or mapIndex == 35 or mapIndex == 44
+	end
+
+	@ExecSpace("ServerOnly")
+	method number GetZoneOffsetX(integer mapIndex)
+		local info = _MapManager:GetZoneInfo(mapIndex)
+		return (info ~= nil) and info.spawnX or 0
+	end
+
+	@ExecSpace("ServerOnly")
+	method table GetZoneXBounds(integer zoneIdx)
+		local info = _MapManager:GetZoneInfo(zoneIdx)
+		if info == nil or info.container ~= nil then return nil end
+		local offsetX = info.spawnX or 0
+		local minX, maxX = nil, nil
+		local prevInfo = _MapManager:GetZoneInfo(zoneIdx - 1)
+		if prevInfo ~= nil and prevInfo.container == nil and prevInfo.file == info.file then
+			minX = (prevInfo.spawnX + offsetX) / 2
+		end
+		local nextInfo = _MapManager:GetZoneInfo(zoneIdx + 1)
+		if nextInfo ~= nil and nextInfo.container == nil and nextInfo.file == info.file then
+			maxX = (offsetX + nextInfo.spawnX) / 2
+		end
+		if minX == nil and maxX == nil then return nil end
+		return { minX = minX, maxX = maxX }
+	end
+
+	@ExecSpace("ServerOnly")
+	method Entity GetZoneEntity(integer mapIndex)
+		local info = _MapManager:GetZoneInfo(mapIndex)
+		local fileName = (info ~= nil) and info.file or string.format("map%02d", mapIndex)
+		local rootMap = _EntityService:GetEntityByPath("/maps/" .. fileName)
+		if rootMap == nil then return nil end
+		if info ~= nil and info.container ~= nil then
+			return rootMap:GetChildByName(info.container, false)
+		end
+		return rootMap
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ClearCurrentBoss()
+		self._currentBoss = nil
+		self._bossZone = -1
+		-- 2026-08-03: 처치 즉시 다음 보스까지 BossRepeatInterval(10분)을 다시 카운트한다(엘리트와 동일 패턴)
+		self._nextBossTimer = self.BossRepeatInterval
+	end
+
+	@ExecSpace("ServerOnly")
+	method void TrySpawnPersistentBoss()
+		if isvalid(self._currentBoss) then return end
+		local currentMap = self:GetCurrentMap()
+		if currentMap == nil then return end
+		local mapIndex = _MapManager.CurrentMapIndex
+		if self:IsNoMonsterZone(mapIndex) then return end
+		local spawned = self:SpawnBatchOnMap(currentMap, _GameManager.Wave, true, false, mapIndex, false, 0)
+		if #spawned > 0 then
+			self._currentBoss = spawned[1]
+			self._bossZone = mapIndex
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void RelocateBossToCurrentZone()
+		local zoneIndex = _MapManager.CurrentMapIndex
+		local map = self:GetZoneEntity(zoneIndex)
+		if map == nil then return end
+		
+		local savedHp = nil
+		if isvalid(self._currentBoss) then
+			---@type MonsterAI
+			local ai = self._currentBoss:GetComponent("script.MonsterAI")
+			if ai ~= nil then savedHp = ai.CurrentHp end
+			self._currentBoss:Destroy()
+		end
+		
+		local spawned = self:SpawnBatchOnMap(map, _GameManager.Wave, true, false, zoneIndex, false, 0)
+		if #spawned == 0 then
+			self._currentBoss = nil
+			self._bossZone = -1
+			return
+		end
+		self._currentBoss = spawned[1]
+		self._bossZone = zoneIndex
+		if savedHp ~= nil then
+			---@type MonsterAI
+			local ai = self._currentBoss:GetComponent("script.MonsterAI")
+			if ai ~= nil then
+				ai.CurrentHp = math.min(savedHp, ai.MaxHp)
+			end
+		end
+		log("MonsterSpawner: boss followed player to zone " .. zoneIndex)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ActivateMap(integer mapIndex)
+		-- 다른 Logic의 OnBeginPlay가 이것보다 먼저 실행돼 _activeMaps가 아직 nil일 수 있으므로 지연 초기화
+		if self._activeMaps == nil then self._activeMaps = {} end
+		local wasActive = self._activeMaps[mapIndex]
+		self._activeMaps[mapIndex] = true
+		-- 빠른 이동 안전장치 플래그는 "이 ActivateMap 호출의 스폰 배치"에만 적용되고 반드시 여기서
+		-- 소비된다 — 아래 모든 리턴 경로에서 매번 명시적으로 0으로 되돌려서, 존10처럼 이 메서드
+		-- 자체를 안 타는 경우(TryStartBonusStage)나 스폰 자체가 없는 경우(안전지대/존 못 찾음)에
+		-- 플래그가 소비 안 된 채 남아 엉뚱한 나중 스폰에 새는 것을 막는다.
+		if self:IsNoMonsterZone(mapIndex) then
+			self._pendingRushPenalty = 0
+			return
+		end
+		
+		local map = self:GetZoneEntity(mapIndex)
+		if map == nil then
+			self._pendingRushPenalty = 0
+			return
+		end
+		
+		if not wasActive then
+			-- 지쳐버린 기사(Tired Knight) 우선 스폰 — 일반 스폰 배치보다 먼저, 존 최초 활성화 시 정확히
+			-- 1회만 확정 스폰한다(유저 지정 "우선순위가 높아 일반몬스터보다 무조건 소환되어야한단말씀" —
+			-- 확률이 아니라 확정). 존1(65)은 TrySpawnTiredKnightForZone 내부에서 제외된다.
+			self:TrySpawnTiredKnightForZone(mapIndex, map)
+			self:SpawnBatchOnMap(map, _GameManager.Wave, false, true, mapIndex, false, 0)
+			self._pendingRushPenalty = 0
+			return
+		end
+		
+		-- 2026-08-05(유저 지정): 이미 활성화됐던 맵으로 재이동(예: 다 잡고 지나갔다가 되돌아옴)해도
+		-- 몬스터가 너무 적으면 정기 스폰 타이머를 기다리지 않고 즉시 최소 MinMonstersOnArrival마리는 채운다.
+		self:SpawnBatchOnMap(map, _GameManager.Wave, false, true, mapIndex, false, self.MinMonstersOnArrival)
+		self._pendingRushPenalty = 0
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean IsMapIndexCurrent(integer mapIndex)
+		return (self:GetCurrentMap() == nil) or (mapIndex == _MapManager.CurrentMapIndex and not _MapManager.AwayOnSideMap)
+	end
+
+	@ExecSpace("ServerOnly")
+	method table SpawnBatchOnMap(Entity map, integer wave, boolean isBoss, boolean allowElite, integer mapIndex, boolean isSpike, integer minCountOverride)
+		-- 버그 수정(2026-08-20, 유저 리포트 "맵4에서 10존으로 들어왔는데 7존에 몬스터가 공격해") — 예전엔
+		-- "currentMap == nil 이거나 map == currentMap(엔티티 동일)"로 판정했는데, 맵3/4처럼 container=nil이라
+		-- 존 10개가 파일 하나(맵 루트)를 공유하면 GetCurrentMap()(=GetZoneEntity(플레이어의 현재 존))도
+		-- 이번에 스폰하는 map(=GetZoneEntity(mapIndex))도 항상 같은 루트 엔티티라 존7에서 스폰해도
+		-- "지금 있는 맵"으로 오판된다 — 그 결과 아래 `if not isCurrentMap then ai:Pause() end`가 전혀
+		-- 발동하지 않아 존7 몬스터가 스폰되자마자 활성 상태(추적/공격 가능)로 태어나, 실제로는 다른 존(존10)에
+		-- 있는 플레이어를 향해 공유 물리공간을 가로질러 걸어와 공격했다. 엔티티 비교 대신 zoneIndex 정수
+		-- 비교로 바꾸면 container 있는 존 그룹(zoneIndex가 엔티티와 항상 1:1)은 동작이 그대로이고,
+		-- container=nil 그룹만 정확히 "정확히 그 존"으로 좁혀진다.
+		-- 유저 지적: "미니게임 들어갔는데 유저가 전 존 공격하는듯" — 몬스터 갤러리처럼 ZoneInfo 밖 별도
+		-- 맵으로 간 동안엔 CurrentMapIndex를 일부러 그대로 두는데(MapManager.AwayOnSideMap 참고), 그
+		-- 사이 원래 존에서 새로 리스폰되는 몬스터가 이 판정만으로는 "지금 있는 맵"으로 오판돼 Pause 없이
+		-- 태어났다 — AwayOnSideMap이 켜져 있으면 인덱스가 같아도 무조건 "지금 있는 맵이 아님"으로 취급한다.
+		local isCurrentMap = self:IsMapIndexCurrent(mapIndex)
+		
+		local count = 1
+		if not isBoss then
+			-- 지금 이 맵에 있는 개수를 먼저 구해서, 램프 계산과 "최소 N마리 보장" 모드 둘 다에서 재사용한다.
+			-- 위와 같은 이유로 존별 카운트도 _spawnZoneIndex로 한 번 더 걸러야 한다 — 안 그러면 맵3/4의
+			-- 10개 존이 같은 엔티티를 공유해서 서로의 몬스터 수를 자기 존 스폰 상한 계산에 끌어다 쓰게 된다.
+			-- 성능 최적화(2026-08-24): map:GetChildComponentsByTypeName 전체 스캔 대신 존별 레지스트리를
+			-- 쓴다(위 _zoneMonsterRegistry 선언부 코멘트 참고) — container=nil 공유맵에서 이 스캔이 존
+			-- 개수(최대 10개)만큼 반복 호출되던 게(SpawnWave가 활성 존마다 이 메서드를 부른다) O(공유맵
+			-- 전체 몬스터 수)에서 O(그 존 몬스터 수)로 줄어든다.
+			local maxForThisMap = isCurrentMap and self.MaxMonstersPerMap or self.MaxMonstersPerMapBackground
+			local existingCount = #self:GetMonstersInZone(mapIndex)
+		
+			if minCountOverride > 0 then
+				-- 2026-08-05: "적어도 N마리는 있게" 보장 모드(이동 도착 시 등) — 램프/스파이크/2배 배수를
+				-- 전부 건너뛰고 부족한 만큼만 정확히 채운다.
+				count = math.max(0, minCountOverride - existingCount)
+			else
+				local variance = math.floor(_UtilLogic:RandomDouble() * (self.SpawnCountVariance + 1))
+				-- 2026-08-03: 웨이브(킬레이트) 대신 순수 경과시간으로 스폰 수를 늘린다 — 0~SpawnCountRampSeconds
+				-- 동안 BaseSpawnCount에서 MaxSpawnCount까지 선형으로 증가하고, 그 이후로는 무한정 늘지 않고
+				-- MaxSpawnCount에서 고정된다(유저 지정 — "스폰은 무한정 느는게 아니라 제한이 있어야지 맥스").
+				local rampProgress = math.min(1.0, self._elapsedPlayTime / self.SpawnCountRampSeconds)
+				local rampedBase = self.BaseSpawnCount + math.floor((self.MaxSpawnCount - self.BaseSpawnCount) * rampProgress)
+				count = rampedBase + variance
+				count = math.min(count, self.MaxSpawnCount)
+				-- 웨이브 스파이크 틱이면 이번 무리에 한해 스폰 수를 배수만큼 버스트시킨다 (아래 맵당 상한
+				-- 체크가 그대로 이어져 적용되므로, 몰려있는 맵에서는 상한에 걸려 자연히 완화된다)
+				if isSpike then
+					count = math.floor(count * self.SpikeCountMultiplier + 0.5)
+				end
+				-- 2026-08-05(유저 지정): 1분까지는 그대로, 2분(DoubleSpawnAfterSeconds)부터는 스폰 수 2배.
+				-- 대신 GameManager.GetExpPerKill()이 같은 시점부터 킬당 경험치를 절반으로 줄여 균형을 맞춘다.
+				if self._elapsedPlayTime >= self.DoubleSpawnAfterSeconds then
+					count = math.ceil(count * self.DoubleSpawnMultiplier)
+				end
+			end
+		
+			-- 이미 이 맵에 몬스터가 상한만큼 쌓여있으면 이번 스폰은 건너뛴다 (오래 방치된 맵 몬스터 무한 누적 방지)
+			-- — 지금 있는 맵은 MaxMonstersPerMap, 그 외(지나간/안 가본) 맵은 더 낮은 MaxMonstersPerMapBackground 적용
+			if existingCount >= maxForThisMap then return {} end
+			count = math.min(count, maxForThisMap - existingCount)
+			if count <= 0 then return {} end
+		end
+		
+		if isBoss then
+			-- 보스는 항상 count==1이라 그대로 동기 처리한다 — TrySpawnPersistentBoss/
+			-- RelocateBossToCurrentZone이 반환값(spawned[1])을 이 호출 안에서 즉시 써야 한다.
+			local spawned = {}
+			local spawnedXs = {}
+			for i = 1, count do
+				local entity = self:SpawnOneMonster(map, mapIndex, wave, isBoss, isCurrentMap, spawnedXs, 0)
+				if entity ~= nil then table.insert(spawned, entity) end
+			end
+			log("MonsterSpawner: spawned " .. count .. " BOSS on " .. map.Name .. " (Wave " .. wave .. ")")
+			return spawned
+		end
+		
+		-- 일반 몬스터 무리(isBoss=false)는 반환값을 즉시 쓰는 호출측이 없다(ActivateMap/SpawnWave 등은
+		-- 결과를 버림) — 그래서 실제 스폰(SpawnOneMonster)은 지금 하지 않고 큐에 쌓아 OnUpdate에서
+		-- 프레임당 SpawnsPerTick마리씩만 나눠 처리한다(위 SpawnsPerTick 선언부 코멘트 참고). rushPenalty는
+		-- 지금 이 시점의 값을 배치에 고정해둔다 — ActivateMap이 이 호출 직후 곧바로 self._pendingRushPenalty를
+		-- 0으로 되돌리므로, 나중에 큐가 처리될 때 그 필드를 다시 읽으면 이미 0이라 유실된다.
+		local batch = {
+			spawned = {},
+			spawnedXs = {},
+			remaining = count,
+			allowElite = allowElite,
+			wave = wave,
+			mapName = map.Name,
+			count = count,
+			rushPenalty = self._pendingRushPenalty,
+		}
+		-- isCurrentMap을 여기서 job에 고정해두지 않는다 — 실제 스폰은 몇 프레임 뒤
+		-- ProcessSpawnQueueTick에서 나눠 처리되는데, 그 사이 플레이어가 실제로 이 존에 도착(또는 이탈)하면
+		-- 지금 계산한 값이 낡아버린다(버그 수정, 2026-08-25 — 유저 리포트 "몬스터가 걷는 모션은 있는데
+		-- 다가오지않는 버그... 존을 이동하면 그러는거 같음": 백그라운드 존이 이 큐로 스폰을 예약해둔 채
+		-- 아직 처리 전인데 플레이어가 마침 그 존에 도착하면, 큐에 박혀있던 예전 isCurrentMap=false가
+		-- 그대로 살아남아 방금 도착한 존인데도 태어나자마자 Pause()되어 버렸다 — InitializeStats가 먼저
+		-- 걷는 스프라이트를 세팅한 뒤라 "걷는 모션은 있는데 다가오지 않는" 것처럼 보임). 대신
+		-- ProcessSpawnQueueTick이 실제로 꺼낼 때 IsMapIndexCurrent를 다시 호출해 그 순간 기준으로 새로 판정한다.
+		for i = 1, count do
+			table.insert(self._spawnQueue, { map = map, mapIndex = mapIndex, wave = wave, batch = batch })
+		end
+		return {}
+	end
+
+	@ExecSpace("ServerOnly")
+	method Entity SpawnOneMonster(Entity map, integer mapIndex, integer wave, boolean isBoss, boolean isCurrentMap, table spawnedXs, number rushPenalty)
+		-- 맵 전용 풀(zoneIndex>=7)은 종을 먼저 뽑아서 스폰 위치 결정에도 같이 써야 한다 —
+		-- 원거리 종은 중앙 구역에만, 근접 종은 중앙을 피해서 스폰시키려면 위치보다 종 선택이 먼저 필요하다
+		local speciesIdx = self:RollSpeciesForMap(mapIndex)
+		local pos = self:GetSpawnPosition(mapIndex, isBoss, speciesIdx, map)
+		
+		-- 2026-08-05(유저 지정): 너무 겹치지 않게 — 이번 배치에서 이미 정한 위치/기존 몬스터와
+		-- X가 너무 가까우면 몇 번 다시 뽑는다(계속 못 찾으면 포기하고 그냥 그 자리에 스폰 — 무한루프 방지).
+		if not isBoss then
+			local attempts = 0
+			while attempts < 4 and self:IsPositionCrowded(map, pos.x, spawnedXs) do
+				pos = self:GetSpawnPosition(mapIndex, isBoss, speciesIdx, map)
+				attempts = attempts + 1
+			end
+			table.insert(spawnedXs, pos.x)
+		end
+		
+		local entity = _SpawnService:SpawnByModelId(
+			self.MonsterModelId,
+			"Monster",
+			self:ToLocalSpawnPos(map, pos),
+			map
+		)
+		if entity == nil then
+			log_error("MonsterSpawner: SpawnByModelId failed")
+			return nil
+		end
+		
+		---@type MonsterAI
+		local ai = entity:GetComponent("script.MonsterAI")
+		if ai ~= nil then
+			ai:InitializeStats(mapIndex, wave, isBoss, speciesIdx)
+			-- 2026-08-05(유저 지정): 일반 몬스터 중 일부(SmallVariantChance)는 작은 개체(크기 2/3,
+			-- 체력 20% 낮음)로 스폰
+			if not isBoss and _UtilLogic:RandomDouble() < self.SmallVariantChance then
+				ai:ApplySmallVariant()
+			end
+			-- 빠른 이동 안전장치(유저 요청) — 방금 도착한 존의 스폰 배치에 한해 몬스터를 유저
+			-- 쪽으로 당기고(1단계), 6연속부터는 스탯까지 강화한다(2단계, 2026-08-11)
+			if not isBoss and rushPenalty > 0 then
+				ai:ApplyRushPenalty(rushPenalty)
+			end
+			if not isCurrentMap then ai:Pause() end
+		end
+		return entity
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ProcessSpawnQueueTick()
+		if #self._spawnQueue == 0 then return end
+		local n = math.min(self.SpawnsPerTick, #self._spawnQueue)
+		for i = 1, n do
+			local job = table.remove(self._spawnQueue, 1)
+			local isCurrentMapNow = self:IsMapIndexCurrent(job.mapIndex)
+			local entity = self:SpawnOneMonster(job.map, job.mapIndex, job.wave, false, isCurrentMapNow, job.batch.spawnedXs, job.batch.rushPenalty)
+			if entity ~= nil then table.insert(job.batch.spawned, entity) end
+			job.batch.remaining = job.batch.remaining - 1
+			if job.batch.remaining <= 0 then
+				self:FinalizeSpawnBatch(job.batch)
+			end
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void FinalizeSpawnBatch(table batch)
+		-- 웨이브 5(딱 한 번)에만 플레이어가 있는 맵의 스폰 그룹 중 1마리를 엘리트로 승급한다.
+		-- 웨이브10 보스 이후(11부터의 무한 웨이브)는 지금까지 나온 몬스터가 섞여서 나오되 보스/엘리트는
+		-- 제외한 "일반 몬스터"만 나와야 하므로 wave<=10으로 명시적으로 막는다.
+		if batch.allowElite and batch.wave <= 10 and batch.wave % 10 == 5 and batch.wave ~= self._lastEliteWave and #batch.spawned > 0 then
+			self._lastEliteWave = batch.wave
+			local eliteIdx = _UtilLogic:RandomIntegerRange(1, #batch.spawned)
+			---@type MonsterAI
+			local ai = batch.spawned[eliteIdx]:GetComponent("script.MonsterAI")
+			if ai ~= nil then ai:MarkElite() end
+		end
+		
+		log("MonsterSpawner: spawned " .. batch.count .. " monster(s) on " .. batch.mapName .. " (Wave " .. batch.wave .. ")")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void TrySpawnTiredKnightForZone(integer mapIndex, Entity map)
+		if not self._tiredKnightUnlocked then return end
+		if mapIndex < 66 or mapIndex > 74 then return end
+		if self._tiredKnightSpawnedZones == nil then self._tiredKnightSpawnedZones = {} end
+		if self._tiredKnightSpawnedZones[mapIndex] then return end
+		self._tiredKnightSpawnedZones[mapIndex] = true
+		self:SpawnTiredKnightOnMap(mapIndex, map)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void UnlockTiredKnightSpawning()
+		if self._tiredKnightUnlocked then return end
+		self._tiredKnightUnlocked = true
+		if self._tiredKnightSpawnedZones == nil then self._tiredKnightSpawnedZones = {} end
+		for mapIndex = 66, 74 do
+			if self._activeMaps ~= nil and self._activeMaps[mapIndex] and not self._tiredKnightSpawnedZones[mapIndex] then
+				local map = self:GetZoneEntity(mapIndex)
+				self._tiredKnightSpawnedZones[mapIndex] = true
+				self:SpawnTiredKnightOnMap(mapIndex, map)
+			end
+		end
+		log("MonsterSpawner: TiredKnight spawning unlocked (zone1 drag complete)")
+	end
+
+	@ExecSpace("ServerOnly")
+	method Entity SpawnTiredKnightOnMap(integer mapIndex, Entity map)
+		if map == nil or not isvalid(map) then
+			log_error("MonsterSpawner: SpawnTiredKnightOnMap - invalid map for zone " .. mapIndex)
+			return nil
+		end
+		local pos = self:GetSpawnPosition(mapIndex, false, 0, map)
+		local entity = _SpawnService:SpawnByModelId(self.MonsterModelId, "TiredKnight", self:ToLocalSpawnPos(map, pos), map)
+		if entity == nil then
+			log_error("MonsterSpawner: SpawnTiredKnightOnMap - SpawnByModelId failed for zone " .. mapIndex)
+			return nil
+		end
+		---@type MonsterAI
+		local ai = entity:GetComponent("script.MonsterAI")
+		if ai ~= nil then
+			ai:InitializeStatsAsTiredKnight(mapIndex)
+		end
+		_UIToast:ShowMessage("검투사가 등장했습니다")
+		log("MonsterSpawner: TiredKnight(검투사) spawned on zone " .. mapIndex)
+		return entity
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetTiredKnightTracking()
+		self._tiredKnightSpawnedZones = {}
+		self._tiredKnightUnlocked = false
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnEliteKilled()
+		self._nextEliteTimer = self.MinEliteRespawnDelay + _UtilLogic:RandomDouble() * (self.MaxEliteRespawnDelay - self.MinEliteRespawnDelay)
+		log("MonsterSpawner: next elite in " .. math.floor(self._nextEliteTimer) .. "s")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SpawnRandomElite()
+		local map = self:GetCurrentMap()
+		if map == nil then
+			-- 플레이어 위치를 아직 모르면 잠시 후 재시도
+			self._nextEliteTimer = 5.0
+			return
+		end
+		if self:IsNoMonsterZone(_MapManager.CurrentMapIndex) then
+			-- 존18(안전지대)에 있는 동안은 엘리트도 스폰하지 않는다 — 다음 타이머에 다시 시도
+			self._nextEliteTimer = 5.0
+			return
+		end
+		
+		local mapIndex = _MapManager.CurrentMapIndex
+		local wave = _GameManager.Wave
+		local speciesIdx = self:RollSpeciesForMap(mapIndex)
+		local pos = self:GetSpawnPosition(mapIndex, false, speciesIdx, map)
+		local entity = _SpawnService:SpawnByModelId(self.MonsterModelId, "Monster", self:ToLocalSpawnPos(map, pos), map)
+		if entity == nil then
+			log_error("MonsterSpawner: SpawnRandomElite failed")
+			return
+		end
+		
+		---@type MonsterAI
+		local ai = entity:GetComponent("script.MonsterAI")
+		if ai ~= nil then
+			ai:InitializeStats(mapIndex, wave, false, speciesIdx)
+			ai:MarkElite()
+		end
+		log("MonsterSpawner: random elite spawned on " .. map.Name)
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer RollSpeciesForMap(integer mapIndex)
+		if mapIndex < 7 then return 0 end
+		local appearanceZone = self:ResolveAppearanceZone(mapIndex)
+		return _UtilLogic:RandomIntegerRange(1, _GameManager:GetMapMonsterCount(appearanceZone))
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer ResolveAppearanceZone(integer mapIndex)
+		if mapIndex == 10 then return 9 end
+		-- ep2_map2_hidden(존1~4=mapIndex85~88, 석상 퍼즐 보상 스퍼) — 전용 종 풀을 새로 만드는 대신
+		-- ep2_map2 자신의 기존 존 풀(mapIndex55~64, GameManager의 검증된 RUID 테이블 재사용) 중
+		-- 근접/원거리/비행형이 골고루 섞인 조합을 골라 재사용한다(유저 요청: "원거리 비행 근접 같이
+		-- 골고루 섞이게"). 85→56(주니어라이오너·근접/네펜데스·원거리), 86→61(라이오너·근접/고스트픽시·
+		-- 비행/주니어루이넬·지그재그), 87→63(거대네펜데스·고정원거리/고스트픽시·비행/주니어루이넬·지그재그 —
+		-- 세 유형이 한 존에 다 섞인 조합), 88→60(거대네펜데스·고정원거리/주니어그류핀·근접/샐리온·근접).
+		-- 4존 전체로 보면 원거리 1,3,4 / 비행 2,3 / 근접 1,2,4에 걸쳐 고르게 나온다. mapIndex==10과
+		-- 동일하게 여기 하나만 고치면 RollSpeciesForMap/GetMapIsRangedSpecies/GetMapIsFlyingSpecies가
+		-- 전부 자동으로 이 별칭을 따라간다 — MonsterAI.InitializeStats의 동일 목적 인라인 해석에도
+		-- 같은 매핑을 그대로 복제해뒀다(두 스크립트가 별도 로직이라 짝을 맞춰야 함).
+		if mapIndex == 85 then return 56 end
+		if mapIndex == 86 then return 61 end
+		if mapIndex == 87 then return 63 end
+		if mapIndex == 88 then return 60 end
+		return mapIndex
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean GetMapIsRangedSpecies(integer mapIndex, integer speciesIdx)
+		return _GameManager:GetMapIsRanged(self:ResolveAppearanceZone(mapIndex), speciesIdx)
+	end
+
+	@ExecSpace("ServerOnly")
+	method table GetRangedTileRange(integer mapIndex)
+		if mapIndex == 12 then
+			return { minX = self.RangedTileMinX, maxX = self.RangedTileMaxX }
+		end
+		local offsetX = self:GetZoneOffsetX(mapIndex)
+		return { minX = offsetX - 5, maxX = offsetX + 5 }
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean GetMapIsFlyingSpecies(integer mapIndex, integer speciesIdx)
+		return _GameManager:GetMapIsFlying(self:ResolveAppearanceZone(mapIndex), speciesIdx)
+	end
+
+	@ExecSpace("ServerOnly")
+	method number RollXAvoidingRange(number safeMin, number safeMax, number avoidMin, number avoidMax)
+		local leftWidth = math.max(0, avoidMin - safeMin)
+		local rightWidth = math.max(0, safeMax - avoidMax)
+		local totalWidth = leftWidth + rightWidth
+		if totalWidth <= 0 then
+			-- 피할 구간이 안전범위 전체를 덮으면(설정 실수 등) 그냥 안전범위 전체에서 뽑는다
+			return safeMin + _UtilLogic:RandomDouble() * (safeMax - safeMin)
+		end
+		local roll = _UtilLogic:RandomDouble() * totalWidth
+		if roll < leftWidth then
+			return safeMin + roll
+		else
+			return avoidMax + (roll - leftWidth)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean IsPositionCrowded(Entity map, number x, table batchXs)
+		for i = 1, #batchXs do
+			if math.abs(batchXs[i] - x) < self.MinSpawnSeparationX then return true end
+		end
+		local monsters = map:GetChildComponentsByTypeName("script.MonsterAI", false)
+		for i = 1, #monsters do
+			local wx = monsters[i].Entity.TransformComponent.WorldPosition.x
+			if math.abs(wx - x) < self.MinSpawnSeparationX then return true end
+		end
+		return false
+	end
+
+	@ExecSpace("ServerOnly")
+	method Entity GetCurrentMap()
+		return self:GetZoneEntity(_MapManager.CurrentMapIndex)
+	end
+
+	@ExecSpace("ServerOnly")
+	method Vector3 ToLocalSpawnPos(Entity parent, Vector3 worldPos)
+		local transform = parent.TransformComponent
+		if transform == nil then return worldPos end
+		local parentWorld = transform.WorldPosition
+		return Vector3(worldPos.x - parentWorld.x, worldPos.y - parentWorld.y, worldPos.z - parentWorld.z)
+	end
+
+	@ExecSpace("ServerOnly")
+	method number GetGroundY(Entity map, number x)
+		if map == nil then return 0 end
+		---@type FootholdComponent
+		local foothold = map:GetComponent("FootholdComponent")
+		if foothold == nil then return 0 end
+		
+		local hit = foothold:Raycast(Vector2(x, 100), Vector2(0, -1), 200)
+		if hit == nil then return 0 end
+		return hit:GetYByX(x)
+	end
+
+	@ExecSpace("ServerOnly")
+	method table GetZonePlatformBands(integer mapIndex)
+		if mapIndex == 4 then
+			return {
+				{ y = -1.22, xMin = -7.15, xMax = 7.15 },   -- 바닥
+				{ y = 1.18, xMin = -7.15, xMax = -0.95 },   -- 좌측 공중 발판
+			}
+		elseif mapIndex == 5 then
+			return {
+				{ y = -1.22, xMin = -7.15, xMax = 7.15 },   -- 바닥
+				{ y = 1.18, xMin = 0.05, xMax = 7.15 },     -- 우측 공중 발판
+			}
+		elseif mapIndex == 6 then
+			return {
+				{ y = -1.22, xMin = -7.15, xMax = 7.15 },   -- 바닥
+				{ y = 1.78, xMin = -1.75, xMax = 1.75 },    -- 중앙 공중 발판
+			}
+		elseif mapIndex == 9 then
+			-- 맵9는 우측에 장식용 절벽 발판(계단식, y≈2.6~4.6)이 따로 있는데 이건 배경 연출 전용이라
+			-- 밴드를 바닥 하나로만 명시해서 몬스터가 그 위로는 절대 스폰되지 않게 한다
+			return {
+				{ y = -1.18, xMin = -7.15, xMax = 7.15 },   -- 바닥만
+			}
+		elseif mapIndex == 10 then
+			-- 맵10(보너스 스테이지)은 보너스 보스가 없을 때 맵9와 같은 몬스터 풀로 폴백 스폰될 때 쓰인다
+			return {
+				{ y = -1.18, xMin = -7.07, xMax = 7.07 },   -- 바닥만
+			}
+		elseif mapIndex == 32 then
+			-- 존32(재규어, 지상형)엔 바닥 외에 공중 발판(월드 x15.42~18.78, y1.05)도 있고, 여긴 맵9
+			-- (장식 전용이라 바닥만 남긴 케이스)와 달리 실제로 몹이 올라가도 되는 발판이다 — "발판에는
+			-- 다 몹이 나와야 한다"는 요구사항. 맵4/5/6과 동일한 다중 밴드 패턴으로 바닥+공중 둘 다 후보에
+			-- 넣고 폭 비례 확률로 고른다. xMin/xMax는 로컬(오프셋 전) 좌표라 실측 월드값에서 offsetX(15.5)를
+			-- 뺐다: 15.42-15.5=-0.08, 18.78-15.5=3.28.
+			return {
+				{ y = -1.35, xMin = -7.08, xMax = 7.08 },   -- 바닥
+				{ y = 1.05, xMin = -0.08, xMax = 3.28 },    -- 공중 발판
+			}
+		elseif mapIndex == 33 then
+			-- 존33(재규어, 2번째 종)도 마찬가지 — 공중 발판이 화면 안전범위 대부분을 덮을 만큼 넓다.
+			-- 실측(getFootholds 재조회, groupID 7): 월드 x25.32~38.58, y=1.05 (이전에 y=1.65/x27.12~36.78로
+			-- 잘못 잡았던 값 — 유저 지적으로 재조사해 발견, foothold Id 자체도 리네임 이후 재인덱싱돼
+			-- 바뀌었다). 로컬 좌표 = 월드값 - offsetX(31.0): 25.32-31.0=-5.68, 38.58-31.0=7.58.
+			-- 비행형(바나나갈매기)은 이 밴드 이전에 GetMapIsFlyingSpecies 분기에서 이미 걸러지므로
+			-- 이 밴드는 지상형 2번째 종(재규어)에게만 적용된다.
+			return {
+				{ y = -1.35, xMin = -7.08, xMax = 7.08 },   -- 바닥
+				{ y = 1.05, xMin = -5.68, xMax = 7.58 },    -- 공중 발판
+			}
+		elseif mapIndex == 31 then
+			-- 존31(루팡, 원거리)도 "발판에는 다 몹이 나와야 한다"는 기본 원칙 그대로 적용 — 원거리는
+			-- 공격 연출/이펙트 얘기지 스폰 위치를 특정 발판 하나로 고정하라는 뜻이 아니었다. 바닥 + 존31에
+			-- 있는 공중 발판 2개(둘 다 실측, groupID 3/4) 전부를 후보로 넣는다. 로컬 좌표(offsetX=0이라
+			-- 월드값과 동일): 그룹3 x-5.28~-3.72 y0.45, 그룹4 x-0.78~1.68 y1.05(이전엔 이 발판만 "고정
+			-- 타일섬"으로 단독 사용했었다 — GetRangedTileRange(31)은 이제 이 밴드 경로에 가려져 안 쓰인다).
+			return {
+				{ y = -1.35, xMin = -7.08, xMax = 7.08 },   -- 바닥
+				{ y = 0.45, xMin = -5.28, xMax = -3.72 },   -- 공중 발판1
+				{ y = 1.05, xMin = -0.78, xMax = 1.68 },    -- 공중 발판2
+			}
+		elseif mapIndex == 34 then
+			-- 존34(바나나갈매기[비행형, 이 밴드 이전에 이미 걸러짐]/좀비루팡[원거리])도 동일 원칙.
+			-- 실측 결과 존34 바닥은 전 구간 평평하지 않다 — x47.25~48.15 구간에서 y=-1.35→-0.75로
+			-- 경사가 올라갔다가 x51.75~52.65에서 다시 내려온다(둔덕). 경사 구간 자체는 착지 높이가
+			-- 애매해서 빼고, 평평한 두 구간(낮은 바닥/둔덕 위)을 별개 밴드로 나눴다. 공중 발판(groupID 6,
+			-- x42.42~46.68 y1.05)은 좀비루팡의 기존 "고정 타일섬"과 동일 좌표 — GetRangedTileRange(34)는
+			-- 이제 이 밴드 경로에 가려져 안 쓰인다.
+			return {
+				{ y = -1.35, xMin = -7.08, xMax = 0.75 },   -- 바닥(낮은 구간, 경사 전까지)
+				{ y = -0.75, xMin = 1.65, xMax = 7.08 },    -- 바닥(둔덕 위 평평한 구간)
+				{ y = 1.05, xMin = -4.08, xMax = 0.18 },    -- 공중 발판
+			}
+		end
+		-- 존8/13~15는 더 이상 하드코딩 밴드를 쓰지 않는다 — GetSpawnPositionFromFootholds가 FootholdComponent를
+		-- 직접 레이캐스트해서 실제 발판을 찾는다(위 주석 "존13~15 전용 스폰 방식" 참고).
+		return nil
+	end
+
+	@ExecSpace("ServerOnly")
+	method Vector3 GetSpawnPositionFromFootholds(integer mapIndex, boolean isBoss, Entity map)
+		local mapName = _MapManager:GetMapName(mapIndex)
+		local rootMap = _EntityService:GetEntityByPath("/maps/" .. mapName)
+		local offsetX = self:GetZoneOffsetX(mapIndex)
+		if rootMap == nil then return Vector3(offsetX, 0, 0) end
+		
+		---@type FootholdComponent
+		local footholdComp = rootMap:GetComponent("FootholdComponent")
+		if footholdComp == nil then return Vector3(offsetX, 0, 0) end
+		
+		local runs = self:GetFlatRunsCached(mapIndex)
+		local baselineY = self:GetBaselineGroundY(mapIndex, footholdComp)
+		
+		if isBoss then
+			-- 보스는 임팩트를 위해 존 중앙을 포함하는 바닥(baselineY) 구간에 고정 스폰
+			for i = 1, #runs do
+				if math.abs(runs[i].y - baselineY) <= self.FlatSlopeTolerance and offsetX >= runs[i].xMin and offsetX <= runs[i].xMax then
+					return Vector3(offsetX, runs[i].y, 0)
+				end
+			end
+			return Vector3(offsetX, baselineY, 0)
+		end
+		
+		local safeMin = offsetX - 5
+		local safeMax = offsetX + 5
+		
+		-- 폭 비례 확률만 쓰면 공중 발판처럼 좁은 구간은 계속 안 뽑힐 수 있다 — 그래서 폭 비례로 고르기
+		-- 전에, 비어있는(몬스터가 하나도 없는) 공중 발판이 있으면 이번 스폰은 그쪽에 무조건 먼저 배정한다.
+		-- 이미 몬스터가 있으면 더 채우지 않고 아래 폭 비례 선택(주로 바닥)으로 넘어간다.
+		if map ~= nil then
+			for i = 1, #runs do
+				local run = runs[i]
+				local runWidth = run.xMax - run.xMin
+				local isAerial = run.y > baselineY + self.AerialHeightThreshold
+				local isExcluded = mapIndex == 15 and self:IsExcludedZone15Foothold(run.ownerId)
+				if isAerial and runWidth >= self.MinFlatRunWidth and not isExcluded and not self:IsRunOccupied(map, run) then
+					local margin = math.min(self.EdgeMarginAerial, runWidth * 0.3)
+					local xMin = math.max(run.xMin + margin, safeMin)
+					local xMax = math.min(run.xMax - margin, safeMax)
+					if xMax > xMin then
+						local x = xMin + _UtilLogic:RandomDouble() * (xMax - xMin)
+						return Vector3(x, run.y, 0)
+					end
+				end
+			end
+		end
+		
+		-- 화면 안전 범위(±5)로 클램프하고, 폭/양끝 여유 조건을 만족하는 구간만 후보로 남긴다
+		local candidates = {}
+		local totalWidth = 0
+		for i = 1, #runs do
+			local run = runs[i]
+			local runWidth = run.xMax - run.xMin
+			local isExcluded = mapIndex == 15 and self:IsExcludedZone15Foothold(run.ownerId)
+			if runWidth >= self.MinFlatRunWidth and not isExcluded then
+				local isAerial = run.y > baselineY + self.AerialHeightThreshold
+				local margin = math.min(isAerial and self.EdgeMarginAerial or self.EdgeMarginGround, runWidth * 0.3)
+				local xMin = math.max(run.xMin + margin, safeMin)
+				local xMax = math.min(run.xMax - margin, safeMax)
+				if xMax > xMin then
+					local width = xMax - xMin
+					table.insert(candidates, { y = run.y, xMin = xMin, xMax = xMax, width = width })
+					totalWidth = totalWidth + width
+				end
+			end
+		end
+		
+		if #candidates == 0 then
+			-- 화면 범위 안에 유효한 구간이 없으면(예: 핏폴 구멍 위) 존 중앙 바닥으로 안전 폴백
+			return Vector3(offsetX, baselineY, 0)
+		end
+		
+		local roll = _UtilLogic:RandomDouble() * totalWidth
+		local chosen = candidates[1]
+		local acc = 0
+		for i = 1, #candidates do
+			acc = acc + candidates[i].width
+			if roll <= acc then
+				chosen = candidates[i]
+				break
+			end
+		end
+		
+		local x = chosen.xMin + _UtilLogic:RandomDouble() * (chosen.xMax - chosen.xMin)
+		return Vector3(x, chosen.y, 0)
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean IsRunOccupied(Entity map, any run)
+		local monsters = map:GetChildComponentsByTypeName("script.MonsterAI", false)
+		for i = 1, #monsters do
+			local pos = monsters[i].Entity.TransformComponent.WorldPosition
+			if pos.x >= run.xMin - 0.2 and pos.x <= run.xMax + 0.2 and math.abs(pos.y - run.y) <= 0.5 then
+				return true
+			end
+		end
+		return false
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean IsExcludedZone15Foothold(string ownerId)
+		return ownerId == self.Zone15ExcludedFootholdOwnerId1
+			or ownerId == self.Zone15ExcludedFootholdOwnerId2
+			or ownerId == self.Zone15ExcludedFootholdOwnerId3
+	end
+
+	@ExecSpace("ServerOnly")
+	method table GetFlatRunsCached(integer mapIndex)
+		if self._flatRunsCache == nil then self._flatRunsCache = {} end
+		local cached = self._flatRunsCache[mapIndex]
+		if cached ~= nil then return cached end
+		
+		local mapName = _MapManager:GetMapName(mapIndex)
+		local rootMap = _EntityService:GetEntityByPath("/maps/" .. mapName)
+		if rootMap == nil then return {} end
+		---@type FootholdComponent
+		local footholdComp = rootMap:GetComponent("FootholdComponent")
+		if footholdComp == nil then return {} end
+		
+		local runs = self:GetFlatRuns(footholdComp)
+		self._flatRunsCache[mapIndex] = runs
+		return runs
+	end
+
+	@ExecSpace("ServerOnly")
+	method table GetFlatRuns(FootholdComponent footholdComp)
+		local all = footholdComp:GetFootholdAll()
+		local visited = {}
+		local runs = {}
+		for i = 1, #all do
+			local seg = all[i]
+			if not visited[seg.Id] and self:IsFlatSegment(seg) then
+				local bounds = self:GetFlatRunBounds(footholdComp, seg)
+				local xMin, xMax = bounds.xMin, bounds.xMax
+				visited[seg.Id] = true
+		
+				local prevId = seg.PreviousFootholdId
+				while prevId ~= 0 do
+					local prev = footholdComp:GetFoothold(prevId)
+					if prev == nil or not self:IsFlatSegment(prev) or math.abs(prev.StartPoint.y - seg.StartPoint.y) > self.FlatSlopeTolerance then break end
+					visited[prev.Id] = true
+					prevId = prev.PreviousFootholdId
+				end
+		
+				local nextId = seg.NextFootholdId
+				while nextId ~= 0 do
+					local nxt = footholdComp:GetFoothold(nextId)
+					if nxt == nil or not self:IsFlatSegment(nxt) or math.abs(nxt.StartPoint.y - seg.StartPoint.y) > self.FlatSlopeTolerance then break end
+					visited[nxt.Id] = true
+					nextId = nxt.NextFootholdId
+				end
+		
+				table.insert(runs, { y = seg.StartPoint.y, xMin = xMin, xMax = xMax, ownerId = seg.OwnerId })
+			end
+		end
+		return runs
+	end
+
+	@ExecSpace("ServerOnly")
+	method table GetContainingRunBounds(integer mapIndex, number worldX, number worldY)
+		local runs = self:GetFlatRunsCached(mapIndex)
+		for i = 1, #runs do
+			local run = runs[i]
+			if worldX >= run.xMin - 0.05 and worldX <= run.xMax + 0.05 and math.abs(run.y - worldY) <= 0.1 then
+				return { xMin = run.xMin, xMax = run.xMax }
+			end
+		end
+		return nil
+	end
+
+	@ExecSpace("ServerOnly")
+	method table GetFlatRunBounds(FootholdComponent footholdComp, any hit)
+		local y = hit.StartPoint.y
+		local xMin = hit.StartPoint.x
+		local xMax = hit.EndPoint.x
+		
+		local prevId = hit.PreviousFootholdId
+		while prevId ~= 0 do
+			local prev = footholdComp:GetFoothold(prevId)
+			if prev == nil or not self:IsFlatSegment(prev) or math.abs(prev.StartPoint.y - y) > self.FlatSlopeTolerance then break end
+			xMin = prev.StartPoint.x
+			prevId = prev.PreviousFootholdId
+		end
+		
+		local nextId = hit.NextFootholdId
+		while nextId ~= 0 do
+			local nxt = footholdComp:GetFoothold(nextId)
+			if nxt == nil or not self:IsFlatSegment(nxt) or math.abs(nxt.StartPoint.y - y) > self.FlatSlopeTolerance then break end
+			xMax = nxt.EndPoint.x
+			nextId = nxt.NextFootholdId
+		end
+		
+		return { xMin = xMin, xMax = xMax }
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean IsFlatSegment(any seg)
+		return math.abs(seg.EndPoint.y - seg.StartPoint.y) <= self.FlatSlopeTolerance
+	end
+
+	@ExecSpace("ServerOnly")
+	method number GetBaselineGroundY(integer mapIndex, FootholdComponent footholdComp)
+		if self._baselineGroundYCache == nil then self._baselineGroundYCache = {} end
+		if self._baselineGroundYCache[mapIndex] ~= nil then return self._baselineGroundYCache[mapIndex] end
+		
+		local offsetX = self:GetZoneOffsetX(mapIndex)
+		local scanMin = offsetX - 8
+		local scanMax = offsetX + 8
+		
+		local all = footholdComp:GetFootholdAll()
+		local minY = 0
+		for i = 1, #all do
+			local seg = all[i]
+			if self:IsFlatSegment(seg) and seg.StartPoint.x >= scanMin and seg.StartPoint.x <= scanMax then
+				if seg.StartPoint.y < minY then minY = seg.StartPoint.y end
+				if seg.EndPoint.y < minY then minY = seg.EndPoint.y end
+			end
+		end
+		self._baselineGroundYCache[mapIndex] = minY
+		return minY
+	end
+
+	@ExecSpace("ServerOnly")
+	method void TryStartBonusStage()
+		if isvalid(self._bonusBoss) then return end
+		
+		local chance = self._map10Visited and self.BonusBossChance or 1.0
+		self._map10Visited = true
+		
+		if _UtilLogic:RandomDouble() >= chance then
+			self:ActivateMap(10)
+			return
+		end
+		
+		self:SpawnBonusBoss()
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SpawnBonusBoss()
+		-- 그룹C 병합 이후 맵10은 물리적으로 map07.map 안의 Zone10 자식 컨테이너다 — 하드코딩된
+		-- "/maps/map10" 경로 대신 ZoneInfo 기반 GetZoneEntity로 조회해야 한다.
+		local map = self:GetZoneEntity(10)
+		if map == nil then return end
+		
+		local existing = map:GetChildComponentsByTypeName("script.MonsterAI", false)
+		for i = 1, #existing do
+			---@type MonsterAI
+			local mob = existing[i]
+			mob.Entity:Destroy()
+		end
+		
+		-- map(GetZoneEntity(10))은 이미 Zone10 자식 컨테이너 자신이 월드 오프셋(spawnX=46.5)을 갖고
+		-- 있으므로, 그 밑에 스폰되는 엔티티의 Position/wander 이동량은 전부 "그 컨테이너 기준 로컬"이다.
+		-- 여기에 GetZoneOffsetX를 또 더하면 오프셋이 두 번 적용돼(46.5+46.5) 보스가 존 밖 저 멀리
+		-- 스폰/배회하다가 카메라 밖으로 사라진다(실측 확인 — "보스가 존 밖으로 나가 화면에서 안 보임").
+		-- bands 테이블 자체는 이미 로컬(병합 전 맵10 기준) 좌표이므로 그대로 쓴다.
+		local bands = self:GetZonePlatformBands(10)
+		local groundY = bands[1].y
+		local pos = Vector3(0, groundY, 0)
+		local entity = _SpawnService:SpawnByModelId(self.BonusBossModelId, "BonusBoss", pos, map)
+		if entity == nil then
+			log_error("MonsterSpawner: SpawnBonusBoss failed")
+			return
+		end
+		
+		---@type MonsterAI
+		local ai = entity:GetComponent("script.MonsterAI")
+		if ai ~= nil then
+			ai:InitializeBonusBoss(bands[1].xMin + 0.4, bands[1].xMax - 0.4, groundY, self.BonusBossSpriteRUID)
+		end
+		
+		self._bonusBoss = entity
+		self._bonusBossActive = true
+		-- 보스 지속시간이 끝난 뒤 평소 웨이브가 곧바로 이어지도록 활성 맵으로 표시해둔다
+		if self._activeMaps == nil then self._activeMaps = {} end
+		self._activeMaps[10] = true
+		log("MonsterSpawner: bonus boss spawned on map10 (combat locked for " .. self.BonusTimerStartDelay .. "s)")
+		
+		-- InitializeBonusBoss가 이미 MonsterAI._bonusBossCombatLocked=true로 걸어뒀다 — 여기서는
+		-- BonusTimerStartDelay(1초) 뒤에 실제로 타이머를 띄우면서 풀어준다(유저 지정: "30초를 유저가
+		-- 인지하고 공격을 하길 원한다").
+		_TimerService:SetTimerOnce(function()
+			if isvalid(self) then self:StartMap10BonusTimer() end
+		end, self.BonusTimerStartDelay)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void StartMap10BonusTimer()
+		if isvalid(self._bonusBoss) then
+			---@type MonsterAI
+			local ai = self._bonusBoss:GetComponent("script.MonsterAI")
+			if ai ~= nil then ai._bonusBossCombatLocked = false end
+		end
+		self.BonusBossTimerActive = true
+		self._bonusBossRemaining = self.BonusBossDuration
+		self.BonusBossRemainingSeconds = math.ceil(self.BonusBossDuration)
+		_TimerService:SetTimerOnce(function()
+			if isvalid(self) then self:EndBonusStage() end
+		end, self.BonusBossDuration)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void EndBonusStage()
+		if isvalid(self._bonusBoss) then
+			---@type MonsterAI
+			local ai = self._bonusBoss:GetComponent("script.MonsterAI")
+			if ai ~= nil then ai:PlayDespawnJump() else self._bonusBoss:Destroy() end
+		end
+		self._bonusBoss = nil
+		self._bonusBossActive = false
+		self.BonusBossTimerActive = false
+		self.BonusBossRemainingSeconds = 0
+		self._bonusBossRemaining = 0
+		log("MonsterSpawner: bonus stage ended on map10")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnSyncProperty(string name, any value)
+		if name == "BonusBossTimerActive" then
+			self:UpdateBonusBossBoardVisibility()
+		elseif name == "BonusBossRemainingSeconds" then
+			self:UpdateBonusBossTimerText()
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void UpdateBonusBossBoardVisibility()
+		local board = _EntityService:GetEntityByPath(self.BonusBossBoardPath)
+		if board ~= nil then board.Enable = self.BonusBossTimerActive end
+		if self.BonusBossTimerActive then self:UpdateBonusBossTimerText() end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void UpdateBonusBossTimerText()
+		local textEntity = _EntityService:GetEntityByPath(self.BonusBossTimerTextPath)
+		if textEntity == nil then return end
+		local renderer = textEntity.TextGUIRendererComponent
+		if renderer == nil then return end
+		local m = math.floor(self.BonusBossRemainingSeconds / 60)
+		local s = self.BonusBossRemainingSeconds % 60
+		renderer.Text = string.format("%02d:%02d", m, s)
+	end
+
+	@ExecSpace("ServerOnly")
+	method Vector3 GetSpawnPosition(integer mapIndex, boolean isBoss, integer speciesIdx, Entity map)
+		-- 비행형 종(맵15 박쥐)은 밴드/레이캐스트 어느 쪽과도 무관하게 항상 화면 안전 범위(±5) X +
+		-- FlyingMinY~FlyingMaxY 사이 임의 높이에 스폰한다 — 발판 유무와 상관없이 가장 먼저 처리해야
+		-- 한다(맵15는 아래 바닥/공중 발판 밴드도 갖고 있어서, 이 체크가 bands==nil 분기 안에 있으면
+		-- 밴드가 있는 맵에서는 아예 실행되지 않아 비행형이 무력화된다).
+		if not isBoss and mapIndex >= 7 and speciesIdx > 0 and self:GetMapIsFlyingSpecies(mapIndex, speciesIdx) then
+			local flyOffsetX = self:GetZoneOffsetX(mapIndex)
+			-- 화면 안전범위(±5)는 스폰 "순간" 위치만 고려한 값이었다 — 비행형은 스폰 후 MonsterAI.UpdateFlying이
+			-- 좌우로 ±3(MonsterAI.FlyRangeX 기본값 — MonsterSpawner엔 그 프로퍼티가 없어 여기선 상수로 직접
+			-- 뺀다, 어차피 코드 전체에서 재할당되는 곳이 없어 항상 3.0)만큼 사인파로 계속 흔드는데, 이 흔들림
+			-- 폭을 안 빼고 그대로 ±5 전체를 스폰 범위로 쓰면 존 경계 쪽에 스폰된 개체가 배회 중 최대 ±8까지
+			-- 밀려나 존 간격(15.5, 중간지점 7.75)을 넘어 옆 존으로 넘어가 보이는 버그가 있었다(유저가 존6에서
+			-- 실제로 확인). 배회 폭만큼 스폰 범위를 미리 좁혀서, 배회를 다 더해도 항상 원래 안전범위(±5) 안에 머물게 한다.
+			local flyRangeX = 3.0
+			local spawnHalfRange = math.max(0, 5 - flyRangeX)
+			local fx = (_UtilLogic:RandomDouble() * 2 * spawnHalfRange) - spawnHalfRange + flyOffsetX
+			local fy = self.FlyingMinY + _UtilLogic:RandomDouble() * (self.FlyingMaxY - self.FlyingMinY)
+			return Vector3(fx, fy, 0)
+		end
+		
+		-- 존13~15는 하드코딩 밴드 대신 실제 FootholdComponent를 레이캐스트하는 방식을 쓴다(§"존13~15 전용
+		-- 스폰 방식" 참고) — 발판을 Maker에서 편집해도 코드가 어긋나지 않는다.
+		-- 존8도 같은 방식으로 옮겼다(2026-07-21) — 유저가 지형을 "완만한 언덕"에서 "아치(기둥+지붕,
+		-- 기둥 밑동에 바닥이 끊긴 구덩이 2곳)"로 바꿨는데, 하드코딩 밴드(GetZonePlatformBands)는 여전히
+		-- "바닥 전체가 평평하다"고 가정해서 그 구덩이 안에도 몬스터를 스폰시키는 버그가 있었다(실측 확인,
+		-- 스크린샷으로 위치 확인). 밴드를 수동으로 고치는 대신 이 라이브 레이캐스트 방식으로 옮겨서,
+		-- 앞으로 존8 지형을 또 바꿔도 코드를 다시 맞출 필요가 없게 한다.
+		-- 존28도 같은 이유로 추가(2026-07-21) — 기둥 두 개(x=14.51/15.27) 사이를 잇는 좁은 공중 다리
+		-- 발판(폭 0.76)이 있는데, 기존 방식(무작위 X 하나 뽑고 그 자리 아래로 레이캐스트)은 허공에 빠지는
+		-- 버그는 아니었지만(다리가 항상 걸림) 넓은 랜덤 범위 대비 다리 폭이 좁아 그 위에 스폰될 확률이
+		-- 낮았다 — 몬스터가 "안 뜨는 것처럼" 보이는 원인. GetFlatRuns가 다리 구간도 별도 run으로 인식해
+		-- 폭 비례 확률로 골라주므로 이쪽으로 옮기면 다리 위에도 고르게 스폰된다.
+		-- 존27/29도 같은 이유로 추가(2026-08-05, 유저 지정) — 이 둘은 "바닥→기둥으로 둘러싸인 중간
+		-- 발판(y=-0.49)→맨 위 공중타일(y=1.31)" 3단 구조인데, 기존 단일 랜덤X+아래방향 레이캐스트
+		-- 방식은 그 X구간에서 항상 맨 위 공중타일(레이가 먼저 닿는 발판)이나 바닥에만 꽂혀서, 기둥
+		-- 사이 중간 발판이 위쪽 타일에 가려져 스폰 후보에 아예 들어가지 못했다(실측 확인). GetFlatRuns는
+		-- 레이캐스트가 아니라 발판 데이터 자체를 순회하므로 가려진 중간 발판도 정상적으로 잡히고, 기둥
+		-- 자체(수직에 가까운 조각, dy=0.41~0.6)는 IsFlatSegment가 자동으로 걸러 스폰 후보에서 빠진다.
+		-- 존30은 같은 구간(x38~55)을 실측했을 때 기둥/공중타일 구조가 없어 대상에서 제외했다.
+		-- 에피소드2 map2 존7~10(mapIndex61~64)도 같은 이유로 추가(2026-08-19) — 라이오너/그류핀류
+		-- (지상형)와 지그재그 종(루이넬류)이 여신 탑 컨셉 공중타일(폭 1.7~4.4 정도의 좁은 발판들, 존8은
+		-- 기둥 구조까지 있음) 위에 등장해야 하는데, 기존 단일 랜덤X+아래방향 레이캐스트 방식은 발판 경계
+		-- 여유(EdgeMargin) 없이 무작위 X를 그대로 쓰다 보니 타일 끝에 바짝 붙어 스폰되는 경우가 있었다
+		-- (유저 리포트: "지그재그 움직일 때 타일 아닌 부분도 밟는 것 같다"). GetFlatRuns 기반 방식은
+		-- 발판별로 EdgeMarginAerial 여유를 두고 폭 비례 확률로 고르므로 더 안전하다(지그재그 진폭 자체의
+		-- 클램프는 MonsterAI.GetContainingRunBounds 별도 처리 — 아래 참고).
+		-- 에피소드2 map3/map4(mapIndex 65~84)도 같은 이유로 추가(2026-08-19) — 니할 사막 컨셉 맵 전체에
+		-- 걸쳐 3블록짜리 작은 공중 발판이 15개 안팎 촘촘히 흩어져 있는데(fromGetFootholds 실측), 기존
+		-- 단일 랜덤X+아래방향 레이캐스트(GetGroundY)는 항상 가장 위에 걸리는 발판만 잡아서, 그 발판이
+		-- 있는 X구간은 바로 아래 진짜 바닥에 영원히 스폰이 안 된다(유저 리포트: "공중발판 아래에 몹 안뜨는데
+		-- 너무 많음"). GetFlatRuns 기반 방식으로 옮기면 바닥/공중 발판 전부 폭 비례 확률로 고르게 되어
+		-- 발판 아래 바닥도 다시 스폰 후보에 들어간다.
+		-- ep2_map2_hidden(mapIndex85~88)도 같은 이유로 추가(2026-08-24, 유저 지적 "공중 발판이랑 바닥
+		-- 바꾼게 있으니깐 확인해야하고") — 유저가 이 맵에서 존1~3 근방(x대략 -0.85~2.65 / 12.65~18.85 /
+		-- 24.35~37.75)의 지면·공중 발판 배치를 ep2_map2와 다르게 바꿔놨는데(실측 getFootholds 대조 —
+		-- ep2_map2에선 그 구간 자체가 지면이 융기하는 언덕이었지만 여기선 지면은 평탄히 두고 별개의
+		-- 분리된 공중 발판을 얹었다), 이 X구간이 전부 각 존의 스폰 화면범위(±5) 안에 들어온다. 기존
+		-- 단일 랜덤X+아래방향 레이캐스트(GetGroundY)를 그대로 쓰면 레이가 위에 뜬 공중 발판에 먼저
+		-- 걸려 지상형 몬스터가 허공에 스폰될 위험이 있다 — GetFlatRuns 기반 방식으로 바닥/공중 전부
+		-- 폭 비례 확률 후보에 넣어야 안전하다.
+		-- ep3_map1(mapIndex89~98)도 동일 패턴(2026-08-24, 유저 "얘도 발판바꿨으니 다 체크가 필요해") —
+		-- 실측 getFootholds(258개) 결과 존1/2/3/6/7/8/9/10(89,90,91,94,95,96,97,98)의 스폰 화면범위(±5)
+		-- 안에 지면과 분리된 공중 발판이 촘촘히 걸려 있다(groupID 2~16, ep2_map3/4와 동일한 밀도).
+		-- 존4/5(92,93)만 예외적으로 분리 공중 발판이 없지만(대신 지면 자체가 융기한 둔덕/평지 —
+		-- ZoneInfo landY로 처리), 10존 전부를 이 라우팅에 태워도 무해하므로 범위째로 추가한다.
+		-- ep3_map2(mapIndex99~108)도 map1과 동일 원본을 덤프한 맵이라 발판 패턴이 완전히 동일하다
+		-- (2026-08-25, 유저 "얘도 덤프떠서 만들었거든... 발판 확인") — 실측 결과도 map1과 일치.
+		-- ep3_map3(mapIndex109~118)도 같은 이유로 추가(2026-08-25) — 다만 발판 구조는 map1/2와 달리
+		-- 이 맵 고유(존1/2/7/8/10에 공중 발판, 존4/5에 독자적 둔덕/단) — GetFlatRuns 기반 방식이라
+		-- 코드 수정 없이 실제 발판 데이터만 따라간다.
+		-- ep3_map4(mapIndex119~128)도 같은 이유로 추가(2026-08-25) — 실측 getFootholds(289개) 결과
+		-- 존1/2/3/8(119,120,121,126)에 지면과 분리된 공중 발판, 존4/5(122,123)에 독자적 단이 있고
+		-- 나머지는 단일 지면 — GetFlatRuns 기반 방식이라 이 역시 코드 수정 없이 실제 발판을 그대로 따라간다.
+		if (mapIndex >= 13 and mapIndex <= 15) or mapIndex == 8 or mapIndex == 27 or mapIndex == 28 or mapIndex == 29
+			or (mapIndex >= 61 and mapIndex <= 64) or (mapIndex >= 65 and mapIndex <= 84) or (mapIndex >= 85 and mapIndex <= 88)
+			or (mapIndex >= 89 and mapIndex <= 128) then
+			return self:GetSpawnPositionFromFootholds(mapIndex, isBoss, map)
+		end
+		
+		local bands = self:GetZonePlatformBands(mapIndex)
+		if bands == nil then
+			local rootMap = _EntityService:GetEntityByPath("/maps/" .. _MapManager:GetMapName(mapIndex))
+			local offsetX = self:GetZoneOffsetX(mapIndex)
+		
+			if not isBoss and mapIndex >= 7 and speciesIdx > 0 and self:GetMapIsRangedSpecies(mapIndex, speciesIdx) then
+				local range = self:GetRangedTileRange(mapIndex)
+				local rrx = range.minX + _UtilLogic:RandomDouble() * (range.maxX - range.minX)
+				return Vector3(rrx, self:GetGroundY(rootMap, rrx), 0)
+			end
+		
+			if not isBoss and mapIndex == 12 then
+				local rx = self:RollXAvoidingRange(offsetX - 5, offsetX + 5, self.RangedTileMinX, self.RangedTileMaxX)
+				return Vector3(rx, self:GetGroundY(rootMap, rx), 0)
+			end
+		
+			-- 기존 로직 그대로 (맵1~3, 보스, 또는 원거리 종이 없는 맵 전용 풀) — offsetX는 병합 안 된
+			-- 맵에서는 항상 0이라 아래 결과에 영향 없음
+			local rx = (_UtilLogic:RandomDouble() * 10) - 5
+			if isBoss then rx = 0 end
+			local worldX = rx + offsetX
+			return Vector3(worldX, self:GetGroundY(rootMap, worldX), 0)
+		end
+		
+		-- bands 테이블은 원본(병합 전) 맵의 로컬 좌표라, 그룹B/C처럼 존이 오프셋을 가지면 여기도
+		-- GetZoneOffsetX를 더해야 한다 — 그룹D는 밴드가 있는 존(11/12)이 없어서 이 버그가 지금까지
+		-- 한 번도 실전 테스트를 안 받았다(신규 코드 취급, 그룹B에서 처음 검증).
+		local offsetX = self:GetZoneOffsetX(mapIndex)
+		
+		if isBoss then
+			-- 보스는 임팩트를 위해 바닥 밴드 중앙에 고정
+			local ground = bands[1]
+			return Vector3(offsetX, ground.y, 0)
+		end
+		
+		-- 발판 폭 그대로 쓰면 화면 가장자리(카메라 가시범위 밖, 대략 ±6.4)에서 스폰돼 몬스터가
+		-- 양옆으로 잘려 보인다 — 맵1~3과 동일하게 화면에 안전하게 들어오는 ±5 범위로 각 밴드를 잘라서 쓴다.
+		-- 그리고 발판 자체의 가장자리에도 몬스터 스프라이트 폭만큼(edgeMargin) 여유를 둬야 공중 발판
+		-- 끝에 반쯤 걸쳐서 스폰되는 걸 막을 수 있다. 고정값 0.4를 그대로 양쪽에서 빼면 존13/15의 좁은
+		-- 발판(폭 0.9 이하)은 실사용 폭이 0에 가깝게 눌려서 사실상 안 뽑히는 것과 마찬가지가 된다
+		-- (실측 확인 — 300번 중 3번). 밴드 폭의 15%로 상한을 둬서 좁은 발판도 최소한의 스폰 확률을 유지한다.
+		local safeMin = offsetX - 5
+		local safeMax = offsetX + 5
+		local clamped = {}
+		for i = 1, #bands do
+			local width = bands[i].xMax - bands[i].xMin
+			local edgeMargin = math.min(0.4, width * 0.15)
+			local xMin = math.max(bands[i].xMin + offsetX + edgeMargin, safeMin)
+			local xMax = math.min(bands[i].xMax + offsetX - edgeMargin, safeMax)
+			if xMax > xMin then
+				table.insert(clamped, { y = bands[i].y, xMin = xMin, xMax = xMax })
+			end
+		end
+		if #clamped == 0 then
+			return Vector3(offsetX, bands[1].y, 0)
+		end
+		
+		local totalWidth = 0
+		for i = 1, #clamped do
+			totalWidth = totalWidth + (clamped[i].xMax - clamped[i].xMin)
+		end
+		local roll = _UtilLogic:RandomDouble() * totalWidth
+		local chosen = clamped[1]
+		local acc = 0
+		for i = 1, #clamped do
+			acc = acc + (clamped[i].xMax - clamped[i].xMin)
+			if roll <= acc then
+				chosen = clamped[i]
+				break
+			end
+		end
+		
+		local x = chosen.xMin + _UtilLogic:RandomDouble() * (chosen.xMax - chosen.xMin)
+		return Vector3(x, chosen.y, 0)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void StopSpawning()
+		self._running = false
+	end
+
+	@ExecSpace("ServerOnly")
+	method void BeginGameplay()
+		self._running = true
+		log("MonsterSpawner: gameplay started")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void RestartSpawning()
+		self._timer = self.EarlyPhaseSpawnInterval
+		self._elapsedPlayTime = 0
+		self._nextBossTimer = self.FirstBossTime
+		-- 다시하기/이어하기 시점에 아직 안 태어난 큐 항목이 남아있으면(예: 존이동 직후 재시작) 이전
+		-- 런의 wave/mapIndex를 들고 있는 배치라 그대로 두면 엉뚱한 스탯으로 스폰된다 — 통째로 비운다.
+		self._spawnQueue = {}
+		-- 살아서 쫓아오던 보스가 있었다면(ClearAllMonsters가 실제 엔티티는 이미 정리) 참조도 함께 비운다
+		self._currentBoss = nil
+		self._bossZone = -1
+		self._running = true
+		log("MonsterSpawner: spawning restarted")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResumeSpawning()
+		self._running = true
+		log("MonsterSpawner: spawning resumed (timer preserved)")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetEliteTracking()
+		self._lastEliteWave = 0
+		self._nextEliteTimer = -1
+		self._lastSpikeWave = 0
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ClearAllMonsters()
+		local total = 0
+		for idx = _MapManager.MinMapIndex, _MapManager.MaxMapIndex do
+			local map = self:GetZoneEntity(idx)
+			if map ~= nil then
+				local monsters = map:GetChildComponentsByTypeName("script.MonsterAI", false)
+				for i = 1, #monsters do
+					monsters[i].Entity:Destroy()
+				end
+				total = total + #monsters
+			end
+		end
+		log("MonsterSpawner: cleared " .. total .. " monster(s)")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void PushAllMonstersBack()
+		local total = 0
+		for idx = _MapManager.MinMapIndex, _MapManager.MaxMapIndex do
+			local map = self:GetZoneEntity(idx)
+			if map ~= nil then
+				local monsters = map:GetChildComponentsByTypeName("script.MonsterAI", false)
+				for i = 1, #monsters do
+					---@type MonsterAI
+					local ai = monsters[i].Entity:GetComponent("script.MonsterAI")
+					if ai ~= nil then ai:PushBack() end
+				end
+				total = total + #monsters
+			end
+		end
+		log("MonsterSpawner: pushed back " .. total .. " monster(s)")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnEndPlay()
+		self._running = false
+	end
+
+end

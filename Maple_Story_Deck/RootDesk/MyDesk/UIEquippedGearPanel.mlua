@@ -1,0 +1,107 @@
+@Component
+script UIEquippedGearPanel extends Component
+
+	property CostumeManagerComponent CostumeManager = nil
+
+	property table SlotEntityByGearCategory = {}
+
+	property UIEquipPopup EquipPopup = nil
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		local playerInfo = self.Entity:GetChildByName("PlayerInfo")
+		local avatar = playerInfo:GetChildByName("UIAvatarEntity")
+		self.CostumeManager = avatar.CostumeManagerComponent
+		
+		-- 유저 요청: 슬롯이 너무 많아서 실제로 쓰는 부위(무기/상체/하체/모자/망토/장갑)만 남기고 나머지
+		-- (부무기/어깨/신발/눈/얼굴/펜던트/귀/귀장신구)는 UI에서 제거했다 — 해당 카테고리 아이템을
+		-- 장착해도 UI 슬롯엔 안 보이지만 아바타에는 그대로 반영된다(Update()의 CostumeManager 갱신은
+		-- 카테고리 전체를 계속 순회하므로 영향 없음). 상체/하체는 따로 보여달라는 요청으로 Longcoat(상체
+		-- 슬롯)와 별개로 Pants(하체 슬롯)를 추가했다 — 지금 있는 유일한 옷(Pensalir Battle Mail)은
+		-- Longcoat라 상체 슬롯에만 뜨고, 하체는 Pants 카테고리 아이템이 생기기 전까진 비어 있는다.
+		local equipmentGrid = self.Entity:GetChildByName("EquipInfoGrid")
+		self.SlotEntityByGearCategory = {
+			[_GearCategoryEnum.OneHandedWeapon] = equipmentGrid:GetChildByName("MainWeapon"),
+			[_GearCategoryEnum.Longcoat] = equipmentGrid:GetChildByName("Coat"),
+			[_GearCategoryEnum.Pants] = equipmentGrid:GetChildByName("Pants"),
+			[_GearCategoryEnum.Cap] = equipmentGrid:GetChildByName("Cap"),
+			[_GearCategoryEnum.Glove] = equipmentGrid:GetChildByName("Glove"),
+			[_GearCategoryEnum.Cape] = equipmentGrid:GetChildByName("Cape"),
+		}
+		
+		for i, entity in pairs(self.SlotEntityByGearCategory) do
+			---@type Entity
+			local slotEntity = entity
+			slotEntity.UIEquippedGearGridCell.EquipPopup = self.EquipPopup
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Update(table gearGUIDByCategory)
+		if gearGUIDByCategory == nil then
+			gearGUIDByCategory = {}
+		end
+		
+		local playerInventory = _UserService.LocalPlayer.PkgPlayerInventory
+		
+		-- 아바타 슬롯은 "이번에 무엇을 입힐지"를 먼저 전부 모은 뒤 한 번에 반영한다. 인벤토리 슬롯
+		-- 카테고리와 아바타 카테고리가 1:1이 아니기 때문(활/양손검은 인벤토리상 OneHandedWeapon
+		-- 슬롯이지만 아바타상 TwoHandedWeapon) — 슬롯을 순회하며 즉시 SetEquip/Clear 하면 나중 순회가
+		-- 앞서 입힌 걸 빈 문자열로 덮어써서 아바타가 벗겨진다.
+		local avatarEquipByCategory = {}
+		
+		for i, gearEnum in ipairs(_GearCategoryEnum:GetEnums()) do
+			if gearEnum == _GearCategoryEnum.TwoHandedWeapon then
+				gearEnum = _GearCategoryEnum.OneHandedWeapon
+			end
+		
+			---@type Entity
+			local slotEntity = self.SlotEntityByGearCategory[gearEnum]
+			local gearGUID = gearGUIDByCategory[gearEnum]
+			---@type ItemStruct
+			local itemStruct = nil
+			if gearGUID then itemStruct = playerInventory.Items[gearGUID] end
+		
+			-- ⚠ 장착 목록(AttachedNormalGearItems)에 GUID는 남아있는데 실제 아이템이 사라진
+			-- "댕글링 장착"이 발생할 수 있다(아이템 강제 삭제/데이터 정리 후 실측 — 인벤을 여는 순간
+			-- LEA-2007 AttemptToIndex로 Update 전체가 죽어서 장착 슬롯과 아바타가 통째로 안 그려졌다).
+			-- GUID 유무가 아니라 실제 itemStruct 유무로 분기해서 이 경우 빈 슬롯으로 취급한다.
+			if itemStruct ~= nil then
+				if slotEntity ~= nil then slotEntity.UIEquippedGearGridCell:Set(itemStruct) end
+		
+				-- 장비 라인 아이템(WeaponTierDataLogic 관리 9종)은 등급에 따라 외형이 바뀌므로
+				-- ItemGearDataSet의 고정 AvatarRUID 컬럼(비어 있음)이 아니라 등급별 RUID를 써야 한다.
+				-- ⚠ SetEquip은 "thumbnail://" 접두사가 붙으면 조용히 미착용 처리되므로 GetAvatarRUID로
+				-- 접두사를 뗀 순수 Guid를 넘긴다(아바타에 아무것도 안 입혀지던 버그의 원인)
+				if _WeaponTierDataLogic:IsWeaponItem(itemStruct.ItemId) then
+					local gearStruct = itemStruct:GetGearStruct()
+					local grade = 0
+					if gearStruct ~= nil then grade = gearStruct.Grade end
+					local avatarGearEnum = _WeaponTierDataLogic:GetAvatarGearCategory(itemStruct.ItemId)
+					if avatarGearEnum ~= -1 then
+						avatarEquipByCategory[avatarGearEnum] = _WeaponTierDataLogic:GetAvatarRUID(itemStruct.ItemId, grade)
+					end
+				else
+					local gearData = itemStruct:GetGearData()
+					if gearData ~= nil then
+						avatarEquipByCategory[gearEnum] = gearData.AvatarRUID
+					end
+				end
+			else
+				if slotEntity ~= nil then slotEntity.UIEquippedGearGridCell:Clear() end
+			end
+		end
+		
+		-- 모아둔 결과를 전 카테고리에 일괄 반영 — 이번에 입힐 게 없는 카테고리는 ""로 벗긴다
+		for i, gearEnum in ipairs(_GearCategoryEnum:GetEnums()) do
+			---@type MapleAvatarItemCategory
+			local avatarCategoryEnum = _GearCategoryEnum:ToAvatarCategory(gearEnum)
+			if avatarCategoryEnum ~= _GearCategoryEnum.None then
+				local ruid = avatarEquipByCategory[gearEnum]
+				if ruid == nil then ruid = "" end
+				self.CostumeManager:SetEquip(avatarCategoryEnum, ruid)
+			end
+		end
+	end
+
+end

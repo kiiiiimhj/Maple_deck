@@ -1,0 +1,79 @@
+@Logic
+script Ep2Map2FlipPotionLogic extends Logic
+
+	@Sync
+	property boolean Triggered = false
+
+	property string TargetObjectPath = "/maps/ep2_map2/MapObject_230"
+
+	property integer PotionType = 2
+
+	property any _startScale = nil
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		local target = _EntityService:GetEntityByPath(self.TargetObjectPath)
+		if target ~= nil then
+			self._startScale = target.TransformComponent.Scale
+		else
+			log_error("Ep2Map2FlipPotion: target entity not found at " .. self.TargetObjectPath)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method Vector3 ComputeDropFall(Entity refEntity)
+		local worldPos = refEntity.TransformComponent.WorldPosition
+		local fallHeight = 0
+		local groundWorldY = worldPos.y
+		local map = refEntity.CurrentMap
+		if map ~= nil then
+			---@type FootholdComponent
+			local foothold = map:GetComponent("FootholdComponent")
+			if foothold ~= nil then
+				local hits = foothold:RaycastAll(Vector2(worldPos.x, worldPos.y), Vector2(0, -1), 50)
+				local groundY = nil
+				local bestDist = nil
+				for i = 1, #hits do
+					local h = hits[i]
+					local y = h:GetYByX(worldPos.x)
+					local dist = worldPos.y - y
+					if bestDist == nil or dist < bestDist then
+						bestDist = dist
+						groundY = y
+					end
+				end
+				if groundY ~= nil and worldPos.y > groundY then
+					fallHeight = (worldPos.y - groundY) * 100
+					groundWorldY = groundY
+				end
+			end
+		end
+		return Vector3(fallHeight, groundWorldY, 0)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnObjectTouched(Entity obj)
+		if self.Triggered then return end
+		if not isvalid(obj) then return end
+		
+		self.Triggered = true
+		local scale = obj.TransformComponent.Scale
+		obj.TransformComponent.Scale = Vector3(1, scale.y, scale.z)
+		log("Ep2Map2FlipPotion: flipped to Scale.x=1, granting white potion")
+		
+		local fall = self:ComputeDropFall(obj)
+		local worldPos = obj.TransformComponent.WorldPosition
+		_GameManager:ApplyPotionDrop(self.PotionType, worldPos, fall.x, fall.y, 1.0)
+		-- 유저 지정: 이 토스트 메세지는 제거(2026-08-22, "필요없음")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		self.Triggered = false
+		local target = _EntityService:GetEntityByPath(self.TargetObjectPath)
+		if target ~= nil and isvalid(target) and self._startScale ~= nil then
+			target.TransformComponent.Scale = self._startScale
+		end
+	end
+
+end

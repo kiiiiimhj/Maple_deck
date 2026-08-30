@@ -1,0 +1,84 @@
+@Logic
+script Ep2Map1ChestEasterEggLogic extends Logic
+
+	@Sync
+	property boolean Opened = false
+
+	property string MedalItemId = "unknown_medal"
+
+	property string RequiredKeyItemId = "unknown_key"
+
+	property string ChestClosedSpriteRUID = "9cff692190eb472fba4f6d0e68f213a7"
+
+	property string ChestOpenSpriteRUID = "7a09c81fa4534f898a41595750d7411d"
+
+	property number ChestOpenVisualDuration = 0.5
+
+	property number ChestDisappearBuffer = 0.3
+
+	property string NoKeyToastText = "열쇠가 필요합니다!"
+
+	@ExecSpace("ServerOnly")
+	method void OnObjectTouched(Entity touchedObject)
+		if self.Opened then return end
+		if not _Ep2Map1CloudEasterEggLogic.CloudCleared then
+			log("Ep2Map1ChestEasterEgg: cloud not cleared yet, ignoring")
+			return
+		end
+		if _PlayerInventory:GetItemCount(self.RequiredKeyItemId) < 1 then
+			log("Ep2Map1ChestEasterEgg: no key, ignoring")
+			self:ShowNoKeyToast(touchedObject)
+			return
+		end
+		
+		self.Opened = true
+		_PlayerInventory:RemoveItem(self.RequiredKeyItemId, 1)
+		self:PlayChestOpenVisual(touchedObject)
+		-- 열림 연출을 잠깐 보여준 뒤 완전히 꺼서(Enable=false) 더 이상 눌리지 않고 화면에서도 사라지게 한다
+		_TimerService:SetTimerOnce(function()
+			if isvalid(touchedObject) then touchedObject.Enable = false end
+		end, self.ChestOpenVisualDuration + self.ChestDisappearBuffer)
+		local worldPos = touchedObject.TransformComponent.WorldPosition
+		local itemDef = _PlayerInventory:GetItemDef(self.MedalItemId)
+		_GameManager:ScheduleLootDrop(worldPos, itemDef.icon, 0, worldPos.y, function()
+			_PlayerInventory:AddItem(self.MedalItemId, 1)
+		end, 1.0)
+		log("Ep2Map1ChestEasterEgg: opened, consumed 1x " .. self.RequiredKeyItemId .. ", granted 1x " .. self.MedalItemId)
+	end
+
+	@ExecSpace("Multicast")
+	method void PlayChestOpenVisual(Entity chestEntity)
+		if self:IsServer() then return end
+		if not isvalid(chestEntity) then return end
+		local renderer = chestEntity.SpriteRendererComponent
+		if renderer ~= nil then renderer.SpriteRUID = self.ChestOpenSpriteRUID end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ShowNoKeyToast(Entity chestEntity)
+		if not isvalid(chestEntity) then return end
+		local map = chestEntity.CurrentMap
+		if map == nil then return end
+		local pos = chestEntity.TransformComponent.WorldPosition
+		local textPos = Vector3(pos.x, pos.y + 1.2, pos.z - 0.1)
+		local fx = _SpawnService:SpawnByModelId("damagenumber", "NoKeyToast", textPos, map)
+		if fx == nil then return end
+		local renderer = fx.TextRendererComponent
+		if renderer ~= nil then
+			renderer.Text = self.NoKeyToastText
+			renderer.FontColor = Color(1, 0.3, 0.3, 1)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		self.Opened = false
+		local chestEntity = _EntityService:GetEntityByPath("/maps/ep2_map1/object-3428_31")
+		if chestEntity ~= nil then
+			chestEntity.Enable = true
+			local renderer = chestEntity.SpriteRendererComponent
+			if renderer ~= nil then renderer.SpriteRUID = self.ChestClosedSpriteRUID end
+		end
+	end
+
+end

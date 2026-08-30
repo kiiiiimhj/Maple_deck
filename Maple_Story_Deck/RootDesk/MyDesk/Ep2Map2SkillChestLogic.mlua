@@ -1,0 +1,128 @@
+@Logic
+script Ep2Map2SkillChestLogic extends Logic
+
+	@Sync
+	property boolean Triggered = false
+
+	property number PlacementTolerance = 0.3
+
+	property string TargetObjectPath = "/maps/ep2_map2/MapObject_269"
+
+	property string RewardSourceObjectPath = "/maps/ep2_map2/MapObject_240"
+
+	property string SkillRewardMessage = "스킬을 얻었다!"
+
+	property string PotionRewardMessage = "회복 포션을 얻었다!"
+
+	property integer FallbackPotionType = 1
+
+	property any _startPosition = nil
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		local target = _EntityService:GetEntityByPath(self.TargetObjectPath)
+		if target ~= nil then
+			self._startPosition = target.TransformComponent.Position
+		else
+			log_error("Ep2Map2SkillChest: target entity not found at " .. self.TargetObjectPath)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void CheckPlacement(Entity item, number x, number y)
+		if self.Triggered then return end
+		if not isvalid(item) then return end
+		
+		local dx = x - 135.1781
+		local dy = y - 1.132582
+		local dist = math.sqrt(dx * dx + dy * dy)
+		if dist > self.PlacementTolerance then
+			log("Ep2Map2SkillChest: placement missed (dist=" .. dist .. ")")
+			return
+		end
+		
+		self.Triggered = true
+		item.TransformComponent.Position = Vector3(135.1781, 1.132582, item.TransformComponent.Position.z)
+		log("Ep2Map2SkillChest: placed correctly, granting reward")
+		self:GrantReward()
+	end
+
+	@ExecSpace("ServerOnly")
+	method Vector3 ComputeDropFall(Entity refEntity)
+		-- 반환: [1]=fallHeight(UI px 근사, 낙하 연출 시간/회전량용), [2]=groundWorldY(실제 착지 월드 Y)
+		local worldPos = refEntity.TransformComponent.WorldPosition
+		local fallHeight = 0
+		local groundWorldY = worldPos.y
+		local map = refEntity.CurrentMap
+		if map ~= nil then
+			---@type FootholdComponent
+			local foothold = map:GetComponent("FootholdComponent")
+			if foothold ~= nil then
+				local hits = foothold:RaycastAll(Vector2(worldPos.x, worldPos.y), Vector2(0, -1), 50)
+				local groundY = nil
+				local bestDist = nil
+				for i = 1, #hits do
+					local h = hits[i]
+					local y = h:GetYByX(worldPos.x)
+					local dist = worldPos.y - y
+					if bestDist == nil or dist < bestDist then
+						bestDist = dist
+						groundY = y
+					end
+				end
+				if groundY ~= nil and worldPos.y > groundY then
+					fallHeight = (worldPos.y - groundY) * 100
+					groundWorldY = groundY
+				end
+			end
+		end
+		return Vector3(fallHeight, groundWorldY, 0)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void GrantReward()
+		local rewardSource = _EntityService:GetEntityByPath(self.RewardSourceObjectPath)
+		local worldPos = (rewardSource ~= nil) and rewardSource.TransformComponent.WorldPosition or Vector3(135.1781, 1.132582, 0)
+		local fallHeight = 0
+		local groundWorldY = worldPos.y
+		if rewardSource ~= nil then
+			local fall = self:ComputeDropFall(rewardSource)
+			fallHeight = fall.x
+			groundWorldY = fall.y
+		end
+		
+		local pool = _CardManager:BuildActiveUpgradePool()
+		if #pool > 0 then
+			_CardManager:GrantCardUpgradesFromPool(pool, worldPos, fallHeight, groundWorldY, 1.0, 1, 0)
+			log("Ep2Map2SkillChest: granted 1 card upgrade from active pool")
+			_UIToast:ShowMessage(self.SkillRewardMessage)
+		else
+			_GameManager:ApplyPotionDrop(self.FallbackPotionType, worldPos, fallHeight, groundWorldY, 1.0)
+			log("Ep2Map2SkillChest: no upgradeable skill, granted potion instead")
+			_UIToast:ShowMessage(self.PotionRewardMessage)
+		end
+		
+		-- 유저 지정: "아이템이 나오면 MapObject_240 이걸 안보이게" — 보상이 나온 원천 오브젝트를 숨긴다
+		-- (이동한 MapObject_269 자신은 그대로 보이게 남겨둔다).
+		if rewardSource ~= nil and isvalid(rewardSource) then
+			rewardSource.Enable = false
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		self.Triggered = false
+		local target = _EntityService:GetEntityByPath(self.TargetObjectPath)
+		if target ~= nil and isvalid(target) then
+			target.Enable = true
+			if self._startPosition ~= nil then
+				target.TransformComponent.Position = self._startPosition
+			end
+		end
+		local rewardSource = _EntityService:GetEntityByPath(self.RewardSourceObjectPath)
+		if rewardSource ~= nil and isvalid(rewardSource) then
+			rewardSource.Enable = true
+		end
+	end
+
+end
