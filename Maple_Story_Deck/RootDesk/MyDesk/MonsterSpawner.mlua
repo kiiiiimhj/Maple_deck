@@ -1,119 +1,216 @@
 @Logic
 script MonsterSpawner extends Logic
 
-	property string MonsterModelId = "monster"
+	-- 스폰 설정
+	property string MonsterModelId = "monster"  -- Monster.model EntryKey
 
-	property number MinInterval = 0.6
+	property number MinInterval = 0.6  -- 최소 간격
 
-	property number IntervalDecay = 0.1
+	property number IntervalDecay = 0.1  -- 웨이브마다 빨라지는 양
 
+	-- 시간 압박 축(뱀서류 난이도 커브 참고) — 웨이브(=처치 속도)와 무관하게, 순수 실시간 경과만으로
+	-- 스폰 간격을 추가로 단축시켜서 "느리게 버티며 파밍만 하는" 플레이가 안전빵이 되지 않게 한다.
+	-- TimePressureGraceSeconds 동안은 초반 빌드업 구간을 보호해 압박이 없고, 그 이후로는 분당
+	-- TimePressurePerMinute씩 웨이브 기반 간격 위에 곱셈으로 얹는다(GetTimePressureMultiplier).
+	-- TimePressureMaxReduction으로 상한을 둬 간격이 0에 수렴하지 않게 막는다.
+	-- 2026-08-03 재조정: 몬스터 개별 강함(GameManager.GetTimeStep)과 마찬가지로 초반이 너무 가혹하다는
+	-- 피드백 — 유예시간을 90초→180초로 늘리고, 분당 감소폭도 5%→3%로 완화한다.
 	property number TimePressureGraceSeconds = 180.0
 
 	property number TimePressurePerMinute = 0.03
 
 	property number TimePressureMaxReduction = 0.5
 
-	property number _elapsedPlayTime = 0
+	property number _elapsedPlayTime = 0  -- _running(실제 플레이 중)일 때만 누적, 다시하기 시 리셋
 
-	property integer BaseSpawnCount = 2
+	-- 무리 스폰 설정 (한 번에 여러 마리, 맵 하나당) — 2026-08-03: 웨이브(킬레이트) 대신 순수 경과시간
+	-- 기준으로 스폰 수를 늘린다. 0~SpawnCountRampSeconds(3분) 동안 BaseSpawnCount에서 MaxSpawnCount까지
+	-- 서서히 늘어나고, 그 이후로는 무한정 늘지 않고 MaxSpawnCount에서 완전히 고정된다(유저 지정).
+	property integer BaseSpawnCount = 2  -- 기본 최소 스폰 수 (경과시간 0초부터)
 
-	property integer SpawnCountVariance = 2
+	property integer SpawnCountVariance = 2  -- 추가 랜덤 범위 (0~variance)
 
-	property number SpawnCountRampSeconds = 180.0
+	property number SpawnCountRampSeconds = 180.0  -- 이 시간에 걸쳐 최대치까지 증가, 이후 고정
 
-	property integer MaxSpawnCount = 6
+	property integer MaxSpawnCount = 6  -- 한 번에 최대 스폰 수(도달 후 상한 고정)
 
-	property integer SpikeWaveInterval = 3
+	-- 웨이브 스파이크 이벤트(톱니형 난이도 곡선) — 완만하게 우상향하기만 하는 대신, 특정 웨이브
+	-- 배수에서 딱 한 틱만 스폰 수를 버스트시켜 "성장 → 안정 → 압박 스파이크 → (카드 강화로 극복) →
+	-- 다시 안정"의 사이클을 만든다.
+	property integer SpikeWaveInterval = 3  -- 이 배수 웨이브마다 스파이크 (3,6,9,12...)
 
-	property number SpikeCountMultiplier = 2.0
+	property number SpikeCountMultiplier = 2.0  -- 스파이크 웨이브의 스폰 수 배수
 
-	property integer _lastSpikeWave = 0
+	property integer _lastSpikeWave = 0  -- 이 웨이브엔 이미 스파이크를 적용했다 (같은 웨이브 중복 방지)
 
+	-- 2026-08-05(유저 지정): 1분까지는 그대로, 2분부터는 무리 스폰 수를 늘린다. 그 대신 총 경험치
+	-- 유입량이 갑자기 튀지 않도록 GameManager.GetExpPerKill()이 같은 시점부터 킬당 경험치를 절반으로
+	-- 줄인다(두 값이 반드시 같은 기준 시각을 공유해야 함). 배수는 처음 2.0이었다가 유저가 "너무 많다"고
+	-- 1.5로 하향(올림 처리 — math.ceil, 이름은 DoubleSpawnMultiplier로 남아있지만 실제 값은 1.5).
 	property number DoubleSpawnAfterSeconds = 120.0
 
 	property number DoubleSpawnMultiplier = 1.5
 
+	-- 2026-08-05(유저 지정): 이동해서 도착한 맵(이미 활성화됐던 맵 포함)에 몬스터가 너무 적으면 정기
+	-- 스폰 타이머를 기다리지 않고 즉시 최소 이만큼은 채운다.
 	property integer MinMonstersOnArrival = 6
 
+	-- 성능 최적화(2026-08-24, 유저 리포트 "존/맵 이동할때마다 조금 끊기는 느낌") — 무리 스폰
+	-- (SpawnBatchOnMap, isBoss=false)이 한 프레임 안에서 count(최대 6~9)마리를 SpawnByModelId+
+	-- InitializeStats까지 통째로 동기 처리해서, 존이동(DoScrollMapChange — 와이프 커버 자체가 없어
+	-- 그대로 화면에 노출됨)/맵이동(DoMapChange) 순간에 프레임이 순간적으로 무거워졌다. isBoss=false
+	-- 배치는 이제 실제 스폰을 여기 큐에 쌓아두고, 프레임당 이 개수만큼만 꺼내 처리한다
+	-- (ProcessSpawnQueueTick, OnUpdate가 매 프레임 호출). 보스(항상 1마리)는 그대로 동기 유지 —
+	-- TrySpawnPersistentBoss/RelocateBossToCurrentZone이 반환값을 즉시 써야 하기 때문.
 	property integer SpawnsPerTick = 2
 
-	property table _spawnQueue = {}
+	property table _spawnQueue = {}  -- {{ map, mapIndex, wave, batch }, ...} (isCurrentMap은 dequeue 시점에 새로 판정 — 아래 주석 참고)
 
-	property table _zoneMonsterRegistry = {}
+	-- 성능 최적화(2026-08-24, 유저 리포트 "맵이동할때 렉 여전함" + "몬스터 많을때/공중유닛일때 끊김") —
+	-- 실측: map3/4처럼 존 10개가 파일 하나(container=nil)를 공유하면 GetZoneEntity가 그 파일의 몬스터를
+	-- 전부(100마리 이상까지 확인됨) 반환하는데, 기존 코드 곳곳이 그 전체를 map:GetChildComponentsByTypeName
+	-- 으로 매번 훑고 _spawnZoneIndex로 걸러내는 방식이었다 — 특히 CardManager.GetMonstersInCurrentZone(모든
+	-- 카드/스킬 타겟팅의 단일 진입점)과 이 스크립트의 OnUpdate(매 프레임)가 이 패턴이라 몬스터가 많을수록
+	-- 체감 렉이 심해졌다. 존별로 몬스터 참조를 직접 들고 있는 레지스트리로 이 스캔 자체를 없앤다 — 스폰될
+	-- 때(모든 InitializeStats* 계열, MonsterAI.mlua) 등록하고, 파괴될 때(MonsterAI.OnEndPlay — Die()든
+	-- 직접 Destroy()든 어떤 경로든 항상 불림) 해제한다.
+	property table _zoneMonsterRegistry = {}  -- {[zoneIndex] = { [ai] = true, ... }, ...}
 
+	-- 빠른 이동 안전장치(MapManager.RegisterZoneArrival이 세팅) — 0=없음, 1=접근 스케일만 당김,
+	-- 2=접근 스케일+스탯 강화(2026-08-11, 6연속 티어 추가). ActivateMap이 자기 SpawnBatchOnMap 호출
+	-- 직후 항상 0으로 되돌려서, 그 존에 머무는 동안의 정기 웨이브 스폰까지 계속 적용되지 않고
+	-- "도착 배치" 한 번에만 적용되게 한다.
 	property integer _pendingRushPenalty = 0
 
+	-- 2026-08-05(2차, 유저 지정): "적 없은지 2초 지나면 즉시 스폰"으로 변경 — 비는 순간 바로 채우면
+	-- 너무 민감해서(잠깐 다 잡은 순간에도 바로 다시 몰림) 2초 연속 비어있을 때만 발동하도록 디바운스.
 	property number EmptyMapSpawnDelay = 2.0
 
 	property number _emptyMapTimer = 0
 
 	property integer _emptyMapTrackedIndex = -1
 
+	-- 2026-08-05(유저 지정): 스폰 위치끼리 너무 겹치지 않게 — 이 값보다 X가 가까우면 재추첨한다(월드 X 기준,
+	-- Y/발판은 판정하지 않음 — 다른 발판/공중에 있으면 겹쳐 보이지 않으므로 X만으로 충분).
 	property number MinSpawnSeparationX = 0.6
 
+	-- 2026-08-05(유저 지정): 스폰되는 일반 몬스터 중 이 비율만큼은 "작은 개체"(크기 2/3, 체력 20% 낮음)로 나온다.
 	property number SmallVariantChance = 0.25
 
+	-- 맵 하나에 동시에 존재할 수 있는 일반 몬스터 총 개수 상한(보스는 대상 아님 — 항상 1마리뿐).
+	-- 현재 플레이 중인 맵과 그 외(지나간/안 가본) 맵을 분리한다 — 지나간 맵은 아무도 안 죽이는데
+	-- 계속 스폰만 되다가 나중에 방문해서 한꺼번에 재개(Resume)되면 몰려있는 것처럼 보이는 현상이 있어서,
+	-- 지금 있는 맵보다 더 낮은 상한을 둔다.
 	property integer MaxMonstersPerMap = 20
 
 	property integer MaxMonstersPerMapBackground = 10
 
+	-- 내부
 	property number _timer = 0
 
 	property boolean _running = false
 
-	property integer _lastEliteWave = 0
+	property integer _lastEliteWave = 0  -- 이 웨이브엔 이미 엘리트를 냈다 (같은 웨이브에서 중복 스폰 방지)
 
-	property number MinEliteRespawnDelay = 180.0
+	-- 엘리트 재등장 주기 (웨이브5 고정 등장 이후, 잡을 때마다 다음 엘리트까지 랜덤 대기)
+	property number MinEliteRespawnDelay = 180.0  -- 3분
 
-	property number MaxEliteRespawnDelay = 300.0
+	property number MaxEliteRespawnDelay = 300.0  -- 5분
 
-	property number _nextEliteTimer = -1
+	property number _nextEliteTimer = -1  -- -1이면 대기 중 아님
 
-	property any _activeMaps = nil
+	property any _activeMaps = nil  -- {[mapIndex] = true, ...} — 한 번이라도 방문해서 스폰이 시작된 맵만 기록
 
+	-- ep2_map3 "지쳐버린 기사"(Tired Knight) — 존마다 정확히 1회만 확정 스폰하기 위한 추적(유저 지정:
+	-- "얘는 우선순위가 높아 일반몬스터보다 무조건 소환되어야한단말씀"). {[mapIndex] = true, ...}.
+	-- 존1(mapIndex 65)은 MapObject_67 드래그 트리거(Ep2Map3TiredKnightLogic) 전용이라 여기 포함되지 않는다.
 	property any _tiredKnightSpawnedZones = nil
 
+	-- 유저 지정 정정(2026-08-22): 존2~10 자동 스폰은 무조건이 아니라 "존1(MapObject_67) 드래그
+	-- 이스터에그를 완료해야만" 켜진다("존 1에 MapObject_67 움직이는거 만들었잖아, 그거하면 1~10존 다
+	-- 적용되는거라고" — 트리거 전엔 어떤 존에도 등장하면 안 됨). Ep2Map3TiredKnightLogic이 드래그 성공
+	-- 시 UnlockTiredKnightSpawning()을 호출해 true로 켠다.
 	property boolean _tiredKnightUnlocked = false
 
-	property any _flatRunsCache = nil
+	-- 성능 최적화(2026-08-20, 유저 리포트 "에피2 맵3/4에서 몬스터 소환될때 렉") — GetFlatRuns(전체 발판
+	-- 스캔) 결과를 mapIndex별로 캐싱. 발판 지형은 런타임에 안 바뀌는 정적 데이터라 최초 1회만 계산하면 됨.
+	property any _flatRunsCache = nil  -- {[mapIndex] = runs, ...}
 
+	-- 보스는 전역에 동시에 1마리만 존재해야 한다. 이게 없으면 여러 맵을 옮겨 다니는 동안 맵마다
+	-- 보스가 하나씩 쌓여서, 나중에 그 맵들을 다시 방문하면 "죽인 보스가 다른 맵에서 또 나오는"
+	-- 것처럼 보이는 버그가 생긴다.
 	property Entity _currentBoss = nil
 
-	property number FirstBossTime = 600.0
+	-- 뱀서식 시간 기반 보스(2026-08-03) — 처치 기반 Wave==10 1회성 이벤트 대신, 첫 등장
+	-- FirstBossTime(10분) 이후 처치할 때마다 BossRepeatInterval(10분) 뒤에 재등장하는 반복
+	-- 이벤트로 바뀌었다. 유저 요청: 맵 이동으로 도망칠 수 없이 죽을 때까지 플레이어를 쫓아와야 한다 —
+	-- 존을 넘어가면(엔진에 엔티티 재부모 API가 없어서) 이전 존의 개체를 파괴하고 새 존에 다시
+	-- 스폰하는 방식으로 따라가게 한다(GameManager의 DespairBlade와 동일 기법). 단, 그냥 순간이동처럼
+	-- 보이면 안 되니 일반 몬스터와 동일하게 "가장 작은 스케일(막 스폰된 상태)"부터 다시 접근해야
+	-- 한다(유저 지정) — InitializeStats를 다시 호출하면 자동으로 이 상태가 된다.
+	property number FirstBossTime = 600.0  -- 첫 보스 등장 시점(10분)
 
-	property number BossRepeatInterval = 600.0
+	property number BossRepeatInterval = 600.0  -- 이후 보스 처치마다 다음 등장까지(10분)
 
-	property number _nextBossTimer = -1
+	property number _nextBossTimer = -1  -- -1이면 대기 중 아님(첫 등장 전엔 FirstBossTime으로 시작)
 
-	property integer _bossZone = -1
+	property integer _bossZone = -1  -- 현재 살아있는 보스가 속한 존(플레이어와 달라지면 재소환)
 
+	-- 존12 원거리(먹물) 종 전용 고정 스폰 구역 — 유저가 Maker에서 직접 깔아둔 "타일 섬" 발판(FootholdComponent
+	-- 레이어 "2", 실측: 월드 X 9.06~15.24, Y 0.9~1.75, 경사/계단 있음). 발판은 항상 맵 루트(월드) 기준이라
+	-- Zone12 컨테이너 오프셋과 무관하게 이미 월드 좌표다 — 하드코딩된 Y 대신 GetGroundY로 실제 발판 표면에
+	-- 레이캐스트해서 스폰한다(이전엔 Y를 고정값으로 하드코딩해서, 유저가 발판 모양을 바꿀 때마다 실제
+	-- 발판 위치와 계속 어긋나 허공에 뜨는 버그가 반복됐다).
 	property number RangedTileMinX = 9.5
 
 	property number RangedTileMaxX = 14.8
 
+	-- 존12 전용으로 범위를 축소해뒀던 메커니즘을, 유저 요청으로 그룹J(존31 루팡/존34 좀비루팡)에도
+	-- 재사용하게 됐다. 다만 RangedTileMinX/MaxX는 map11(zone12) 기준 절대 월드 좌표라 map20에 그대로
+	-- 쓰면 엉뚱한 위치(존31/32 경계 근처)를 가리킨다 — 아래 GetRangedTileRange로 맵별 실제 발판 X구간을
+	-- 분기한다(GetMapIsRangedSpecies가 감싸는 GameManager.GetMapIsRanged 플래그로 대상 여부만 판정).
+	-- 비행형 종(맵15 박쥐) 전용 스폰 높이 범위 — 발판 레이캐스트로 바닥에 고정되지 않고 이 Y 범위
+	-- 안에서 공중에 무작위로 스폰된다(이 게임은 몬스터가 실제로 날아다니지 않고 스케일만 커지며
+	-- "접근"을 표현하므로, 비행형의 차이는 스폰 높이가 바닥이 아니라 공중이라는 것뿐이다).
 	property number FlyingMinY = -0.3
 
 	property number FlyingMaxY = 2.0
 
-	property number MinFlatRunWidth = 0.5
+	-- 존8/13~15 전용 스폰 방식: GetZonePlatformBands처럼 발판 좌표를 코드에 하드코딩하는 대신, 매 스폰마다
+	-- FootholdComponent를 직접 레이캐스트해서 실제 발판 위에 스폰한다 — 유저가 Maker에서 발판을 옮기거나
+	-- 지워도 코드를 다시 맞출 필요가 없다(하드코딩 밴드가 발판 편집 때마다 어긋나던 근본 문제 해결).
+	-- 존8은 2026-07-21에 이 방식으로 이전했다(아치형 지형으로 바뀌면서 하드코딩 밴드가 기둥 밑동의
+	-- 바닥 구멍 2곳을 모르고 그 안에도 스폰시키는 버그가 있었음). 나머지 맵1~7/9/10은 아직 안 옮겼고,
+	-- 필요해지면(지형을 자주 바꾸는 맵부터) 그때그때 넓힌다.
+	property number MinFlatRunWidth = 0.5  -- 이보다 좁게 이어진 발판 구간은 스폰 후보에서 제외
 
-	property number EdgeMarginGround = 0.4
+	property number EdgeMarginGround = 0.4  -- 바닥 발판 양끝 제외 여유
 
-	property number EdgeMarginAerial = 0.15
+	property number EdgeMarginAerial = 0.15  -- 공중 발판 양끝 제외 여유 (좁은 발판이라 넓게 깎으면 폭 비례
 
-	property number AerialHeightThreshold = 0.3
+	-- 확률 선택에서 거의 안 뽑히는 이중 페널티가 생겨 작게 잡음 — 존13 중앙 발판 폭 0.9 기준 실사용폭
+	-- 0.36→0.6로 완화)
+	property number AerialHeightThreshold = 0.3  -- 이 맵의 최저 발판 Y보다 이만큼 높으면 "공중 발판"으로 간주
 
-	property number FlatSlopeTolerance = 0.05
+	property number FlatSlopeTolerance = 0.05  -- 발판 시작/끝 Y차가 이 이하면 "수평"으로 간주(엔진 IsHorizontal()이
 
-	property any _baselineGroundYCache = nil
+	-- 사람이 손으로 그린 발판의 미세한 오차까지 엄격히 걸러내면, 눈에는 평평한 기둥 꼭대기 같은 발판이
+	-- 계속 걸러져서 후보에서 빠지는 문제가 있어 자체 허용오차로 판정한다)
+	property any _baselineGroundYCache = nil  -- {[mapIndex] = y, ...} — 맵마다 한 번만 전체 발판을 훑어 계산
 
+	-- 유저가 존15 중앙 기둥을 지우고 대신 CustomFootholdComponent 오브젝트("foothold-848_1~3", 실측
+	-- OwnerId 3개)로 교체함 — 이 3개 발판 위에는 몬스터가 스폰되지 않게 OwnerId로 제외한다. 좌표(X범위)가
+	-- 아니라 소유 엔티티 ID로 판정해서, 유저가 Maker에서 이 오브젝트를 옮기거나 크기를 바꿔도 계속 걸러진다.
 	property string Zone15ExcludedFootholdOwnerId1 = "9e591620-aa5a-49c1-b23b-d9907ec6f3ba"
 
 	property string Zone15ExcludedFootholdOwnerId2 = "35bc9d79-4793-4039-8357-b37c2cda364a"
 
 	property string Zone15ExcludedFootholdOwnerId3 = "7b48d3a1-c42a-4f2c-8a13-efefddea1917"
 
-	property string BonusBossModelId = "bonusboss"
+	-- 맵10 보너스 스테이지 설정 — 등장하면 정신없이 돌아다니며 무적으로 히트당 보상만 지급하는 보스.
+	-- 첫 방문은 100% 등장, 이후 재방문마다 BonusBossChance 확률로 재판정. 실패하면(또는 지속시간이
+	-- 끝나면) 맵9와 같은 몬스터 풀을 그대로 재사용하는 평소 웨이브 스폰으로 대체된다.
+	property string BonusBossModelId = "bonusboss"  -- BonusBoss.model EntryKey
 
 	property string BonusBossSpriteRUID = "0d577f299dbd49c996f2dac8aee99a23"
 
@@ -127,6 +224,11 @@ script MonsterSpawner extends Logic
 
 	property boolean _bonusBossActive = false
 
+	-- 유저 지정(2026-08-26): "에피1 보너스보스도 유지시간 타이머 있으면 좋을듯" — ep3_map2
+	-- BonusBossBoard와 동일한 UI를 재사용(별도 엔티티 Map10BonusBossBoard로 복제). 스폰 즉시는
+	-- MonsterAI._bonusBossCombatLocked=true라 공격이 전혀 안 먹히고(InitializeBonusBoss가 건다),
+	-- BonusTimerStartDelay(1초) 뒤에야 실제로 타이머를 띄우고 공격을 풀어준다 — "30초를 유저가
+	-- 인지하고 공격하길 원한다"는 지정과 동일한 패턴을 여기도 적용.
 	property number BonusTimerStartDelay = 1.0
 
 	@Sync
@@ -141,8 +243,14 @@ script MonsterSpawner extends Logic
 
 	property string BonusBossTimerTextPath = "/ui/DefaultGroup/Map10BonusBossBoard/Inner/TimerText"
 
+	-- 2026-08-03: 초반(0~SpawnCountRampSeconds, 스폰 수 램프 구간과 동일한 경계) 몬스터 수가 너무
+	-- 적다는 피드백 — 스폰 수 램프만으론 부족해서 이 구간은 간격 자체를 웨이브/시간압박 배수와 무관하게
+	-- EarlyPhaseSpawnInterval로 훨씬 빠르게 고정한다. 그 이후로는 기존 웨이브 기반 간격 + 시간 압박
+	-- 배수 조합으로 자연스럽게 이어진다.
 	property number EarlyPhaseSpawnInterval = 2.0
 
+	-- MonsterAI.InitializeStats* 계열이 _spawnZoneIndex를 설정한 직후 호출 — 이 몬스터를 그 존의
+	-- 레지스트리에 등록한다. 같은 엔티티가 재초기화되어 다시 불려도(있다면) 집합이라 중복 없이 안전하다.
 	@ExecSpace("ServerOnly")
 	method void RegisterZoneMonster(integer zoneIndex, MonsterAI ai)
 		if self._zoneMonsterRegistry[zoneIndex] == nil then
@@ -151,12 +259,16 @@ script MonsterSpawner extends Logic
 		self._zoneMonsterRegistry[zoneIndex][ai] = true
 	end
 
+	-- MonsterAI.OnEndPlay가 항상 호출 — 죽거나 파괴된 몬스터를 레지스트리에서 뗀다.
 	@ExecSpace("ServerOnly")
 	method void UnregisterZoneMonster(integer zoneIndex, MonsterAI ai)
 		local bucket = self._zoneMonsterRegistry[zoneIndex]
 		if bucket ~= nil then bucket[ai] = nil end
 	end
 
+	-- 지정한 존의 살아있는 몬스터만 배열로 돌려준다(레지스트리에 죽은 채 남아있을 수 있는 항목은
+	-- isvalid로 걸러낸다). 맵 전체가 아니라 정확히 이 존만 보므로, container=nil 공유맵에서도
+	-- GetChildComponentsByTypeName 전체 스캔 없이 O(그 존 크기)로 끝난다.
 	@ExecSpace("ServerOnly")
 	method table GetMonstersInZone(integer zoneIndex)
 		local bucket = self._zoneMonsterRegistry[zoneIndex]
@@ -185,11 +297,16 @@ script MonsterSpawner extends Logic
 		if self._activeMaps == nil then self._activeMaps = {} end
 	end
 
+	-- 웨이브1~5는 4.0초로 고정, 웨이브6부터 6.0초에서 시작해 웨이브당 IntervalDecay(0.1초)씩 감소
+	-- (최소 MinInterval까지). Wave10 보스는 OnUpdate에서 별도로 20초 고정 처리한다. 시간 압박 배수는
+	-- 여기 포함되지 않는다 — 순수 웨이브 기반 값만 반환하고, 시간 압박은 GetEffectiveSpawnInterval에서 곱한다.
 	method number GetSpawnInterval(integer wave)
 		if wave <= 5 then return 4.0 end
 		return math.max(self.MinInterval, 6.0 - self.IntervalDecay * (wave - 6))
 	end
 
+	-- 웨이브(처치 속도) 기반 간격 위에 시간 압박 배수를 곱해서 실제 다음 스폰까지 남은 시간을 계산한다.
+	-- 곱한 뒤에도 MinInterval 밑으로는 내려가지 않게 다시 한번 클램프한다.
 	method number GetEffectiveSpawnInterval(integer wave)
 		if self._elapsedPlayTime < self.SpawnCountRampSeconds then
 			return self.EarlyPhaseSpawnInterval
@@ -198,6 +315,9 @@ script MonsterSpawner extends Logic
 		return math.max(self.MinInterval, base * self:GetTimePressureMultiplier())
 	end
 
+	-- 유예시간(TimePressureGraceSeconds) 동안은 1.0(압박 없음)을 반환해 초반 빌드업 구간을 보호한다.
+	-- 그 이후로는 경과 분당 TimePressurePerMinute씩 배수를 줄이되, TimePressureMaxReduction으로
+	-- 상한을 둬 무한히 0에 수렴하지 않게 한다.
 	method number GetTimePressureMultiplier()
 		local minutesPastGrace = math.max(0, (self._elapsedPlayTime - self.TimePressureGraceSeconds) / 60)
 		local reduction = math.min(self.TimePressureMaxReduction, minutesPastGrace * self.TimePressurePerMinute)
@@ -292,6 +412,8 @@ script MonsterSpawner extends Logic
 		end
 	end
 
+	-- 현재 웨이브에 맞는 몬스터를 스폰한다. 일반 몬스터는 "이미 한 번 방문해서 활성화된" 맵에만 동시에
+	-- 등장하고(안 가본 맵은 스폰 안 됨), 보스/엘리트는 플레이어가 실제로 있는 맵에서만 1번 등장한다
 	@ExecSpace("ServerOnly")
 	method void SpawnWave()
 		local wave = _GameManager.Wave
@@ -325,18 +447,37 @@ script MonsterSpawner extends Logic
 		end
 	end
 
+	-- 몬스터가 절대 스폰되지 않아야 하는 맵/존 — 존18(그림자 존 안전지대), 존35(맵21 택시 이스터에그
+	-- 전용 조회 항목, 진짜 존 아님).
+	-- 존27~30(그룹I)은 GameManager에 전용 몬스터 풀(쉐도우 듀어러/자이언트 쉐도우/쉐도우 블레이드/
+	-- 스티지/훈련된 오다군 정찰병)이 채워져서 더 이상 여기서 막을 필요가 없다.
+	-- 그룹K(존36~39) 추가로 MapManager.MaxMapIndex가 39로 올라가면서 존35가 SpawnWave의 순회 범위
+	-- (MinMapIndex~MaxMapIndex) 안에 들어오게 됐다 — 예전엔 34가 상한이라 35가 자동으로 범위 밖이었지만,
+	-- 이제는 명시적으로 막아야 한다(MapTaxiLogic이 35를 ActivateMap 없이 CurrentMapIndex만 바꾸므로
+	-- _activeMaps[35]가 항상 false라 실제로 스폰이 걸리진 않지만, 원래 의도한 "존 시스템 밖" 불변식을
+	-- 명시적으로 복원해둔다).
 	@ExecSpace("ServerOnly")
 	method boolean IsNoMonsterZone(integer mapIndex)
 		-- 44(map24, 진 힐라의 보물상자): 일반 웨이브 스폰 대상이 아니다 — Map24TreasureChestLogic이 직접 스폰
 		return mapIndex == 18 or mapIndex == 35 or mapIndex == 44
 	end
 
+	-- 존별 스폰 X 오프셋 — MapManager.ZoneInfo가 단일 진실 소스다(그룹A/B/C로 존이 늘어나도 여기 손댈
+	-- 필요 없음). 이 값은 아래 GetSpawnPosition의 "±5 범위" 로컬 스폰 로직의 중심으로 쓰인다.
 	@ExecSpace("ServerOnly")
 	method number GetZoneOffsetX(integer mapIndex)
 		local info = _MapManager:GetZoneInfo(mapIndex)
 		return (info ~= nil) and info.spawnX or 0
 	end
 
+	-- 넉백류 스킬이 존 경계를 넘어 몬스터를 옆 존으로 밀어내는 문제 방지용(2026-08-20, 유저 리포트
+	-- "넉백류 스킬쓰면 계속 존을 벗어나는 경우가 생기는거 같은데") — 맵3/4처럼 container=nil인 존
+	-- 그룹은 발판 자체가 존 경계 없이 물리적으로 이어져 있어서, CardManager.ClampKnockbackDestX의
+	-- 화면-안전 클램프(플레이어 위치 ±5)만으로는 존 경계를 완전히 못 막는다 — 플레이어가 존 가장자리
+	-- 근처에 있으면 ±5 반경 자체가 존 경계(존 간격 15.5의 절반=7.75)보다 넓어질 수 있기 때문이다.
+	-- 같은 파일을 공유하는 앞/뒤 존과의 spawnX 중간지점을 하드 경계로 계산해서 돌려준다 — container가
+	-- 있는(자기만의 엔티티를 가진) 존이거나 앞/뒤에 같은 파일을 공유하는 존이 없으면 그쪽 경계는 nil
+	-- (그 방향은 원래 클램프 로직에 맡긴다).
 	@ExecSpace("ServerOnly")
 	method table GetZoneXBounds(integer zoneIdx)
 		local info = _MapManager:GetZoneInfo(zoneIdx)
@@ -355,6 +496,8 @@ script MonsterSpawner extends Logic
 		return { minX = minX, maxX = maxX }
 	end
 
+	-- mapIndex가 가리키는 "존"의 실제 엔티티(스폰 부모/일시정지 스코프용)를 반환한다. MapManager.ZoneInfo에서
+	-- 물리 파일/자식 컨테이너 이름을 조회 — container가 nil이면 맵 루트 자신, 아니면 그 자식 컨테이너.
 	@ExecSpace("ServerOnly")
 	method Entity GetZoneEntity(integer mapIndex)
 		local info = _MapManager:GetZoneInfo(mapIndex)
@@ -367,6 +510,9 @@ script MonsterSpawner extends Logic
 		return rootMap
 	end
 
+	-- GameManager.OnBossDefeated()가 보스 처치 시점에 호출 — 다음 SpawnWave/ActivateMap 틱부터
+	-- 다시 보스를 스폰할 수 있게 참조를 비운다 (사실상 Wave가 곧 11로 넘어가 다시 안 쓰이지만,
+	-- 넘어가기 직전의 짧은 틈에도 중복 스폰을 막기 위해 명시적으로 정리한다)
 	@ExecSpace("ServerOnly")
 	method void ClearCurrentBoss()
 		self._currentBoss = nil
@@ -375,6 +521,9 @@ script MonsterSpawner extends Logic
 		self._nextBossTimer = self.BossRepeatInterval
 	end
 
+	-- _nextBossTimer 만료 시(첫 등장 또는 이전 보스 처치 후 재등장) 호출 — 플레이어가 있는 존에 보스
+	-- 1마리를 스폰한다. 이미 살아있는 보스가 있으면 건너뛴다(그 보스가 죽어야 ClearCurrentBoss가
+	-- 다음 타이머를 다시 시작하므로, 자연히 "죽을 때까지 대기"가 된다).
 	@ExecSpace("ServerOnly")
 	method void TrySpawnPersistentBoss()
 		if isvalid(self._currentBoss) then return end
@@ -389,6 +538,11 @@ script MonsterSpawner extends Logic
 		end
 	end
 
+	-- 살아있는 보스가 플레이어와 다른 존에 남아있을 때(MonsterSpawner.OnUpdate가 매 프레임 판정) 호출 —
+	-- DespairBlade와 동일 기법(파괴+재소환, 엔진에 엔티티 재부모 API가 없어서)으로 플레이어가 있는 존까지
+	-- 쫓아오게 한다. 현재 체력은 그대로 이어받고(존 이동으로 도망쳐서 체력이 리셋되면 안 되므로),
+	-- InitializeStats를 다시 호출해 일반 몬스터와 동일하게 "막 스폰된 가장 작은 스케일"부터 다시
+	-- 접근하게 한다(유저 지정 — 순간이동처럼 바로 앞에 나타나면 안 됨).
 	@ExecSpace("ServerOnly")
 	method void RelocateBossToCurrentZone()
 		local zoneIndex = _MapManager.CurrentMapIndex
@@ -421,6 +575,10 @@ script MonsterSpawner extends Logic
 		log("MonsterSpawner: boss followed player to zone " .. zoneIndex)
 	end
 
+	-- MapManager가 호출: 플레이어가 이 맵에 처음 도착했을 때 스폰을 활성화하고, 그 자리에서 바로 한 무리를
+	-- 즉시 스폰한다(이동하기 전까지 진행된 현재 웨이브 기준). 이미 활성화된 맵이면 아무 것도 하지 않는다.
+	-- 2026-08-03: 보스는 더 이상 여기서 분기하지 않는다(시간 기반 반복 이벤트로 분리됨) — 항상 일반
+	-- 웨이브 스폰만 하고, 지금 도착한 맵이 "플레이어가 있는 맵"이므로 엘리트 후보 자격을 준다.
 	@ExecSpace("ServerOnly")
 	method void ActivateMap(integer mapIndex)
 		-- 다른 Logic의 OnBeginPlay가 이것보다 먼저 실행돼 _activeMaps가 아직 nil일 수 있으므로 지연 초기화
@@ -458,11 +616,19 @@ script MonsterSpawner extends Logic
 		self._pendingRushPenalty = 0
 	end
 
+	-- 지정한 mapIndex가 "지금 플레이어가 있는 존"인지 판정 — SpawnBatchOnMap(큐 적재 시점)과
+	-- ProcessSpawnQueueTick(실제 스폰 시점) 양쪽에서 공유해서 쓴다(아래 버그 수정 코멘트 참고).
+	-- GetCurrentMap()이 nil(아직 어느 맵인지 모름 — 월드 시작 직후 _UserService.UserEntities가
+	-- 비어있는 순간과 겹칠 수 있음)이면 "다른 맵"으로 단정하지 않고 활성 상태로 취급한다 — 그렇지 않으면
+	-- 게임 시작하자마자 첫 맵의 몬스터가 통째로 멈춰있는 채로 태어나는 버그가 생긴다.
 	@ExecSpace("ServerOnly")
 	method boolean IsMapIndexCurrent(integer mapIndex)
 		return (self:GetCurrentMap() == nil) or (mapIndex == _MapManager.CurrentMapIndex and not _MapManager.AwayOnSideMap)
 	end
 
+	-- 지정한 맵 하나에 몬스터 무리를 스폰. allowElite=true인 호출에서만 엘리트 승급 후보가 된다.
+	-- 스폰되는 맵이 플레이어의 현재 맵이 아니라고 "확실히" 판단될 때만 새로 태어난 몬스터를 일시정지시킨다 —
+	-- 안 그러면 화면 밖 맵에서 계속 새로 스폰되는 애들이 기본값(안 멈춤)으로 태어나서 몰래 공격한다.
 	@ExecSpace("ServerOnly")
 	method table SpawnBatchOnMap(Entity map, integer wave, boolean isBoss, boolean allowElite, integer mapIndex, boolean isSpike, integer minCountOverride)
 		-- 버그 수정(2026-08-20, 유저 리포트 "맵4에서 10존으로 들어왔는데 7존에 몬스터가 공격해") — 예전엔
@@ -566,6 +732,11 @@ script MonsterSpawner extends Logic
 		return {}
 	end
 
+	-- 몬스터 1마리를 실제로 생성한다(종/위치 추첨 → 겹침 재시도 → SpawnByModelId → 스탯 초기화까지).
+	-- 원래 SpawnBatchOnMap의 for 루프 본문이었던 것을 그대로 옮긴 것 — 보스(SpawnBatchOnMap이 직접,
+	-- 동기)와 일반 무리(ProcessSpawnQueueTick이 프레임당 나눠서) 양쪽이 이 메서드 하나를 공유한다.
+	-- spawnedXs는 "이 배치 전체"에서 이미 정해진 X들의 누적 리스트(호출측이 들고 있다가 넘겨준다) —
+	-- 겹침 재시도 판정과 성공한 좌표 append이 전부 이 안에서 일어난다.
 	@ExecSpace("ServerOnly")
 	method Entity SpawnOneMonster(Entity map, integer mapIndex, integer wave, boolean isBoss, boolean isCurrentMap, table spawnedXs, number rushPenalty)
 		-- 맵 전용 풀(zoneIndex>=7)은 종을 먼저 뽑아서 스폰 위치 결정에도 같이 써야 한다 —
@@ -614,6 +785,9 @@ script MonsterSpawner extends Logic
 		return entity
 	end
 
+	-- OnUpdate가 매 프레임 호출 — 무리 스폰 큐(SpawnBatchOnMap이 isBoss=false일 때 쌓아둠)에서
+	-- 프레임당 SpawnsPerTick개까지만 실제로 스폰한다. 한 배치의 마지막 항목까지 다 처리되면
+	-- FinalizeSpawnBatch로 엘리트 승급 + 로그를 원래 SpawnBatchOnMap 루프 끝과 동일하게 재현한다.
 	@ExecSpace("ServerOnly")
 	method void ProcessSpawnQueueTick()
 		if #self._spawnQueue == 0 then return end
@@ -630,6 +804,8 @@ script MonsterSpawner extends Logic
 		end
 	end
 
+	-- ProcessSpawnQueueTick이 한 배치의 마지막 큐 항목까지 처리한 직후 호출 — 원래 SpawnBatchOnMap의
+	-- for 루프가 끝난 뒤 하던 엘리트 승급 + 로그를 그대로 재현한다.
 	@ExecSpace("ServerOnly")
 	method void FinalizeSpawnBatch(table batch)
 		-- 웨이브 5(딱 한 번)에만 플레이어가 있는 맵의 스폰 그룹 중 1마리를 엘리트로 승급한다.
@@ -646,6 +822,11 @@ script MonsterSpawner extends Logic
 		log("MonsterSpawner: spawned " .. batch.count .. " monster(s) on " .. batch.mapName .. " (Wave " .. batch.wave .. ")")
 	end
 
+	-- ActivateMap(존 최초 활성화)이 호출 — ep2_map3 존2~10(mapIndex 66~74)마다 검투사를 정확히 1회
+	-- 확정 스폰한다. 존1(65)은 MapObject_67 드래그 트리거(Ep2Map3TiredKnightLogic) 전용이라 제외한다.
+	-- _tiredKnightUnlocked가 false(존1 드래그 미완료)면 아무 존에도 스폰하지 않는다(유저 지적 — "존1
+	-- 이스터에그 하기 전인데 이미 다른 존에 몬스터가 있다"는 버그 리포트로 이 게이트를 추가함).
+	-- map 파라미터는 호출측이 이미 GetZoneEntity로 구해둔 값을 그대로 재사용(중복 조회 방지).
 	@ExecSpace("ServerOnly")
 	method void TrySpawnTiredKnightForZone(integer mapIndex, Entity map)
 		if not self._tiredKnightUnlocked then return end
@@ -656,6 +837,10 @@ script MonsterSpawner extends Logic
 		self:SpawnTiredKnightOnMap(mapIndex, map)
 	end
 
+	-- Ep2Map3TiredKnightLogic이 존1 드래그 성공 시 호출 — 이 시점부터 존2~10 자동 확정 스폰을 켠다.
+	-- 이미 방문해서 활성화(_activeMaps)된 존은 ActivateMap의 "최초 방문" 분기를 다시 타지 않으므로,
+	-- 여기서 즉시 훑어 밀린 스폰을 대신 처리한다(유저 지정: "그거하면 1~10존 다 적용되는거라고" — 아직
+	-- 안 가본 존은 나중에 처음 들어갈 때 TrySpawnTiredKnightForZone이 정상 처리).
 	@ExecSpace("ServerOnly")
 	method void UnlockTiredKnightSpawning()
 		if self._tiredKnightUnlocked then return end
@@ -671,6 +856,10 @@ script MonsterSpawner extends Logic
 		log("MonsterSpawner: TiredKnight spawning unlocked (zone1 drag complete)")
 	end
 
+	-- 검투사(구 "지쳐버린 기사") 1마리를 지정한 존에 실제로 스폰한다. Ep2Map3TiredKnightLogic(존1 드래그
+	-- 트리거)도 이 메서드를 직접 호출한다 — speciesIdx=0으로 넘겨 GetSpawnPosition의 비행형 분기
+	-- (§species>0 조건)를 건너뛰고 mapIndex 65~84 전용 발판 레이캐스트 분기(GetSpawnPositionFromFootholds)로
+	-- 바로 떨어지게 한다. 유저 지정(2026-08-22): 몬스터 이름을 "검투사"로 확정, 등장 토스트를 항상 띄운다.
 	@ExecSpace("ServerOnly")
 	method Entity SpawnTiredKnightOnMap(integer mapIndex, Entity map)
 		if map == nil or not isvalid(map) then
@@ -693,18 +882,22 @@ script MonsterSpawner extends Logic
 		return entity
 	end
 
+	-- GameManager.RestartGame()이 호출 — "다시하기" 시 존별 검투사 스폰 여부 + 잠금 상태를 전부
+	-- 초기화해서 새 런에서는 다시 존1 드래그부터 해야 존2~10에 등장하게 한다(ResetEliteTracking과 동일한 정책).
 	@ExecSpace("ServerOnly")
 	method void ResetTiredKnightTracking()
 		self._tiredKnightSpawnedZones = {}
 		self._tiredKnightUnlocked = false
 	end
 
+	-- MonsterAI.Die()가 엘리트 처치 시점에 호출 — 다음 엘리트 등장까지 3~5분 랜덤 대기를 시작한다
 	@ExecSpace("ServerOnly")
 	method void OnEliteKilled()
 		self._nextEliteTimer = self.MinEliteRespawnDelay + _UtilLogic:RandomDouble() * (self.MaxEliteRespawnDelay - self.MinEliteRespawnDelay)
 		log("MonsterSpawner: next elite in " .. math.floor(self._nextEliteTimer) .. "s")
 	end
 
+	-- _nextEliteTimer 만료 시 호출 — 플레이어가 있는 맵에 엘리트 몬스터 1마리를 즉시 스폰한다
 	@ExecSpace("ServerOnly")
 	method void SpawnRandomElite()
 		local map = self:GetCurrentMap()
@@ -738,6 +931,9 @@ script MonsterSpawner extends Logic
 		log("MonsterSpawner: random elite spawned on " .. map.Name)
 	end
 
+	-- 맵 전용 몬스터 풀(zoneIndex>=7)에서 쓸 종 인덱스를 미리 뽑는다. 스폰 위치 결정(GetSpawnPosition)과
+	-- 외형 초기화(MonsterAI.InitializeStats)가 같은 종을 참조해야 해서 두 호출보다 먼저 실행한다.
+	-- 맵1~6은 풀 개념이 없으므로 0(= "위치 로직에서 무시") 반환.
 	@ExecSpace("ServerOnly")
 	method integer RollSpeciesForMap(integer mapIndex)
 		if mapIndex < 7 then return 0 end
@@ -745,6 +941,8 @@ script MonsterSpawner extends Logic
 		return _UtilLogic:RandomIntegerRange(1, _GameManager:GetMapMonsterCount(appearanceZone))
 	end
 
+	-- 맵10(보너스 스테이지)은 별도 풀이 없고 맵9 풀을 그대로 재사용한다 — MonsterAI.InitializeStats와
+	-- 동일한 규칙을 스폰 위치 결정 쪽에서도 써야 해서 별도 헬퍼로 뽑아둔다
 	@ExecSpace("ServerOnly")
 	method integer ResolveAppearanceZone(integer mapIndex)
 		if mapIndex == 10 then return 9 end
@@ -765,11 +963,25 @@ script MonsterSpawner extends Logic
 		return mapIndex
 	end
 
+	-- speciesIdx가 가리키는 종이 이 맵(zoneIndex>=7) 풀에서 원거리 종인지 여부
 	@ExecSpace("ServerOnly")
 	method boolean GetMapIsRangedSpecies(integer mapIndex, integer speciesIdx)
 		return _GameManager:GetMapIsRanged(self:ResolveAppearanceZone(mapIndex), speciesIdx)
 	end
 
+	-- 원거리 종 전용 고정 스폰 구역(타일섬) X범위 — 존12 전용. 존31/34(map20)는 한때 이 방식(원거리 종을
+	-- 발판 하나에 고정)을 재사용했었지만, "발판에는 다 몹이 나와야 한다"는 요구로 GetZonePlatformBands(31)/
+	-- (34)가 바닥+공중 발판 전부를 후보로 삼는 다중 밴드로 대체했다 — bands가 nil이 아니면 이 메서드를
+	-- 거치는 스폰 분기 자체를 안 타므로, 31/34 전용 분기는 여기 남겨두지 않는다(죽은 코드 방지).
+	-- 2026-08-11 버그 수정: 이 메서드는 이름과 주석("맵별로 분기")과 달리 실제로는 mapIndex를 완전히
+	-- 무시하고 존12(map11) 전용 절대 월드좌표(9.5~14.8)를 항상 반환하고 있었다. GetSpawnPosition의
+	-- 원거리 종 분기(bands==nil인 맵에서 mapIndex>=7이면 여기로 옴)가 이 값을 그대로 스폰 X로 써서,
+	-- 밴드가 없는 다른 원거리-종 맵(에피소드2 존2/6/9/10의 네펜데스/다크네펜데스)이 전부 자기 존
+	-- 오프셋과 무관하게 존12 좌표(≈존2 화면 범위와 우연히 겹침)에 스폰되는 버그였다(유저 리포트: "네펜데스가
+	-- 다 존2에서만 나오고 존6엔 안 보인다" — 실측: 존6 컨테이너 소속 다크네펜데스 3마리의 WorldPosition.x가
+	-- 전부 9.5~14.8, 존6의 실제 화면 위치(spawnX=77.5)와 62~68유닛 떨어져 카메라에 절대 안 잡힘). 존12만
+	-- 유저가 Maker에서 직접 깔아둔 진짜 "타일섬" 발판이라 그 절대좌표를 그대로 유지해야 하고, 그 외
+	-- 모든 맵은 GetZoneOffsetX 기준 그 존 자신의 화면-안전 범위(±5)로 스폰해야 한다.
 	@ExecSpace("ServerOnly")
 	method table GetRangedTileRange(integer mapIndex)
 		if mapIndex == 12 then
@@ -779,11 +991,14 @@ script MonsterSpawner extends Logic
 		return { minX = offsetX - 5, maxX = offsetX + 5 }
 	end
 
+	-- speciesIdx가 가리키는 종이 이 맵(zoneIndex>=7) 풀에서 비행형 종인지 여부 (지금은 맵15의 박쥐만 해당)
 	@ExecSpace("ServerOnly")
 	method boolean GetMapIsFlyingSpecies(integer mapIndex, integer speciesIdx)
 		return _GameManager:GetMapIsFlying(self:ResolveAppearanceZone(mapIndex), speciesIdx)
 	end
 
+	-- safeMin~safeMax 범위에서 avoidMin~avoidMax 구간을 제외하고 X를 뽑는다. 좌/우 남은 폭에 비례해서
+	-- 어느 쪽에서 뽑을지 정하므로, 한쪽 폭이 0이어도(구간이 끝에 붙어있어도) 자연스럽게 반대쪽만 나온다.
 	@ExecSpace("ServerOnly")
 	method number RollXAvoidingRange(number safeMin, number safeMax, number avoidMin, number avoidMax)
 		local leftWidth = math.max(0, avoidMin - safeMin)
@@ -801,6 +1016,10 @@ script MonsterSpawner extends Logic
 		end
 	end
 
+	-- 2026-08-05(유저 지정): 스폰 위치가 이번 배치에서 이미 정한 X들 또는 기존 몬스터와 너무 가까운지
+	-- 판정한다(MinSpawnSeparationX 이내면 "붐빔"). Y/발판 종류는 안 본다 — 다른 발판/높이에 있으면
+	-- 애초에 겹쳐 보이지 않으므로 X 하나만으로 충분하고, 밴드/foothold 방식마다 Y좌표계가 달라(로컬/월드
+	-- 혼재) 비교가 부정확해질 위험이 있다.
 	@ExecSpace("ServerOnly")
 	method boolean IsPositionCrowded(Entity map, number x, table batchXs)
 		for i = 1, #batchXs do
@@ -814,11 +1033,23 @@ script MonsterSpawner extends Logic
 		return false
 	end
 
+	-- 실제로 플레이어가 있는 맵을 찾는다 (보스/엘리트 스폰 위치 판정용, 스폰 시 일시정지 여부 판정용).
+	-- 그룹D 병합(맵11+12가 같은 map11.map 파일)으로 CurrentMapName만으로는 11/12를 구분할 수 없게
+	-- 됐다 — 대신 MapManager.CurrentMapIndex(버튼 이동 때마다 확정적으로 갱신됨)를 신뢰하고,
+	-- GetZoneEntity로 맵 루트 또는 Zone12 자식 컨테이너를 구분해서 반환한다.
 	@ExecSpace("ServerOnly")
 	method Entity GetCurrentMap()
 		return self:GetZoneEntity(_MapManager.CurrentMapIndex)
 	end
 
+	-- SpawnByModelId의 spawnPosition은 parent 기준 로컬 좌표다. GetSpawnPosition은 발판 레이캐스트를
+	-- 위해 항상 월드 좌표를 계산해 반환하므로(Zone12처럼 parent 자체가 오프셋을 가진 컨테이너일 수 있음),
+	-- 실제 스폰 직전에 parent의 WorldPosition을 빼서 로컬로 변환해야 한다. 이걸 빼먹으면 Zone12(오프셋 +25)
+	-- 컨테이너 밑에서 오프셋이 두 번 겹쳐 적용돼(발판 계산의 +15 오프셋 + 부모의 +25 오프셋) 몬스터가
+	-- 발판 오른쪽 끝(33.92)을 한참 벗어난 곳(35~45)에서 스폰되는 버그가 있었다(parent가 원점인 다른 맵은
+	-- WorldPosition이 (0,0,0)이라 이 변환이 항등이므로 기존 동작에 영향 없음).
+	-- 맵 루트 엔티티(map01 등)는 애초에 TransformComponent 자체가 없다(실측 확인 — [LEA-2007] AttemptToIndex)
+	-- 이 경우 오프셋 없이 worldPos를 그대로 쓰면 된다(루트는 항상 원점이므로 로컬==월드).
 	@ExecSpace("ServerOnly")
 	method Vector3 ToLocalSpawnPos(Entity parent, Vector3 worldPos)
 		local transform = parent.TransformComponent
@@ -827,6 +1058,7 @@ script MonsterSpawner extends Logic
 		return Vector3(worldPos.x - parentWorld.x, worldPos.y - parentWorld.y, worldPos.z - parentWorld.z)
 	end
 
+	-- x좌표 위치의 발판 Y값을 찾아서 반환한다 (발판이 없으면 0에 스폰 — 맵마다 발판 높이가 달라도 항상 바닥 위에 스폰되도록)
 	@ExecSpace("ServerOnly")
 	method number GetGroundY(Entity map, number x)
 		if map == nil then return 0 end
@@ -839,6 +1071,9 @@ script MonsterSpawner extends Logic
 		return hit:GetYByX(x)
 	end
 
+	-- 맵4~6은 바닥 발판 + 공중 발판이 따로 있어서(getFootholds()로 확인한 좌표를 그대로 하드코딩),
+	-- 아래로 레이캐스트하는 GetGroundY 방식으로는 맨 위 발판만 걸려 공중 발판에 스폰이 안 된다.
+	-- 발판 폭에 비례한 확률로 밴드를 하나 고르고 그 안에서 X를 뽑아 "타일이 있는 곳은 다 등장 가능"하게 한다.
 	@ExecSpace("ServerOnly")
 	method table GetZonePlatformBands(integer mapIndex)
 		if mapIndex == 4 then
@@ -917,6 +1152,10 @@ script MonsterSpawner extends Logic
 		return nil
 	end
 
+	-- 존13~15 전용: 랜덤 X를 쏴서 "맞으면 쓰고 아니면 다시 쏘는" 방식 대신, FootholdComponent가 이미
+	-- 알고 있는 발판 전체(GetFootholdAll)를 한 번에 훑어서 밟을 수 있는 평평한 구간을 직접 뽑고, 그중
+	-- 하나를 폭 비례 확률로 고른다 — "밟을 수 있는지" 판단은 이미 GetFlatRuns가 코드로 갖고 있으니
+	-- 그 결과에만 스폰하면 된다.
 	@ExecSpace("ServerOnly")
 	method Vector3 GetSpawnPositionFromFootholds(integer mapIndex, boolean isBoss, Entity map)
 		local mapName = _MapManager:GetMapName(mapIndex)
@@ -1005,7 +1244,10 @@ script MonsterSpawner extends Logic
 		return Vector3(x, chosen.y, 0)
 	end
 
+	-- run(발판 구간) 범위 안에 이미 살아있는 몬스터가 있는지 확인한다. "비어있는 특수 발판을 우선
+	-- 채운다" 로직의 존재 여부 판정에 쓰인다.
 	@ExecSpace("ServerOnly")
+	---@param run any
 	method boolean IsRunOccupied(Entity map, any run)
 		local monsters = map:GetChildComponentsByTypeName("script.MonsterAI", false)
 		for i = 1, #monsters do
@@ -1017,6 +1259,7 @@ script MonsterSpawner extends Logic
 		return false
 	end
 
+	-- run의 소유 엔티티(ownerId)가 존15 foothold-848 오브젝트 3개 중 하나인지 확인한다.
 	@ExecSpace("ServerOnly")
 	method boolean IsExcludedZone15Foothold(string ownerId)
 		return ownerId == self.Zone15ExcludedFootholdOwnerId1
@@ -1024,6 +1267,14 @@ script MonsterSpawner extends Logic
 			or ownerId == self.Zone15ExcludedFootholdOwnerId3
 	end
 
+	-- GetFlatRuns(전체 발판 스캔, 맵3/4는 152유닛 폭에 52개 구간)를 mapIndex별로 캐싱해서 재사용한다.
+	-- 하드코딩 밴드가 없는 존(맵3/4 등, GetZonePlatformBands==nil)은 몬스터 스폰(재시도 포함 최대
+	-- 5회/마리)과 넉백 클램프(ClampKnockbackDestX)가 호출될 때마다 매번 이 전체 스캔을 새로 돌렸다 —
+	-- 몬스터 여러 마리(최대 6마리)를 한 배치에 스폰할 때 같은 계산을 수십 번 반복해서 스폰 순간 렉으로
+	-- 체감됐다(유저 리포트: "에피2 맵3/4에서 몬스터 소환될때 렉이 걸리는거 같다"). 발판 지형은 런타임에
+	-- 절대 안 바뀌는 정적 레벨 데이터이므로, mapIndex별로 딱 한 번만 계산해서 영구 캐시해두고 그 뒤로는
+	-- 재사용한다 — container=nil로 파일 하나를 공유하는 존 그룹(맵3의 10개 존 등)은 mapIndex마다 캐시
+	-- 항목이 따로 생기지만(약간의 메모리 중복은 있음) 계산 자체는 각 mapIndex당 1회로 끝난다.
 	@ExecSpace("ServerOnly")
 	method table GetFlatRunsCached(integer mapIndex)
 		if self._flatRunsCache == nil then self._flatRunsCache = {} end
@@ -1042,6 +1293,9 @@ script MonsterSpawner extends Logic
 		return runs
 	end
 
+	-- FootholdComponent가 가진 발판 전체를 한 번 훑어서, 이어진 평평한 구간(run)별로 { y, xMin, xMax }를
+	-- 만든다. 개별 발판 조각(예: 길이 0.9) 하나만 보면 바닥도 "좁다"고 오판하기 쉬워서, 실제로 연결된
+	-- 전체 폭을 기준으로 판단해야 한다. 직접 부르지 말고 GetFlatRunsCached를 통해 호출할 것(위 캐시 함수).
 	@ExecSpace("ServerOnly")
 	method table GetFlatRuns(FootholdComponent footholdComp)
 		local all = footholdComp:GetFootholdAll()
@@ -1076,6 +1330,13 @@ script MonsterSpawner extends Logic
 		return runs
 	end
 
+	-- (worldX, worldY) 지점이 속한 평평한 발판 구간의 xMin/xMax를 찾는다. MonsterAI.InitializeStats가
+	-- 지그재그 스폰 직후 호출해서, 진폭(ZigzagAmplitude)이 실제 발판 폭을 넘어 타일 밖으로 흔들리지
+	-- 않도록 클램프하는 데 쓴다(유저 리포트: "지그재그 움직일 때 타일 아닌 부분도 밟는 것 같다" —
+	-- 에피소드2 map2 존7~10의 좁은 공중타일에서 기본 진폭 0.5가 타일 경계를 넘어가는 문제).
+	-- Y는 완전히 같은 층에만 매칭되도록 좁은 오차(0.1)만 허용하고, X는 발판 끝점 근처(부동소수점 오차)도
+	-- 포함하도록 약간의 여유(0.05)를 둔다. 매칭되는 run이 없으면(밴드/타일섬처럼 발판 위가 아닌 스폰)
+	-- nil을 반환해 호출측이 기본 진폭을 그대로 쓰게 한다.
 	@ExecSpace("ServerOnly")
 	method table GetContainingRunBounds(integer mapIndex, number worldX, number worldY)
 		local runs = self:GetFlatRunsCached(mapIndex)
@@ -1088,7 +1349,15 @@ script MonsterSpawner extends Logic
 		return nil
 	end
 
+	-- hit이 속한 발판이 앞뒤로 같은 높이(수평)인 이웃과 계속 이어지는 만큼을 따라가서, 실제로 연결된
+	-- 평평한 구간 전체의 xMin/xMax를 구한다. 개별 발판 조각(예: 길이 0.9) 하나만으로는 "좁다"고 오판하기
+	-- 쉬워서(바닥도 여러 조각이 이어붙어 만들어짐), 이어진 전체 폭을 기준으로 좁은지 판단해야 한다.
+	-- 반환타입을 "number, number"(다중 반환)로 선언하면 Maker 컴파일러가 [LEA-3015] CannotLoad
+	-- ("Sequence contains no elements")를 내며 이 파일 전체 로드에 실패한다(실측 확인 — 파라미터가
+	-- 없는 다중 반환 선언(예: 엔진 네이티브 GetBound())은 문제없지만, 파라미터가 있는 사용자 정의
+	-- 다중 반환 메서드에서 재현됨). 그래서 xMin/xMax를 테이블 하나에 담아 단일 반환값으로 우회한다.
 	@ExecSpace("ServerOnly")
+	---@param hit Foothold
 	method table GetFlatRunBounds(FootholdComponent footholdComp, any hit)
 		local y = hit.StartPoint.y
 		local xMin = hit.StartPoint.x
@@ -1113,11 +1382,32 @@ script MonsterSpawner extends Logic
 		return { xMin = xMin, xMax = xMax }
 	end
 
+	-- 발판이 "수평"인지 판정. 엔진 네이티브 Foothold:IsHorizontal()은 오차 없이 엄격하게 판정하는 것으로
+	-- 보이는데, 유저가 Maker에서 손으로 그린 발판은 눈에 평평해 보여도 StartPoint/EndPoint의 Y가 아주
+	-- 살짝 다를 수 있다 — 그러면 IsHorizontal()이 계속 false를 반환해 그 발판이 스폰 후보에서 통째로
+	-- 빠지고(예: 기둥 꼭대기 발판), 결국 아래 바닥에만 스폰되는 것처럼 보인다. FlatSlopeTolerance 이내의
+	-- 기울기는 수평으로 간주해 이 문제를 피한다.
 	@ExecSpace("ServerOnly")
+	---@param seg Foothold
 	method boolean IsFlatSegment(any seg)
 		return math.abs(seg.EndPoint.y - seg.StartPoint.y) <= self.FlatSlopeTolerance
 	end
 
+	-- 이 존(mapIndex)의 X 범위 안에 있는 발판만 훑어서 최저 Y(=바닥 기준선)를 구하고 캐시한다. 이 값보다
+	-- AerialHeightThreshold 이상 높은 발판을 "공중 발판"으로 취급해 edgeMargin을 더 크게 적용한다.
+	-- ⚠ 병합된 물리 파일(예: map07이 존7/8/9/10을 한 FootholdComponent에 다 갖고 있음) 전체를 스캔하면
+	-- 안 된다 — 다른 존의 장식용 깊은 구덩이(예: 존8 아치 밑 수직굴, y≈-4.5)까지 최저Y 계산에 섞여
+	-- 이 존 자신의 실제 바닥(-1.18)보다 훨씬 낮은 값이 잡히는 문제가 있었다(실측 확인). 그러면 진짜
+	-- 바닥이 "공중 발판"으로 오판되고, 후보가 하나도 없을 때의 폴백 좌표(Vector3(offsetX, baselineY, 0))가
+	-- 엉뚱하게 그 구덩이 안에 찍힌다. 그래서 이 존 자신의 X 범위(오프셋 ± 존 폭 여유 8)로 스캔을 한정한다.
+	-- ⚠ 존27 추가(2026-08-05) 중 두 번째 문제 발견 — X범위를 한정해도, 그 안에 "밟을 수 없는 수직 벽/절벽
+	-- 장식"(예: 존27 좌측 끝 x=-7.09의 맵 경계 절벽, y=-1.09에서 -3.90까지 내려가는 수직 조각들)이 있으면
+	-- 그 수직 조각의 끝점 Y까지 "바닥"으로 잡혀 버린다(실측 확인 — 40/40 스폰이 전부 진짜 바닥에만 찍히고
+	-- 기둥 위/사이 발판엔 하나도 안 감). 이러면 진짜 바닥(-1.09)이 baselineY(-3.90)보다 AerialHeightThreshold
+	-- 이상 높아서 "공중 발판"으로 오판되고, GetSpawnPositionFromFootholds의 "빈 공중 발판 우선 배정" 루프가
+	-- runs 순회 중 가장 먼저 만나는 그 오판된 바닥에서 즉시 return해버려 진짜 공중 발판까지 도달하지 못한다.
+	-- 그래서 밟고 설 수 있는 평평한(IsFlatSegment) 조각의 Y만 기준선 후보로 삼는다 — 수직 벽/절벽은
+	-- 애초에 "바닥"이 아니므로 기준선 계산에서 제외하는 게 맞다.
 	@ExecSpace("ServerOnly")
 	method number GetBaselineGroundY(integer mapIndex, FootholdComponent footholdComp)
 		if self._baselineGroundYCache == nil then self._baselineGroundYCache = {} end
@@ -1140,6 +1430,9 @@ script MonsterSpawner extends Logic
 		return minY
 	end
 
+	-- ── 맵10 보너스 스테이지 ──────────────────────────────────────
+	-- MapManager가 맵10 입장마다 호출. 첫 방문은 100%, 이후엔 BonusBossChance 확률로 보너스 보스를
+	-- 등장시킨다. 실패하거나 이미 보스가 떠 있으면 평소 웨이브 스폰(맵9 몬스터 풀 재사용)으로 대체한다.
 	@ExecSpace("ServerOnly")
 	method void TryStartBonusStage()
 		if isvalid(self._bonusBoss) then return end
@@ -1155,6 +1448,7 @@ script MonsterSpawner extends Logic
 		self:SpawnBonusBoss()
 	end
 
+	-- 맵10에 보너스 보스 1마리를 즉시 스폰한다. 평소 웨이브 몬스터와 섞이지 않도록 기존 몬스터를 먼저 정리한다.
 	@ExecSpace("ServerOnly")
 	method void SpawnBonusBoss()
 		-- 그룹C 병합 이후 맵10은 물리적으로 map07.map 안의 Zone10 자식 컨테이너다 — 하드코딩된
@@ -1204,6 +1498,7 @@ script MonsterSpawner extends Logic
 		end, self.BonusTimerStartDelay)
 	end
 
+	-- 화면 인지 유예(BonusTimerStartDelay) 뒤 실제로 타이머를 띄우고 공격을 풀어준다.
 	@ExecSpace("ServerOnly")
 	method void StartMap10BonusTimer()
 		if isvalid(self._bonusBoss) then
@@ -1219,6 +1514,7 @@ script MonsterSpawner extends Logic
 		end, self.BonusBossDuration)
 	end
 
+	-- 지속시간 만료 시 호출 — 보너스 보스를 제거한다. 이후 평소 SpawnWave 틱이 맵9 몬스터 풀로 재개한다.
 	@ExecSpace("ServerOnly")
 	method void EndBonusStage()
 		if isvalid(self._bonusBoss) then
@@ -1261,6 +1557,17 @@ script MonsterSpawner extends Logic
 		renderer.Text = string.format("%02d:%02d", m, s)
 	end
 
+	-- 스폰 위치를 정한다. 맵4~6은 발판 밴드 테이블에서 폭에 비례한 확률로 하나 골라 그 위에 스폰하고,
+	-- 맵1~3/맵 전용 풀은 기존처럼 화면 근처(±5) 범위에서 골라 아래로 레이캐스트한다(회귀 방지를 위해 그대로 둠).
+	-- speciesIdx: 맵 전용 풀(zoneIndex>=7)에서 RollSpeciesForMap이 미리 뽑아준 값(0=해당 없음). 원거리 종이면
+	-- 일반 바닥 대신 유저가 Maker에서 직접 깔아둔 타일 섬 발판(RangedTileMinX~MaxX, 이미 월드 좌표 —
+	-- 발판은 항상 맵 루트 기준이라 Zone12 오프셋과 무관) X구간에서 뽑되, Y는 하드코딩하지 않고 GetGroundY로
+	-- 그 발판 표면에 직접 레이캐스트한다(경사/계단이 있어도 항상 정확히 표면에 선다 — 이전엔 Y를 고정값으로
+	-- 하드코딩해서 유저가 발판 모양을 바꿀 때마다 허공에 뜨는 버그가 반복됐다). 근접 종은 그 X구간을 피해
+	-- 좌우 바깥쪽에서만 스폰한다(레이캐스트가 타일 섬 위에 먼저 걸려 근접 종도 섬 위에 착지해버릴 수 있어서).
+	-- map 파라미터를 받지 않는다 — 그룹D 병합 이후 맵12는 물리적으로 map11.map 안의 Zone12 자식이라
+	-- 발판(FootholdComponent)은 항상 맵 루트(map11)에 있으므로, 레이캐스트 대상은 mapIndex로부터
+	-- 직접 다시 조회한다(호출측이 넘기는 "존 엔티티"와 발판 소유 루트가 다를 수 있어서).
 	@ExecSpace("ServerOnly")
 	method Vector3 GetSpawnPosition(integer mapIndex, boolean isBoss, integer speciesIdx, Entity map)
 		-- 비행형 종(맵15 박쥐)은 밴드/레이캐스트 어느 쪽과도 무관하게 항상 화면 안전 범위(±5) X +
@@ -1417,17 +1724,20 @@ script MonsterSpawner extends Logic
 		return Vector3(x, chosen.y, 0)
 	end
 
+	-- GameManager가 호출: 스폰 멈추기 (게임 종료 시)
 	@ExecSpace("ServerOnly")
 	method void StopSpawning()
 		self._running = false
 	end
 
+	-- MapManager.BeginGameplay()가 "게임 시작" 클릭 시점에 호출 — 웨이브 타이머를 최초로 켠다
 	@ExecSpace("ServerOnly")
 	method void BeginGameplay()
 		self._running = true
 		log("MonsterSpawner: gameplay started")
 	end
 
+	-- GameManager가 호출: 다시하기/이어하기 시 스폰 재개
 	@ExecSpace("ServerOnly")
 	method void RestartSpawning()
 		self._timer = self.EarlyPhaseSpawnInterval
@@ -1443,12 +1753,14 @@ script MonsterSpawner extends Logic
 		log("MonsterSpawner: spawning restarted")
 	end
 
+	-- 이어하기 전용: 타이머를 건드리지 않고 _running만 재개 (기존 스폰 스케줄 유지)
 	@ExecSpace("ServerOnly")
 	method void ResumeSpawning()
 		self._running = true
 		log("MonsterSpawner: spawning resumed (timer preserved)")
 	end
 
+	-- GameManager.RestartGame()(처음부터 다시하기)에서만 호출 — 이어하기는 같은 웨이브의 엘리트 기록을 유지해야 한다
 	@ExecSpace("ServerOnly")
 	method void ResetEliteTracking()
 		self._lastEliteWave = 0
@@ -1456,6 +1768,7 @@ script MonsterSpawner extends Logic
 		self._lastSpikeWave = 0
 	end
 
+	-- GameManager가 호출: 다시하기/이어하기 시 남아있는 몬스터 전부 제거 (map1~3 전부)
 	@ExecSpace("ServerOnly")
 	method void ClearAllMonsters()
 		local total = 0
@@ -1472,6 +1785,7 @@ script MonsterSpawner extends Logic
 		log("MonsterSpawner: cleared " .. total .. " monster(s)")
 	end
 
+	-- 이어하기 전용: 몬스터를 제거하지 않고 스폰 위치로 밀어냄 (map1~3 전부)
 	@ExecSpace("ServerOnly")
 	method void PushAllMonstersBack()
 		local total = 0

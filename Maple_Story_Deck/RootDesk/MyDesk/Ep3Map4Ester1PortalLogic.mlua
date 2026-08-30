@@ -10,6 +10,36 @@ script Ep3Map4Ester1PortalLogic extends Logic
 	@Sync
 	property integer RemainingSeconds = 0
 
+	-- ep3_map4의 기존 네이티브 portal-3(유저 지정: "map4에서 0fa0c82396d74c14ac004a65dff4497e 이 uuid
+	-- 눌러서 다 소환하면 portal-3 이 포탈 생기게해줘 평소에는 안보임"). 평소엔 map 파일에서 Enable=false로
+	-- 숨겨져 있다가, Ep3Map4PunkoEasterEggLogic이 오브젝트 4개(object-15_73/143/171/172)를 전부
+	-- 트리거하면 RevealPortal()로 켜진다.
+	--
+	-- 누르면(Ep3Map4Ester1PortalTrigger.RequestClick) 자격의 증표(ep3_map3_qualification_token,
+	-- [[project_ep3map3_item_easteregg]] — ep3_map3 장식오브젝트16개 중 매런 1개만 드롭)를 검사한다
+	-- (유저 지정 정정: "검투사 말고 자격의 증표가 입장 재화야" — 처음엔 검투사의 증표(tired_knight_seal)로
+	-- 잘못 넣었던 것을 수정) — 있으면 1개 소모하고 "자격의 증표를 사용했습니다" 토스트 후 히든맵으로
+	-- 이동, 없으면 요구 아이템 말풍선만 보여준다(Ep2Map4PiecePuzzleLogic.OnPortalObjectClicked와
+	-- 완전히 동일한 패턴 — Ep2Map1GiftNpcLogic.SpawnBubble 재사용).
+	--
+	-- 목적지(유저 지정, 중간에 정정: "이동맵 이름 ep3_map4_ester_1이고 존 5개 사용이야" / "CharacterUnlockGroup
+	-- 이건 오타임"): ep3_map4_ester_1(mapIndex 129~133, MapManager.ZoneInfo에 신규 등록 — 존1~5,
+	-- Zone2~10 마커 중 앞 5개만 이번에 사용). 이 인덱스들은 GameManager의 몬스터 스탯 테이블([129]~[133])엔
+	-- 이미 배선되어 있었지만 MapManager.ZoneInfo엔 없었고(GetZoneEntity/GetMapName이 존재하지 않는
+	-- "map129" 파일명으로 폴백해 몬스터가 전혀 안 나올 뻔함) 이번에 새로 등록했다. 또한 MaxMapIndex(에피3=128)
+	-- 밖이라 SilentMoveToMap/MoveToMap을 못 쓴다(둘 다 range 가드로 조용히 no-op) — 그래서 이 Logic이
+	-- MoveAllUsersToZone과 동일한 저수준 시퀀스(TeleportToMapPosition + CurrentMapIndex 수동 대입 +
+	-- SetMonstersPausedForZone + ActivateMap)를 직접 구현한다.
+	--
+	-- 존 간 이동(존1→2...5) 트리거는 아직 안 만들었다 — 이번 범위는 "포탈로 존1(129) 진입 + 60초 후
+	-- 자동 퇴장"까지다(유저에게 이 경계를 명시적으로 알릴 것).
+	--
+	-- 안전장치(유저 지정: "또 다른존에서 공격하거나 공격받거나 그런거 없도록 부탁한다" —
+	-- [[feedback_arena_map_zoneindex_leak_checklist]] 동일 계열 버그 예방): 입장 직전 실제 존을
+	-- _originZoneIndex에 저장해 즉시 Pause하고, CurrentMapIndex를 129로 실제로 바꾼다 — 그래서
+	-- CardManager.GetMonstersInCurrentZone/ClampKnockbackDestX/로컬 잡템 로직이 항상 "지금 있는 존"만
+	-- 정확히 조회한다(Ep2Map4GalleryPortalTrigger/Ep3Map2BonusBossLogic의 InArena 워크어라운드가
+	-- 필요했던 이유는 그쪽 아레나가 CurrentMapIndex를 안 바꿔서였다 — 여긴 실제로 바꾸므로 불필요).
 	property string PortalPath = "/maps/ep3_map4/portal-3"
 
 	property string RequiredItemId = "ep3_map3_qualification_token"
@@ -18,6 +48,9 @@ script Ep3Map4Ester1PortalLogic extends Logic
 
 	property string RequirementIconRUID = "613d49a35f90479c905e9265305a09b8"
 
+	-- 유저가 RequirementBubblePreview(map/ep3_map4.map, GiftBubble.model)를 Maker에서 직접 드래그해
+	-- 튜닝한 값 그대로 반영(2026-08-27) — 말풍선 위치/아이콘 위치/텍스트("X0" 자리표시자를 "x1"로
+	-- 직접 입력, 짧은 수량 표기로 확정). 스케일은 모델 기본값(0.488449961)과 동일해 안 건드림.
 	property string RequirementText = "x1"
 
 	property string UsedMessage = "자격의 증표를 사용했습니다"
@@ -38,6 +71,8 @@ script Ep3Map4Ester1PortalLogic extends Logic
 
 	property number Duration = 60.0
 
+	-- 타이머 UI(2026-08-27, 유저 지적: "여긴 왜 타이머 안붙였냐") — Ep3Map2BonusBossLogic의
+	-- BonusBossBoard와 동일한 패턴으로 ui/DefaultGroup.ui에 Ep3Map4Ester1Board를 신규 배치했다.
 	property string BoardEntityPath = "/ui/DefaultGroup/Ep3Map4Ester1Board"
 
 	property string TimerTextPath = "/ui/DefaultGroup/Ep3Map4Ester1Board/Inner/TimerText"
@@ -61,6 +96,7 @@ script Ep3Map4Ester1PortalLogic extends Logic
 		end
 	end
 
+	-- Ep3Map4PunkoEasterEggLogic이 오브젝트 4개 전부 트리거되면 호출
 	@ExecSpace("ServerOnly")
 	method void RevealPortal()
 		if self.PortalRevealed then return end
@@ -71,6 +107,7 @@ script Ep3Map4Ester1PortalLogic extends Logic
 		log("Ep3Map4Ester1Portal: portal revealed")
 	end
 
+	-- Ep3Map4Ester1PortalTrigger.RequestClick()이 호출
 	@ExecSpace("ServerOnly")
 	method void OnPortalTouched(Entity clickedEntity)
 		if self.Active then return end -- 이미 히든맵에 있으면 무시(중복 입장 방지)
@@ -207,6 +244,7 @@ script Ep3Map4Ester1PortalLogic extends Logic
 		renderer.Text = string.format("%02d:%02d", m, s)
 	end
 
+	-- GameManager.RestartGame()이 호출 — 새 런에서는 포탈이 다시 숨겨지고(존1~4를 다시 다 눌러야 함) 재입장 가능
 	@ExecSpace("ServerOnly")
 	method void ResetForNewRun()
 		self.PortalRevealed = false

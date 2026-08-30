@@ -32,6 +32,11 @@ script Ep2Map2ArenaLogic extends Logic
 
 	property string Portal7Path = "/maps/ep2_map2_estermap_1/portal-7"
 
+	-- 선택 단계(10마리 고르는 화면)와 결과 단계(단상) 양쪽에서 같이 쓰는 딤드(월드 스프라이트).
+	-- 몬스터들이 같은 맵에 붙어있는 월드 엔티티라 UI 딤으로는 절대 그 위로 못 올린다(구조적 한계,
+	-- GalleryArenaUI.mlua 헤더 주석 참고) — 대신 딤 자체를 월드 스프라이트로 두고 Z(999.999)/
+	-- OrderInLayer(0)를 몬스터(999.5/2)보다 뒤에 둬서 몬스터가 자연히 위에 뜨게 한다. 결과 화면의
+	-- Podium(UI)은 월드보다 항상 위 렌더 패스라 이 딤 위에 뜨는 것도 별도 처리 없이 보장된다.
 	property Entity galleryDim = "1493fb8b-4d16-4184-9727-cc522a82d951"
 
 	property integer RetryCost = 300
@@ -54,10 +59,24 @@ script Ep2Map2ArenaLogic extends Logic
 
 	property boolean _usedFreeRetryThisRun = false
 
+	-- 유저 지적: "몬스터 선택안했는데 강제 시작되는 경우도 있는듯" — OnFighterClicked가 예약하는
+	-- StartBattle 타이머(2초 뒤)가 StartSelectionPhase로 취소되지 않고 그대로 남아있다가, 이후
+	-- 재도전/재입장으로 또 PreBattle 단계에 들어간 시점에 뒤늦게 발동하면서 유저가 이번엔 아직
+	-- 안 골랐어도(혹은 다른 몬스터를 고른 도중에도) 전투를 강제로 시작시키는 레이스가 있었다.
+	-- 선택 단계를 새로 시작할 때마다 토큰을 올리고, 예약된 타이머는 발동 시점에 자기 토큰이 아직도
+	-- 최신인지 확인해서 오래된(취소되지 않은) 타이머는 무시한다.
 	property integer _selectionToken = 0
 
+	-- 유저 지정: "단상이랑 단상위 몬스터 크기 좀 더 키우자 한 15%정도" — 단상 이미지 자체는 .ui
+	-- 쪽(GalleryArenaUI ResultGroup/Podium RectSize)에서 이미 1.15배로 키웠고, 그 위에 서는 몬스터
+	-- 아이콘 크기도 여기서 같은 배율로 맞춘다(둘이 따로 놀면 비율이 어긋나 보임).
 	property number PodiumIconScale = 1.15
 
+	-- hp = 종별 체력 보정치(유저 지적: "승률이 낮은애한테 체력 보정치를 주면"). 실제 전투 타이밍
+	-- 수식을 그대로 복제한 오프라인 시뮬레이터(scratchpad/arena_sim 계열)로 1000판 승률을 뽑은 뒤,
+	-- 승률이 낮은 종은 체력을 올리고 높은 종은 내리는 보정을 2회 반복 적용 — 원래 전원 공통 15000
+	-- 이었던 걸 종별로 분리했다. 보정 전 승률 표준편차 6.85(2.8%~24.4%) → 보정 후 독립 검증
+	-- 3000판에서 2.32(6.7%~14.1%)로 균등해짐 확인.
 	method any GetFighterData()
 		-- iconW/iconH = stand 애니메이션클립의 원본 픽셀 크기(msw-search로 조회) — 결과 화면 UI
 		-- 단상 위 아이콘(GalleryArenaUI.ShowResult/ApplySlot)이 종별로 찌그러지지 않게 쓴다.
@@ -497,6 +516,8 @@ script Ep2Map2ArenaLogic extends Logic
 		end
 	end
 
+	-- GalleryArenaUI.OnCloseButtonClicked(X 버튼)가 호출 — 결과 화면을 닫은 뒤에야 포탈을 드러낸다
+	-- (유저 지정: "1~3등수 나오고 X버튼 안누르면 포탈 안눌리게").
 	@ExecSpace("ServerOnly")
 	method void OnResultClosed()
 		if self.Phase ~= "Result" then return end

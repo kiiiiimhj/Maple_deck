@@ -1,46 +1,64 @@
 @Logic
 script LoadingUI extends Logic
 
+	-- 게임 입장 로딩 화면(ui/LoadingGroup.ui).
+	--
+	-- 왜 필요했나: "게임 시작"을 누르면 곧바로 인게임이라, 유저가 화면을 인식하기도 전에 몬스터가
+	-- 붙어서 죽는 경우가 있었다(유저 리포트). 그래서 화면을 검게 덮은 채로 잠깐 두고, 그 사이
+	-- 서버는 몬스터 스폰 시작을 미룬다(GameManager.EntryDelaySeconds). 연출과 실제 전투 시작이
+	-- 같이 늦춰져야 의미가 있다 — 화면만 가리면 "죽는 걸 못 본" 문제가 오히려 심해진다.
+	--
+	-- 연출은 페이드(알파 트윈). 맵 이동은 검은 와이프(MapTransitionLogic)로 이미 쓰고 있어서,
+	-- "장소 이동=와이프 / 시간 경과·로딩=페이드"로 역할을 갈라 두면 둘이 헷갈리지 않는다.
+
 	property Entity loadingScreen = "4e3f744a-329a-4aa7-9e36-a0ec50fb2906"
-
 	property CanvasGroupComponent screenCanvas = "4e3f744a-329a-4aa7-9e36-a0ec50fb2906"
-
 	property SpriteGUIRendererComponent bgSprite = "4a7dbbce-a4e0-4168-a001-e93a0443194a"
 
+	-- "Loading..." 글자들을 담은 컨테이너. 파도 연출은 글자마다 위상이 달라야 해서 한 덩어리
+	-- TextComponent로는 안 되고, Char_0..Char_N 자식 엔티티를 각각 위아래로 흔든다.
+	-- 문구 전체 위치를 옮기려면 이 컨테이너만 움직이면 되고, 글자 간격은 각 Char_N의 x를 조정한다
 	property Entity waveContainer = "9b28daaa-c08b-40e5-81b6-784034204f55"
-
+	-- 글자가 위아래로 흔들리는 폭(px)
 	property number WaveAmplitude = 12
-
+	-- 파도가 흐르는 속도(rad/s)
 	property number WaveSpeed = 6.0
-
+	-- 글자 하나당 위상차(rad) — 클수록 파도가 촘촘해진다
 	property number WavePhase = 0.55
 
 	property table _waveChars = {}
-
 	property number _waveTime = 0
 
+	-- 화면이 검어지는 시간. 타이틀 화면은 이 페이드가 끝난 뒤에 닫아서, 로비가 사라지는 순간이
+	-- 검은 화면 뒤에 감춰지게 한다(에피2/3의 맵 점프 노출도 같이 가려진다)
 	property number FadeInSeconds = 0.35
-
+	-- 검은 화면을 유지하는 시간(= 실제 "로딩" 구간)
 	property number HoldSeconds = 1.2
-
+	-- 화면이 다시 밝아지는 시간
 	property number FadeOutSeconds = 0.5
 
+	-- ── 부팅 커버 ──
+	-- 월드를 처음 켤 때 각 UI 그룹의 "저장된 상태"가 먼저 한 번 그려지고, 그 뒤에야 컨트롤러
+	-- 스크립트의 OnBeginPlay가 돌면서 정리된다(DefaultGroup의 HUD 18개가 보이고, TitleGroup은
+	-- Shop/Skill 패널이 동시에 켜진 채로 보였다가 ShowTab("battle")이 정리하는 식).
+	-- 그래서 이 화면은 .ui에 **덮인 상태로 저장**되어 있고(Screen.Enable=true, GroupAlpha=1),
+	-- 여기서는 "언제 걷을지"만 결정한다 — 스크립트가 켜는 방식이면 이미 늦어서 못 막는다.
 	property boolean CoverOnBoot = true
-
+	-- 데이터 로드가 끝났는지 확인하는 주기
 	property number BootPollSeconds = 0.1
-
+	-- 데이터 로드가 끝난 뒤 UI들이 자리를 잡을 여유
 	property number BootSettleSeconds = 0.35
-
+	-- 로딩 화면을 최소한 이만큼은 보여준다. 실측상 데이터 로드가 0.3초면 끝나버려서, 이게 없으면
+	-- 로딩 화면이 스치듯 지나가 유저가 보지도 못한다(유저 리포트: "거의 안 보인다")
 	property number BootMinShowSeconds = 2.0
-
+	-- 안전장치: 로드 완료 신호가 끝내 안 와도 이 시간이 지나면 무조건 걷는다.
+	-- 이게 없으면 로드 단계가 실패했을 때 화면이 영영 검은 채로 남는다
 	property number BootMaxSeconds = 8.0
 
 	property boolean _playing = false
-
+	-- 지금 화면이 완전히 덮여 있는가(부팅 커버 포함) — PlayEntry가 페이드인을 건너뛸지 판단한다
 	property boolean _covered = false
-
 	property number _bootElapsed = 0
-
 	property integer _bootTimerId = 0
 
 	@ExecSpace("ClientOnly")
@@ -49,7 +67,7 @@ script LoadingUI extends Logic
 			log_error("LoadingUI: screen entity missing")
 			return
 		end
-		
+
 		if not self.CoverOnBoot then
 			self.loadingScreen.Enable = false
 			self.screenCanvas.GroupAlpha = 0
@@ -60,7 +78,7 @@ script LoadingUI extends Logic
 			log("LoadingUI started (boot cover disabled)")
 			return
 		end
-		
+
 		-- .ui에 저장된 대로 이미 덮여 있는 상태. 여기서 켜는 게 아니라 상태만 맞춰둔다
 		self.loadingScreen.Enable = true
 		self.screenCanvas.GroupAlpha = 1
@@ -71,6 +89,8 @@ script LoadingUI extends Logic
 		log("LoadingUI started (boot cover on)")
 	end
 
+	-- "Loading..." 글자 엔티티와 각자의 기준 y를 한 번만 모아둔다.
+	-- 기준 y를 .ui에서 읽어두기 때문에, 하이라키에서 글자 위치를 옮겨도 그 자리를 중심으로 흔들린다
 	@ExecSpace("ClientOnly")
 	method void CacheWaveChars()
 		local chars = {}
@@ -79,14 +99,14 @@ script LoadingUI extends Logic
 			log_warning("LoadingUI: waveContainer missing, wave disabled")
 			return
 		end
-		
+
 		for _, child in ipairs(self.waveContainer.Children:ToTable()) do
 			if isvalid(child) then
 				local t = child.UITransformComponent
 				chars[#chars + 1] = { transform = t, baseX = t.anchoredPosition.x, baseY = t.anchoredPosition.y }
 			end
 		end
-		
+
 		self._waveChars = chars
 		log("LoadingUI: wave chars cached = " .. tostring(#chars))
 	end
@@ -95,10 +115,10 @@ script LoadingUI extends Logic
 	method void OnUpdate(number delta)
 		-- 로딩 화면이 떠 있는 동안만 글자를 흔든다
 		if not isvalid(self.loadingScreen) or not self.loadingScreen.Enable then return end
-		
+
 		local chars = self._waveChars
 		if chars == nil or #chars == 0 then return end
-		
+
 		self._waveTime = self._waveTime + delta
 		for i = 1, #chars do
 			local c = chars[i]
@@ -114,27 +134,27 @@ script LoadingUI extends Logic
 	method void TickBootCover()
 		-- 데이터 로드 완료(_DataLoadLogic.IsLoadEnd)까지 덮어두고, 안 오면 BootMaxSeconds에서 포기한다
 		self._bootElapsed = self._bootElapsed + self.BootPollSeconds
-		
+
 		local ready = _DataLoadLogic.IsLoadEnd
 		local timedOut = self._bootElapsed >= self.BootMaxSeconds
 		if not ready and not timedOut then return end
-		
+
 		_TimerService:ClearTimer(self._bootTimerId)
 		self._bootTimerId = 0
-		
+
 		if timedOut and not ready then
 			log_warning(string.format("LoadingUI: boot cover timed out after %.1fs (data load not finished), revealing anyway", self._bootElapsed))
 		else
 			log(string.format("LoadingUI: data load finished at %.1fs", self._bootElapsed))
 		end
-		
+
 		-- 로드가 끝나도 각 UI의 OnBeginPlay 정리가 같은 프레임에 끝나 있지 않을 수 있어 잠깐 더 둔다.
 		-- 여기에 더해 BootMinShowSeconds를 채울 때까지 기다린다 — 로드가 순식간에 끝나도 로딩
 		-- 화면이 최소 그 시간만큼은 보이게 하려는 것
 		local settle = self.BootSettleSeconds
 		local remainMin = self.BootMinShowSeconds - self._bootElapsed
 		if remainMin > settle then settle = remainMin end
-		
+
 		log(string.format("LoadingUI: revealing in %.2fs (min-show %.1fs)", settle, self.BootMinShowSeconds))
 		_TimerService:SetTimerOnce(function()
 			if not isvalid(self) then return end
@@ -150,6 +170,8 @@ script LoadingUI extends Logic
 		end
 	end
 
+	-- "게임 시작"/"다시하기"가 호출하는 입장 연출 전체.
+	-- onCovered: 화면이 완전히 검어진 시점에 실행할 콜백(타이틀 닫기 등) — 없으면 nil을 넘긴다.
 	@ExecSpace("ClientOnly")
 	method void PlayEntry(any onCovered)
 		if self._playing then
@@ -162,10 +184,10 @@ script LoadingUI extends Logic
 			if onCovered ~= nil then onCovered() end
 			return
 		end
-		
+
 		self._playing = true
 		self.loadingScreen.Enable = true
-		
+
 		-- 이미 덮여 있으면(부팅 커버가 아직 안 걷힌 상태) 페이드인을 건너뛴다 —
 		-- 여기서 알파를 0으로 되돌리면 로비가 한 번 번쩍 보였다가 다시 검어진다
 		local fadeIn = self.FadeInSeconds
@@ -174,17 +196,17 @@ script LoadingUI extends Logic
 		else
 			self.screenCanvas.GroupAlpha = 0
 		end
-		
+
 		local totalCovered = fadeIn + self.HoldSeconds
 		log(string.format("LoadingUI: PlayEntry (fadeIn=%.2f hold=%.2f fadeOut=%.2f)", fadeIn, self.HoldSeconds, self.FadeOutSeconds))
-		
+
 		-- 1) 검게 덮기
 		if fadeIn > 0 then
 			_TweenLogic:PlayTween(0, 1, fadeIn, EaseType.QuadEaseIn, function(value)
 				if isvalid(self.screenCanvas) then self.screenCanvas.GroupAlpha = value end
 			end)
 		end
-		
+
 		-- 2) 완전히 가려진 순간 — 타이틀 닫기 같은 "보이면 안 되는 전환"을 여기서 처리한다
 		_TimerService:SetTimerOnce(function()
 			if not isvalid(self) then return end
@@ -192,7 +214,7 @@ script LoadingUI extends Logic
 			self._covered = true
 			if onCovered ~= nil then onCovered() end
 		end, fadeIn)
-		
+
 		-- 3) 유지 후 다시 밝히기
 		_TimerService:SetTimerOnce(function()
 			if not isvalid(self) then return end
@@ -209,11 +231,11 @@ script LoadingUI extends Logic
 			self._covered = false
 			return
 		end
-		
+
 		_TweenLogic:PlayTween(1, 0, self.FadeOutSeconds, EaseType.QuadEaseOut, function(value)
 			if isvalid(self.screenCanvas) then self.screenCanvas.GroupAlpha = value end
 		end)
-		
+
 		_TimerService:SetTimerOnce(function()
 			if not isvalid(self) then return end
 			if isvalid(self.screenCanvas) then self.screenCanvas.GroupAlpha = 0 end
@@ -224,6 +246,7 @@ script LoadingUI extends Logic
 		end, self.FadeOutSeconds)
 	end
 
+	-- 화면이 검게 덮여있는 총 시간. GameManager가 스폰 시작을 얼마나 미룰지 맞출 때 참고한다.
 	method number GetCoveredSeconds()
 		return self.FadeInSeconds + self.HoldSeconds
 	end

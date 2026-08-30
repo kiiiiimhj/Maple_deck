@@ -7,6 +7,18 @@ script Ep2Map1GiftNpcLogic extends Logic
 	@Sync
 	property string PickedItemId = ""
 
+	-- 에피소드2 map1 이스터에그 2: object-3428_84(Ep2Map1GiftNpcTrigger가 붙은 NPC) — 교환(퀘스트) 구조.
+	-- 1번째 클릭(런당 1회, 이어하기 유지): 맵1(ep2_map1, 존1~10 = mapIndex 45~54) 몬스터가 떨어뜨리는
+	-- 잡템 중 1종을 랜덤으로 확정하고 "아이콘 X 30" 말풍선으로 목표만 보여준다 — 이 시점엔 아무것도
+	-- 지급/차감하지 않는다. 플레이어가 실제로 몬스터를 잡아 그 잡템을 기존 드롭 시스템으로 30개 모아온 뒤
+	-- 다시 누르면(교환 성공) 그 30개를 소모하고, 진짜 인게임 스킬 강화 1회를 지급한다(Ep2Map1SkillEasterEggLogic
+	-- 과 동일하게 CardManager.BuildActiveUpgradePool + GrantCardUpgradesFromPool 재사용 — 카드가 실제
+	-- 슬롯으로 날아가서 레벨업됨. 유저 정정: SkillInventory 강화탭이 아니라 인게임 스킬).
+	-- 아직 목표치를 못 채운 상태에서 다시 누르면(몇 번을 눌러도) 갈라진 하트 대신 "아이콘 X 남은개수"로
+	-- 계속 진행상황을 보여준다(유저 지정: "그냥 하트 띄우지말고 계속 뭐 모아야하는지 보여주는게 좋을듯").
+	-- 교환은 이번 런에 딱 1번만 가능(유저 지정) — 성공하면 Redeemed=true로 그 뒤 완전히 무반응.
+	-- "다시하기"/"새로 시작"에서는 GameManager.RestartGame()이 ResetForNewRun()을 호출해 초기화되지만
+	-- (다시 도전 가능 + 잡템도 재추첨), "이어하기"는 건드리지 않는다.
 	property integer GiftAmount = 30
 
 	property string HeartIconRUID = "7ecb5769578f4b05808afaad17ee83ac"
@@ -15,18 +27,33 @@ script Ep2Map1GiftNpcLogic extends Logic
 
 	property string BubbleModelId = "giftbubble"
 
+	-- 유저가 Maker 하이어라키에 GiftBubblePreview로 직접 배치해 드래그로 잡은 위치를 그대로 반영
+	-- (NPC 월드 좌표 기준 상대 오프셋)
 	property number BubbleXOffset = -0.7652970
 
 	property number BubbleYOffset = 0.9155867
 
+	-- 하트 아이콘 전용 위치/크기(2026-08-21, 유저 지정: "잡템 모아오라고한 이미지 사이즈랑 위치로 변경하고
+	-- 거기에서 오른쪽으로 더 이동"). 잡템 수집 중 아이콘(Icon 자식의 모델 기본값, GiftBubble.model 참고)과
+	-- 별개로 둔 이유 — 하트 스프라이트(7ecb5769578f4b05808afaad17ee83ac, 16x16)가 잡템 아이콘들(대부분
+	-- 28x28 전후)보다 원본 픽셀 크기가 작아서, 같은 Scale을 그대로 쓰면 하트만 확연히 작게 보이고 pivot도
+	-- 스프라이트마다 달라(둘 다 좌하단 근접이지만 정확히 다름) 같은 Position이어도 눈에 보이는 위치가
+	-- 다르다 — 시작값은 일단 잡템 아이콘과 동일하게 맞춰뒀고(요청의 1단계), GiftBubblePreview로 유저가
+	-- 직접 오른쪽으로 옮기면(요청의 2단계) 그 결과를 여기 그대로 반영한다.
 	property Vector3 HeartIconPosition = Vector3(-0.4361, -0.2908, 0)
 
 	property Vector3 HeartIconScale = Vector3(5.788959, 5.78895855, 1)
 
+	-- 잡템 아이콘(하트가 아닌 일반 케이스) 전용 위치/크기 — GiftBubble.model에 원래 구워져 있던 Icon
+	-- 자식의 기본값 그대로(SpawnBubble이 이제 항상 명시적으로 iconPos/iconScale을 요구하므로, 기존
+	-- 동작을 그대로 보존하기 위해 이 값을 하드코딩해둔다)
 	property Vector3 DefaultIconPosition = Vector3(-0.7126, -0.2924, 0)
 
 	property Vector3 DefaultIconScale = Vector3(2.73173356, 2.73173332, 1)
 
+	-- 아래 Text* 값들도 GiftBubblePreview에서 유저가 직접 튜닝한 값을 그대로 반영(폰트/크기/아웃라인/
+	-- 텍스트 박스 크기). SpawnBubble이 매번 이 값들로 덮어쓰므로, 모델 파일이 아니라 여기가 유일한
+	-- 소스다 — 다음에 또 튜닝하면 여기 값만 바꾸면 된다.
 	property string TextFont = "Maple"
 
 	property Color TextOutlineColor = Color(0, 0, 0, 1)
@@ -41,6 +68,8 @@ script Ep2Map1GiftNpcLogic extends Logic
 
 	property Vector2 TextRectSize = Vector2(0.59, 0.45)
 
+	-- 맵1(구름정원, 존1~10) 몬스터 전용 잡템 — GameManager.GetMonsterLootItemId의 [45]~[54] 풀을
+	-- 중복 제거해서 고정 목록으로 둔다(맵 전체 어느 존에서든 나올 수 있는 7종)
 	property table _map1ItemPool = {
 		"star_pixie_dust", "luna_pixie_moon_shard", "nepenthes_seed", "luster_pixie_wing",
 		"ghost_pixie_veil", "dark_nepenthes_seed", "giant_nepenthes_seed",
@@ -48,6 +77,7 @@ script Ep2Map1GiftNpcLogic extends Logic
 
 	property any _activeBubble = nil
 
+	-- Ep2Map1GiftNpcTrigger.RequestTouch()가 호출
 	@ExecSpace("ServerOnly")
 	method void OnObjectTouched(Entity npcEntity)
 		if self.Redeemed then return end
@@ -93,6 +123,19 @@ script Ep2Map1GiftNpcLogic extends Logic
 		log("Ep2Map1GiftNpc: redeemed " .. self.PickedItemId .. " x" .. self.GiftAmount .. " for a card upgrade")
 	end
 
+	-- 말풍선(GiftBubble.model)을 스폰하고 아이콘/텍스트를 채운 뒤 BubbleShowDuration 후 파괴한다.
+	-- showText=false면 Count 자식(아웃라인 텍스트)을 숨긴다(하트/갈라진하트 반응 때는 숫자가 필요 없다).
+	-- Icon/Count 둘 다 모델 기본값이 Enable=false라서(스폰 직후 잠깐 원본 기본 아이콘/큰 텍스트가
+	-- 비쳤다 사라지는 깜빡임 방지 — 유저 지적), 여기서 값부터 전부 채운 뒤 맨 마지막에 Enable=true로
+	-- 켠다. 순서를 반대로 하면(먼저 켜고 나중에 값 채우면) 다시 깜빡일 수 있다.
+	-- scale은 GiftBubble.model에 구워둔 원본 크기(1.0 기준) 대비 배율이다 — 호출측이 자기 전용 크기
+	-- 프로퍼티를 노출해서 유저가 직접 조절할 수 있게 한다(유저 지정, 2026-08-26: "말풍선 크기랑
+	-- 위치 내가 수정할수있게"). 기존 호출부는 전부 1.0을 넘겨 원래 크기 그대로 유지한다.
+	-- iconPos/iconScale은 Icon 자식의 위치/크기를 호출측이 매번 명시적으로 지정한다(이전엔 하트만
+	-- 특수 취급하고 나머지는 GiftBubble.model에 구워둔 기본값에 암묵적으로 의존했는데, 그러면 다른
+	-- 호출측(예: 초대권 아이콘)이 자기만의 위치/크기를 쓸 방법이 없었다 — 유저 지적: "아이콘 위치
+	-- 크기도 내가 맞춘 대로 반영해야지" 2026-08-26). 기존 호출부는 전부 모델 기본값(DefaultIconPosition/
+	-- DefaultIconScale, 하트는 HeartIconPosition/HeartIconScale)을 그대로 넘겨 외형 변화 없음.
 	@ExecSpace("ServerOnly")
 	method void SpawnBubble(Entity map, Vector3 pos, string iconRuid, string text, boolean showText, number scale, Vector3 iconPos, Vector3 iconScale)
 		if self._activeBubble ~= nil and isvalid(self._activeBubble) then
@@ -140,6 +183,7 @@ script Ep2Map1GiftNpcLogic extends Logic
 		end, self.BubbleShowDuration)
 	end
 
+	-- GameManager.RestartGame()이 호출 — 새 런에서는 다시 교환 도전 가능하고, 잡템 목표도 재추첨된다
 	@ExecSpace("ServerOnly")
 	method void ResetForNewRun()
 		self.Redeemed = false

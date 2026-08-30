@@ -76,6 +76,8 @@ script GachaUI extends Logic
 
 	property ButtonComponent btnSkip = "cf78fd7c-c466-482f-8218-97978aa80d59"
 
+	-- 좌측 탭 레일 — 스킬 뽑기 / 유물 뽑기를 고른다. 고른 탭에 따라 필드에서 떨어지는 보상 종류와
+	-- 지급처(_SkillInventory / _RelicInventory)가 통째로 갈린다. 연출/전투 로직은 완전히 공유한다.
 	property ButtonComponent btnTabSkill = "92704f1e-bbb1-4427-af65-9d4abd526aed"
 
 	property ButtonComponent btnTabRelic = "5023b0ab-b8bd-44e9-be09-85ff6ec8f958"
@@ -86,15 +88,18 @@ script GachaUI extends Logic
 
 	property TextComponent pull10Text = "9200c775-1054-4b14-ae05-a9c3c9a70535"
 
+	-- 현재 탭. true면 스킬 뽑기, false면 유물 뽑기(기존 동작). 기본값은 스킬 — 목업 기준
 	property boolean _skillMode = true
 
+	-- 뽑기 비용(다이아). 버튼 라벨도 이 값으로 만들어진다
 	property integer Pull1Cost = 100
 
 	property integer Pull10Cost = 1000
 
+	-- 스킬 뽑기 등급 가중치 — 1=일반 / 2=매직 / 3=레어. 합이 100일 필요는 없다(비율로만 쓴다)
 	property any _gradeWeights = { 70, 25, 5 }
 
-	property any _skillBuckets = nil
+	property any _skillBuckets = nil  -- { [grade] = { 0-based 스킬 인덱스, ... } }
 
 	property any _tabSkillHandler = nil
 
@@ -104,6 +109,7 @@ script GachaUI extends Logic
 
 	property any _tabRelicStateHandler = nil
 
+	-- Bg_cover가 위로 올라가는 거리 / 열고 닫을 때 걸리는 시간 (팝 연출 0.08초는 별도)
 	property number _coverLiftDistance = 140
 
 	property number _coverAnimDuration = 0.32
@@ -119,11 +125,11 @@ script GachaUI extends Logic
 
 	property integer _pullDropsDone = 0
 
-	property any _pullResultCounts = nil
+	property any _pullResultCounts = nil  -- { [slotIndex]=count, ... }
 
-	property any _pullResultOrder = nil
+	property any _pullResultOrder = nil  -- { slotIndex, ... } 처음 나온 순서
 
-	property any _resultIcons = nil
+	property any _resultIcons = nil  -- 이번에 Clone된 결과 아이콘들, 다음 뽑기 시작 시 정리한다
 
 	property any _openHandler = nil
 
@@ -160,10 +166,15 @@ script GachaUI extends Logic
 
 	property number _fieldHalfHeight = 205
 
+	-- 아바타가 "지금" 서 있는 자리 — CharacterIcon의 anchoredPosition과 항상 일치해야 마법/텔레포트
+	-- 연출이 정확히 발밑에서 시작한다. 보스 레이드 중에는 궤도를 돌며 계속 바뀌고, 끝나면
+	-- _avatarHomePosition으로 되돌린다
 	property Vector2 _avatarPosition = Vector2(188, 58)
 
+	-- 몬스터가 이 반경 안으로는 들어오지 못하게 밀어내서 아바타를 그냥 관통하지 않게 한다
 	property number _avatarAvoidRadius = 95
 
+	-- 한 번에 이동하는 거리를 필드 전체가 아니라 이 정도로 짧게 제한해서 자연스럽게 배회하도록 한다
 	property number _wanderStepRadius = 140
 
 	-- 10뽑 때 아바타를 둘러싸는 등장 원의 반경
@@ -254,12 +265,14 @@ script GachaUI extends Logic
 		},
 	}
 
-	property any _monsters = nil
+	property any _monsters = nil  -- { {entity=Entity, hp=integer, stateTimerId=any, clips=table}, ... }
 
 	property any _attackTimerId = nil
 
 	property boolean _fieldActive = false
 
+	-- 몬스터 종족 후보군 — 스폰마다 이 중 하나를 무작위로 골라 stand/move/hit/die 세트를 통째로 적용한다.
+	-- 전부 몬스터 템플릿(70x70, 머쉬맘 크기)에 그대로 clone되므로 크기는 항상 머쉬맘 크기를 넘지 않는다.
 	property any _monsterSpecies = {
 		{
 			stand = "a95cfed2c8fe4d2cb64cbb62db051f92",
@@ -281,12 +294,15 @@ script GachaUI extends Logic
 		}, -- 이상한 돼지
 	}
 
+	-- 일반 공격 임팩트 이펙트 후보군 — 매번 이 중 하나를 무작위로 골라 재생한다
+	-- (skill/5101014 에너지 폭풍 / 파이어 오라 / 와일드 발칸 Type-P 강화)
 	property any _skillImpactRuids = {
 		"2912d09170704723a3d5e6141ccc95db",
 		"2b3c964c0372411f9d6dd70dfee42935",
 		"0c986efd8d634349a78ab00aba409ecd",
 	}
 
+	-- 유물 드롭 아이콘 후보군 — 유물 탭(RelicPanel)의 18개 유물 아이콘을 전부 그대로 재사용한다
 	property any _relicIconRuids = {
 		"thumbnail://211528c140544b359a6858379515c3e1",
 		"thumbnail://ba12da26b63f4430b57fdf02b465ccf8",
@@ -352,6 +368,7 @@ script GachaUI extends Logic
 		-- 유물 아이콘으로 그려버린다(유저 리포트: "결과창 뜰 때 빠르게 유물 누르면 유물이 뽑은 걸로 나온다").
 		-- 결과 표시까지 완전히 끝나야 풀리는 _pullInProgress로 그 구간을 막는다
 		if self._pullInProgress then return end
+		-- 탭 전환. 연출이 도는 중에는(_fieldActive) 보상 종류가 중간에 바뀌면 안 되므로 무시한다
 		if self._fieldActive then return end
 		if self._skillMode == skillMode then return end
 		self._skillMode = skillMode
@@ -1344,6 +1361,7 @@ script GachaUI extends Logic
 	method Vector2 SpawnPosition(integer index, integer totalCount)
 		-- 여러 마리가 한 번에 나올 때는(10뽑) 아바타를 삥 둘러싼 원형으로 등장시키고, 1마리면 무작위 위치로 등장한다.
 		-- 원 위의 자리가 잔디 밖이거나 장식 위면 반경을 조금씩 줄여 안쪽 빈자리를 찾는다
+		-- 여러 마리가 한 번에 나올 때는(10뽑) 아바타를 삥 둘러싼 원형으로 등장시키고, 1마리면 무작위 위치로 등장한다
 		if totalCount <= 1 then
 			return self:AvoidAvatarPosition(self:RandomFieldPosition())
 		end

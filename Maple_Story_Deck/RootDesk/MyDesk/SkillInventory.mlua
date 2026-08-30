@@ -7,10 +7,16 @@ script SkillInventory extends Logic
 	@Sync
 	property SyncTable<string, integer> Levels
 
+	-- 스킬별 획득 조각 개수 / 현재 레벨 — key = 스킬 인덱스 "0".."17" 문자열, value = 개수/레벨.
+	-- RelicInventory와 완전히 동일한 구조. SyncTable은 next/pairs를 못 쓰므로 항상 0~skillCount-1 범위를 직접 순회한다
 	property integer skillCount = 60
 
+	-- 강화 안 한 기본 상태가 Lv.1이고, 9번 강화하면 Lv.10이 최대(9줄짜리 비용표와 1:1 대응).
+	-- 보너스는 Lv3/6/9에서만 상승(Lv1,2,4,5,7,8,10은 효과 없이 조각/골드만 소모)
 	property integer maxLevel = 10
 
+	-- 레벨업 비용 — 등급(1=일반/2=매직/3=레어)별로 다른 표를 쓴다. 인덱스 1~9 = "현재 레벨이 N일 때
+	-- N+1로 올리는 비용"(예: 일반 등급 Lv1 -> Lv2는 인덱스1 = 조각1개/1000골드). 사용자 확정표.
 	property any _levelFragmentCostByGrade = {
 		[1] = { 1, 10, 20, 40, 60, 80, 100, 130, 170 },
 		[2] = { 1, 5, 10, 15, 20, 40, 60, 80, 100 },
@@ -23,6 +29,9 @@ script SkillInventory extends Logic
 		[3] = { 3000, 4000, 5000, 6000, 9000, 13000, 17000, 21000, 25000 },
 	}
 
+	-- 스킬탭 슬롯 인덱스(0~19) ↔ 실제 스킬 정보. grade는 1=일반/2=매직/3=레어이며, 등급 오름차순으로
+	-- 이미 정렬해뒀다 — SkillUI가 슬롯 순서 그대로(SkillSlot_0..19) 그리기만 하면 "낮은 등급부터" 노출된다.
+	-- 나중에 스킬이 추가되면 이 배열에 등급 순서에 맞는 자리로 끼워 넣고 skillCount만 늘리면 된다.
 	property any _skillDefs = {
 		{ name = "매직 부스터", icon = "5ef24c581426423f9919bef97ab23f56", grade = 1 },
 		{ name = "포션", icon = "234aca1a4ce946119b68e3717991e775", grade = 1 },
@@ -183,6 +192,7 @@ script SkillInventory extends Logic
 		log("SkillInventory: skill " .. key .. " leveled up to " .. tostring(nextLevel))
 	end
 
+	-- currentLevel(1~9)이 현재 레벨일 때 다음 레벨로 올리는 데 필요한 조각 개수(등급별)
 	method integer GetFragmentCostForLevel(integer currentLevel, integer grade)
 		return self._levelFragmentCostByGrade[grade][currentLevel]
 	end
@@ -205,16 +215,20 @@ script SkillInventory extends Logic
 		return self.skillCount
 	end
 
+	-- 1=일반 / 2=매직 / 3=레어
 	method integer GetSkillGrade(integer skillIndex)
 		local def = self._skillDefs[skillIndex + 1]
 		if def == nil then return 1 end
 		return def.grade
 	end
 
+	-- currentLevel(1~9)이 현재 레벨일 때 다음 레벨로 올리는 데 필요한 골드(등급별)
 	method integer GetGoldCostForLevel(integer currentLevel, integer grade)
 		return self._levelGoldCostByGrade[grade][currentLevel]
 	end
 
+	-- 캐릭터 필터용 — 인덱스 구간으로 캐릭터를 판별한다(0~19=아르카나 / 20~39=실피드 / 40~59=레이온).
+	-- SkillUI의 _characterFilter(0/1/2)와 동일한 번호 체계.
 	method integer GetSkillCharacter(integer skillIndex)
 		if skillIndex >= 40 then return 2
 		elseif skillIndex >= 20 then return 1

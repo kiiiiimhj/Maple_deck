@@ -1,24 +1,19 @@
 @Logic
 script MapMoveUI extends Logic
 
+	-- UI 바인딩 (클라이언트 전용)
 	property ButtonComponent btnMapLeft = "0e741f46-3a04-4117-be4d-54aa6898a335"
-
 	property ButtonComponent btnMapRight = "4489416c-b03d-4478-bc37-514ac3a40990"
-
 	property ButtonComponent btnMapUp = "2c899ef8-3dfd-49aa-ad4d-0ad3fa2e0d46"
-
 	property ButtonComponent btnMapDown = "ebf77f70-837b-4ae3-a13d-5bb9f8d84b51"
 
+	-- 맵4 이상 잠금 표시용 자물쇠 아이콘 / ">" 텍스트 (BtnMapRight의 자식/자기자신 컴포넌트)
 	property SpriteGUIRendererComponent lockIcon = "cbd1ed65-3756-41a9-8e89-4bec9ecc3778"
-
 	property TextComponent rightArrowText = "4489416c-b03d-4478-bc37-514ac3a40990"
 
 	property any _leftHandler = nil
-
 	property any _rightHandler = nil
-
 	property any _upHandler = nil
-
 	property any _downHandler = nil
 
 	@ExecSpace("ClientOnly")
@@ -32,6 +27,12 @@ script MapMoveUI extends Logic
 		log("MapMoveUI started")
 	end
 
+	-- GameManager.OnBossDefeated() / MapManager.DoMapChange()가 각각 호출 — OnSyncProperty는 자기 자신의
+	-- @Sync 프로퍼티 변경에만 반응하고 다른 스크립트(GameManager/MapManager)의 동기화는 감지하지 못해서
+	-- 명시적으로 알려줘야 한다
+	-- bossDefeated를 파라미터로 직접 받는다 — GameManager.BossDefeated의 @Sync 전파와 이 Multicast 호출은
+	-- 서로 다른 채널이라 순서 보장이 없어서, 여기서 다시 _GameManager.BossDefeated를 읽으면 아직 갱신 전
+	-- (false) 값을 볼 수 있어 자물쇠가 즉시 갱신되지 않는다
 	@ExecSpace("Multicast")
 	method void NotifyBossDefeated(boolean bossDefeated)
 		if not self:IsClient() then return end
@@ -40,6 +41,9 @@ script MapMoveUI extends Logic
 		log("MapMoveUI: NotifyBossDefeated bossDefeated=" .. tostring(bossDefeated) .. " showLock=" .. tostring(showLock))
 	end
 
+	-- Zone15PuzzleLogic.OnSwitchTouched()가 정답을 다 맞췄을 때 호출 — 지금 존15에 있는 클라이언트라면
+	-- 자물쇠를 즉시 ">"로 바꿔준다(IsSolved의 @Sync 전파를 기다리지 않고 명시적으로 알려줌 — 위 두
+	-- Notify*와 동일한 이유)
 	@ExecSpace("Multicast")
 	method void NotifyZone15Solved()
 		if not self:IsClient() then return end
@@ -48,6 +52,9 @@ script MapMoveUI extends Logic
 		log("MapMoveUI: NotifyZone15Solved")
 	end
 
+	-- mapIndex를 파라미터로 직접 받는다 — CurrentMapIndex의 @Sync 전파와 이 Multicast 호출은 서로 다른
+	-- 채널이라 순서 보장이 없어서, 여기서 다시 _MapManager.CurrentMapIndex를 읽으면 아직 갱신 전(이전
+	-- 값)을 볼 수 있다
 	@ExecSpace("Multicast")
 	method void NotifyMapChanged(integer mapIndex)
 		if not self:IsClient() then return end
@@ -63,6 +70,10 @@ script MapMoveUI extends Logic
 		self:UpdateButtonVisibility(mapIndex)
 	end
 
+	-- MapManager.MoveToMap의 레벨5 잠금과 동일한 환산 — 에피1은 그대로, 에피2(내부 mapIndex 45~88)는
+	-- 44를, 에피3(내부 mapIndex 89~98)은 88을 빼서 "그 에피소드 안에서 몇 번째 존인지"로 되돌린다.
+	-- 자물쇠 표시 기준(mapIndex==3)이 실제 잠금 기준과 반드시 같은 값을 봐야 한다. 큰 범위(89)부터
+	-- 먼저 체크해야 한다 — MapManager.MoveToMap과 동일한 순서 버그를 피하기 위함.
 	@ExecSpace("ClientOnly")
 	method integer GetLocalZoneIndex(integer mapIndex)
 		if mapIndex >= 89 then return mapIndex - 88 end
@@ -70,6 +81,17 @@ script MapMoveUI extends Logic
 		return mapIndex
 	end
 
+	-- 맵6/존19/존40/map1존5(49)/ep3_map1존5(93)/ep3_map4존3(121)에만 "위로" 버튼(맵6에선 맵7 진입,
+	-- 존19에선 존15 복귀, 존40에선 존29 복귀, map1존5(49)에선 map2존5(59)로 직행 — 유저 지정: "map2가
+	-- 꼭대기고 그 아래층이 map1"이라 map1→map2가 위로 올라가는 방향, ep3_map1존5(93)에선 ep3_map2존1(99)로
+	-- 직행 — 유저 지정, 이번엔 존 번호가 달라짐, ep3_map4존3(121)에선 ep3_map3존6(114)로 복귀 — 유저 지정),
+	-- 맵7/존15/존29/map2존5(59)/ep3_map2존1(99)/ep3_map3존6(114)에만 "아래로" 버튼(맵7에선 맵6
+	-- 복귀, 존15에선 그룹G/존19 직행, 존29에선 그룹L/존40 직행, map2존5(59)에선 map1존5(49)로 복귀,
+	-- ep3_map2존1(99)에선 ep3_map1존5(93)로 복귀, ep3_map3존6(114)에선 ep3_map4존3(121)로 직행 —
+	-- 유저 지정, 2026-08-25). 존19에는 그림자 상점(존18) 복귀용
+	-- 버튼을 일부러 두지 않는다 — 존18은 존15에서 횟불 3개를 켜야 풀리는 ">" 정공법으로만 들어가야 하고,
+	-- 그룹G/I(존19~30) 쪽에서 되돌아가는 백도어가 있으면 그 퍼즐 게이트를 우회하게 된다. 같은 이유로 존18
+	-- 자신도 ">"가 없어야 한다 — 존18은 막다른 길(그림자 상점)이고, "<"로만 존17로 돌아나갈 수 있다.
 	@ExecSpace("ClientOnly")
 	method void UpdateButtonVisibility(integer mapIndex)
 		-- 맵21(mapIndex==35)은 존1~34 순환 밖의 비밀 구역(택시 이스터에그) — 일반 좌/우 이동 버튼은
@@ -127,6 +149,13 @@ script MapMoveUI extends Logic
 		_MapManager:RequestMoveRight()
 	end
 
+	-- 맵6→7 전용 경로. 우측 이동 버튼(RequestMoveRight)은 맵6에서 이제 맵11(해변 존)로 분기하므로,
+	-- 맵7 진입은 더 이상 그 함수와 공유하지 않고 RequestMoveToMap7로 분리되어 있다.
+	-- 존19에서는 같은 버튼을 존15 복귀 전용 경로로 가로챈다(존15의 "아래로" 버튼과 대칭되는 재사용 패턴).
+	-- 존40에서는 같은 버튼을 존29 복귀 전용 경로로 가로챈다(존29의 "아래로" 버튼과 대칭되는 재사용 패턴,
+	-- 유저 지정). map1존5(49)에서는 같은 버튼을 map2존5(59) 직행 경로로 가로챈다(유저 지정 — "map2가
+	-- 꼭대기고 그 아래층이 map1"이라 위로 올라가는 방향이 map2로 이어진다). ep3_map4 존3(121)에서는 같은
+	-- 버튼을 ep3_map3 존6(114) 복귀 경로로 가로챈다(RequestMoveToEp3Map4Zone3의 역방향, 2026-08-25).
 	@ExecSpace("ClientOnly")
 	method void OnUpClicked()
 		if _MapManager.CurrentMapIndex == 19 then
@@ -156,6 +185,11 @@ script MapMoveUI extends Logic
 		_MapManager:RequestMoveToMap7()
 	end
 
+	-- 맵7→6은 인덱스상 -1이라 RequestMoveLeft와 동일한 이동이지만, "아래로"라는 별도 버튼으로 노출한다.
+	-- 존15에서는 같은 버튼을 그룹G(존19) 직행 분기로 가로챈다(맵6의 "위로" 버튼과 동일한 재사용 패턴).
+	-- 존29에서는 같은 버튼을 그룹L(존40) 직행 분기로 가로챈다(유저 지정). map2존5(59)에서는 같은 버튼을
+	-- map1존5(49) 복귀 경로로 가로챈다(OnUpClicked의 map1존5 분기와 대칭되는 역방향). ep3_map3 존6(114)
+	-- 에서는 같은 버튼을 ep3_map4 존3(121) 직행 경로로 가로챈다(유저 지정, 2026-08-25).
 	@ExecSpace("ClientOnly")
 	method void OnDownClicked()
 		if _MapManager.CurrentMapIndex == 15 then
