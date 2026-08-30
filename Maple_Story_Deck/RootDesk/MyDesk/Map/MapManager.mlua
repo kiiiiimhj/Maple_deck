@@ -110,6 +110,18 @@ script MapManager extends Logic
 			-- RequestMoveToEp2Map2Hidden(존61 전용)로만 가능하다.
 			self.MaxMapIndex = 88
 			self.DesiredStartMapIndex = 45
+		elseif episode == 3 and self.TestStartAtEp3HiddenMap then
+			-- 임시 테스트 변경(2026-08-29, 유저 요청 "엘나스산맥 맵 고르면 히든맵(좀비 나오는데)
+			-- 거기로 입장시켜줘, 맵이동도 </> 버튼으로") — "엘라스 산맥"(에피3)을 고르면 정상 진행
+			-- 대신 ep3_map4_ester_1 좀비 히든맵(존1~5 = mapIndex129~133)에서 시작한다.
+			-- Min/Max까지 129~133으로 좁혀야 하는 이유: StartGame이 쓰는 SilentMoveToMap에는
+			-- MoveToMap과 달리 isEsterZone 예외가 없어서 Max가 128이면 진입 자체가 막힌다.
+			-- 좁혀두면 </> 이동(MoveByDelta→MoveToMap)도 129~133 안에서만 돌고, 양 끝(129의 "<",
+			-- 133의 ">")은 기존 막다른 길 분기가 그대로 막아준다.
+			-- 테스트 끝나면 TestStartAtEp3HiddenMap을 false로 되돌릴 것 — 그러면 아래 정상 분기를 탄다.
+			self.MinMapIndex = 129
+			self.MaxMapIndex = 133
+			self.DesiredStartMapIndex = 129
 		elseif episode == 3 then
 			-- 에피소드3(mapIndex89~128, "엘라스 산맥" 컨셉) — map1(존1~10=89~98)/map2(존1~10=99~108)/
 			-- map3(존1~10=109~118)/map4(존1~10=119~128). 98→99, 108→109, 118→119 전부 인접 mapIndex라
@@ -146,11 +158,48 @@ script MapManager extends Logic
 	property number Ep2Map3ConfineMaxX = 144.72
 	property number Ep2Map3FixedCameraY = -1.35
 
+	-- 유저 지정(2026-08-29, ep3_map1/2 수정에 이어 "ep2도 해줄 수 있겠니") — 에피소드2에서 confine
+	-- 분기가 있던 건 ep2_map3(65~74)뿐이었고 map1/map2/map4/히든맵은 전부 else(네이티브
+	-- ConfineCameraArea)로 떨어져 존마다 지면 높이를 그대로 따라가고 있었다.
+	-- 각 맵의 지면 높이는 MapBuilder.getFootholds()로 존별 spawnX를 지나는 "가장 낮은 평평한 발판"을
+	-- 뽑아 실측했다(윗단/사다리 발판이 같은 X에 겹쳐 있어서 최고점을 잡으면 틀린다 — ep2_map3의
+	-- 알려진 landY(-1.35/-0.75/-0.15)로 이 규칙을 먼저 검증한 뒤 나머지 맵에 적용했고, map1 존4(-0.53)/
+	-- map2 존4·5(-0.53/0.07)/map4(-1.35/-0.75/-0.15)가 ZoneInfo에 이미 적힌 값과 정확히 일치했다).
+	--   ep2_map1(45~54): 지면 -1.13, 존4만 -0.53 (+0.60 계단)
+	--   ep2_map2(55~64): 지면 -1.13, 존4 -0.53 / 존5 0.07 (+1.20까지)
+	--   ep2_map4(75~84): 지면 -1.35, 존4 -0.75 / 존5 -0.15 (ep2_map3와 동일 패턴)
+	--   ep2_map2_hidden(85~88): 지면 -1.13, 존4 -0.53
+	property number Ep2Map1ConfineMinX = -7.15
+	property number Ep2Map1ConfineMaxX = 144.85
+	property number Ep2Map1FixedCameraY = -1.13
+	property number Ep2Map2ConfineMinX = -7.15
+	property number Ep2Map2ConfineMaxX = 144.85
+	property number Ep2Map2FixedCameraY = -1.13
+	property number Ep2Map4ConfineMinX = -7.02
+	property number Ep2Map4ConfineMaxX = 144.72
+	property number Ep2Map4FixedCameraY = -1.35
+	property number Ep2Map2HiddenConfineMinX = -7.15
+	property number Ep2Map2HiddenConfineMaxX = 144.85
+	property number Ep2Map2HiddenFixedCameraY = -1.13
+
 	-- 유저 지정(2026-08-25) — 에피소드3 map3(존1~10=mapIndex109~118)/map4(존1~10=mapIndex119~128)도
 	-- ep2_map3와 동일 패턴: "존1(root) 기준 카메라 앵글을 유지한 채 존2~10까지 좌우로만 스크롤하고 싶다"
 	-- (지형 자체는 그대로 두고 카메라 Y만 존1 기준으로 고정). X는 두 맵 다 발판 전체 범위가 동일
 	-- (getFootholdBounds 실측, ep3_map1/2/3 시리즈 공통 원본 덤프라 폭이 동일). Y는 각 맵 존1(spawnX=0)의
 	-- landY(ZoneInfo[109]/[119], 둘 다 1.12)를 그대로 재사용한다.
+	-- 유저 리포트(2026-08-29) — "존 이동할 때 카메라 올라갔다 내려갔다 하는거 map3/4는 고쳤는데
+	-- map1이랑 map2는 안 고친 거 같은데". 실제로 ResetCameraConfine에 89~108 분기가 아예 없어서
+	-- else(네이티브 ConfineCameraArea)로 떨어지고 있었다. 두 맵 다 ep3_map3/4와 같은 원본 덤프라
+	-- ZoneInfo landY가 존1~3 -1.24 / 존4 -0.64 / 존5 -0.04 / 존6~10 -1.24 — 존4~5 구간이 1.2만큼
+	-- 솟은 계단 지형이라 그 구간을 지날 때 카메라가 따라 올라갔다 내려온다. 다른 맵들과 동일하게
+	-- Y를 존1(spawnX=0)의 landY로 고정한다. X는 같은 덤프라 발판 폭이 동일(-7.09~144.79).
+	property number Ep3Map1ConfineMinX = -7.09
+	property number Ep3Map1ConfineMaxX = 144.79
+	property number Ep3Map1FixedCameraY = -1.24
+	property number Ep3Map2ConfineMinX = -7.09
+	property number Ep3Map2ConfineMaxX = 144.79
+	property number Ep3Map2FixedCameraY = -1.24
+
 	property number Ep3Map3ConfineMinX = -7.09
 	property number Ep3Map3ConfineMaxX = 144.79
 	property number Ep3Map3FixedCameraY = 1.12
@@ -210,6 +259,11 @@ script MapManager extends Logic
 
 	-- MoveToMap의 레벨5 존 잠금을 통째로 무시하는 테스트 스위치 — 기본 false(정상 잠금 적용).
 	property boolean TestUnlockAllZones = false
+
+	-- 임시 테스트 스위치(2026-08-29, 유저 요청) — true면 월드 선택에서 "엘라스 산맥"(에피3)을 골랐을 때
+	-- 정상 시작 지점(ep3_map1 존1) 대신 좀비 히든맵 ep3_map4_ester_1 존1(mapIndex129)로 바로 입장한다.
+	-- 상세는 SetEpisodeRange의 분기 주석 참고. 테스트가 끝나면 false로 되돌릴 것.
+	property boolean TestStartAtEp3HiddenMap = false
 
 	property boolean _startRedirectDone = false
 
@@ -579,7 +633,7 @@ script MapManager extends Logic
 		local sound = mapEntity.SoundComponent
 		if sound == nil or sound.AudioClipRUID == "" then return end
 		_SoundService:StopBGM(true)
-		_SoundService:PlayBGM(sound.AudioClipRUID, 1.0)
+		_SoundOptionLogic:PlayBgm(sound.AudioClipRUID, 1.0)
 		log("MapManager: BGM -> " .. mapFile)
 	end
 
@@ -1262,7 +1316,24 @@ script MapManager extends Logic
 		local cam = _CameraService:GetCurrentCameraComponent()
 		if cam == nil then return end
 		cam.Damping = self.ScrollCameraDamping
-		if mapIndex >= 65 and mapIndex <= 74 then
+		if mapIndex >= 45 and mapIndex <= 54 then
+			-- 에피소드2 map1(구름정원, 존1~10) — 존1 지면(-1.13) 기준으로 Y 고정. 존4만 -0.53으로
+			-- 솟아 있어서 그 존을 드나들 때 카메라가 올라갔다 내려왔다 했다.
+			cam.ConfineCameraArea = false
+			cam.UseCustomBound = true
+			cam.LeftBottom = Vector2(self.Ep2Map1ConfineMinX, self.Ep2Map1FixedCameraY)
+			cam.RightTop = Vector2(self.Ep2Map1ConfineMaxX, self.Ep2Map1FixedCameraY)
+			cam.DeadZone = Vector2(self.DefaultDeadZone.x, 1.0)
+			cam.SoftZone = Vector2(self.DefaultSoftZone.x, 1.0)
+		elseif mapIndex >= 55 and mapIndex <= 64 then
+			-- 에피소드2 map2(존1~10) — 존1 지면(-1.13) 기준. 존4(-0.53)/존5(0.07) 2단 계단.
+			cam.ConfineCameraArea = false
+			cam.UseCustomBound = true
+			cam.LeftBottom = Vector2(self.Ep2Map2ConfineMinX, self.Ep2Map2FixedCameraY)
+			cam.RightTop = Vector2(self.Ep2Map2ConfineMaxX, self.Ep2Map2FixedCameraY)
+			cam.DeadZone = Vector2(self.DefaultDeadZone.x, 1.0)
+			cam.SoftZone = Vector2(self.DefaultSoftZone.x, 1.0)
+		elseif mapIndex >= 65 and mapIndex <= 74 then
 			-- ep2_map3(존1~10) 체류 중엔 존4~5 계단 지형으로 인한 카메라 높낮이 변화를 없애기 위해
 			-- Y를 고정한 커스텀 confine을 쓴다(위 프로퍼티 주석 참고). X는 맵 전체 발판 범위 그대로라
 			-- 좌우 스크롤 동작은 기존과 동일하다.
@@ -1273,6 +1344,40 @@ script MapManager extends Logic
 			cam.UseCustomBound = true
 			cam.LeftBottom = Vector2(self.Ep2Map3ConfineMinX, self.Ep2Map3FixedCameraY)
 			cam.RightTop = Vector2(self.Ep2Map3ConfineMaxX, self.Ep2Map3FixedCameraY)
+			cam.DeadZone = Vector2(self.DefaultDeadZone.x, 1.0)
+			cam.SoftZone = Vector2(self.DefaultSoftZone.x, 1.0)
+		elseif mapIndex >= 75 and mapIndex <= 84 then
+			-- 에피소드2 map4(존1~10) — 존1 지면(-1.35) 기준. ep2_map3와 완전히 동일한 계단
+			-- (존4 -0.75 / 존5 -0.15)인데 분기만 빠져 있었다.
+			cam.ConfineCameraArea = false
+			cam.UseCustomBound = true
+			cam.LeftBottom = Vector2(self.Ep2Map4ConfineMinX, self.Ep2Map4FixedCameraY)
+			cam.RightTop = Vector2(self.Ep2Map4ConfineMaxX, self.Ep2Map4FixedCameraY)
+			cam.DeadZone = Vector2(self.DefaultDeadZone.x, 1.0)
+			cam.SoftZone = Vector2(self.DefaultSoftZone.x, 1.0)
+		elseif mapIndex >= 85 and mapIndex <= 88 then
+			-- ep2_map2_hidden(존1~4, 경험치 2배 히든맵) — 존1 지면(-1.13) 기준. 존4만 -0.53.
+			cam.ConfineCameraArea = false
+			cam.UseCustomBound = true
+			cam.LeftBottom = Vector2(self.Ep2Map2HiddenConfineMinX, self.Ep2Map2HiddenFixedCameraY)
+			cam.RightTop = Vector2(self.Ep2Map2HiddenConfineMaxX, self.Ep2Map2HiddenFixedCameraY)
+			cam.DeadZone = Vector2(self.DefaultDeadZone.x, 1.0)
+			cam.SoftZone = Vector2(self.DefaultSoftZone.x, 1.0)
+		elseif mapIndex >= 89 and mapIndex <= 98 then
+			-- 에피소드3 map1(존1~10) — ep3_map3/4와 동일 패턴. ConfineCameraArea를 같이 꺼야
+			-- 커스텀 박스가 실제로 유일한 confine 기준이 된다(아래 map3 분기 주석 참고).
+			cam.ConfineCameraArea = false
+			cam.UseCustomBound = true
+			cam.LeftBottom = Vector2(self.Ep3Map1ConfineMinX, self.Ep3Map1FixedCameraY)
+			cam.RightTop = Vector2(self.Ep3Map1ConfineMaxX, self.Ep3Map1FixedCameraY)
+			cam.DeadZone = Vector2(self.DefaultDeadZone.x, 1.0)
+			cam.SoftZone = Vector2(self.DefaultSoftZone.x, 1.0)
+		elseif mapIndex >= 99 and mapIndex <= 108 then
+			-- 에피소드3 map2(존1~10) — map1과 동일 원본이라 값까지 동일하다.
+			cam.ConfineCameraArea = false
+			cam.UseCustomBound = true
+			cam.LeftBottom = Vector2(self.Ep3Map2ConfineMinX, self.Ep3Map2FixedCameraY)
+			cam.RightTop = Vector2(self.Ep3Map2ConfineMaxX, self.Ep3Map2FixedCameraY)
 			cam.DeadZone = Vector2(self.DefaultDeadZone.x, 1.0)
 			cam.SoftZone = Vector2(self.DefaultSoftZone.x, 1.0)
 		elseif mapIndex >= 109 and mapIndex <= 118 then

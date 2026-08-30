@@ -1,0 +1,58 @@
+@Logic
+script SoundOptionLogic extends Logic
+	-- 인게임 옵션 팝업(OptionUI)의 "배경음 끄기 / 효과음 끄기" 스위치.
+	--
+	-- 효과음: SoundService에는 전역 효과음 볼륨 API가 없다(SetBGMVolume은 BGM 전용). 그래서 프로젝트의
+	-- 모든 `_SoundService:PlaySound(...)` 호출을 이 Logic의 PlaySfx로 우회시켜 여기 한 곳에서 막는다.
+	-- 배경음: SetBGMVolume(0)으로 끄지만, 맵 이동/로비 복귀 때 PlayBGM(id, 1.0)이 볼륨을 되돌리므로
+	-- PlayBGM 호출도 여기(PlayBgm)를 거치게 해서 재생 직후 음소거를 다시 적용한다.
+	--
+	-- 두 게이트 메서드가 @ExecSpace("Client")인 이유 — 원본 `_SoundService:PlaySound/PlayBGM`이 이미
+	-- "Client"라 서버에서 호출하면 클라로 넘어가는 RPC다. 여기를 ClientOnly로 잡으면 서버에서 울리던
+	-- 효과음(몬스터 AI 등)이 통째로 사라지고, 반대로 ExecSpace를 안 붙이면 서버 쪽에서 서버의 음소거
+	-- 플래그(항상 false)를 보고 그대로 흘려보내 음소거가 안 먹는다. "Client"여야 판정이 클라에서 난다.
+	property boolean BgmMuted = false
+	property boolean SfxMuted = false
+
+	@ExecSpace("Client")
+	method void PlaySfx(string ruid, number volume)
+		-- 효과음 재생 게이트. 음소거 중이면 그냥 버린다(효과음은 끊겨도 복구할 상태가 없다).
+		if self.SfxMuted then return end
+		_SoundService:PlaySound(ruid, volume)
+	end
+
+	@ExecSpace("Client")
+	method void PlayBgm(string ruid, number volume)
+		-- 배경음 재생 게이트. 음소거 중이어도 재생 자체는 걸어두고 볼륨만 0으로 눌러야,
+		-- 나중에 음소거를 풀었을 때 그 맵의 곡이 그대로 살아난다.
+		_SoundService:PlayBGM(ruid, volume)
+		if self.BgmMuted then _SoundService:SetBGMVolume(0.0) end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetBgmMuted(boolean muted)
+		-- 배경음 음소거 토글. 이미 재생 중인 곡을 끊지 않고 볼륨만 0/1로 오간다.
+		self.BgmMuted = muted
+		if muted then
+			_SoundService:SetBGMVolume(0.0)
+		else
+			_SoundService:SetBGMVolume(1.0)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetSfxMuted(boolean muted)
+		-- 효과음 음소거 토글. 실제 차단은 PlaySfx에서 한다.
+		self.SfxMuted = muted
+	end
+
+	method boolean IsBgmMuted()
+		-- 다른 Logic(OptionUI)이 상태를 물어볼 때 쓰는 접근자 — 프로퍼티 직접 읽기는 nil이 될 수 있다.
+		return self.BgmMuted
+	end
+
+	method boolean IsSfxMuted()
+		-- 다른 Logic(OptionUI)이 상태를 물어볼 때 쓰는 접근자.
+		return self.SfxMuted
+	end
+end

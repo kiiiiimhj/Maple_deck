@@ -16,6 +16,30 @@ script GachaUI extends Logic
 	property Entity resultTitle = "9f2dba68-7c6c-40dc-9988-ed588530d3a3"
 	property ButtonComponent btnSkip = "cf78fd7c-c466-482f-8218-97978aa80d59"
 
+	-- 좌측 탭 레일 — 스킬 뽑기 / 유물 뽑기를 고른다. 고른 탭에 따라 필드에서 떨어지는 보상 종류와
+	-- 지급처(_SkillInventory / _RelicInventory)가 통째로 갈린다. 연출/전투 로직은 완전히 공유한다.
+	property ButtonComponent btnTabSkill = "92704f1e-bbb1-4427-af65-9d4abd526aed"
+	property ButtonComponent btnTabRelic = "5023b0ab-b8bd-44e9-be09-85ff6ec8f958"
+	property TextComponent titleText = "28d0c5aa-0d27-43c9-8793-2029bb79cda9"
+	property TextComponent pull1Text = "a0d524d7-1c98-45fc-aeda-262624d9bf47"
+	property TextComponent pull10Text = "9200c775-1054-4b14-ae05-a9c3c9a70535"
+
+	-- 현재 탭. true면 스킬 뽑기, false면 유물 뽑기(기존 동작). 기본값은 스킬 — 목업 기준
+	property boolean _skillMode = true
+
+	-- 뽑기 비용(다이아). 버튼 라벨도 이 값으로 만들어진다
+	property integer Pull1Cost = 100
+	property integer Pull10Cost = 1000
+
+	-- 스킬 뽑기 등급 가중치 — 1=일반 / 2=매직 / 3=레어. 합이 100일 필요는 없다(비율로만 쓴다)
+	property any _gradeWeights = { 70, 25, 5 }
+	property any _skillBuckets = nil -- { [grade] = { 0-based 스킬 인덱스, ... } }
+
+	property any _tabSkillHandler = nil
+	property any _tabRelicHandler = nil
+	property any _tabSkillStateHandler = nil
+	property any _tabRelicStateHandler = nil
+
 	-- Bg_cover가 위로 올라가는 거리 / 열고 닫을 때 걸리는 시간 (팝 연출 0.08초는 별도)
 	property number _coverLiftDistance = 140
 	property number _coverAnimDuration = 0.32
@@ -134,12 +158,61 @@ script GachaUI extends Logic
 		self._pull1StateHandler = self.btnPull1.Entity:ConnectEvent(ButtonStateChangeEvent, function(event) self:OnButtonStateChanged(event, self.btnPull1.Entity) end)
 		self._pull10StateHandler = self.btnPull10.Entity:ConnectEvent(ButtonStateChangeEvent, function(event) self:OnButtonStateChanged(event, self.btnPull10.Entity) end)
 		self._skipStateHandler = self.btnSkip.Entity:ConnectEvent(ButtonStateChangeEvent, function(event) self:OnButtonStateChanged(event, self.btnSkip.Entity) end)
+		self._tabSkillHandler = self.btnTabSkill.Entity:ConnectEvent(ButtonClickEvent, function() self:SetMode(true) end)
+		self._tabRelicHandler = self.btnTabRelic.Entity:ConnectEvent(ButtonClickEvent, function() self:SetMode(false) end)
+		self._tabSkillStateHandler = self.btnTabSkill.Entity:ConnectEvent(ButtonStateChangeEvent, function(event) self:OnButtonStateChanged(event, self.btnTabSkill.Entity) end)
+		self._tabRelicStateHandler = self.btnTabRelic.Entity:ConnectEvent(ButtonStateChangeEvent, function(event) self:OnButtonStateChanged(event, self.btnTabRelic.Entity) end)
+		self:ApplyModeVisual()
 		log("GachaUI started")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetMode(boolean skillMode)
+		-- 탭 전환. 연출이 도는 중에는(_fieldActive) 보상 종류가 중간에 바뀌면 안 되므로 무시한다
+		if self._fieldActive then return end
+		if self._skillMode == skillMode then return end
+		self._skillMode = skillMode
+		-- 이전 탭에서 띄워둔 결과 아이콘은 다른 종류라 그대로 두면 헷갈린다 — 같이 치운다
+		self:ClearResultIcons()
+		self:ApplyModeVisual()
+		log("GachaUI: mode = " .. self:GetModeName())
+	end
+
+	@ExecSpace("ClientOnly")
+	method string GetModeName()
+		-- 타이틀/버튼 라벨에 쓰는 현재 탭 이름
+		if self._skillMode then return "스킬" end
+		return "유물"
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ApplyModeVisual()
+		-- 선택된 탭만 원색으로 밝히고 나머지는 어둡게 눌러둔다. 타이틀과 두 뽑기 버튼 라벨도
+		-- 현재 탭 이름으로 다시 쓴다(버튼 아트는 공용이고 글자만 바뀐다)
+		local name = self:GetModeName()
+		local onColor = Color(1, 1, 1, 1)
+		local offColor = Color(0.55, 0.5, 0.42, 1)
+		local skillSprite = self.btnTabSkill.Entity.SpriteGUIRendererComponent
+		local relicSprite = self.btnTabRelic.Entity.SpriteGUIRendererComponent
+		if isvalid(skillSprite) then
+			if self._skillMode then skillSprite.Color = onColor else skillSprite.Color = offColor end
+		end
+		if isvalid(relicSprite) then
+			if self._skillMode then relicSprite.Color = offColor else relicSprite.Color = onColor end
+		end
+		if isvalid(self.titleText) then self.titleText.Text = name .. " 뽑기" end
+		-- 결과창 타이틀("획득한 유물!")도 같은 이름을 따라간다
+		if isvalid(self.resultTitle) then self.resultTitle.TextComponent.Text = "획득한 " .. name .. "!" end
+		if isvalid(self.pull1Text) then self.pull1Text.Text = name .. " 뽑기 X1\n다이아 : " .. tostring(self.Pull1Cost) end
+		if isvalid(self.pull10Text) then self.pull10Text.Text = name .. " 뽑기 X10\n다이아 : " .. tostring(self.Pull10Cost) end
 	end
 
 	@ExecSpace("ClientOnly")
 	method void Open()
 		self.gachaGroup.Enable = true
+		-- 열 때마다 현재 탭 표시와 다이아 잔액 기준 버튼 상태를 다시 맞춘다
+		self:ApplyModeVisual()
+		self:SetPullButtonsEnabled(true)
 	end
 
 	@ExecSpace("ClientOnly")
@@ -154,17 +227,101 @@ script GachaUI extends Logic
 	method void OnPull1Clicked()
 		-- 이미 진행 중인 뽑기가 있으면 무시 — 버튼이 비활성화되어 있어도 이중 안전장치로 한 번 더 막는다
 		if self._fieldActive then return end
-		-- TODO: 재화(다이아) 차감은 재화 시스템 붙을 때 추가
-		self:BeginPull(1)
-		self:StartField(1, 1.0)
+		_GameManager:RequestGachaSpend(self.Pull1Cost, 1, self._skillMode)
 	end
 
 	@ExecSpace("ClientOnly")
 	method void OnPull10Clicked()
 		if self._fieldActive then return end
-		-- TODO: 재화(다이아) 차감은 재화 시스템 붙을 때 추가
-		self:BeginPull(10)
-		self:StartField(10, 0.35)
+		_GameManager:RequestGachaSpend(self.Pull10Cost, 10, self._skillMode)
+	end
+
+	@ExecSpace("Client")
+	method void OnGachaSpendApproved(integer count, boolean isSkill)
+		-- 서버가 다이아를 실제로 깎은 뒤에만 도착한다 — 여기서부터가 기존 연출 흐름 그대로다.
+		-- 요청과 응답 사이에 탭을 바꿨을 가능성은 없지만(연출 중 탭 잠금), 결제된 종류를 그대로 따른다
+		if self._fieldActive then return end
+		self._skillMode = isSkill
+		self:ApplyModeVisual()
+		self:BeginPull(count)
+		if count <= 1 then
+			self:StartField(1, 1.0)
+		else
+			self:StartField(count, 0.35)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void NotifyDiamondChanged(integer newTotal)
+		-- TitleUI의 다이아 배지 갱신과 같은 타이밍에 호출된다. 팝업 쪽엔 잔액 라벨이 따로 없으므로
+		-- 뽑기 버튼의 "살 수 있는지"만 다시 반영한다
+		if self._fieldActive then return end
+		self:SetPullButtonsEnabled(true)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void BuildSkillBuckets()
+		-- SkillInventory의 스킬을 등급별 바구니로 한 번만 분류해둔다(뽑을 때마다 60개를 다시 훑지 않도록).
+		-- 다른 Logic의 프로퍼티(_skillDefs / skillCount)를 직접 읽으면 런타임에 nil이 잡히므로
+		-- 반드시 SkillInventory가 노출한 접근자 메서드만 쓴다
+		if self._skillBuckets ~= nil then return end
+		self._skillBuckets = { {}, {}, {} }
+		local count = _SkillInventory:GetSkillCount()
+		for i = 0, count - 1 do
+			local g = _SkillInventory:GetSkillGrade(i)
+			if g >= 1 and g <= 3 then
+				table.insert(self._skillBuckets[g], i)
+			end
+		end
+		log("GachaUI: skill buckets = " .. tostring(#self._skillBuckets[1]) .. "/" .. tostring(#self._skillBuckets[2]) .. "/" .. tostring(#self._skillBuckets[3]))
+	end
+
+	@ExecSpace("ClientOnly")
+	method integer RollSkillIndex()
+		-- 등급을 가중 추첨한 뒤 그 등급 안에서는 균등하게 하나 고른다. 해당 등급이 비어 있으면 일반(1)로 내린다
+		self:BuildSkillBuckets()
+		local total = 0
+		for i = 1, 3 do total = total + self._gradeWeights[i] end
+		local roll = _UtilLogic:RandomDouble() * total
+		local grade = 1
+		local acc = 0
+		for i = 1, 3 do
+			acc = acc + self._gradeWeights[i]
+			if roll < acc then
+				grade = i
+				break
+			end
+		end
+		local bucket = self._skillBuckets[grade]
+		if bucket == nil or #bucket == 0 then bucket = self._skillBuckets[1] end
+		if bucket == nil or #bucket == 0 then return 0 end
+		return bucket[_UtilLogic:RandomIntegerRange(1, #bucket)]
+	end
+
+	@ExecSpace("ClientOnly")
+	method integer RollRewardIndex()
+		-- 현재 탭에 맞는 보상 하나를 뽑아 0-based 인덱스로 돌려준다.
+		-- 유물은 기존과 동일한 균등 추첨, 스킬은 등급 가중 추첨이다
+		if self._skillMode then return self:RollSkillIndex() end
+		return _UtilLogic:RandomIntegerRange(1, #self._relicIconRuids) - 1
+	end
+
+	@ExecSpace("ClientOnly")
+	method string GetRewardIconRuid(integer index)
+		-- 필드 드롭 아이콘과 결과창 아이콘이 같은 이 함수를 쓴다(둘이 어긋나지 않도록)
+		if not self._skillMode then return self._relicIconRuids[index + 1] end
+		return _SkillInventory:GetSkillIconRuid(index)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void GrantReward(integer index)
+		-- 보상이 아바타에 도착하는 시점에 실제 지급까지 서버에 요청한다
+		if self._skillMode then
+			_SkillInventory:RequestAddSkill(index)
+		else
+			_RelicInventory:RequestAddRelic(index)
+		end
+		self:RegisterPullResult(index)
 	end
 
 	@ExecSpace("ClientOnly")
@@ -180,15 +337,29 @@ script GachaUI extends Logic
 
 	@ExecSpace("ClientOnly")
 	method void SetPullButtonsEnabled(boolean enabled)
-		-- 뽑기 진행 중에는 두 버튼을 눌러도 반응하지 않도록 막고, 흐릿하게 비활성 상태를 보여준다
-		self.btnPull1.Enable = enabled
-		self.btnPull10.Enable = enabled
+		-- 뽑기 진행 중에는 두 버튼을 눌러도 반응하지 않도록 막고, 흐릿하게 비활성 상태를 보여준다.
+		-- 진행 중이 아니어도 다이아가 모자라는 쪽은 같은 방식으로 눌러 끈다(서버에서 어차피 거절된다)
+		local can1 = false
+		local can10 = false
+		if enabled then
+			can1 = _GameManager.Diamond >= self.Pull1Cost
+			can10 = _GameManager.Diamond >= self.Pull10Cost
+		end
+		self.btnPull1.Enable = can1
+		self.btnPull10.Enable = can10
+		self:ApplyButtonDim(self.btnPull1.Entity, can1)
+		self:ApplyButtonDim(self.btnPull10.Entity, can10)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ApplyButtonDim(Entity buttonEntity, boolean active)
+		-- 배경 알파만 낮춰서 "지금은 못 누른다"를 보여준다(버튼 아트 자체는 그대로 둔다)
+		if not isvalid(buttonEntity) then return end
+		local sprite = buttonEntity.SpriteGUIRendererComponent
+		if not isvalid(sprite) then return end
 		local alpha = 1.0
-		if not enabled then alpha = 0.5 end
-		local sprite1 = self.btnPull1.Entity.SpriteGUIRendererComponent
-		if isvalid(sprite1) then sprite1.Color = Color(sprite1.Color.r, sprite1.Color.g, sprite1.Color.b, alpha) end
-		local sprite10 = self.btnPull10.Entity.SpriteGUIRendererComponent
-		if isvalid(sprite10) then sprite10.Color = Color(sprite10.Color.r, sprite10.Color.g, sprite10.Color.b, alpha) end
+		if not active then alpha = 0.5 end
+		sprite.Color = Color(sprite.Color.r, sprite.Color.g, sprite.Color.b, alpha)
 	end
 
 	@ExecSpace("ClientOnly")
@@ -204,6 +375,10 @@ script GachaUI extends Logic
 		self.btnClose.Entity.Enable = false
 		-- 대신 스킵 버튼을 켜서 필드 연출을 건너뛸 수 있게 한다
 		self.btnSkip.Entity.Enable = true
+		-- 연출 도중 탭을 바꾸면 보상 종류가 어긋나므로 탭 버튼도 같이 잠근다(엔티티는 켜둔 채
+		-- ButtonComponent만 끈다 — DisabledColor가 자동으로 적용되어 잠긴 게 보인다)
+		self.btnTabSkill.Enable = false
+		self.btnTabRelic.Enable = false
 		self:PlayCoverOpen()
 	end
 
@@ -252,9 +427,9 @@ script GachaUI extends Logic
 			local relic = self.relicDropTemplate:Clone("SkipRelicDrop_" .. tostring(_UtilLogic.ElapsedSeconds) .. "_" .. tostring(#relics))
 			relic.Enable = true
 			relic.UITransformComponent.anchoredPosition = pos
-			local pickedSlot = _UtilLogic:RandomIntegerRange(1, #self._relicIconRuids)
-			relic.SpriteGUIRendererComponent.ImageRUID = DataRef(self._relicIconRuids[pickedSlot])
-			table.insert(pickedSlots, pickedSlot)
+			local pickedIndex = self:RollRewardIndex()
+			relic.SpriteGUIRendererComponent.ImageRUID = DataRef(self:GetRewardIconRuid(pickedIndex))
+			table.insert(pickedSlots, pickedIndex)
 			table.insert(relics, relic)
 
 			local capturedRelic = relic
@@ -288,9 +463,8 @@ script GachaUI extends Logic
 			_TimerService:SetTimerOnce(function()
 				-- 다같이 도착했으니 획득 연출도 한 번만, 지급도 한 번에 몰아서 처리한다
 				self:PlayAcquireEffect()
-				for _, pickedSlot in ipairs(pickedSlots) do
-					_RelicInventory:RequestAddRelic(pickedSlot - 1)
-					self:RegisterPullResult(pickedSlot - 1)
+				for _, pickedIndex in ipairs(pickedSlots) do
+					self:GrantReward(pickedIndex)
 				end
 			end, flyDuration)
 		end, landDuration + 0.25)
@@ -308,6 +482,8 @@ script GachaUI extends Logic
 		self:ClearResultIcons()
 		self.btnClose.Entity.Enable = true
 		self.btnSkip.Entity.Enable = false
+		self.btnTabSkill.Enable = true
+		self.btnTabRelic.Enable = true
 	end
 
 	@ExecSpace("ClientOnly")
@@ -655,9 +831,10 @@ script GachaUI extends Logic
 		relic.Enable = true
 		relic.UITransformComponent.anchoredPosition = position
 		local sprite = relic.SpriteGUIRendererComponent
-		-- pickedSlot은 1-based Lua 인덱스, RelicPanel의 RelicSlot_0.."17"과 맞추려면 유물탭 갱신 시 -1 해서 넘긴다
-		local pickedSlot = _UtilLogic:RandomIntegerRange(1, #self._relicIconRuids)
-		sprite.ImageRUID = DataRef(self._relicIconRuids[pickedSlot])
+		-- pickedIndex는 0-based 보상 인덱스 — 유물탭(RelicSlot_0.."17") / 스킬탭(SkillSlot_0..59) 둘 다
+		-- 0-based를 쓰므로 그대로 넘긴다. 어떤 종류인지는 RollRewardIndex/GetRewardIconRuid가 판단한다
+		local pickedIndex = self:RollRewardIndex()
+		sprite.ImageRUID = DataRef(self:GetRewardIconRuid(pickedIndex))
 
 		local capturedRelic = relic
 		-- 톡 튀어오름
@@ -691,8 +868,7 @@ script GachaUI extends Logic
 			-- 유물이 아바타에게 도착하는 시점에 맞춰 획득 연출을 재생하고, 서버에 실제 획득을 기록해 유물 탭에 반영한다
 			_TimerService:SetTimerOnce(function()
 				self:PlayAcquireEffect()
-				_RelicInventory:RequestAddRelic(pickedSlot - 1)
-				self:RegisterPullResult(pickedSlot - 1)
+				self:GrantReward(pickedIndex)
 			end, flyDuration)
 		end, landDuration + 1.0)
 	end
@@ -738,6 +914,8 @@ script GachaUI extends Logic
 		-- 뽑기가 완전히 끝났으니 닫기 버튼을 다시 켜고, 더 이상 스킵할 게 없으니 스킵 버튼은 끈다
 		self.btnClose.Entity.Enable = true
 		self.btnSkip.Entity.Enable = false
+		self.btnTabSkill.Enable = true
+		self.btnTabRelic.Enable = true
 		-- Bg_cover가 열 때와 반대로(위/투명 -> 제자리/불투명) 다시 덮이고, 다 덮인 뒤 그 위에 획득한 유물들을 보여준다
 		if not isvalid(self.bgCover) or self._coverBasePos == nil then return end
 		local basePos = self._coverBasePos
@@ -797,7 +975,7 @@ script GachaUI extends Logic
 
 			local icon = clone:GetChildByName("Icon", false)
 			if isvalid(icon) then
-				icon.SpriteGUIRendererComponent.ImageRUID = DataRef(self._relicIconRuids[slotIndex + 1])
+				icon.SpriteGUIRendererComponent.ImageRUID = DataRef(self:GetRewardIconRuid(slotIndex))
 			end
 			local countText = clone:GetChildByName("CountText", false)
 			if isvalid(countText) then
@@ -860,6 +1038,10 @@ script GachaUI extends Logic
 		if self._pull10StateHandler then self.btnPull10.Entity:DisconnectEvent(ButtonStateChangeEvent, self._pull10StateHandler) end
 		if self._skipHandler then self.btnSkip.Entity:DisconnectEvent(ButtonClickEvent, self._skipHandler) end
 		if self._skipStateHandler then self.btnSkip.Entity:DisconnectEvent(ButtonStateChangeEvent, self._skipStateHandler) end
+		if self._tabSkillHandler then self.btnTabSkill.Entity:DisconnectEvent(ButtonClickEvent, self._tabSkillHandler) end
+		if self._tabRelicHandler then self.btnTabRelic.Entity:DisconnectEvent(ButtonClickEvent, self._tabRelicHandler) end
+		if self._tabSkillStateHandler then self.btnTabSkill.Entity:DisconnectEvent(ButtonStateChangeEvent, self._tabSkillStateHandler) end
+		if self._tabRelicStateHandler then self.btnTabRelic.Entity:DisconnectEvent(ButtonStateChangeEvent, self._tabRelicStateHandler) end
 	end
 
 end

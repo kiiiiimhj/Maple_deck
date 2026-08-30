@@ -51,6 +51,23 @@ script UIComposePopup extends Component
 
 	property TextGUIRendererComponent SkillText = "839c0657-31d9-4237-96fc-9242224df35c"
 
+	-- 합성 결과 카드(유저 레퍼런스) 품질 섹션. 확률 값만 색을 달리해야 해서 라벨/값을 엔티티로 분리했다
+	property Entity QualityDivider = "99785d26-a8cc-47c7-8bf4-8c3a6b8e2716"
+
+	property TextGUIRendererComponent QualityTitle = "1f7ff7eb-750b-4dd3-a42a-15c15c0d3c65"
+
+	property Entity QualityRow1 = "10e38c74-9617-4054-b4e6-73262fb172b0"
+
+	property TextGUIRendererComponent QualityRow1Label = "020d60d9-b478-4b64-a535-472498231507"
+
+	property TextGUIRendererComponent QualityRow1Value = "f28e42f9-f9e2-4df2-bf1f-b1a3250f9863"
+
+	property Entity QualityRow2 = "fd38ff13-82ac-47ee-a6aa-c24aab84d6e2"
+
+	property TextGUIRendererComponent QualityRow2Label = "9a34264d-b030-4320-9949-4e6438431709"
+
+	property TextGUIRendererComponent QualityRow2Value = "c43ef631-c84f-4142-9460-ad598096a5f1"
+
 	property GridViewComponent Grid = "34a7947c-ccae-4f93-97a3-f2c4a0de7eda"
 
 	property ButtonComponent ComposeButton = "a0d42036-263b-4541-a34b-e82eb6e86638"
@@ -196,11 +213,11 @@ script UIComposePopup extends Component
 		self.BaseSlotIcon.ImageRUID = baseItemStruct:GetDisplayRUID()
 		self:SetQualityBadge(self.BaseQualityBg, self.BaseQualityText, baseItemStruct)
 
-		self.Material1Icon.Entity.Enable = false
-		self.Material2Icon.Entity.Enable = false
-		self.Material2.Entity.Enable = self:RequiredMaterialCount() >= 2
-		self:SetQualityBadge(self.Material1QualityBg, self.Material1QualityText, nil)
-		self:SetQualityBadge(self.Material2QualityBg, self.Material2QualityText, nil)
+		-- 재료 슬롯 초기화는 RefreshMaterialSlots 한 곳에서만 한다(위에서 두 Struct를 nil로 만들었으니
+		-- 전부 "빈 슬롯" 경로를 탄다). 예전엔 여기서 아이콘/배지만 직접 껐는데 등급색 테두리는 못 껐다 —
+		-- 테두리는 아이콘이 아니라 슬롯 배경 엔티티의 Outline이라, 합성 성공 후 재진입 시 빈 슬롯에
+		-- 이전 재료의 테두리만 남아 있었다(유저 리포트)
+		self:RefreshMaterialSlots()
 
 		-- 이전 합성 연출이 X나 에러로 중간에 끊겼을 수도 있으니 안전하게 초기 상태로 리셋
 		-- (재료 아이콘이 날아가다 만 스케일/좌표로 남아있던 실제 버그로 발견됨)
@@ -337,9 +354,22 @@ script UIComposePopup extends Component
 			table.insert(list, itemStruct)
 		end
 
+		-- 지금 베이스의 재료로 쓸 수 있는 아이템을 맨 위로 올린다(유저 지정). 비교자 안에서 매번
+		-- IsValidMaterial 을 부르면 O(n log n)번 호출되므로 GUID 기준으로 미리 계산해 둔다
+		local validMap = {}
+		for i, itemStruct in ipairs(list) do
+			validMap[itemStruct.GUID] = self:IsValidMaterial(itemStruct)
+		end
+
 		-- 높은 등급 순으로, 같은 등급이면 같은 종류(ItemId)끼리 묶어서 정렬(유저 지정)
-		-- 유저 지정: 등급 높은 순 → (같은 등급이면) 품질 높은 순 → ItemId(최종 동률 안정용)
+		-- 유저 지정: 재료 가능 여부 → 등급 높은 순 → (같은 등급이면) 품질 높은 순 → ItemId(최종 동률 안정용)
 		table.sort(list, function(a, b)
+			local validA = validMap[a.GUID]
+			local validB = validMap[b.GUID]
+			if validA ~= validB then
+				return validA
+			end
+
 			local gearA = a:GetGearStruct()
 			local gearB = b:GetGearStruct()
 			local gradeA = gearA ~= nil and gearA.Grade or -1
@@ -455,6 +485,10 @@ script UIComposePopup extends Component
 			self:ApplyGradeBorder(self.Material1Frame, m1)
 		else
 			self.Material1Icon.Entity.Enable = false
+			-- 등급색 테두리는 아이콘이 아니라 슬롯 배경(Material1Frame — Material1 버튼과 같은 엔티티)의
+			-- Outline이라, 아이콘만 꺼서는 지워지지 않는다. 재료를 뺄 때 여기서 같이 꺼야 빈 슬롯에
+			-- 테두리가 남지 않는다(유저 리포트: 재료를 넣었다 빼면 테두리가 남음)
+			self.Material1Frame.Outline = false
 		end
 		self:SetQualityBadge(self.Material1QualityBg, self.Material1QualityText, m1)
 
@@ -466,6 +500,8 @@ script UIComposePopup extends Component
 			self:ApplyGradeBorder(self.Material2Frame, m2)
 		else
 			self.Material2Icon.Entity.Enable = false
+			-- Material1과 동일 — 슬롯 배경의 Outline을 같이 꺼야 테두리가 남지 않는다
+			self.Material2Frame.Outline = false
 		end
 		self:SetQualityBadge(self.Material2QualityBg, self.Material2QualityText, m2)
 
@@ -501,6 +537,38 @@ script UIComposePopup extends Component
 		else
 			text.Text = "A"
 		end
+	end
+
+	-- 카드 하단 "품질 승급 확률" 섹션(유저 레퍼런스 레이아웃). 라벨과 확률 값은 색이 달라야 해서
+	-- 서로 다른 엔티티로 쪼개져 있고, 여기서 한 번에 채운다.
+	-- rate2 < 0 이면 두 번째 행은 숨긴다(품질 S처럼 더 올라갈 곳이 없어 "유지"만 있는 경우)
+	@ExecSpace("ClientOnly")
+	method void ShowQualitySection(string label1, number rate1, string label2, number rate2)
+		self.QualityDivider.Enable = true
+		self.QualityTitle.Entity.Enable = true
+		self.QualityRow1.Enable = true
+		self.QualityRow1Label.Text = label1
+		self.QualityRow1Value.Text = string.format("%d%%", rate1)
+
+		local showRow2 = false
+		if rate2 >= 0 then
+			showRow2 = true
+		end
+		self.QualityRow2.Enable = showRow2
+		if showRow2 then
+			self.QualityRow2Label.Text = label2
+			self.QualityRow2Value.Text = string.format("%d%%", rate2)
+		end
+	end
+
+	-- 무기가 아니거나(품질 개념 없음) 최고 등급이라 보여줄 확률이 없을 때 — 구분선까지 같이 꺼서
+	-- 카드 아래에 선만 덩그러니 남지 않게 한다
+	@ExecSpace("ClientOnly")
+	method void HideQualitySection()
+		self.QualityDivider.Enable = false
+		self.QualityTitle.Entity.Enable = false
+		self.QualityRow1.Enable = false
+		self.QualityRow2.Enable = false
 	end
 
 	-- 베이스/재료 슬롯 아이콘에 인벤토리 그리드와 동일한 등급색 테두리를 적용(유저 지정)
@@ -569,30 +637,38 @@ script UIComposePopup extends Component
 		if nextGrade == -1 then
 			self.ResultCountText.Entity.Parent.Enable = false
 			self:ApplyGradeBorderByGrade(self.ResultSlotFrame, grade)
-			self.GradeText.Text = _GearGradeEnum:GetKoreanName(grade) .. " (최고 등급)"
+			-- 카드 폭이 좁아서 한 줄로는 안 들어간다 — 줄바꿈을 문구에 직접 넣는다
+			self.GradeText.Text = _GearGradeEnum:GetKoreanName(grade) .. "\n(최고 등급)"
 			self.StatText.Text = ""
 			self.SkillText.Enable = false
+			self:HideQualitySection()
 			self.ComposeButton.Enable = false
 			return
 		end
 
 		self.ComposeButton.Enable = self:HasEnoughMaterials()
-		self.GradeText.Text = _GearGradeEnum:GetKoreanName(grade) .. " → " .. _GearGradeEnum:GetKoreanName(nextGrade)
+		-- 두 줄 형식(유저 지정): 화살표를 아래 줄 앞에 붙인다. 레퍼런스는 ↓ 세로 배치였지만
+		-- 이 부분만 다르게 가기로 확정 — "레어 / → 에픽"
+		self.GradeText.Text = _GearGradeEnum:GetKoreanName(grade) .. "\n → " .. _GearGradeEnum:GetKoreanName(nextGrade)
 
 		if isWeapon then
-			local nameChangeText = _WeaponTierDataLogic:GetDisplayName(baseItemStruct.ItemId, grade) .. " → " .. _WeaponTierDataLogic:GetDisplayName(baseItemStruct.ItemId, nextGrade)
-			-- 등급축과 품질축이 매번 함께 처리된다(유저 강한 정정) — gap 기반 유지/승급 확률을 같이 보여준다
+			-- 아이템명도 등급과 같은 두 줄 형식으로 맞춘다 — "봉황위궁 / → 골든 아룬드"
+			self.StatText.Text = _WeaponTierDataLogic:GetDisplayName(baseItemStruct.ItemId, grade) .. "\n → " .. _WeaponTierDataLogic:GetDisplayName(baseItemStruct.ItemId, nextGrade)
+			-- 등급축과 품질축이 매번 함께 처리된다(유저 강한 정정) — gap 기반 유지/승급 확률은
+			-- 본문이 아니라 카드 하단의 전용 섹션(구분선 아래)에 행 단위로 보여준다
 			if previewHigher >= _QualityEnum.S then
-				self.StatText.Text = nameChangeText .. " (품질 S 유지)"
+				self:ShowQualitySection("품질 S 유지", 100, "", -1)
 			else
-				self.StatText.Text = nameChangeText .. string.format(" (품질 %s 유지 %d%% / %s 승급 %d%%)",
-					_QualityEnum:GetKoreanName(previewHigher), 100 - previewPromoteRate,
-					_QualityEnum:GetKoreanName(previewPromoteQuality), previewPromoteRate)
+				self:ShowQualitySection(
+					"품질 " .. _QualityEnum:GetKoreanName(previewHigher) .. " 유지", 100 - previewPromoteRate,
+					"품질 " .. _QualityEnum:GetKoreanName(previewPromoteQuality) .. " 승급", previewPromoteRate)
 			end
 		else
 			local placeholderHpBefore = 10 + grade * 10
 			local placeholderHpAfter = 10 + nextGrade * 10
-			self.StatText.Text = string.format("HP %d → %d", placeholderHpBefore, placeholderHpAfter)
+			self.StatText.Text = string.format("HP %d\n → HP %d", placeholderHpBefore, placeholderHpAfter)
+			-- 무기가 아니면 품질(F~S) 개념이 없어서 확률 섹션 자체를 숨긴다
+			self:HideQualitySection()
 		end
 
 		-- 결과 슬롯 테두리는 이번 합성으로 실제 등급이 오르는 경우에만 "완성 후" 등급색을 미리 보여준다

@@ -29,6 +29,9 @@ script TitleUI extends Logic
 
 	-- 우측 상단 상시 코인 배지 — 어떤 탭을 보고 있어도 항상 표시된다 (GameManager.TotalCoins, 런과 무관하게 누적)
 	property TextComponent coinText = "7953a102-4e89-451e-907d-ad8215d50f79"
+	-- 코인 배지 바로 아래 다이아 배지 — 뽑기 전용 재화(GameManager.Diamond). 코인과 완전히 같은 갱신 경로
+	-- (시작 시 RequestDiamondSync로 당겨오고, 이후엔 NotifyDiamondChanged Multicast로 갱신)
+	property TextGUIRendererComponent diamondText = "0f487edf-528b-45f5-a027-eee635795401"
 
 	-- 상점 탭 아이콘 — 평소엔 라이딩 가게 NPC의 stand 클립으로 가만히 서 있다가, 탭 클릭 시 say 클립으로 짧게 인사하는 연출을 재생한다
 	property SpriteGUIRendererComponent shopIcon = "cdcc6063-2fd8-45c5-81b9-851158d06ce8"
@@ -87,6 +90,8 @@ script TitleUI extends Logic
 		-- 로드를 끝내기 전의 기본값(0)일 수 있어서 그냥 읽으면 "코인이 초기화된 것처럼" 보일 수 있다
 		self.coinText.Text = tostring(_GameManager.TotalCoins)
 		_GameManager:RequestCoinSync()
+		self.diamondText.Text = tostring(_GameManager.Diamond)
+		_GameManager:RequestDiamondSync()
 		_GameManager:InitPlayerNameUI()
 		-- 타이틀(로비) 화면을 보는 동안엔 뒤에 깔린 맵의 BGM(SoundComponent.PlayOnEnable)이 들리면 안 된다 —
 		-- 맵 진입과 동시에 네이티브 컴포넌트가 자동 재생하므로 여기서 즉시 멈춘다. "게임 시작" 클릭 시 재개
@@ -100,6 +105,16 @@ script TitleUI extends Logic
 		-- 순서 보장이 없어서, 여기서 다시 _GameManager.TotalCoins를 읽지 않고 파라미터로 직접 받는다
 		if not self:IsClient() then return end
 		self.coinText.Text = tostring(newTotal)
+	end
+
+	@ExecSpace("Multicast")
+	method void NotifyDiamondChanged(integer newTotal)
+		-- GameManager.AddDiamond / SpendDiamond / RequestDiamondSync가 호출. NotifyCoinsChanged와
+		-- 같은 이유로 @Sync 전파를 믿지 않고 서버가 확정한 값을 파라미터로 직접 받는다
+		if not self:IsClient() then return end
+		self.diamondText.Text = tostring(newTotal)
+		-- 뽑기 팝업이 열려 있으면 그쪽 잔액 표시도 같은 값으로 함께 갱신한다
+		_GachaUI:NotifyDiamondChanged(newTotal)
 	end
 
 	@ExecSpace("ClientOnly")
@@ -219,7 +234,7 @@ script TitleUI extends Logic
 		-- "멈추기"만 하면 로비 곡이 자동으로 돌아오지 않는다 — map01의 SoundComponent는 PlayOnEnable이라
 		-- 월드 부팅 시 1회만 자동재생되고 이후엔 재트리거되지 않음), 로비 전용 BGM을 명시적으로 다시 재생한다.
 		_SoundService:StopBGM(true)
-		_SoundService:PlayBGM(self.LobbyBgmRUID, 1.0)
+		_SoundOptionLogic:PlayBgm(self.LobbyBgmRUID, 1.0)
 		log("TitleUI: ShowLobby")
 	end
 

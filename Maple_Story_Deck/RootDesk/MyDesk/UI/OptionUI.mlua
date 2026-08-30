@@ -1,0 +1,238 @@
+@Logic
+script OptionUI extends Logic
+	-- 인게임 옵션 팝업(ui/OptionGroup.ui) 컨트롤러.
+	-- HUD 우상단 원형 "옵션" 버튼 → 옵션 패널(배경음/효과음 토글, 조합, 게임 종료)
+	--                              → "조합" → 조합식 패널(스킬 아이콘 + 아이콘 = 결과 아이콘)
+	-- 두 패널은 같은 UIGroup 안에 있고 딤드 배경 하나를 공유한다. UI라서 전부 ClientOnly.
+
+	property Entity optionGroup = "286e4e96-7bf6-4463-85ed-27ab4741f26c"
+	property Entity optionPanel = "c2c2fbbe-a6e3-405f-ad69-9dc45156952d"
+	property Entity fusionPanel = "c869d11a-75f5-44e4-8030-f7c715c6d66a"
+
+	property ButtonComponent btnOption = "dba34531-f159-4ca0-894d-d2bdac2f38c0"
+	property ButtonComponent btnOptionClose = "3a206cc6-e186-4c6e-8dec-6484e701614a"
+	property ButtonComponent btnFusion = "299f0302-ea44-4645-9521-3b4d80db2bbc"
+	property ButtonComponent btnQuit = "cc182cd9-dcbe-4b4d-841d-49c2e97b7e25"
+	property ButtonComponent btnFusionClose = "a88d5d00-6c9e-482c-9681-8acfcd7cd353"
+	-- 종료 확인창 — 옵션 패널 위에 겹쳐 뜬다(옵션 패널은 뒤에 그대로 남는다)
+	property Entity confirmPanel = "772e6312-1d86-413b-8de5-24fe94c3d09b"
+	property ButtonComponent btnConfirmYes = "5a71ffe1-5626-456b-b0b9-4a90efb96e8b"
+	property ButtonComponent btnConfirmNo = "7f6357af-85b6-474b-b581-3b16a049c2fe"
+	property ButtonComponent btnBgm = "c9f7943b-5aec-4810-a245-589a0034884f"
+	property ButtonComponent btnSfx = "98665bec-f547-4530-9883-db5eb4f9e279"
+	-- 토글 원 안의 ON/OFF 글자 — 버튼과 같은 엔티티(button()이 스프라이트+텍스트를 한 엔티티에 만든다)
+	property TextGUIRendererComponent bgmText = "c9f7943b-5aec-4810-a245-589a0034884f"
+	property TextGUIRendererComponent sfxText = "98665bec-f547-4530-9883-db5eb4f9e279"
+
+	-- 켜짐/꺼짐 색 — 꺼진 쪽은 회색으로 눌러서 한눈에 구분되게 한다.
+	property Color OnColor = Color(1.0, 1.0, 1.0, 1.0)
+	property Color OffColor = Color(0.45, 0.45, 0.45, 1.0)
+
+	property integer FusionRowCount = 7
+
+	-- 캐릭터별 조합식. { result = 결과 카드, mats = { 재료 카드들 } }
+	-- 재료 첫 번째가 Lv5까지 올려야 하는 슬롯 카드, 나머지는 보유만 하면 되는 패시브다.
+	-- 원본은 CardManager.GenerateLevelUpChoices의 조합 해금 조건문들 — 거기 조건이 바뀌면 여기도 같이 고칠 것.
+	property any _recipes = nil
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		-- 버튼 연결 + 시작 시 팝업 닫힘 상태 보장.
+		self:BuildRecipeTable()
+
+		self.btnOption.Entity:ConnectEvent(ButtonClickEvent, function() self:OpenOption() end)
+		self.btnOptionClose.Entity:ConnectEvent(ButtonClickEvent, function() self:CloseAll() end)
+		self.btnFusionClose.Entity:ConnectEvent(ButtonClickEvent, function() self:CloseFusion() end)
+		self.btnFusion.Entity:ConnectEvent(ButtonClickEvent, function() self:OpenFusion() end)
+		self.btnQuit.Entity:ConnectEvent(ButtonClickEvent, function() self:OpenQuitConfirm() end)
+		self.btnConfirmYes.Entity:ConnectEvent(ButtonClickEvent, function() self:OnQuitConfirmed() end)
+		self.btnConfirmNo.Entity:ConnectEvent(ButtonClickEvent, function() self:CloseQuitConfirm() end)
+		self.btnBgm.Entity:ConnectEvent(ButtonClickEvent, function() self:ToggleBgm() end)
+		self.btnSfx.Entity:ConnectEvent(ButtonClickEvent, function() self:ToggleSfx() end)
+
+		self.optionGroup:SetEnable(false)
+		self.confirmPanel:SetEnable(false)
+		self:RefreshToggleVisual()
+		log("OptionUI: ready")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void BuildRecipeTable()
+		-- 캐릭터 인덱스(_GameManager.SelectedCharacter) → 조합식 목록.
+		-- 0 = 아르카나(기본), 1 = 실피드, 2 = 레이온, 3 = 쉐이드
+		self._recipes = {}
+		self._recipes[0] = {
+			{ result = 16,  mats = { 4, 8 } },
+			{ result = 17,  mats = { 3, 10 } },
+			{ result = 19,  mats = { 9, 7 } },
+			{ result = 20,  mats = { 11, 13 } },
+			{ result = 21,  mats = { 12, 7, 18 } },
+			{ result = 23,  mats = { 15, 10, 22 } },
+			{ result = 24,  mats = { 14, 22 } },
+		}
+		self._recipes[1] = {
+			{ result = 114, mats = { 103, 104 } },
+			{ result = 115, mats = { 105, 110 } },
+			{ result = 116, mats = { 101, 112 } },
+			{ result = 117, mats = { 102, 113 } },
+			{ result = 118, mats = { 106, 109, 110 } },
+			{ result = 119, mats = { 107, 109, 111 } },
+			{ result = 120, mats = { 108, 112, 113 } },
+		}
+		self._recipes[2] = {
+			{ result = 160, mats = { 153, 158 } },
+			{ result = 165, mats = { 154, 161 } },
+			{ result = 166, mats = { 155, 164, 163 } },
+			{ result = 167, mats = { 152, 151, 162 } },
+			{ result = 168, mats = { 156, 164, 151 } },
+			{ result = 169, mats = { 159, 161, 164 } },
+			{ result = 170, mats = { 157, 163, 164 } },
+		}
+		self._recipes[3] = {
+			{ result = 185, mats = { 171, 181, 183 } },
+			{ result = 186, mats = { 173, 180, 182 } },
+			{ result = 187, mats = { 174, 184, 180 } },
+			{ result = 188, mats = { 175, 176 } },
+			{ result = 189, mats = { 177, 182, 184, 183 } },
+			{ result = 190, mats = { 178, 184, 181 } },
+			{ result = 191, mats = { 179, 180, 183 } },
+		}
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OpenOption()
+		-- 게임오버 팝업이 떠 있는 동안엔 옵션을 열지 않는다(둘이 겹쳐서 조작이 꼬인다).
+		if _GameManager.GameOver then return end
+		self.optionGroup:SetEnable(true)
+		self.optionPanel:SetEnable(true)
+		self.fusionPanel:SetEnable(false)
+		self.confirmPanel:SetEnable(false)
+		self:RefreshToggleVisual()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void CloseAll()
+		-- X 버튼 / 게임 종료 직전에 팝업 전체를 닫는다.
+		self.optionGroup:SetEnable(false)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OpenFusion()
+		-- "조합" — 옵션 패널을 조합식 패널로 갈아끼운다(딤드는 그대로 유지).
+		self:RefreshFusionRows()
+		self.confirmPanel:SetEnable(false)
+		self.optionPanel:SetEnable(false)
+		self.fusionPanel:SetEnable(true)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void CloseFusion()
+		-- 조합식 X — 옵션 패널로 되돌아간다.
+		self.fusionPanel:SetEnable(false)
+		self.optionPanel:SetEnable(true)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshFusionRows()
+		-- 현재 고른 캐릭터의 조합식만 채운다. 재료가 2~4개로 제각각이라 슬롯/＋는 고정 좌표에 미리
+		-- 깔아두고 남는 것만 끈다 — 그래야 "=" 와 결과 아이콘이 모든 행에서 같은 x에 정렬된다.
+		local list = self._recipes[_GameManager.SelectedCharacter]
+		if list == nil then list = self._recipes[0] end
+
+		for i = 1, self.FusionRowCount do
+			local row = self.fusionPanel:GetChildByName("Row" .. i, false)
+			if row ~= nil then
+				local rec = list[i]
+				if rec == nil then
+					row:SetEnable(false)
+				else
+					row:SetEnable(true)
+					local mats = rec.mats
+					local matCount = #mats
+					for s = 1, 4 do
+						local slot = row:GetChildByName("Slot" .. s, false)
+						if slot ~= nil then
+							if s <= matCount then
+								slot:SetEnable(true)
+								slot.SpriteGUIRendererComponent.ImageRUID = DataRef(_CardManager:GetCardIconRUID(mats[s]))
+							else
+								slot:SetEnable(false)
+							end
+						end
+					end
+					for p = 1, 3 do
+						local plus = row:GetChildByName("Plus" .. p, false)
+						if plus ~= nil then plus:SetEnable(p < matCount) end
+					end
+					local res = row:GetChildByName("Result", false)
+					if res ~= nil then
+						res.SpriteGUIRendererComponent.ImageRUID = DataRef(_CardManager:GetCardIconRUID(rec.result))
+					end
+					local nameEntity = row:GetChildByName("Name", false)
+					if nameEntity ~= nil then
+						nameEntity.TextGUIRendererComponent.Text = _CardManager:GetSlotBaseName(rec.result)
+					end
+				end
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ToggleBgm()
+		-- 배경음 켜기/끄기.
+		_SoundOptionLogic:SetBgmMuted(not _SoundOptionLogic:IsBgmMuted())
+		self:RefreshToggleVisual()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ToggleSfx()
+		-- 효과음 켜기/끄기.
+		_SoundOptionLogic:SetSfxMuted(not _SoundOptionLogic:IsSfxMuted())
+		self:RefreshToggleVisual()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshToggleVisual()
+		-- 원 안의 글자(ON/OFF)와 원 색을 현재 음소거 상태에 맞춘다.
+		local bgmOn = not _SoundOptionLogic:IsBgmMuted()
+		local sfxOn = not _SoundOptionLogic:IsSfxMuted()
+
+		if bgmOn then
+			self.bgmText.Text = "ON"
+			self.btnBgm.Entity.SpriteGUIRendererComponent.Color = self.OnColor
+		else
+			self.bgmText.Text = "OFF"
+			self.btnBgm.Entity.SpriteGUIRendererComponent.Color = self.OffColor
+		end
+
+		if sfxOn then
+			self.sfxText.Text = "ON"
+			self.btnSfx.Entity.SpriteGUIRendererComponent.Color = self.OnColor
+		else
+			self.sfxText.Text = "OFF"
+			self.btnSfx.Entity.SpriteGUIRendererComponent.Color = self.OffColor
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OpenQuitConfirm()
+		-- "게임 종료"는 되돌릴 수 없으니 바로 끝내지 않고 확인창을 먼저 띄운다(유저 지정 2026-08-30).
+		self.confirmPanel:SetEnable(true)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void CloseQuitConfirm()
+		-- "아니오" — 확인창만 닫고 옵션 패널로 돌아간다.
+		self.confirmPanel:SetEnable(false)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnQuitConfirmed()
+		-- "예" — 이번 런을 여기서 끝낸다. 서버가 랭킹 점수를 등록하고 GameOver를 켜면 GameOverUI가
+		-- 폴링으로 게임오버 팝업을 띄운다(죽었을 때와 동일 경로). 단, 스스로 끝낸 판은 이어하기가
+		-- 없어야 하므로 GameManager._gaveUp 플래그로 "다시하기만" 모드가 된다.
+		log("OptionUI: quit(give up) confirmed")
+		self:CloseAll()
+		_GameManager:RequestGiveUp()
+	end
+end
