@@ -1,0 +1,105 @@
+@Logic
+script Ep1Zone2ManoLogic extends Logic
+
+	-- 에피소드1 존2(mapIndex 2, map01.map의 Zone02 컨테이너) 이스터에그 — trap-44를 누르면 "마노"
+	-- 한 마리가 나타난다(유저 제공 리소스팩). 유저 지정 사양:
+	--  · HP 1000 고정(MonsterAI.ManoFixedHp) — 시간대 스케일링을 타지 않는다
+	--  · 10초(MonsterAI.ManoLifetime) 안에 못 잡으면 보상 없이 사라진다
+	--  · 공격은 하지 않고(_neverAttacks) 지상에서 플레이어 쪽으로 다가온다
+	--  · 잡으면 50% 확률로 보유 스킬 1개 강화, 그게 안 나오면 빨간 포션
+	-- 버섯 이스터에그(Ep3Map1MushroomLogic)와 같은 구조지만, 그쪽은 미니무르 계열이라 "타격 무시"라
+	-- 잡을 수가 없다 — 이건 실제 전투 대상이라 MonsterAI에 별도 초기화(InitializeStatsAsMano)를 뒀다.
+	@Sync property boolean Triggered = false
+
+	-- 존2는 map01.map에 Zone02 컨테이너로 병합돼 있고 x만 15.5 오프셋돼 있다(MapManager.ZoneInfo[2]).
+	-- 따라서 아래 좌표는 전부 "월드 - 15.5"인 로컬 값이다.
+	--  · 지면 Y: 맵1~3은 전부 -1.35로 동일(ZoneInfo에 landY가 따로 없는 이유)
+	--  · 발판 실측 범위: 월드 8.42~22.58 = 로컬 -7.08~+7.08
+	--  · trap-44 배치 좌표: 로컬 x = 2.5666 → 그 자리에서 튀어나오게 한다
+	property integer SpawnZoneIndex = 2
+	property number LocalSpawnX = 2.5666
+	property number GroundY = -1.35
+
+	property string AppearMessage = "마노가 나타났다!"
+
+	-- 처치 보상 — 유저 지정: "50% 확률로 슬롯에 있는 스킬 1개, 없으면 100% 빨간포션".
+	-- 즉 절반은 스킬 강화, 나머지 절반(과 강화할 스킬이 하나도 없는 경우)은 빨간 포션.
+	property number SkillRewardChance = 0.5
+	-- 빨간 포션 = ApplyPotionDrop의 potionType 1 (2는 흰 포션)
+	property integer RedPotionType = 1
+
+	-- 한 런에 한 번만 소환된다 — 새 런에서는 ResetForNewRun이 풀어준다
+	@ExecSpace("ServerOnly")
+	method void SummonMano()
+		if self.Triggered then
+			log("Ep1Zone2Mano: already summoned this run")
+			return
+		end
+
+		local map = _MonsterSpawner:GetZoneEntity(self.SpawnZoneIndex)
+		if map == nil then
+			log_error("Ep1Zone2Mano: zone entity not found for zone " .. self.SpawnZoneIndex)
+			return
+		end
+
+		local localPos = Vector3(self.LocalSpawnX, self.GroundY, 0)
+		local entity = _SpawnService:SpawnByModelId(_MonsterSpawner.MonsterModelId, "Mano", localPos, map)
+		if entity == nil then
+			log_error("Ep1Zone2Mano: SpawnByModelId failed")
+			return
+		end
+
+		---@type MonsterAI
+		local ai = entity:GetComponent("script.MonsterAI")
+		if ai == nil then
+			log_error("Ep1Zone2Mano: MonsterAI component missing on spawned entity")
+			return
+		end
+
+		self.Triggered = true
+		ai:InitializeStatsAsMano(self.SpawnZoneIndex, self.LocalSpawnX, self.GroundY)
+		_UIToast:ShowMessage(self.AppearMessage)
+		log("Ep1Zone2Mano: mano spawned at local x=" .. tostring(self.LocalSpawnX))
+	end
+
+	-- MonsterAI.Die()가 제한시간 안에 처치됐을 때만 호출한다(시간 초과 despawn은 EndManoLife가
+	-- 보상 없이 처리). deathLocalPos는 존 컨테이너 기준 로컬 좌표다.
+	@ExecSpace("ServerOnly")
+	method void OnManoKilled(Vector3 deathLocalPos)
+		local map = _MonsterSpawner:GetZoneEntity(self.SpawnZoneIndex)
+		if map == nil then
+			log_error("Ep1Zone2Mano: zone entity missing on kill, reward skipped")
+			return
+		end
+
+		-- 드롭 연출은 월드 좌표를 받는다 — 존 오프셋을 되돌려 월드로 환산한다.
+		-- ⚠ 다른 Logic의 property(ZoneInfo)를 직접 인덱싱하면 런타임에 nil이 잡히는 사례가 있어
+		-- 반드시 접근자(GetZoneInfo)를 쓴다
+		local zoneInfo = _MapManager:GetZoneInfo(self.SpawnZoneIndex)
+		local offsetX = 0
+		if zoneInfo ~= nil and zoneInfo.spawnX ~= nil then offsetX = zoneInfo.spawnX end
+		local worldPos = Vector3(deathLocalPos.x + offsetX, self.GroundY, 0)
+
+		-- 스킬 강화가 나올 자리인지 먼저 굴리고, 강화할 스킬이 하나도 없으면 포션으로 떨어뜨린다
+		local wantSkill = _UtilLogic:RandomDouble() < self.SkillRewardChance
+		if wantSkill then
+			local pool = _CardManager:BuildActiveUpgradePool()
+			if #pool > 0 then
+				_CardManager:GrantCardUpgradesFromPool(pool, worldPos, 0, self.GroundY, 1.0, 1, 0)
+				log("Ep1Zone2Mano: killed -> 1 skill upgrade")
+				return
+			end
+			log("Ep1Zone2Mano: skill roll won but no upgradeable skill, falling back to potion")
+		end
+
+		_GameManager:ApplyPotionDrop(self.RedPotionType, worldPos, 0, self.GroundY, 1.0)
+		log("Ep1Zone2Mano: killed -> red potion")
+	end
+
+	-- GameManager.RestartGame()이 호출 — 새 런에서 다시 소환할 수 있게 한다
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		self.Triggered = false
+	end
+
+end

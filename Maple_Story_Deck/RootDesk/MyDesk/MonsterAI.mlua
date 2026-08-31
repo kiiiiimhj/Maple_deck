@@ -174,6 +174,16 @@ script MonsterAI extends Component
 
 	property integer _miniMooreLifeTimerId = 0
 
+	-- 존2 trap-44 이스터에그 "마노"(InitializeStatsAsMano) — 미니무르 계열과 달리 실제로 잡을 수 있고,
+	-- 처치하면 Die()가 Ep1Zone2ManoLogic으로 보상 지급을 넘긴다. 유저 지정: HP 1000 고정 / 10초 제한.
+	property boolean _isMano = false
+
+	property number ManoFixedHp = 1000
+
+	property number ManoLifetime = 10.0
+
+	property integer _manoLifeTimerId = 0
+
 	property number _wanderMinX = -5
 
 	property number _wanderMaxX = 5
@@ -1112,6 +1122,79 @@ script MonsterAI extends Component
 			self:ApplyHardFreeze(_GameManager._globalFreezeRemaining)
 		end
 		log("MonsterAI: Cauldron initialized Zone=" .. zoneIndex .. " HP=" .. self.CurrentHp)
+	end
+
+	-- Ep1Zone2ManoLogic.SpawnMano()가 스폰 직후 호출 — 존2 trap-44를 누르면 나오는 "마노"(유저 제공
+	-- 리소스팩). 미니무르 계열(_isMiniMoore)과 달리 "잡을 수 있는" 몬스터다 — 타격을 정상적으로
+	-- 받고 HP가 0이 되면 Die()를 타며, 그때 Ep1Zone2ManoLogic이 보상을 준다(_isMano 플래그로 식별).
+	--  · HP는 시간대 기준값이 아니라 유저 지정 고정값 1000(ManoFixedHp)
+	--  · _neverAttacks=true — 플레이어를 절대 공격하지 않는다(가마솥과 동일 정책)
+	--  · 지상에서 좌우로 배회하다 플레이어 쪽으로 접근한다(일반 몬스터의 접근 이동을 그대로 쓰되
+	--    공격만 막는 형태 — 10초 안에 잡아야 해서 사거리 안으로 들어와줘야 한다)
+	--  · 10초(ManoLifetime) 안에 못 잡으면 스스로 사라진다(EndManoLife)
+	@ExecSpace("ServerOnly")
+	method void InitializeStatsAsMano(integer zoneIndex, number spawnX, number groundY)
+		self._dead = false
+		self:SetSpawnZone(zoneIndex)
+		self._isBoss = false
+		self._isElite = false
+		self._isMano = true
+		self._neverAttacks = true
+
+		self.MaxHp = self.ManoFixedHp
+		self.CurrentHp = self.MaxHp
+
+		-- 유저 제공 리소스팩 "마노" — hit1/die1/move/stand + 사운드. skill1은 공격을 안 하므로 쓰지 않는다
+		self._standRUID = "e035bb90c053401b88de2159dfa230eb"
+		self._moveRUID = "3dcd0dc63d2d491b9b8d39b3b9d0a214"
+		self._hitRUID = "452cb740ddcb4837a46b75d7935e2ffc"
+		self._dieRUID = "f430051f6fc34f2eb56fe5e62b346eac"
+		self._attackRUID = ""
+		self._hitSoundRUID = "6de4a479bd344a3688d8c28a8b46c0f2"
+		self._dieSoundRUID = "ba4aab7d12af410ea2cc7e3fbc97ec54"
+		self._attackSoundRUID = ""
+		-- 프레임 수 정보가 없어 다른 소형 몬스터 사망연출과 같은 값으로 둔다(실측 아님)
+		self._dieDuration = 0.35
+
+		self._isFlying = false
+		self._isRangedInk = false
+		self._isRangedSlash = false
+		self._isCharge = false
+		self._isZigzag = false
+		self._isGiantNepenthes = false
+		self._hasPhase2 = false
+		self._phase2Chance = 0
+		self._isSwarmMember = false
+		self._isYellowMiniBean = false
+		self._hitEffectRUID = ""
+		self._hitEffectMaxConcurrent = 1
+		self._customAttackInterval = 0
+		self._accuracyDebuffPercent = 0
+		self.FreezeStack = 0
+
+		self._currentScale = 1.0
+		self.MonsterSprite = self._standRUID
+		self.Entity.TransformComponent.Position = Vector3(spawnX, groundY, 0)
+		self.Entity.TransformComponent.Scale = Vector3(self._currentScale * self._scaleMultiplier, self._currentScale * self._scaleMultiplier, 1.0)
+		self:SyncDepthOverlaySprite()
+		self:HideDepthOverlay()
+		if _GameManager._globalFreezeActive and _GameManager._globalFreezeRemaining > 0 then
+			self:ApplyHardFreeze(_GameManager._globalFreezeRemaining)
+		end
+
+		self._manoLifeTimerId = _TimerService:SetTimerOnce(self.EndManoLife, self.ManoLifetime)
+		log("MonsterAI: Mano initialized Zone=" .. zoneIndex .. " HP=" .. self.CurrentHp)
+	end
+
+	-- ManoLifetime이 지날 때까지 못 잡으면 호출 — 보상 없이 조용히 사라진다.
+	-- 이미 죽었으면(_dead) 아무것도 하지 않는다 — 처치 보상은 Die() 쪽에서 이미 나갔다.
+	@ExecSpace("ServerOnly")
+	method void EndManoLife()
+		self._manoLifeTimerId = 0
+		if self._dead then return end
+		if not isvalid(self.Entity) then return end
+		log("MonsterAI: Mano despawned (not killed in time)")
+		self:PlayDespawnJump()
 	end
 
 	-- Ep2Map4CentaurLogic.SpawnCentaurHorde()가 스폰 직후 호출 — ep2_map4 MapObject_205를 2번 클릭하면
@@ -3081,6 +3164,15 @@ script MonsterAI extends Component
 			return
 		end
 		self._dead = true
+		-- 존2 마노 이스터에그 — 제한시간 안에 잡았을 때만 여기로 온다(시간 초과는 EndManoLife가
+		-- 보상 없이 despawn). 남은 수명 타이머를 정리하고 보상 지급을 Logic으로 넘긴다
+		if self._isMano then
+			if self._manoLifeTimerId ~= 0 then
+				_TimerService:ClearTimer(self._manoLifeTimerId)
+				self._manoLifeTimerId = 0
+			end
+			_Ep1Zone2ManoLogic:OnManoKilled(self.Entity.TransformComponent.Position)
+		end
 		-- 죽는 연출(die 스프라이트)과 깊이 오버레이(서 있는 포즈를 검게 덧씌운 것)가 서로 어긋나 보이지
 		-- 않도록, 죽는 순간 오버레이부터 즉시 꺼버린다
 		self:HideDepthOverlay()

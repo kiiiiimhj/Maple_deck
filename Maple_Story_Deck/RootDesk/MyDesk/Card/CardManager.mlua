@@ -14293,6 +14293,17 @@ script CardManager extends Logic
 	-- 순서는 그대로 유지한다.
 	property number EffectDepthEpsilon = 0.2
 
+	-- SpawnEffectWithModel 안전망 타이머의 모델별 수명 — 각 모델에 박혀 있는 SkillEffectAI.Duration과
+	-- 같은 값으로 맞춰둔다(skilleffect=0.8 / skilleffectlong=2.5). 이 값을 바꿀 때는 모델 쪽
+	-- Duration도 같이 바꿔야 두 경로의 수명이 어긋나지 않는다.
+	property number SkillEffectLifetime = 0.8
+
+	property number SkillEffectLongLifetime = 2.5
+
+	-- 아래 1회성 진단(SkillEffectAI 부착 여부)이 이미 찍혔는지 — 연출은 초당 수십 개씩 스폰되므로
+	-- 매번 로그를 남기면 로그창이 묻힌다. 런당 딱 한 줄만 남긴다.
+	property boolean _skillEffectAIChecked = false
+
 	@ExecSpace("ServerOnly")
 	method Entity SpawnEffect(string ruid, Vector3 pos, number rotationZ, number playRate, number scale, number alpha)
 		return self:SpawnEffectWithModel(ruid, pos, rotationZ, playRate, scale, alpha, "skilleffect")
@@ -14329,6 +14340,36 @@ script CardManager extends Logic
 		local tc = e.TransformComponent
 		if tc ~= nil and rotationZ ~= 0 then tc.ZRotation = rotationZ end
 		if tc ~= nil and scale ~= 1 then tc.Scale = Vector3(scale, scale, 1) end
+
+		-- 소멸 안전망 — 연출 엔티티의 수명을 모델에 붙은 SkillEffectAI 하나에만 의존하지 않는다.
+		-- 그 스크립트 컴포넌트가 어떤 이유로든 붙지 않으면(파일 이동 후 Maker 재등록 누락 등)
+		-- 호출부가 Destroy를 걸지 않는 연출(썬더볼트 등)은 소멸 경로가 통째로 사라져 화면에 영구히
+		-- 남는다 — 유저 리포트로 실제 발생한 버그. 여기서 같은 수명으로 한 번 더 예약해두면
+		-- SkillEffectAI가 정상일 때는 이미 파괴된 뒤라 isvalid에서 걸러져 동작이 완전히 동일하고,
+		-- 비정상일 때만 이 타이머가 대신 정리한다.
+		-- "persistenteffect"는 애초에 호출부가 수명을 직접 관리하는 모델이라 여기서 건드리지 않는다.
+		local lifetime = 0
+		if modelId == "skilleffect" then
+			lifetime = self.SkillEffectLifetime
+		elseif modelId == "skilleffectlong" then
+			lifetime = self.SkillEffectLongLifetime
+		end
+		if lifetime > 0 then
+			-- 런당 1회 진단 — 안전망이 "보험"인지 "유일한 소멸 경로"인지 로그 한 줄로 판정한다.
+			-- NOT attached가 뜨면 Maker에 script.SkillEffectAI가 등록되지 않은 것이고,
+			-- 그때는 재등록(파일 이동 흔적 확인 → refresh)이 진짜 해결책이다.
+			if not self._skillEffectAIChecked then
+				self._skillEffectAIChecked = true
+				if e:GetComponent("script.SkillEffectAI") == nil then
+					log_warning("SpawnEffectWithModel: script.SkillEffectAI NOT attached (modelId=" .. modelId .. ") — 안전망 타이머가 연출을 대신 정리 중")
+				else
+					log("SpawnEffectWithModel: script.SkillEffectAI attached OK (modelId=" .. modelId .. ")")
+				end
+			end
+			_TimerService:SetTimerOnce(function()
+				if isvalid(e) then e:Destroy() end
+			end, lifetime)
+		end
 		return e
 	end
 

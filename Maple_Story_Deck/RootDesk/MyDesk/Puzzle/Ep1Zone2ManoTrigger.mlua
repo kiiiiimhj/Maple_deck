@@ -1,0 +1,68 @@
+@Component
+script Ep1Zone2ManoTrigger extends Component
+
+	-- 에피소드1 존2 trap-44 클릭 트리거 — Ep1Zone2ManoLogic.SummonMano()를 호출한다.
+	-- Ep2Map3SummonTrigger와 동일한 단순 클릭 패턴(드래그 아님). 런당 1회만 실제 소환되지만
+	-- (SummonMano 내부 Triggered 가드) 눌림 연출은 매번 재생한다.
+	property any _touchHandler = nil
+	property Vector3 _restPosition = Vector3(0, 0, 0)
+	property boolean _restCaptured = false
+	property number PressDownOffset = 0.15
+	property number PressDownDuration = 0.08
+	property number PressUpDuration = 0.12
+
+	method void OnBeginPlay()
+		-- 클릭은 클라이언트에서만 받는다(월드 오브젝트는 TouchReceiveComponent + TouchEvent)
+		if self:IsClient() then
+			self._touchHandler = self.Entity:ConnectEvent(TouchEvent, self.OnTouched)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnTouched(TouchEvent event)
+		-- 게임오버 중이거나 타이틀(로비) 화면이면 무시한다
+		if _GameManager.GameOver then return end
+		if _TitleUI.titleGroup.Enable then return end
+		self:PlayPressAnimation()
+		self:RequestSummon()
+	end
+
+	-- 클릭 피드백 — 살짝 눌렸다가 제자리로. 매 클릭의 라이브 좌표가 아니라 최초 캡처한 _restPosition을
+	-- 기준으로 왕복해서, 연출 도중 재클릭해도 위치가 누적으로 밀리지 않는다(Ep2Map3SummonTrigger와 동일)
+	@ExecSpace("ClientOnly")
+	method void PlayPressAnimation()
+		if not self._restCaptured then
+			self._restPosition = self.Entity.TransformComponent.Position
+			self._restCaptured = true
+		end
+		local rest = self._restPosition
+		local pressedY = rest.y - self.PressDownOffset
+
+		_TweenLogic:PlayTween(0.0, 1.0, self.PressDownDuration, EaseType.QuadEaseOut, function(t)
+			if not isvalid(self) or not isvalid(self.Entity) then return end
+			local y = rest.y + (pressedY - rest.y) * t
+			self.Entity.TransformComponent.Position = Vector3(rest.x, y, rest.z)
+		end)
+
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) or not isvalid(self.Entity) then return end
+			_TweenLogic:PlayTween(0.0, 1.0, self.PressUpDuration, EaseType.QuadEaseIn, function(t)
+				if not isvalid(self) or not isvalid(self.Entity) then return end
+				local y = pressedY + (rest.y - pressedY) * t
+				self.Entity.TransformComponent.Position = Vector3(rest.x, y, rest.z)
+			end)
+		end, self.PressDownDuration)
+	end
+
+	@ExecSpace("Server")
+	method void RequestSummon()
+		_Ep1Zone2ManoLogic:SummonMano()
+	end
+
+	method void OnEndPlay()
+		if self:IsClient() then
+			if self._touchHandler ~= nil then self.Entity:DisconnectEvent(TouchEvent, self._touchHandler) end
+		end
+	end
+
+end
