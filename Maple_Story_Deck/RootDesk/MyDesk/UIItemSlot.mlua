@@ -40,6 +40,12 @@ script UIItemSlot extends Component
 	-- 장비 정보 팝업의 ItemDecoration과 동일 RUID/색상) — QualityText와 항상 같이 켜지고 꺼진다
 	property SpriteGUIRendererComponent QualityBg = nil
 
+	-- QualityBg가 장비일 때 되돌아가야 할 원래 모습(.model 값 그대로). 강화 주문서 슬롯에서는 같은
+	-- 엔티티를 부위 심볼 스프라이트로 재활용하기 때문에, 장비를 그릴 때 매번 여기로 복구해야 한다.
+	-- (신규 자식을 추가하면 원인불명 렌더링 실패가 반복돼서 — SelectedBadge 주석 참고 — 이미 잘
+	--  그려지는 QualityBg를 재활용하는 쪽으로 우회했다. 위치가 이미 아이콘 우측 하단이라 그대로 맞는다)
+	property string QualityBgRUID = "ecabb6fff10ac864697292bdbeda2606"
+
 	property any ItemStruct = nil
 
 	property any OnItemClickedFunc = nil
@@ -101,7 +107,9 @@ script UIItemSlot extends Component
 			self.ImageDim.Enable = false
 			self.IconBackground.Outline = false
 			self.QualityText.Enable = false
-			self.QualityBg.Enable = false
+			-- 장비가 아닌 아이템 중 강화 주문서만 우측 하단에 부위 심볼을 덧붙인다(유저 요청:
+			-- "주문서 아이콘에 장착 슬롯의 하얀 벡터 심볼이 붙어야 뭔지 알 수 있다")
+			self:ApplyScrollSymbol(itemStruct.ItemId)
 			return
 		end
 
@@ -113,6 +121,12 @@ script UIItemSlot extends Component
 		-- 무기는 실제 품질(F~S), 그 외 장비는 아직 품질 카탈로그가 없어 "A" 고정
 		self.QualityText.Enable = true
 		self.QualityBg.Enable = true
+		-- 주문서 슬롯에서 심볼 스프라이트로 쓰였을 수 있으니 원래 원형 배지 모습으로 되돌린다
+		-- (GridView가 셀을 재활용하므로 복구를 빠뜨리면 장비 슬롯에 심볼이 남는다)
+		self.QualityBg.ImageRUID = self.QualityBgRUID
+		self.QualityBg.Color = Color(0.3555, 0.352, 0.352, 1.0)
+		self.QualityBg.OutlineWidth = 1
+		self.QualityBg.OutlineColor = Color(0.898, 0.847, 0.098, 1.0)
 		-- .model에 저장한 FontColor 기본값이 스폰 시점엔 적용 안 되는 걸 실측(TextComponent Values 한계로
 		-- 추정) — Text/Enable처럼 스크립트에서 직접 세팅
 		self.QualityText.FontColor = Color(1, 1, 1, 1)
@@ -139,6 +153,23 @@ script UIItemSlot extends Component
 		else
 			self.ImageGrade.Enable = false
 		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ApplyScrollSymbol(integer itemId)
+		-- 강화 주문서면 QualityBg(아이콘 우측 하단 배지 자리)를 부위 심볼 스프라이트로 재활용하고,
+		-- 그 외 비장비 아이템이면 그냥 끈다. 심볼이 하얀 벡터라 주문서 색과 겹쳐 묻히지 않도록
+		-- 검은 외곽선을 두껍게 준다
+		if not _EnhanceScrollLogic:IsScrollItem(itemId) then
+			self.QualityBg.Enable = false
+			return
+		end
+
+		self.QualityBg.Enable = true
+		self.QualityBg.ImageRUID = _EnhanceScrollLogic:GetSymbolRUID(itemId)
+		self.QualityBg.Color = Color(1.0, 1.0, 1.0, 1.0)
+		self.QualityBg.OutlineWidth = 2
+		self.QualityBg.OutlineColor = Color(0.0, 0.0, 0.0, 1.0)
 	end
 
 	@ExecSpace("ClientOnly")

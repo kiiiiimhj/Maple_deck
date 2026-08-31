@@ -84,9 +84,16 @@ script GachaUI extends Logic
 
 	property TextComponent titleText = "28d0c5aa-0d27-43c9-8793-2029bb79cda9"
 
-	property TextComponent pull1Text = "a0d524d7-1c98-45fc-aeda-262624d9bf47"
+	-- 뽑기 버튼 라벨은 제목과 비용을 별도 자식 엔티티로 나눠 뒀다 — 비용은 "다이아몬드 아이콘 + x100"
+	-- 형태라 아이콘 스프라이트와 나란히 놓여야 해서 제목과 한 텍스트에 둘 수 없다.
+	-- (버튼 엔티티 자신의 레거시 TextComponent는 빈 문자열로 비워 두 번 그려지지 않게 했다)
+	property TextGUIRendererComponent pull1Text = "76ebd2a4-c2b1-4e3e-af3c-065c3d532492"
 
-	property TextComponent pull10Text = "9200c775-1054-4b14-ae05-a9c3c9a70535"
+	property TextGUIRendererComponent pull10Text = "4722aca5-885b-440e-aeac-1d8fa2bb4150"
+
+	property TextGUIRendererComponent pull1CostText = "0a6c4b01-690d-49c7-a176-63c1b345f3f8"
+
+	property TextGUIRendererComponent pull10CostText = "3ae4c9d4-c978-4ca7-b3cc-53358687b409"
 
 	-- 현재 탭. true면 스킬 뽑기, false면 유물 뽑기(기존 동작). 기본값은 스킬 — 목업 기준
 	property boolean _skillMode = true
@@ -95,6 +102,13 @@ script GachaUI extends Logic
 	property integer Pull1Cost = 100
 
 	property integer Pull10Cost = 1000
+
+	-- 뽑기 버튼 배경색. 활성/비활성을 "색"으로만 구분하고 알파는 항상 1.0로 둔다(유저 지정).
+	-- 기본색은 ui/GachaGroup.ui의 BtnPull1/BtnPull10 SpriteGUIRenderer Color와 같은 값이니 한쪽만
+	-- 바꾸면 활성 상태가 어긋난다 — 둘을 같이 맞출 것
+	property Color PullButtonColor = Color(0.94, 0.78, 0.32, 1.0)
+
+	property Color PullButtonDisabledColor = Color(0.50, 0.42, 0.19, 1.0)
 
 	-- 스킬 뽑기 등급 가중치 — 1=일반 / 2=매직 / 3=레어. 합이 100일 필요는 없다(비율로만 쓴다)
 	property any _gradeWeights = { 70, 25, 5 }
@@ -403,8 +417,11 @@ script GachaUI extends Logic
 		if isvalid(self.titleText) then self.titleText.Text = name .. " 뽑기" end
 		-- 결과창 타이틀("획득한 유물!")도 같은 이름을 따라간다
 		if isvalid(self.resultTitle) then self.resultTitle.TextComponent.Text = "획득한 " .. name .. "!" end
-		if isvalid(self.pull1Text) then self.pull1Text.Text = name .. " 뽑기 X1\n다이아 : " .. tostring(self.Pull1Cost) end
-		if isvalid(self.pull10Text) then self.pull10Text.Text = name .. " 뽑기 X10\n다이아 : " .. tostring(self.Pull10Cost) end
+		if isvalid(self.pull1Text) then self.pull1Text.Text = name .. " 뽑기 X1" end
+		if isvalid(self.pull10Text) then self.pull10Text.Text = name .. " 뽑기 X10" end
+		-- 비용은 아이콘 옆에 "x100"으로만 적는다 (다이아몬드 아이콘이 재화 종류를 대신 알려준다)
+		if isvalid(self.pull1CostText) then self.pull1CostText.Text = "x" .. tostring(self.Pull1Cost) end
+		if isvalid(self.pull10CostText) then self.pull10CostText.Text = "x" .. tostring(self.Pull10Cost) end
 	end
 
 	@ExecSpace("ClientOnly")
@@ -632,13 +649,18 @@ script GachaUI extends Logic
 
 	@ExecSpace("ClientOnly")
 	method void ApplyButtonDim(Entity buttonEntity, boolean active)
-		-- 배경 알파만 낮춰서 "지금은 못 누른다"를 보여준다(버튼 아트 자체는 그대로 둔다)
+		-- "지금은 못 누른다"를 알파가 아니라 색으로만 보여준다(유저 지정: 알파는 빼지 말 것).
+		-- ⚠ ButtonComponent의 Transition이 ColorTint고 DisabledColor도 잡혀 있지만, Enable=false로
+		-- 끄면 엔진이 그 틴트를 적용하지 않는다(실측 확인 — 알파를 1.0으로 되돌리면 활성 버튼과
+		-- 구분이 안 됐다). 그래서 비활성 색은 여기서 직접 갈아끼운다.
 		if not isvalid(buttonEntity) then return end
 		local sprite = buttonEntity.SpriteGUIRendererComponent
 		if not isvalid(sprite) then return end
-		local alpha = 1.0
-		if not active then alpha = 0.5 end
-		sprite.Color = Color(sprite.Color.r, sprite.Color.g, sprite.Color.b, alpha)
+		if active then
+			sprite.Color = self.PullButtonColor
+		else
+			sprite.Color = self.PullButtonDisabledColor
+		end
 	end
 
 	@ExecSpace("ClientOnly")
@@ -887,7 +909,11 @@ script GachaUI extends Logic
 
 	@ExecSpace("ClientOnly")
 	method void SpawnDamageText(Vector2 pos, integer amount, boolean isPlayerHit)
-		-- 피격 지점 위로 데미지 숫자가 떠올랐다 사라진다. 내가 때린 건 노란색, 내가 맞은 건 빨간색
+		-- 피격 지점 위로 데미지 숫자가 떠올랐다 사라진다. 내가 때린 건 금색, 내가 맞은 건 빨간색.
+		-- 메이플스토리 데미지 폰트 룩은 템플릿(DamageTextTemplate)에서 만든다 —
+		-- Maple 폰트 + Bold|Italic(기울기) + 두꺼운 외곽선 + 아래로 깔리는 그림자 + 세로 그라데이션.
+		-- ⚠ MSW 네이티브 데미지 스킨(_DamageSkinService)은 월드 렌더러라 UI 팝업 위로 못 올라온다
+		-- (실측 확인). 그래서 가챠에서는 UI 텍스트로 같은 룩을 재현한다.
 		if not isvalid(self.damageTextTemplate) then return end
 		local label = self.damageTextTemplate:Clone("DamageText_" .. tostring(_UtilLogic.ElapsedSeconds))
 		label.Enable = true
@@ -898,11 +924,18 @@ script GachaUI extends Logic
 		local renderer = label.TextGUIRendererComponent
 		if isvalid(renderer) then
 			renderer.Text = tostring(amount)
-			if isPlayerHit then
-				renderer.FontColor = Color(1.0, 0.94, 0.42, 1.0)
-			else
-				renderer.FontColor = Color(1.0, 0.36, 0.32, 1.0)
+			-- 템플릿에서 ColorGradient + GradientMode=Vertical을 켜뒀으므로 여기서는 네 꼭지점 색만
+			-- 갈아끼운다. ColorGradient가 켜져 있으면 FontColor는 무시되므로 건드리지 않는다
+			local topColor = Color(1.0, 0.98, 0.78, 1.0)
+			local botColor = Color(1.0, 0.55, 0.09, 1.0)
+			if not isPlayerHit then
+				topColor = Color(1.0, 0.86, 0.84, 1.0)
+				botColor = Color(0.88, 0.10, 0.10, 1.0)
 			end
+			renderer.TopLeftColor = topColor
+			renderer.TopRightColor = topColor
+			renderer.BottomLeftColor = botColor
+			renderer.BottomRightColor = botColor
 		end
 		local captured = label
 		_TweenLogic:PlayTween(startPos, endPos, 0.55, EaseType.QuadEaseOut, function(value)

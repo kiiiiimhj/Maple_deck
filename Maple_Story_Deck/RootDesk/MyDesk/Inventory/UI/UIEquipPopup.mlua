@@ -34,6 +34,33 @@ script UIEquipPopup extends Component
 
 	property TextGUIRendererComponent GoldText = "5009a399-2408-45a3-8922-cebb3a880852"
 
+	-- 강화 재료 표시(골드 칸 옆) — 그 장비 부위에 맞는 강화 주문서 아이콘과 "보유 / 필요" 수량.
+	-- 만렙이거나 강화 대상이 아닌 부위면 둘 다 꺼진다
+	property SpriteGUIRendererComponent ScrollIcon = "b84fa1ef-8f2b-428e-a7f8-80eeb024bb36"
+
+	property TextGUIRendererComponent ScrollCostText = "10846e28-e92c-432b-9926-9daf0948fd71"
+
+	-- 강화 실패 사유(주문서/골드 부족 등)를 화면 중앙에 띄웠다가 위로 살짝 떠오르며 사라진다.
+	-- EquipPopup(이 스크립트가 붙은 엔티티)이 1920x1080 전체화면이라 그 직속 자식으로 두고 pos=[0,0]이면
+	-- 정확히 화면 중앙이고, Panel보다 뒤에 추가돼 있어 팝업 위에 그려진다.
+	-- 공용 토스트(_UIToast)를 쓰지 않는 이유: ToastGroup은 별도 UIGroup이라 이 팝업(EquipmentGroup)보다
+	-- 아래에 그려지는데, GroupOrder를 올렸더니 Maker가 전체 UI 그룹 순서를 재정렬해서 다른 .ui 파일들에
+	-- 써버렸다(GachaGroup이 로비 아래로 내려가 뽑기 팝업이 안 보이는 사고). GroupOrder는 다시 건드리지 않는다.
+	property TextGUIRendererComponent LevelUpWarnText = "627e47fd-93f4-44c2-9727-b4c4817eb777"
+
+	property number WarnHoldSeconds = 1.6
+
+	property number WarnFadeInSeconds = 0.12
+
+	property number WarnFadeOutSeconds = 0.45
+
+	-- 사라지면서 위로 떠오르는 거리(px)
+	property number WarnRiseDistance = 22
+
+	property any _warnTimerId = nil
+
+	property Vector2 _warnBasePos = Vector2(0, 0)
+
 	-- 유물 업그레이드와 동일한 골드 코스트 자리 — 실제 레벨업 수치 체계가 정해지기 전까지는 임시값
 	property integer PlaceholderUpgradeCost = 1000
 
@@ -60,23 +87,26 @@ script UIEquipPopup extends Component
 	-- (SkillVariant로 4종 중 1개 선택 — 매직/에픽/유니크처럼 4종이 동일한 등급은 어차피 결과가 같음),
 	-- 지금 등급이 그 행의 등급에 도달했으면(같거나 높으면) 잠금 해제, 아직이면 잠금 아이콘으로 덮는다.
 	-- 노말은 어떤 행의 기준 등급도 만족 못 해서 5행 전부 잠긴 채로 유지된다.
-	property SpriteGUIRendererComponent GradeSkillLock0 = "0f8a6bfd-04b0-4148-ac35-ccfce137cde8"
+	-- 행 왼쪽 배지(Row{i}/LockIcon)는 "그 줄이 해금되는 등급 색"의 네모로 항상 떠 있고, 잠긴 줄만
+	-- 그 위에 자물쇠(Row{i}/LockIcon/Lock — 인게임 맵이동 버튼과 같은 아이콘)를 덮는다. 아래 프로퍼티는
+	-- 그 자물쇠 오버레이를 가리킨다(배지 자체는 등급이 행마다 고정이라 .ui에 색을 박아두고 안 건드린다).
+	property SpriteGUIRendererComponent GradeSkillLock0 = "cea25ed1-ddae-43df-876c-ae90bff735d4"
 
 	property TextGUIRendererComponent GradeSkillText0 = "4a2ebbfc-1de2-464a-aa0b-a02beec7f368"
 
-	property SpriteGUIRendererComponent GradeSkillLock1 = "c0bc8cf1-6ee7-4ed8-854e-679c0d80c05d"
+	property SpriteGUIRendererComponent GradeSkillLock1 = "30370415-6f37-4e3a-a06f-aa06f61f7ebc"
 
 	property TextGUIRendererComponent GradeSkillText1 = "2c8a00bb-663f-4d60-b5b3-67a6a1cfd0b9"
 
-	property SpriteGUIRendererComponent GradeSkillLock2 = "dc552e33-9e4f-4644-9060-f307ce73c267"
+	property SpriteGUIRendererComponent GradeSkillLock2 = "d2225f24-e7c2-4a58-88e5-5ee82d0978c0"
 
 	property TextGUIRendererComponent GradeSkillText2 = "c70db38d-506c-4e42-b80b-e7fed382ff7d"
 
-	property SpriteGUIRendererComponent GradeSkillLock3 = "6462af0d-8557-4beb-8b95-f5be892cb6ee"
+	property SpriteGUIRendererComponent GradeSkillLock3 = "7572c0c5-bc43-4246-9bc3-b2044f953375"
 
 	property TextGUIRendererComponent GradeSkillText3 = "c836d03a-efa9-4e78-a3f2-8bbf22bc69db"
 
-	property SpriteGUIRendererComponent GradeSkillLock4 = "3151da2f-2584-406e-9b4b-c80d8513ae02"
+	property SpriteGUIRendererComponent GradeSkillLock4 = "7800a9af-34cd-477d-b238-880501cd39b3"
 
 	property TextGUIRendererComponent GradeSkillText4 = "6fc8b940-64a8-4590-85a7-29660f2b61e6"
 
@@ -101,8 +131,8 @@ script UIEquipPopup extends Component
 
 		-- 레벨업/일괄 레벨업/합성/등급 상향 — 디자인 확정 전 자리만(유저 지정: "일단 플레이스홀더 수치로 뼈대만").
 		-- 실제 레벨/스탯 성장 데이터 모델이 아직 없어서 클릭하면 준비중 로그만 남긴다.
-		self.ButtonLevelUp.Entity:ConnectEvent(ButtonClickEvent, function() self:OnPlaceholderButtonClicked("레벨업") end)
-		self.ButtonBatchLevelUp.Entity:ConnectEvent(ButtonClickEvent, function() self:OnPlaceholderButtonClicked("일괄 레벨업") end)
+		self.ButtonLevelUp.Entity:ConnectEvent(ButtonClickEvent, function() self:OnLevelUpButtonClicked(false) end)
+		self.ButtonBatchLevelUp.Entity:ConnectEvent(ButtonClickEvent, function() self:OnLevelUpButtonClicked(true) end)
 		self.ComposeButton.Entity:ConnectEvent(ButtonClickEvent, function() self:OnComposeButtonClicked() end)
 		self.GradeUpButton.Entity:ConnectEvent(ButtonClickEvent, function() self:OnPlaceholderButtonClicked("등급 상향") end)
 	end
@@ -152,8 +182,13 @@ script UIEquipPopup extends Component
 				self.StatValueText.Text = "-"
 			end
 
-			local bonusText = _WeaponTierDataLogic:GetActualBonusText(itemStruct.ItemId, gearStruct.Grade, gearStruct.SkillVariant, gearStruct.BonusPercentPerMille, gearStruct.ProcChancePerMille)
-			self.DescText.Text = bonusText
+			-- 설명란은 아이템 플레이버 문구를 보여준다. 예전엔 현재 등급의 효과 텍스트를 넣었는데,
+			-- 바로 아래 등급 스킬 표에 같은 줄이 또 나와서 중복이었다
+			local descText = _WeaponTierDataLogic:GetDescription(itemStruct.ItemId, gearStruct.Grade)
+			if descText == "" then
+				descText = "아이템 설명이 아직 등록되지 않았습니다."
+			end
+			self.DescText.Text = descText
 			self.QualityText.Text = _QualityEnum:GetKoreanName(gearStruct.Quality)
 			self:UpdateGradeSkillBox(itemStruct.ItemId, gearStruct)
 		else
@@ -175,9 +210,7 @@ script UIEquipPopup extends Component
 			self.ComposeCountBadge.Entity.Enable = false
 		end
 
-		self.LevelBadgeText.Text = "Lv. 1 / 10"
-
-		self.GoldText.Text = string.format("%d / %d", _GameManager.Gold, self.PlaceholderUpgradeCost)
+		self:UpdateLevelUpBox(itemStruct, gearStruct)
 
 		local mainKeyword = itemStruct:IsAttached() and "장착 해제" or "장착"
 		self.ButtonEquipLabel.Text = mainKeyword
@@ -212,7 +245,14 @@ script UIEquipPopup extends Component
 
 		for i = 1, 5 do
 			local rowGrade = rowGrades[i]
-			locks[i].Entity.Enable = gearStruct.Grade < rowGrade
+			local isLocked = gearStruct.Grade < rowGrade
+			-- 잠긴 줄: 등급 색 배지 위에 자물쇠를 덮고 글씨는 회색 / 해금된 줄: 자물쇠 제거 + 흰 글씨
+			locks[i].Entity.Enable = isLocked
+			if isLocked then
+				labels[i].FontColor = Color(0.60, 0.60, 0.64, 1.0)
+			else
+				labels[i].FontColor = Color(1.0, 1.0, 1.0, 1.0)
+			end
 
 			-- 레거시 아이템(이 필드 추가 전 드롭)은 표가 비어있을 수 있어 그 자리에서 1회 굴려 보여준다
 			local bonusPercentPerMille = gearStruct.BonusPercentPerMilleByGrade[rowGrade]
@@ -222,6 +262,92 @@ script UIEquipPopup extends Component
 
 			labels[i].Text = _WeaponTierDataLogic:GetActualBonusText(itemId, rowGrade, gearStruct.SkillVariant, bonusPercentPerMille, gearStruct.ProcChancePerMille)
 		end
+	end
+
+	-- 레벨 뱃지 / 강화 재료(부위별 주문서 아이콘 + 보유·필요 수) / 골드 비용을 한 번에 갱신한다.
+	-- 큰 수를 짧게 줄인다(1000→k / 100만→M). 강화 재료 칸의 "보유 / 필요" 골드가 9184688처럼 길어지면
+	-- 칸을 넘어 두 줄로 깨져서 도입했다. 보유량은 어차피 대략만 보면 되는 값이라 축약해도 정보 손실이 없다.
+	-- 정확한 숫자가 필요한 다른 화면(상점 가격 등)에는 일부러 적용하지 않았다.
+	@ExecSpace("ClientOnly")
+	method string FormatCount(integer value)
+		if value >= 1000000 then
+			return self:TrimDecimal(value / 1000000) .. "M"
+		end
+
+		if value >= 1000 then
+			return self:TrimDecimal(value / 1000) .. "k"
+		end
+
+		return tostring(value)
+	end
+
+	-- 소수 첫째자리까지 반올림하되 .0이면 떼고 정수로 보여준다("2.0k"가 아니라 "2k")
+	@ExecSpace("ClientOnly")
+	method string TrimDecimal(number value)
+		local rounded = math.floor(value * 10 + 0.5) / 10
+		if rounded == math.floor(rounded) then
+			return tostring(math.floor(rounded))
+		end
+
+		return string.format("%.1f", rounded)
+	end
+
+	-- 상한은 현재 등급이 정하고(노말5~레전더리50), 등급업해도 레벨은 유지되므로 "Lv. 현재 / 상한"으로 보여준다
+	@ExecSpace("ClientOnly")
+	method void UpdateLevelUpBox(any itemStruct, any gearStruct)
+		if gearStruct == nil then
+			self.LevelBadgeText.Text = "Lv. -"
+			self.GoldText.Text = "-"
+			self.ScrollIcon.Entity.Enable = false
+			self.ScrollCostText.Entity.Enable = false
+			return
+		end
+
+		local maxLevel = _EnhanceScrollLogic:GetMaxLevel(gearStruct.Grade)
+		self.LevelBadgeText.Text = string.format("Lv. %d / %d", gearStruct.Level, maxLevel)
+
+		local isMax = gearStruct.Level >= maxLevel
+		local goldCost = _EnhanceScrollLogic:GetGoldCost(gearStruct.Level)
+		local scrollCost = _EnhanceScrollLogic:GetScrollCost(gearStruct.Level)
+
+		-- 골드는 런 전용 Gold가 아니라 로비에서 쓰는 영구 누적 코인(TotalCoins) 기준으로 보여준다
+		if isMax then
+			self.GoldText.Text = "MAX"
+		else
+			self.GoldText.Text = string.format("%s / %s", self:FormatCount(_GameManager.TotalCoins), self:FormatCount(goldCost))
+		end
+
+		-- 강화에 들어가는 재료를 그 장비 부위에 맞는 주문서 아이콘으로 보여준다
+		local itemData = itemStruct:GetItemData()
+		local gearData = nil
+		if itemData ~= nil then gearData = itemData:GetGearData() end
+
+		local scrollItemId = 0
+		if gearData ~= nil then
+			scrollItemId = _EnhanceScrollLogic:GetScrollItemId(gearData.GearCategory)
+		end
+
+		if scrollItemId == 0 or isMax then
+			self.ScrollIcon.Entity.Enable = false
+			self.ScrollCostText.Entity.Enable = false
+			return
+		end
+
+		local scrollData = _ItemDataLogic:GetData(scrollItemId)
+		if scrollData ~= nil then
+			self.ScrollIcon.ImageRUID = scrollData.RUID
+		end
+		self.ScrollIcon.Entity.Enable = true
+
+		local owned = _UserService.LocalPlayer.PkgPlayerInventory:GetItemCount(scrollItemId, nil)
+		self.ScrollCostText.Text = string.format("%d / %d", owned, scrollCost)
+		-- 부족하면 회색으로 — 뽑기 버튼과 같은 규칙(알파 말고 색으로 부족을 알린다)
+		if owned >= scrollCost then
+			self.ScrollCostText.FontColor = Color(1, 1, 1, 1)
+		else
+			self.ScrollCostText.FontColor = Color(0.85, 0.45, 0.45, 1)
+		end
+		self.ScrollCostText.Entity.Enable = true
 	end
 
 	-- EquipInfoGrid(장비판) 슬롯이 쓰는 부위별 픽토그램 RUID를 그대로 재사용한다. 장비판에 전용 슬롯이
@@ -277,6 +403,108 @@ script UIEquipPopup extends Component
 		log("UIEquipPopup: " .. label .. " 버튼 클릭 — 준비중(디자인 확정 전)")
 	end
 
+	-- 레벨업 / 일괄 레벨업. 실제 재료·골드 검증과 차감은 전부 서버(PkgPlayerInventory.LevelUpGear)가 하고,
+	-- 결과는 InvenItemModifiedEvent로 되돌아와 이 팝업이 자동으로 다시 그려진다
+	@ExecSpace("ClientOnly")
+	method void OnLevelUpButtonClicked(boolean isBatch)
+		if self.Entity.Enable == false or self.ItemStruct == nil then
+			return
+		end
+
+		---@type ItemStruct
+		local itemStruct = self.ItemStruct
+		_UserService.LocalPlayer.PkgPlayerInventory:RequestLevelUpGear(itemStruct.GUID, isBatch)
+	end
+
+	-- 서버가 강화 실패 사유를 보내오면(PkgPlayerInventory.ShowLevelUpFailToClient) 재료 칸 위에 띄운다.
+	-- 재호출되면 진행 중이던 연출을 끊고 처음부터 다시 시작한다(연타 시 마지막 메시지가 온전히 보이게)
+	@ExecSpace("ClientOnly")
+	method void ShowLevelUpWarning(string message)
+		if not isvalid(self.LevelUpWarnText) then
+			return
+		end
+
+		local warn = self.LevelUpWarnText
+		local transform = warn.Entity.UITransformComponent
+
+		if self._warnTimerId ~= nil then
+			_TimerService:ClearTimer(self._warnTimerId)
+			self._warnTimerId = nil
+		else
+			-- 연출이 돌고 있지 않을 때의 위치가 원래 자리다. 떠오른 중간 위치를 기준으로 잡으면
+			-- 반복될수록 문구가 위로 계속 밀려 올라간다
+			self._warnBasePos = transform.anchoredPosition
+		end
+
+		warn.Text = message
+		warn.Entity.Enable = true
+		transform.anchoredPosition = self._warnBasePos
+		self:SetWarnAlpha(0)
+
+		local basePos = self._warnBasePos
+		local fadeIn = self.WarnFadeInSeconds
+		local hold = self.WarnHoldSeconds
+		local fadeOut = self.WarnFadeOutSeconds
+		local rise = self.WarnRiseDistance
+		local time = 0
+		local preTime = _UtilLogic.ElapsedSeconds
+
+		local tween = function()
+			local delta = _UtilLogic.ElapsedSeconds - preTime
+			time = time + delta
+			preTime = _UtilLogic.ElapsedSeconds
+
+			if time >= fadeIn + hold + fadeOut then
+				self:SetWarnAlpha(0)
+				transform.anchoredPosition = basePos
+				warn.Entity.Enable = false
+				_TimerService:ClearTimer(self._warnTimerId)
+				self._warnTimerId = nil
+				return
+			end
+
+			if time < fadeIn then
+				self:SetWarnAlpha(time / fadeIn)
+			elseif time < fadeIn + hold then
+				self:SetWarnAlpha(1)
+			else
+				-- 사라지는 구간에서만 위로 떠오른다
+				local t = (time - fadeIn - hold) / fadeOut
+				self:SetWarnAlpha(1 - t)
+				transform.anchoredPosition = Vector2(basePos.x, basePos.y + rise * t)
+			end
+		end
+
+		self._warnTimerId = _TimerService:SetTimerRepeat(tween, 1/60)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void StopLevelUpWarning()
+		-- 연출 중단 + 원위치 복구. 타이머가 안 돌고 있으면 아무것도 하지 않는다
+		if self._warnTimerId == nil then
+			return
+		end
+
+		_TimerService:ClearTimer(self._warnTimerId)
+		self._warnTimerId = nil
+
+		if isvalid(self.LevelUpWarnText) then
+			self.LevelUpWarnText.Entity.UITransformComponent.anchoredPosition = self._warnBasePos
+			self.LevelUpWarnText.Entity.Enable = false
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetWarnAlpha(number alpha)
+		-- TextGUIRendererComponent에는 그룹 알파가 없어서 FontColor의 a를 직접 건드린다
+		if not isvalid(self.LevelUpWarnText) then
+			return
+		end
+
+		local c = self.LevelUpWarnText.FontColor
+		self.LevelUpWarnText.FontColor = Color(c.r, c.g, c.b, math.min(1, math.max(0, alpha)))
+	end
+
 	@ExecSpace("ClientOnly")
 	method void OnDeleteButtonClicked()
 		if self.Entity.Enable == false or self.ItemStruct == nil then
@@ -304,6 +532,10 @@ script UIEquipPopup extends Component
 	@ExecSpace("ClientOnly")
 	method void Close()
 		self.ItemStruct = nil
+
+		-- 경고 문구 연출이 돌던 중이면 정리한다 — 안 그러면 팝업이 닫힌 뒤에도 타이머가 계속 돌고,
+		-- 다음에 열었을 때 알파/위치가 중간값인 채로 남는다
+		self:StopLevelUpWarning()
 
 		self.Entity.Enable = false
 

@@ -62,7 +62,7 @@ script GameManager extends Logic
 
 	property boolean _diamondDirty = false
 
-	property string DiamondIconRUID = "72c0e904c4f046d9b0bc2dd48ac109ea"
+	property string DiamondIconRUID = "81462aeb825b4660991cef05651271cf"
 
 	-- 웨이브
 	@Sync
@@ -277,6 +277,11 @@ script GameManager extends Logic
 	-- 시스템에 직접 지급하고, 잡템과 동일한 팝-바운스 연출 뒤 평소엔 숨겨진 "로비 인벤토리 아이콘"
 	-- (ui/DefaultGroup.ui WeaponDropLobbyIcon, BtnInventory 바로 아래)으로 날아가 잠깐 알림처럼 켜졌다 꺼진다
 	property number WeaponDropChance = 0.0005
+
+	-- 장비 레벨 강화 주문서 드롭 확률 — 부위(무기/갑옷/모자/장갑/망토)마다 각각 독립 판정한다.
+	-- 유저 지정 0.2%: 한 런(20분 ≈ 6,000킬) 기준 부위당 약 12장, 장비 하나 만렙(847장)에
+	-- 하루 1~2런이면 대략 1~2개월이 걸리도록 잡은 값이다
+	property number EnhanceScrollDropChance = 0.002
 
 	property SpriteGUIRendererComponent weaponFlyIcon = "85419574-ad70-40f3-9f78-392334e80509"
 
@@ -4084,6 +4089,57 @@ script GameManager extends Logic
 		self:GrantWeaponItemDrop(worldPos, fallHeight, groundWorldY, dropScale)
 	end
 
+	@ExecSpace("ServerOnly")
+	method void TryDropEnhanceScroll(Vector3 worldPos, number fallHeight, number groundWorldY, number dropScale)
+		-- 장비 레벨 강화 재료(부위별 강화 주문서). 유저 지정: 부위마다 독립 판정이라 5종을 각각 굴린다
+		-- (한 킬에 두 종류가 같이 뜰 수도 있다). 잡템과 달리 가방이 아니라 로비 인벤토리로 들어간다.
+		if self.GameOver then return end
+
+		local scrollIds = {
+			_EnhanceScrollLogic.ScrollWeaponItemId,
+			_EnhanceScrollLogic.ScrollCoatItemId,
+			_EnhanceScrollLogic.ScrollCapItemId,
+			_EnhanceScrollLogic.ScrollGloveItemId,
+			_EnhanceScrollLogic.ScrollCapeItemId,
+		}
+		for _, scrollId in ipairs(scrollIds) do
+			if _UtilLogic:RandomDouble() < self.EnhanceScrollDropChance then
+				self:GrantEnhanceScrollDrop(worldPos, fallHeight, groundWorldY, dropScale, scrollId)
+			end
+		end
+	end
+
+	-- TryDropEnhanceScroll의 확률 체크를 뗀 확정 지급형 — 요일 던전 보상처럼 확률 없이 줄 때 쓴다
+	@ExecSpace("ServerOnly")
+	method void GrantEnhanceScrollDrop(Vector3 worldPos, number fallHeight, number groundWorldY, number dropScale, integer scrollItemId)
+		if self.GameOver then return end
+
+		-- 장비 드롭과 동일한 이유로 접속 유저 목록에서 직접 가져온다(고정 아레나에서 CurrentMapIndex가
+		-- 어긋나 GetUsersByMapName이 0명을 반환하는 문제 회피 — GrantWeaponItemDrop 주석 참고)
+		local userId = nil
+		for _, u in pairs(_UserService.UserEntities) do
+			userId = u.PlayerComponent.UserId
+			break
+		end
+		if userId == nil then return end
+
+		local createParam = ItemCreateParamStruct()
+		createParam.ItemId = scrollItemId
+		createParam.ItemCount = 1
+
+		local resultStruct = ItemCreateResultStruct()
+		local errorCode = _ItemFactoryLogic:TryAddItem(userId, createParam, resultStruct)
+		if errorCode ~= _ErrorCodeEnum.Success then
+			log_error("GrantEnhanceScrollDrop: TryAddItem failed. Error : " .. tostring(errorCode))
+			return
+		end
+
+		local itemData = _ItemDataLogic:GetData(scrollItemId)
+		local iconRUID = ""
+		if itemData ~= nil then iconRUID = itemData.RUID end
+		self:PlayLobbyDropVisual(Vector2(worldPos.x, worldPos.y), fallHeight, groundWorldY, dropScale, iconRUID)
+	end
+
 	-- TryDropWeaponItem의 확률 체크(WeaponDropChance) 이후 부분만 떼어낸 무조건 지급형 — 스틸(Card176)이
 	-- "아이템이 뜨는지"(50%)를 먼저 판정한 뒤, 그중 장비/잡템 비율을 WeaponDropChance로 다시 나눠 쓸 때 호출한다.
 	@ExecSpace("ServerOnly")
@@ -4104,8 +4160,10 @@ script GameManager extends Logic
 		local quality = _QualityEnum:RollDropQuality()
 		
 		-- 2026-08-17: 장비 라인이 스태프 하나에서 9종(스태프/활/양손검/자마다르/슈트A/슈트B/투구/장갑/망토)으로
-		-- 늘어났다 — 전부 공용 아이템이라 캐릭터 무관 균등 랜덤으로 어느 라인이 떨어질지 먼저 고른다
-		local gearItemIds = _WeaponTierDataLogic.GearItemIds
+		-- 늘어났다 — 전부 공용 아이템이라 캐릭터 무관 균등 랜덤으로 어느 라인이 떨어질지 먼저 고른다.
+		-- 2026-08-31: 유저 지정으로 맵(에피소드)별 드롭 부위를 갈랐다 — 태초의 마을=무기 / 구름정원=갑옷·모자 /
+		-- 엘라스 산맥=장갑·망토. 월드 선택 팝업의 맵 사진에 붙은 부위 아이콘 배지와 같은 분배다
+		local gearItemIds = _WeaponTierDataLogic:GetGearItemIdsByEpisode(self.SelectedEpisode)
 		local itemId = gearItemIds[_UtilLogic:RandomIntegerRange(1, #gearItemIds)]
 		
 		local skillVariant = _WeaponTierDataLogic:RollSkillVariant()
@@ -4142,21 +4200,24 @@ script GameManager extends Logic
 			return
 		end
 		
-		self:PlayWeaponDropVisual(Vector2(worldPos.x, worldPos.y), fallHeight, groundWorldY, dropScale, grade, itemId)
+		self:PlayLobbyDropVisual(Vector2(worldPos.x, worldPos.y), fallHeight, groundWorldY, dropScale, _WeaponTierDataLogic:GetDisplayRUID(itemId, grade))
 	end
 
 	@ExecSpace("Multicast")
-	method void PlayWeaponDropVisual(Vector2 worldPos, number fallHeight, number groundWorldY, number dropScale, integer grade, integer itemId)
-		-- 잡템과 동일한 팝-바운스 연출(짧은 홉 3단) 뒤, 평소엔 숨겨진 로비 인벤토리 아이콘으로 날아간다.
-		-- 무기 드롭은 극히 드물어서(0.05%) 잡템처럼 슬롯 풀을 둘 필요 없이 단일 슬롯 가드로 충분하다
+	method void PlayLobbyDropVisual(Vector2 worldPos, number fallHeight, number groundWorldY, number dropScale, string iconRUID)
+		-- 로비 인벤토리로 들어가는 드롭(장비 / 강화 주문서) 공용 연출. 잡템과 동일한 팝-바운스(짧은 홉
+		-- 3단) 뒤, 평소엔 숨겨진 로비 인벤토리 아이콘으로 날아간다.
+		-- 표시할 아이콘 RUID는 호출측(서버)에서 정해 넘긴다 — 장비는 등급별 외형, 주문서는 부위별 색.
+		-- 드롭 빈도가 낮아(장비 0.05% / 주문서 부위당 0.2%) 잡템처럼 슬롯 풀을 둘 필요 없이 단일 슬롯
+		-- 가드로 충분하다(연출이 겹치는 동안 들어온 건 연출만 생략되고 지급은 이미 서버에서 끝나 있다)
 		if self:IsServer() then return end
 		if self._weaponFlyActive then return end
 		self._weaponFlyActive = true
-		
+
 		local icon = self.weaponFlyIcon
 		local rawUI = _UILogic:ScreenToUIPosition(_UILogic:WorldToScreenPosition(worldPos))
 		local startUI = Vector2(rawUI.x, rawUI.y + self.DropYOffset)
-		icon.ImageRUID = _WeaponTierDataLogic:GetDisplayRUID(itemId, grade)
+		icon.ImageRUID = iconRUID
 		icon.Color = Color(1, 1, 1, 1)
 		icon.Entity:SetEnable(true)
 		local tc = icon.Entity.UITransformComponent

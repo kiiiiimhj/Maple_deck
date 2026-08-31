@@ -829,6 +829,197 @@ script PkgPlayerInventory extends Component
 		self:ComposeItem(baseGUID, materialGUIDs, true)
 	end
 
+	@ExecSpace("Server")
+	method void RequestLevelUpGear(string gearGUID, boolean isBatch)
+		self:LevelUpGear(gearGUID, isBatch)
+	end
+
+	-- 장비 레벨 강화(부위별 강화 주문서 + 골드). isBatch면 재료/골드/상한이 허용하는 만큼 연속으로 올린다.
+	--  · 상한은 현재 등급이 정한다(EnhanceScrollLogic.GetMaxLevel) — 등급업해도 레벨은 유지되므로
+	--    합성으로 상한만 열리고 이어서 올릴 수 있다(유저 지정)
+	--  · 골드는 런 전용 Gold가 아니라 영구 누적 TotalCoins에서 뺀다(GameManager.SpendCoins)
+	@ExecSpace("ServerOnly")
+	method integer LevelUpGear(string gearGUID, boolean isBatch)
+		local userId = self.Entity.PlayerComponent.UserId
+
+		---@type ItemStruct
+		local itemStruct = self.Items[gearGUID]
+		if itemStruct == nil then
+			self:SendErrorCodeToClient(_ErrorCodeEnum.Item_CannotFind, '', userId)
+			return _ErrorCodeEnum.Item_CannotFind
+		end
+
+		---@type ItemGearStruct
+		local gearStruct = itemStruct:GetGearStruct()
+		if gearStruct == nil then
+			self:SendErrorCodeToClient(_ErrorCodeEnum.Item_InvalidGearStruct, '', userId)
+			return _ErrorCodeEnum.Item_InvalidGearStruct
+		end
+
+		local itemData = itemStruct:GetItemData()
+		if itemData == nil then
+			self:SendErrorCodeToClient(_ErrorCodeEnum.Item_InvalidData, '', userId)
+			return _ErrorCodeEnum.Item_InvalidData
+		end
+
+		local gearData = itemData:GetGearData()
+		if gearData == nil then
+			self:SendErrorCodeToClient(_ErrorCodeEnum.Item_InvalidData, '', userId)
+			return _ErrorCodeEnum.Item_InvalidData
+		end
+
+		local scrollItemId = _EnhanceScrollLogic:GetScrollItemId(gearData.GearCategory)
+		if scrollItemId == 0 then
+			-- 강화 대상이 아닌 부위(신발/악세 등)
+			self:SendErrorCodeToClient(_ErrorCodeEnum.Item_InvalidCategory, '', userId)
+			return _ErrorCodeEnum.Item_InvalidCategory
+		end
+
+		local maxLevel = _EnhanceScrollLogic:GetMaxLevel(gearStruct.Grade)
+		local leveledCount = 0
+		local lastError = _ErrorCodeEnum.Success
+
+		repeat
+			local curLevel = gearStruct.Level
+			if curLevel >= maxLevel then
+				lastError = _ErrorCodeEnum.Item_LevelUpMaxLevel
+				break
+			end
+
+			local scrollCost = _EnhanceScrollLogic:GetScrollCost(curLevel)
+			local goldCost = _EnhanceScrollLogic:GetGoldCost(curLevel)
+			if scrollCost <= 0 then
+				lastError = _ErrorCodeEnum.Item_LevelUpMaxLevel
+				break
+			end
+
+			if self:GetItemCount(scrollItemId, nil) < scrollCost then
+				lastError = _ErrorCodeEnum.Item_LackCount
+				break
+			end
+
+			if _GameManager.TotalCoins < goldCost then
+				lastError = _ErrorCodeEnum.Item_LevelUpLackGold
+				break
+			end
+
+			if not self:ConsumeScrolls(userId, scrollItemId, scrollCost) then
+				lastError = _ErrorCodeEnum.ItemDelete_Exception
+				break
+			end
+
+			-- 바로 위에서 잔액을 확인했고 서버는 단일 스레드라 실패할 수 없는 경로다. 그래도 만약
+			-- 실패하면 이미 주문서를 소모한 뒤이므로, 재료만 날리지 않도록 레벨은 그대로 올려준다
+			if not _GameManager:SpendCoins(goldCost) then
+				log_error("LevelUpGear: SpendCoins failed after validation. gold=" .. tostring(goldCost))
+			end
+
+			gearStruct.Level = curLevel + 1
+			leveledCount = leveledCount + 1
+		until not isBatch
+
+		if leveledCount == 0 then
+			-- 한 레벨도 못 올렸을 때만 알린다(일괄 강화는 올릴 수 있는 만큼 올리고 멈추는 게 정상이라
+			-- leveledCount > 0이면 실패로 취급하지 않는다). SendErrorCodeToClient는 로컬라이즈 키가
+			-- 없어 "Item_LackCount" 같은 원문 enum 이름이 그대로 뜨므로 한글 문구로 대체한다
+			self:ShowLevelUpFailToClient(self:GetLevelUpFailMessage(lastError), userId)
+			return lastError
+		end
+
+		self.IsSaveDB = true
+		self:SyncGearLevelToClient(gearGUID, gearStruct.Level, userId)
+
+		return _ErrorCodeEnum.Success
+	end
+
+	-- 강화 실패 문구를 장비 정보 팝업 안(재료 칸 위)에 띄운다. 공용 토스트(_UIToast)를 쓰지 않는 이유는
+	-- UIEquipPopup.LevelUpWarnText 주석 참고 — ToastGroup이 이 팝업보다 아래 그룹이고, GroupOrder를
+	-- 올리면 Maker가 전체 UI 그룹 순서를 재정렬해버린다.
+	-- UIEquipPopup은 UI 엔티티에 붙은 @Component라 서버에서 직접 RPC를 받을 수 없어서(UI는 client-only),
+	-- 플레이어 엔티티에 붙은 이 컴포넌트가 클라에서 대신 받아 팝업을 찾아 호출한다
+	@ExecSpace("Client")
+	method void ShowLevelUpFailToClient(string message)
+		local popup = _EntityService:GetEntityByPath("/ui/EquipmentGroup/Inventory/EquipPopup")
+		if not isvalid(popup) then
+			return
+		end
+
+		local ui = popup.UIEquipPopup
+		if not isvalid(ui) then
+			return
+		end
+
+		ui:ShowLevelUpWarning(message)
+	end
+
+	-- 레벨 강화 실패 사유를 유저에게 보여줄 한글 문장으로 바꾼다. 서버에서 호출되므로
+	-- _LocalizationService(ClientOnly)는 쓸 수 없어 문자열을 직접 들고 있는다
+	method string GetLevelUpFailMessage(integer errorCode)
+		if errorCode == _ErrorCodeEnum.Item_LackCount then
+			return "강화 주문서가 부족합니다!"
+		end
+
+		if errorCode == _ErrorCodeEnum.Item_LevelUpLackGold then
+			return "골드가 부족합니다!"
+		end
+
+		if errorCode == _ErrorCodeEnum.Item_LevelUpMaxLevel then
+			return "이미 최대 레벨입니다"
+		end
+
+		if errorCode == _ErrorCodeEnum.Item_InvalidCategory then
+			return "강화할 수 없는 장비입니다"
+		end
+
+		return "강화에 실패했습니다"
+	end
+
+	-- 주문서 N장 소모. 스택이 여러 슬롯에 나뉘어 있을 수 있어 슬롯 단위로 순차 삭제한다 —
+	-- TryDeleteMultipleItems는 같은 ItemId가 목록에 두 번 이상 나오면 InvalidParam으로 거부하고,
+	-- resultStruct를 재사용하면 두 번째 삭제의 제거 이벤트가 클라에 안 가기 때문에 매번 새로 만든다
+	-- (ComposeItem의 재료 삭제와 동일한 이유 — 그쪽 주석 참고)
+	@ExecSpace("ServerOnly")
+	method boolean ConsumeScrolls(string userId, integer scrollItemId, integer count)
+		local deleteParamList = self:GetDeleteParamListByItemId(scrollItemId, count, nil)
+		if deleteParamList == nil then
+			return false
+		end
+
+		for _, deleteParam in ipairs(deleteParamList) do
+			local resultStruct = ItemDeleteResultStruct()
+			local errorCode = _ItemFactoryLogic:TryDeleteItem(userId, deleteParam, resultStruct)
+			if errorCode ~= _ErrorCodeEnum.Success then
+				log_error("ConsumeScrolls: TryDeleteItem failed. Error : " .. tostring(errorCode))
+				return false
+			end
+		end
+
+		return true
+	end
+
+	@ExecSpace("Client")
+	method void SyncGearLevelToClient(string gearGUID, integer newLevel)
+		-- 서버가 올린 레벨을 클라 사본에 반영하고, 열려 있는 장비 정보 팝업을 그 값으로 다시 그린다
+		---@type ItemStruct
+		local itemStruct = self.Items[gearGUID]
+		if itemStruct == nil then
+			return
+		end
+
+		---@type ItemGearStruct
+		local gearStruct = itemStruct:GetGearStruct()
+		if gearStruct == nil then
+			return
+		end
+
+		gearStruct.Level = newLevel
+
+		-- 합성 결과 동기화와 동일한 통지 경로 — 인벤토리/팝업이 이 이벤트를 받아 그 GUID를 다시 그린다
+		local evt = InvenItemModifiedEvent()
+		evt.GUIDs = {gearGUID}
+		self.Entity:SendEvent(evt)
+	end
+
 	@ExecSpace("ServerOnly")
 	method integer ComposeItem(string baseGUID, table materialGUIDs, boolean isSendErrorCode)
 		local userId = self.Entity.PlayerComponent.UserId

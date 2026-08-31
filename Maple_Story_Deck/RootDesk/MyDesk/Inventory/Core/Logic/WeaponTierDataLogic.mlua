@@ -33,8 +33,14 @@ script WeaponTierDataLogic extends Logic
 
 	property integer CapeItemId = 50002
 
-	-- 이 로직이 관리하는 전체 ItemId 집합(멤버십 체크 + GameManager 드롭 랜덤픽에 사용)
+	-- 이 로직이 관리하는 전체 ItemId 집합(멤버십 체크에 사용)
 	property table GearItemIds = {}
+
+	-- 에피소드(= 월드 선택 팝업의 _worldIndex) -> 그 맵에서만 드롭되는 장비 ItemId 목록.
+	-- 유저 지정: 태초의 마을=무기만 / 구름정원=갑옷·모자만 / 엘라스 산맥=나머지 2개(장갑·망토).
+	-- 월드 선택 팝업의 맵 사진 우측 하단 부위 아이콘 배지가 이 분배와 같은 내용을 보여준다
+	-- (WorldCharacterSelectUI._worlds.partIcons) — 한쪽만 고치면 표시와 실제가 어긋나므로 같이 고칠 것.
+	property table GearItemIdsByEpisode = {}
 
 	-- itemId -> "Atk" | "Hp" | nil(스탯 없음, 등급 스킬 텍스트만 있는 아이템)
 	property table StatFieldTable = {}
@@ -51,10 +57,24 @@ script WeaponTierDataLogic extends Logic
 	-- 신규 8개 라인 데이터
 	property table NewItemTierDataTable = {}
 
+	-- itemId -> grade -> 아이템 플레이버 설명(장비 정보 팝업 상단 설명란에 그대로 출력).
+	-- 등급마다 이름이 달라지는(= 사실상 다른 아이템인) 구조라 등급별로 각각 쓴다.
+	-- 유저 지정: 품질(F~SS) 관련 내용은 넣지 않는다 — 순수 아이템 설정 문구만.
+	property table DescTable = {}
+
 	method void Init()
 		local gearItemIds = { self.WeaponItemId, self.BowItemId, self.TwoHandSwordItemId, self.JamadarItemId,
 			self.SuitAItemId, self.SuitBItemId, self.HelmItemId, self.GloveItemId, self.CapeItemId }
 		self.GearItemIds = gearItemIds
+
+		local byEpisode = {}
+		self.GearItemIdsByEpisode = byEpisode
+		-- 태초의 마을: 무기 4종(스태프/활/양손검/자마다르)
+		byEpisode[1] = { self.WeaponItemId, self.BowItemId, self.TwoHandSwordItemId, self.JamadarItemId }
+		-- 구름정원: 갑옷 2종(슈트A/슈트B) + 모자
+		byEpisode[2] = { self.SuitAItemId, self.SuitBItemId, self.HelmItemId }
+		-- 엘라스 산맥: 장갑 + 망토
+		byEpisode[3] = { self.GloveItemId, self.CapeItemId }
 
 		local statFieldTable = {}
 		self.StatFieldTable = statFieldTable
@@ -81,6 +101,124 @@ script WeaponTierDataLogic extends Logic
 
 		self:InitLegacyTierData()
 		self:InitNewItemTierData()
+		self:InitDescriptions()
+	end
+
+	-- 9개 라인 × 6등급 = 54개 아이템의 설명 문구. 이름이 등급마다 바뀌므로 등급별로 따로 쓴다.
+	method void InitDescriptions()
+		local d = {}
+		self.DescTable = d
+
+		-- 스태프(레거시)
+		d[self.WeaponItemId] = {
+			[_GearGradeEnum.None] = "나뭇가지보단 조금 더 쓸 만하다.",
+			[_GearGradeEnum.Magic] = "이제 마법사다운 무기를 들었다.",
+			[_GearGradeEnum.Rare] = "보기만 해도 왠지 강해 보인다.",
+			[_GearGradeEnum.Epic] = "마법사라면 한 번쯤 탐내는 스태프.",
+			[_GearGradeEnum.Unique] = "드래곤의 힘이 깃들었다고 한다. 진짜인지는 모른다.",
+			[_GearGradeEnum.Legendary] = "이 정도면 스태프가 마법을 쓰는 것 같다.",
+		}
+
+		-- 활
+		d[self.BowItemId] = {
+			[_GearGradeEnum.None] = "활은 역시 멀리서 쏘는 게 제맛이다.",
+			[_GearGradeEnum.Magic] = "독사는 아니지만 꽤 날카롭다.",
+			[_GearGradeEnum.Rare] = "봉황도 탐낼 만큼 멋진 활.",
+			[_GearGradeEnum.Epic] = "금빛이라 화살보다 눈에 띈다.",
+			[_GearGradeEnum.Unique] = "당기는 순간 제법 긴장된다.",
+			[_GearGradeEnum.Legendary] = "비싸 보인다. 실제로도 비싸다.",
+		}
+
+		-- 양손검
+		d[self.TwoHandSwordItemId] = {
+			[_GearGradeEnum.None] = "무겁다. 하지만 멋있다.",
+			[_GearGradeEnum.Magic] = "한 번 휘두르면 팔이 먼저 놀란다.",
+			[_GearGradeEnum.Rare] = "묵직함 하나는 확실하다.",
+			[_GearGradeEnum.Epic] = "전사가 들면 제법 그럴듯하다.",
+			[_GearGradeEnum.Unique] = "푸른 검신이 시선을 사로잡는다.",
+			[_GearGradeEnum.Legendary] = "베지 못할 것은 없어 보인다.",
+		}
+
+		-- 자마다르(단검)
+		d[self.JamadarItemId] = {
+			[_GearGradeEnum.None] = "날이 세 개라서 더 무섭다.",
+			[_GearGradeEnum.Magic] = "부채처럼 보이지만 절대 부채가 아니다.",
+			[_GearGradeEnum.Rare] = "작고 가볍지만 무시하면 큰일 난다.",
+			[_GearGradeEnum.Epic] = "이름은 주먹인데 어째서 단검일까?",
+			[_GearGradeEnum.Unique] = "조용히 들고 다니기 좋은 단검.",
+			[_GearGradeEnum.Legendary] = "피를 좋아할 것처럼 생겼다.",
+		}
+
+		-- 슈트A(드라카즈 제복 계열)
+		-- ⚠ 유니크/에픽은 유저가 준 목록의 이름("프로스티 슈트"/"여제의 훌륭한 로브")과 실제 등록명
+		-- ("템페스트 후드로브"/"여제의 쓸만한 로브")이 다르다. 등급 순서 기준으로 그대로 배치했다.
+		d[self.SuitAItemId] = {
+			[_GearGradeEnum.None] = "제복을 입으면 왠지 강해진 기분이 든다.",
+			[_GearGradeEnum.Magic] = "어둠 속에서도 존재감이 확실하다.",
+			[_GearGradeEnum.Rare] = "수련기사의 첫걸음을 함께하는 로브.",
+			[_GearGradeEnum.Epic] = "이름부터 이미 훌륭하다.",
+			[_GearGradeEnum.Unique] = "보기만 해도 조금 추워진다.",
+			[_GearGradeEnum.Legendary] = "이름부터 최종병기 느낌이다.",
+		}
+
+		-- 슈트B(기사단 제복 계열)
+		-- ⚠ 갑옷 라인은 슈트A/슈트B 두 줄인데 유저가 준 목록에는 슈트A 6개만 있었다.
+		-- 이 6개는 유저 문구 톤(짧은 한 줄 + 가벼운 유머)에 맞춰 임시로 채운 것 — 확인 후 교체 필요.
+		d[self.SuitBItemId] = {
+			[_GearGradeEnum.None] = "기사단에 들어가면 제일 먼저 받는 옷.",
+			[_GearGradeEnum.Magic] = "특별한 날에만 입는 옷 같다.",
+			[_GearGradeEnum.Rare] = "푸른 보석이 은근히 고급스럽다.",
+			[_GearGradeEnum.Epic] = "베릴보다 비싸 보인다. 실제로도 그렇다.",
+			[_GearGradeEnum.Unique] = "입는 순간 격이 달라 보인다.",
+			[_GearGradeEnum.Legendary] = "검은색은 언제나 강해 보인다.",
+		}
+
+		-- 투구
+		-- ⚠ 유니크는 유저 목록의 이름("스텔라 깃털모자")과 실제 등록명("템페스트 깃털모자")이 다르다.
+		d[self.HelmItemId] = {
+			[_GearGradeEnum.None] = "급하게 만든 것치고는 제법 쓸 만하다.",
+			[_GearGradeEnum.Magic] = "뼈를 뒤집어썼다. 꽤 무섭다.",
+			[_GearGradeEnum.Rare] = "자쿰의 힘을 머리에 얹었다.",
+			[_GearGradeEnum.Epic] = "해적의 멋을 조금 빌려왔다.",
+			[_GearGradeEnum.Unique] = "별빛과 깃털이 제법 잘 어울린다.",
+			[_GearGradeEnum.Legendary] = "머리 위에 벨룸을 얹은 기분이다.",
+		}
+
+		-- 장갑
+		-- ⚠ 레어는 유저 목록의 이름("레더 글로브")과 실제 등록명("하드레더 글로브")이 다르다.
+		d[self.GloveItemId] = {
+			[_GearGradeEnum.None] = "일단 끼면 뭐든 할 수 있을 것 같다.",
+			[_GearGradeEnum.Magic] = "손끝까지 날렵해지는 느낌이다.",
+			[_GearGradeEnum.Rare] = "평범하지만 기본은 확실하다.",
+			[_GearGradeEnum.Epic] = "함장이라면 이 정도는 껴줘야 한다.",
+			[_GearGradeEnum.Unique] = "무공이 사용했다는 전설의 장갑.",
+			[_GearGradeEnum.Legendary] = "이름은 귀엽지만 장갑은 강력하다.",
+		}
+
+		-- 망토
+		d[self.CapeItemId] = {
+			[_GearGradeEnum.None] = "낡았지만 없는 것보단 낫다.",
+			[_GearGradeEnum.Magic] = "보기만 해도 마음이 조금 편안해진다.",
+			[_GearGradeEnum.Rare] = "하늘을 날 수 있을 것 같지만 못 난다.",
+			[_GearGradeEnum.Epic] = "검은색이라 어디에나 잘 어울린다.",
+			[_GearGradeEnum.Unique] = "붉은 날개를 두른 듯한 망토.",
+			[_GearGradeEnum.Legendary] = "푸른색이라 제법 시원해 보인다.",
+		}
+	end
+
+	-- 팝업 설명란용. 등록되지 않은 조합이면 빈 문자열을 돌려준다(호출부에서 대체 문구 처리)
+	method string GetDescription(integer itemId, integer gradeEnum)
+		local byItem = self.DescTable[itemId]
+		if byItem == nil then
+			return ""
+		end
+
+		local text = byItem[gradeEnum]
+		if text == nil then
+			return ""
+		end
+
+		return text
 	end
 
 	method void InitLegacyTierData()
@@ -315,6 +453,17 @@ script WeaponTierDataLogic extends Logic
 
 	method boolean IsLegacyWeapon(integer itemId)
 		return itemId == self.WeaponItemId
+	end
+
+	-- 그 에피소드에서 드롭될 수 있는 장비 ItemId 목록. 알 수 없는 에피소드 값이면 전체 풀로 폴백한다
+	-- (분배 표에 없는 신규 에피소드가 생겨도 드롭이 통째로 막히지 않게)
+	method table GetGearItemIdsByEpisode(integer episode)
+		local ids = self.GearItemIdsByEpisode[episode]
+		if ids == nil then
+			return self.GearItemIds
+		end
+
+		return ids
 	end
 
 	-- "Atk" | "Hp" | nil
