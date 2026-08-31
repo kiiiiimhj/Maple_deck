@@ -330,6 +330,11 @@ script MonsterSpawner extends Logic
 		-- 즉시) 바로 몬스터가 태어났으므로, 큐 처리도 같은 타이밍을 최대한 그대로 유지한다.
 		self:ProcessSpawnQueueTick()
 		if self.BonusBossTimerActive then
+			-- 유저 정정(2026-09-01) — 존을 벗어나도 보스/타이머 자체는 그대로 살아있어야 한다(실수로
+			-- 잠깐 나갔다 들어올 수 있으니까). "나가있는 시간도 포함해서" 카운트다운은 존과 무관하게
+			-- 계속 흐르고, 존을 벗어나면 보드 UI만 숨겨졌다가 다시 들어오면 그 시점 남은 시간 그대로
+			-- 다시 보이면 된다 — 실제 서버 상태(이 카운트다운)는 절대 건드리지 않는다. 존 여부에 따른
+			-- 보드 표시/숨김 자체는 클라이언트 쪽 UpdateBonusBossBoardVisibility가 전담한다.
 			self._bonusBossRemaining = self._bonusBossRemaining - delta
 			if self._bonusBossRemaining < 0 then self._bonusBossRemaining = 0 end
 			local secs = math.ceil(self._bonusBossRemaining)
@@ -1535,15 +1540,24 @@ script MonsterSpawner extends Logic
 		if name == "BonusBossTimerActive" then
 			self:UpdateBonusBossBoardVisibility()
 		elseif name == "BonusBossRemainingSeconds" then
-			self:UpdateBonusBossTimerText()
+			-- 유저 정정(2026-09-01): "30초 타이머가 숨김처리된다고 생각하면 됨" — 보스/타이머 자체는
+			-- 존과 무관하게 서버에서 계속 흐르고(나가있는 시간 포함), 존을 벗어나면 보드만 숨겼다가
+			-- 다시 들어오면 그 시점 남은 시간 그대로 다시 보여야 한다. RemainingSeconds가 매초
+			-- 동기화될 때마다 그 시점의 존 위치까지 같이 재평가해서 보드 표시 여부를 맞춘다.
+			self:UpdateBonusBossBoardVisibility()
 		end
 	end
 
+	-- 보드를 보여줄지는 "타이머가 살아있는가"뿐 아니라 "지금 존10에 있는가"도 같이 봐야 한다(유저
+	-- 정정) — 존을 벗어나면 보드만 숨기고, 다시 들어오면(타이머가 아직 안 끝났다면) 그대로 다시
+	-- 보여준다. 서버 쪽 카운트다운(BonusBossRemainingSeconds)은 이 존 판정과 완전히 무관하게 계속
+	-- 흐른다 — 여기는 순수 표시 여부만 결정한다.
 	@ExecSpace("ClientOnly")
 	method void UpdateBonusBossBoardVisibility()
 		local board = _EntityService:GetEntityByPath(self.BonusBossBoardPath)
-		if board ~= nil then board.Enable = self.BonusBossTimerActive end
-		if self.BonusBossTimerActive then self:UpdateBonusBossTimerText() end
+		local shouldShow = self.BonusBossTimerActive and _MapManager.CurrentMapIndex == 10
+		if board ~= nil then board.Enable = shouldShow end
+		if shouldShow then self:UpdateBonusBossTimerText() end
 	end
 
 	@ExecSpace("ClientOnly")
