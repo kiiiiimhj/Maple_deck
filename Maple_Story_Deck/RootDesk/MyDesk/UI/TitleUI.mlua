@@ -61,6 +61,7 @@ script TitleUI extends Logic
 	property any _rankHandler = nil
 	property any _shopIconAnimEndHandler = nil
 	property any _equipHandler = nil
+	property any _newItemHandler = nil
 
 	@ExecSpace("ClientOnly")
 	method void OnBeginPlay()
@@ -82,6 +83,12 @@ script TitleUI extends Logic
 			_RankUI:Open()
 		end)
 		self._equipHandler = self.btnEquip.Entity:ConnectEvent(ButtonClickEvent, function() _InventoryBootstrap:OpenInventory() end)
+		-- 유저 요청: 가방/스킬탭/유물탭 아이콘에 "안에 새 게 있음" 레드닷 표시 — 장비는 NewItemEvent로
+		-- 변경을 통지받고, 스킬/유물은 각자의 OnSyncProperty(NewSet)가 이 스크립트를 직접 부른다
+		self._newItemHandler = _UserService.LocalPlayer:ConnectEvent(NewItemEvent, function() self:RefreshEquipNavDot() end)
+		self:RefreshEquipNavDot()
+		self:RefreshSkillNavDot()
+		self:RefreshRelicNavDot()
 		self._shopIconAnimEndHandler = self.shopIcon.Entity:ConnectEvent(SpriteGUIAnimPlayerEndEvent, self.OnShopIconAnimEnd)
 		-- 시작 시 기본 탭인 전투가 눌린 상태로 보이도록 연출까지 함께 적용한다
 		self:ShowTab("battle")
@@ -125,6 +132,9 @@ script TitleUI extends Logic
 		self.skillPanel.Enable = (tabName == "skill")
 		self.relicPanel.Enable = (tabName == "relic")
 		self.rankPanel.Enable = (tabName == "rank")
+		-- 가방(인벤토리) 버튼은 로비(배틀 탭)에서만 쓴다. 다른 탭에서는 화면 우상단을 가리기만 해서
+		-- 숨긴다 — 랭킹 탭은 이 자리를 실제 콘텐츠로 쓴다(유저 지정 2026-09-01).
+		self.btnEquip.Entity.Enable = (tabName == "battle")
 	end
 
 	@ExecSpace("ClientOnly")
@@ -249,6 +259,34 @@ script TitleUI extends Logic
 		if self._rankHandler then self.btnRank.Entity:DisconnectEvent(ButtonClickEvent, self._rankHandler) end
 		if self._equipHandler then self.btnEquip.Entity:DisconnectEvent(ButtonClickEvent, self._equipHandler) end
 		if self._shopIconAnimEndHandler then self.shopIcon.Entity:DisconnectEvent(SpriteGUIAnimPlayerEndEvent, self._shopIconAnimEndHandler) end
+		if self._newItemHandler then _UserService.LocalPlayer:DisconnectEvent(NewItemEvent, self._newItemHandler) end
+	end
+
+	-- 가방 아이콘(btnEquip) 레드닷 — 확인 안 한 새 아이템이 있으면 표시. PkgPlayerInventory의
+	-- NewItemEvent(장비/아이템 획득·확인 시마다 발생)에 연결해서 갱신한다.
+	@ExecSpace("ClientOnly")
+	method void RefreshEquipNavDot()
+		-- 배지는 "베이스 원 + 하이라이트 + 느낌표" 자식 구조라 엔티티 단위로 토글한다
+		local redDot = self.btnEquip.Entity:GetChildByName("RedDot")
+		if not isvalid(redDot) then return end
+		local playerInventory = _UserService.LocalPlayer.PkgPlayerInventory
+		redDot.Enable = isvalid(playerInventory) and playerInventory:HasAnyNewItem()
+	end
+
+	-- 스킬탭 아이콘(btnSkill) 레드닷 — SkillInventory.OnSyncProperty(NewSet)가 이 메서드를 직접 부른다
+	@ExecSpace("ClientOnly")
+	method void RefreshSkillNavDot()
+		local redDot = self.btnSkill.Entity:GetChildByName("RedDot")
+		if not isvalid(redDot) then return end
+		redDot.Enable = _SkillInventory:HasAnyNewSkill()
+	end
+
+	-- 유물탭 아이콘(btnRelic) 레드닷 — RelicInventory.OnSyncProperty(NewSet)가 이 메서드를 직접 부른다
+	@ExecSpace("ClientOnly")
+	method void RefreshRelicNavDot()
+		local redDot = self.btnRelic.Entity:GetChildByName("RedDot")
+		if not isvalid(redDot) then return end
+		redDot.Enable = _RelicInventory:HasAnyNewRelic()
 	end
 
 end

@@ -87,6 +87,8 @@ script MonsterAI extends Component
 	property string _attackSoundRUID = ""
 
 	-- 슬로우 상태 (콜드 빔)
+	-- 유물 수리검(10번) 판정용 — 마지막으로 받은 타격이 치명타였는지. Die()에서 확률 굴림에 쓴다
+	property boolean _lastHitWasCrit = false
 	property boolean _isSlowed = false
 
 	property integer _slowTimerId = 0
@@ -697,7 +699,10 @@ script MonsterAI extends Component
 		else
 			self.ApproachSpeed = _GameManager:GetWaveApproachSpeed(wave)
 		end
-		
+		-- 유물 에오스의 돌(6번) — 적 이동속도 감소. 스폰 시 한 번만 곱해두면 이후 접근 로직이
+		-- 전부 이 값을 쓰므로 매 프레임 계산할 필요가 없다(스턴/슬로우는 별도로 또 곱해진다).
+		self.ApproachSpeed = self.ApproachSpeed * (1.0 - _RelicInventory:GetEnemySlowRatio())
+
 		-- 보스는 속도 분산 없이 일정하게 접근 + 임팩트를 위해 비주얼 스케일 2.5배(기존 5배가 너무 커서 50% 축소)
 		-- (엘리트와 곱연산으로 같이 적용됨)
 		if not isBoss then
@@ -2308,11 +2313,26 @@ script MonsterAI extends Component
 	-- 망토 에픽/레전더리 "엘리트/보스 몬스터에게 주는 피해량 증가" — 자기 자신이 엘리트/보스일 때만
 	-- 곱해진다. 일반 몬스터는 항상 1.0이라 계산에 영향 없음
 	@ExecSpace("ServerOnly")
-	method number GetGearEliteBossDamageMult()
-		if self._isElite or self._isBoss or self._isBonusBoss then
-			return _GearEffectLogic:GetEliteBossDamageMult()
+	-- 유물 힘의 마법석(9번) — 상태이상(스턴/빙결/슬로우/속박)에 걸린 적에게 주는 피해 배율.
+	-- 상태이상이 하나도 없으면 1.0이라 일반 몬스터에게는 아무 영향이 없다.
+	method number GetRelicAilmentDamageMult()
+		if self._isStunned or self._isHardFrozen or self._isSlowed or self._isLevitating then
+			return _RelicInventory:GetAilmentDamageMult()
 		end
 		return 1.0
+	end
+
+	method number GetGearEliteBossDamageMult()
+		-- 유물 룬(3번)은 기획표가 "보스에게 가하는 피해"라 엘리트는 빼고 보스/보너스보스에만 건다.
+		-- 장비 쪽 보너스는 기존대로 엘리트까지 포함한다(둘의 적용 범위가 다르다).
+		local relicMult = 1.0
+		if self._isBoss or self._isBonusBoss then
+			relicMult = _RelicInventory:GetBossDamageMult()
+		end
+		if self._isElite or self._isBoss or self._isBonusBoss then
+			return _GearEffectLogic:GetEliteBossDamageMult() * relicMult
+		end
+		return relicMult
 	end
 
 	@ExecSpace("ServerOnly")
@@ -2320,7 +2340,8 @@ script MonsterAI extends Component
 		-- 카드 공격 시 호출
 		if self._dead then return end
 		if self._isCauldron and self._cauldronLocked then return end
-		damage = damage * self:GetGearEliteBossDamageMult()
+		self._lastHitWasCrit = false
+		damage = damage * self:GetGearEliteBossDamageMult() * self:GetRelicAilmentDamageMult()
 		if self._isBonusBoss then
 			if self._bonusBossCombatLocked then return end
 			-- 버그 수정(2026-08-26, 유저 리포트 "죽는 연출 2번 나오는거같아") — 킬링 블로우에서 히트
@@ -2441,11 +2462,12 @@ script MonsterAI extends Component
 	method void TakeDamageCritWithOffset(number damage, Vector2 offset)
 		if self._dead then return end
 		if self._isCauldron and self._cauldronLocked then return end
-		damage = damage * (1.0 + _CardManager:GetCriticalShotBonus() + _CardManager:GetKarmaBonus())
+		self._lastHitWasCrit = true
+		damage = damage * (1.0 + _CardManager:GetCriticalShotBonus() + _CardManager:GetKarmaBonus() + _RelicInventory:GetCritDamageBonus())
 		-- 장비 치명타 피해 보너스(자마다르 에픽 상시 / 레전더리 확률 버프) — 모든 크리티컬이
 		-- 이 두 진입점(TakeDamageCrit / TakeDamageCritWithOffset)만 거치므로 개별 스킬의
 		-- `damage * 2` 호출부를 전부 건드릴 필요가 없다
-		damage = damage * (1.0 + _GearEffectLogic:GetCritDamageBonus()) * self:GetGearEliteBossDamageMult()
+		damage = damage * (1.0 + _GearEffectLogic:GetCritDamageBonus()) * self:GetGearEliteBossDamageMult() * self:GetRelicAilmentDamageMult()
 		if self._isBonusBoss then
 			if self._bonusBossCombatLocked then return end
 			-- 버그 수정(2026-08-26) — TakeDamage와 동일 이유(킬링 블로우 히트+사망 연출 겹침 방지)
@@ -2477,13 +2499,14 @@ script MonsterAI extends Component
 	method void TakeDamageCrit(number damage)
 		if self._dead then return end
 		if self._isCauldron and self._cauldronLocked then return end
+		self._lastHitWasCrit = true
 		-- 크리티컬 샷(카드111, 실피드 전용 패시브) + 카르마(카드182, 쉐이드 전용 패시브) 보너스 —
 		-- 모든 크리티컬 대미지에 추가 배율 적용(같은 런에서 둘 다 활성일 수 없어 가산해도 안전)
-		damage = damage * (1.0 + _CardManager:GetCriticalShotBonus() + _CardManager:GetKarmaBonus())
+		damage = damage * (1.0 + _CardManager:GetCriticalShotBonus() + _CardManager:GetKarmaBonus() + _RelicInventory:GetCritDamageBonus())
 		-- 장비 치명타 피해 보너스(자마다르 에픽 상시 / 레전더리 확률 버프) — 모든 크리티컬이
 		-- 이 두 진입점(TakeDamageCrit / TakeDamageCritWithOffset)만 거치므로 개별 스킬의
 		-- `damage * 2` 호출부를 전부 건드릴 필요가 없다
-		damage = damage * (1.0 + _GearEffectLogic:GetCritDamageBonus()) * self:GetGearEliteBossDamageMult()
+		damage = damage * (1.0 + _GearEffectLogic:GetCritDamageBonus()) * self:GetGearEliteBossDamageMult() * self:GetRelicAilmentDamageMult()
 		if self._isBonusBoss then
 			if self._bonusBossCombatLocked then return end
 			-- 버그 수정(2026-08-26) — TakeDamage와 동일 이유(킬링 블로우 히트+사망 연출 겹침 방지)
@@ -2521,7 +2544,7 @@ script MonsterAI extends Component
 		if self._dead then return end
 		if self._isCauldron and self._cauldronLocked then return end
 		-- 크리티컬 샷(카드111)/카르마(카드182) 보너스 — 크리티컬 경로에서만 추가 배율 적용
-		if isCrit then damage = damage * (1.0 + _CardManager:GetCriticalShotBonus() + _CardManager:GetKarmaBonus()) end
+		if isCrit then damage = damage * (1.0 + _CardManager:GetCriticalShotBonus() + _CardManager:GetKarmaBonus() + _RelicInventory:GetCritDamageBonus()) end
 		if self._isBonusBoss then
 			if self._bonusBossCombatLocked then return end
 			-- 버그 수정(2026-08-26) — TakeDamage와 동일 이유(킬링 블로우 히트+사망 연출 겹침 방지)
@@ -2570,6 +2593,8 @@ script MonsterAI extends Component
 
 	@ExecSpace("ServerOnly")
 	method void ApplySlow(number duration)
+		-- 유물 시몬수의자(2번) — 모든 상태이상 지속시간을 늘린다. 각 Apply* 진입점에서 한 번씩만 곱한다
+		duration = duration * _RelicInventory:GetAilmentDurationMult()
 		-- 이동속도를 50% 감소. 중복 적용 시 타이머만 갱신 (속도 이중 감소 방지)
 		if not self._isSlowed then
 			self.ApproachSpeed = self.ApproachSpeed * 0.5
@@ -2600,6 +2625,8 @@ script MonsterAI extends Component
 	-- false: 아쿠아 트랩처럼 자체 연출(물 구속구)이 따로 있어 별 이펙트가 필요 없는 경우.
 	@ExecSpace("ServerOnly")
 	method void ApplyStun(number duration, boolean showIndicator)
+		-- 유물 시몬수의자(2번) — 상태이상 지속시간 증가
+		duration = duration * _RelicInventory:GetAilmentDurationMult()
 		-- 잠깐 완전히 멈췄다가 원래 속도로 돌아온다. 중복 적용 시 타이머만 갱신
 		if not self._isStunned then
 			self._stunSavedSpeed = self.ApproachSpeed
@@ -2649,6 +2676,8 @@ script MonsterAI extends Component
 	-- 몬스터가 새로 얼어도 남은 시간이 갱신되도록)
 	@ExecSpace("ServerOnly")
 	method void ApplyHardFreeze(number duration)
+		-- 유물 시몬수의자(2번) — 상태이상 지속시간 증가
+		duration = duration * _RelicInventory:GetAilmentDurationMult()
 		-- _dead 체크를 여기서 하지 않는다 — 스폰 재사용 엔티티가 죽은 적 없는데도 _dead=true로
 		-- 읽히는 잔존 버그(InitializeStats 참고)에 걸리면 이 가드가 얼려야 할 몬스터를 조용히
 		-- 건너뛰어버렸다("아이템 먹었는데 안 얼어있다" 버그의 원인). 실제 사망 처리는 OnUpdate
@@ -3007,6 +3036,8 @@ script MonsterAI extends Component
 	@ExecSpace("ServerOnly")
 	method void ApplyLevitate(number duration)
 		if self._dead or self._isFlying then return end
+		-- 유물 시몬수의자(2번) — 상태이상(속박) 지속시간 증가
+		duration = duration * _RelicInventory:GetAilmentDurationMult()
 		local liftHeight = 0.35
 		local fallDuration = math.min(0.25, duration * 0.3)
 		
@@ -3223,6 +3254,11 @@ script MonsterAI extends Component
 				_GameManager:AddGold(_GameManager:GetGoldPerKill())
 			else
 				_GameManager:OnMonsterKilled()
+			end
+			-- 유물 수리검(10번) — 마지막 타격이 치명타였으면 확률로 골드를 한 번 더 준다(2배 효과).
+			-- OnMonsterKilled의 시그니처를 건드리지 않으려고 별도 호출로 뺐다.
+			if self._lastHitWasCrit then
+				_GameManager:TryRelicCritCoinBonus()
 			end
 		end
 		-- 비행형(박쥐 등)은 사망 위치가 공중이므로, 드랍 연출이 실제 발판(몬스터가 걸어다니는 바닥) 높이까지

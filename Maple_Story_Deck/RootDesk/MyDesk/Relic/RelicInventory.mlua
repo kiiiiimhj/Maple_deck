@@ -6,32 +6,87 @@ script RelicInventory extends Logic
 	-- SyncTable은 next/pairs를 못 쓰므로 항상 0~relicCount-1 범위를 직접 순회한다
 	@Sync property SyncTable<string, integer> Counts
 	@Sync property SyncTable<string, integer> Levels
+	-- 유저 요청: 처음 뽑힌 유물(0개→1개 이상 전환)에 레드닷 표시 — 유물 탭에서 슬롯을 한 번 눌러
+	-- 확인하면(OnRelicSlotClicked) 꺼진다. key는 Counts/Levels와 동일한 유물 인덱스 문자열
+	@Sync property SyncTable<string, boolean> NewSet
 
 	property integer relicCount = 18
 	property integer maxPerRelic = 2
-	-- 최소 1개를 뽑아 소유한 순간 Lv1(GetEffectiveLevel 참고)이고, 여기서 5번 강화하면 Lv6이 최대
-	property integer maxLevel = 6
+	-- 최소 1개를 뽑아 소유한 순간 Lv1(GetEffectiveLevel 참고)이고, 여기서 4번 강화하면 Lv5가 최대
+	property integer maxLevel = 5
 
-	-- 레벨업에 필요한 조각/코인 (인덱스 1=Lv1, ..., 5=Lv5 — "현재 레벨이 N일 때 N+1로 올리는 비용").
-	-- 사용자가 제공한 실제 표
-	property any _levelFragmentCost = { 2, 4, 10, 20, 30 }
-	property any _levelGoldCost = { 2000, 4000, 10000, 20000, 30000 }
+	-- 레벨업에 필요한 조각/코인 (인덱스 N = "현재 레벨이 N일 때 N+1로 올리는 비용").
+	-- 최대가 Lv5라 강화는 4회뿐이고, 표도 4칸이다.
+	--   Lv1 → 4조각 + 5000코인
+	--   Lv2 → 15조각 + 10000코인
+	--   Lv3 → 30조각 + 30000코인
+	--   Lv4 → 50조각 + 50000코인
+	property any _levelFragmentCost = { 4, 15, 30, 50 }
+	property any _levelGoldCost = { 5000, 10000, 30000, 50000 }
 
-	-- 유물마다 하나씩 배정된 효과 종류 — 인덱스 0~17 순서대로(1-based Lua 테이블이라 i+1로 조회).
-	-- gold=골드 획득%, exp=경험치 획득%, potionChance=포션 드롭 확률%p, potionHeal=포션 회복량%p
-	-- 4종류를 균등 분배(각 4~5개)해서 "유물마다 다른 효과"가 되도록 함
-	property any _relicEffectTypes = {
-		"gold", "exp", "potionChance", "potionHeal", "gold",
-		"exp", "potionChance", "potionHeal", "gold", "exp",
-		"potionChance", "potionHeal", "gold", "exp", "potionChance",
-		"potionHeal", "gold", "exp"
+	-- ── 유물별 고유 효과 ────────────────────────────────────────────────────
+	-- 인덱스 0~17은 유물 탭 슬롯(TitleGroup.ui의 RelicSlot_N) 순서와 1:1로 같다.
+	-- 예전에는 gold/exp/potionChance/potionHeal 4종을 18칸에 돌려막은 자리표시였고,
+	-- 같은 종류끼리 레벨을 합산해서 한 덩어리로 계산했다(GetTotalLevelsForType).
+	-- 이제는 유물 하나가 효과 하나를 단독으로 담당하므로 합산 없이 그 유물의 값만 쓴다.
+	--
+	--  idx  유물명              효과 키            단위
+	--   0   시그너스의 손수건    basicAtk          기본공격 데미지 %
+	--   1   만년설화            basicSpeed        기본공격 속도 %(쿨타임 감소로 적용)
+	--   2   시몬수의자          ailmentDuration   상태이상 지속시간 %
+	--   3   룬                  bossDamage        보스에게 주는 피해 %
+	--   4   봉인된 오브          skillDamage       스킬 피해량 %
+	--   5   지혜의 항아리        skillCooldown     스킬 쿨타임 감소 %
+	--   6   에오스의 돌          enemySlow         적 이동속도 감소 %
+	--   7   황금 카드           bossSkillDrop     보스 스킬 드롭율 %
+	--   8   성배                gold              런 골드 획득 %
+	--   9   힘의 마법석          ailmentDamage     상태이상 걸린 적에게 주는 피해 %
+	--  10   수리검              critCoin          치명타 시 코인 2배 확률 %
+	--  11   낡은 피아노          exp               경험치 획득 %
+	--  12   무닌                critDamage        크리티컬 피해 %
+	--  13   자수정              critChance        크리티컬 확률 %
+	--  14   소행성              potionHeal        포션 회복량 %
+	--  15   팬더 허수아비        lowHpInvuln       체력 10% 미만 시 무적 (초)
+	--  16   복주머니            potionChance      포션 드롭율 %p
+	--  17   검은 방패           damageTaken       받는 피해 감소 %
+	-- 유물 이름 — TitleGroup.ui의 RelicSlot_N/Name 과 같은 순서다.
+	-- RelicUI는 .ui에서 이름을 캐시해 쓰지만(GetRelicBaseName), 확률 공개 팝업처럼 유물 탭이
+	-- 열리기 전에도 이름이 필요한 곳이 있어 데이터 쪽에도 정본을 둔다.
+	property any _relicNames = {
+		"시그너스의 손수건", "만년설화", "시몬수의자", "룬", "봉인된 오브", "지혜의 항아리",
+		"에오스의 돌", "황금 카드", "성배", "힘의 마법석", "수리검", "낡은 피아노",
+		"무닌", "자수정", "소행성", "팬더 허수아비", "복주머니", "검은 방패"
 	}
 
-	-- 효과 종류별 레벨당 증가량(%) — 전부 "레벨 합계 × 이 값"으로 계산
-	property number goldBonusPerLevel = 1.0
-	property number expBonusPerLevel = 1.0
-	property number potionChanceBonusPerLevel = 0.5
-	property number potionHealBonusPerLevel = 1.0
+	property any _relicEffectKeys = {
+		"basicAtk", "basicSpeed", "ailmentDuration", "bossDamage", "skillDamage", "skillCooldown",
+		"enemySlow", "bossSkillDrop", "gold", "ailmentDamage", "critCoin", "exp",
+		"critDamage", "critChance", "potionHeal", "lowHpInvuln", "potionChance", "damageTaken"
+	}
+
+	-- 레벨별 값 (Lv1~Lv5). 유물을 하나라도 보유하면 그 순간 Lv1이고, 거기서 4번 강화하면 Lv5가 최대다.
+	-- 전부 기획표 그대로다. 단위는 효과마다 다르다 —
+	-- 팬더 허수아비(15번)만 초이고, 복주머니(16)는 %p, 나머지는 전부 퍼센트다.
+	property any _relicEffectValues = {
+		{ 2, 3, 5, 7, 10 },           --  0 시그너스의 손수건 · 기본 공격력 %
+		{ 4, 6, 8, 10, 12 },          --  1 만년설화 · 기본 공격 속도 %
+		{ 5, 8, 11, 14, 17 },         --  2 시몬수의자 · 상태이상 지속시간 %
+		{ 5, 8, 11, 14, 17 },         --  3 룬 · 보스 피해 %
+		{ 3, 6, 9, 12, 15 },          --  4 봉인된 오브 · 스킬 피해량 %
+		{ 3, 4, 6, 8, 10 },           --  5 지혜의 항아리 · 스킬 쿨타임 감소 %
+		{ 3, 5, 7, 9, 11 },           --  6 에오스의 돌 · 적 이동속도 감소 %
+		{ 5, 8, 10, 15, 20 },         --  7 황금 카드 · 보스 스킬 드롭율 %
+		{ 3, 5, 8, 11, 15 },          --  8 성배 · 런 골드 획득 %
+		{ 10, 13, 18, 25, 35 },       --  9 힘의 마법석 · 상태이상 적 피해 %
+		{ 2, 4, 6, 10, 15 },          -- 10 수리검 · 치명타 시 코인 2배 확률 %
+		{ 1, 2, 3, 5, 7 },            -- 11 낡은 피아노 · 경험치 획득 %
+		{ 3, 6, 9, 12, 15 },          -- 12 무닌 · 크리티컬 피해 %
+		{ 2, 3, 4, 6, 8 },            -- 13 자수정 · 크리티컬 확률 %
+		{ 3, 5, 8, 15, 20 },          -- 14 소행성 · 포션 회복량 %
+		{ 1, 2, 3, 4, 5 },            -- 15 팬더 허수아비 · 저체력 무적 (초)
+		{ 0.3, 0.4, 0.5, 0.6, 0.7 },  -- 16 복주머니 · 포션 드롭율 %p
+		{ 5, 7, 9, 11, 13 }           -- 17 검은 방패 · 받는 피해 감소 %
+	}
 
 	property any _storage = nil
 	property boolean _dirty = false
@@ -65,6 +120,19 @@ script RelicInventory extends Logic
 				end
 			end
 		end
+		-- 레드닷 상태도 재시작 사이에 유지한다(확인 안 한 새 유물은 다음 접속에도 계속 표시)
+		local newErrorCode, newRaw = self._storage:GetAndWait("NewSet")
+		if newErrorCode == 0 and newRaw ~= nil and newRaw ~= "" then
+			local loadedNew = _UtilLogic:StringToTable(newRaw)
+			if loadedNew ~= nil then
+				for i = 0, self.relicCount - 1 do
+					local key = tostring(i)
+					if loadedNew[key] ~= nil then
+						self.NewSet[key] = loadedNew[key]
+					end
+				end
+			end
+		end
 		-- 5초마다 변경이 있을 때만 저장한다 (매번 저장하면 크레딧을 낭비한다)
 		self._flushTimerId = _TimerService:SetTimerRepeat(function() self:FlushIfDirty() end, 3.0)
 		log("RelicInventory started")
@@ -75,10 +143,40 @@ script RelicInventory extends Logic
 		-- 유물을 획득했을 때 클라이언트(GachaUI)가 호출한다. 서버에서 개수를 올리고 저장 대상으로 표시한다
 		if relicIndex < 0 or relicIndex >= self.relicCount then return end
 		local key = tostring(relicIndex)
+		-- 유저 요청: 처음 뽑히는 순간(미보유→보유 전환)에만 레드닷을 켠다 — 이미 보유 중인 유물의
+		-- 조각을 추가로 뽑는 것은 "새로 얻음"이 아니므로 대상에서 제외
+		local wasOwned = self:GetEffectiveLevel(relicIndex) > 0
 		local current = 0
 		if self.Counts[key] ~= nil then current = self.Counts[key] end
 		self.Counts[key] = current + 1
+		if not wasOwned then
+			self.NewSet[key] = true
+		end
 		self._dirty = true
+	end
+
+	-- 유물 탭에서 슬롯을 눌러 확인했을 때 호출 — 레드닷을 끈다
+	@ExecSpace("Server")
+	method void MarkRelicSeen(integer relicIndex)
+		if relicIndex < 0 or relicIndex >= self.relicCount then return end
+		local key = tostring(relicIndex)
+		if self.NewSet[key] then
+			self.NewSet[key] = nil
+			self._dirty = true
+		end
+	end
+
+	method boolean IsRelicNew(integer relicIndex)
+		local key = tostring(relicIndex)
+		return self.NewSet[key] == true
+	end
+
+	-- 유물 탭 아이콘(로비 상단 btnRelic)에 표시할 레드닷 — 하나라도 미확인 유물이 있으면 true
+	method boolean HasAnyNewRelic()
+		for i = 0, self.relicCount - 1 do
+			if self.NewSet[tostring(i)] == true then return true end
+		end
+		return false
 	end
 
 	@ExecSpace("Server")
@@ -149,63 +247,170 @@ script RelicInventory extends Logic
 		return self._levelGoldCost[level]
 	end
 
+	method string GetRelicName(integer relicIndex)
+		-- 유물 이름. 확률 공개 팝업(GachaUI)과 업그레이드 팝업이 공용으로 쓴다.
+		if relicIndex < 0 or relicIndex >= self.relicCount then return "" end
+		return self._relicNames[relicIndex + 1]
+	end
+
 	method string GetRelicEffectType(integer relicIndex)
-		-- 이 유물이 어떤 효과를 담당하는지 반환한다 ("gold"/"exp"/"potionChance"/"potionHeal")
-		return self._relicEffectTypes[relicIndex + 1]
+		-- 이 유물이 담당하는 효과 키를 반환한다 (_relicEffectKeys 표 참고)
+		if relicIndex < 0 or relicIndex >= self.relicCount then return "" end
+		return self._relicEffectKeys[relicIndex + 1]
 	end
 
-	method number GetEffectMagnitudePerLevel(string effectType)
-		-- 업그레이드 팝업이 옵션 설명 텍스트를 만들 때 쓰는, 효과 종류별 레벨당 증가량(%)
-		if effectType == "gold" then return self.goldBonusPerLevel
-		elseif effectType == "exp" then return self.expBonusPerLevel
-		elseif effectType == "potionChance" then return self.potionChanceBonusPerLevel
-		elseif effectType == "potionHeal" then return self.potionHealBonusPerLevel
-		else return 0 end
+	-- ── 값 조회 ─────────────────────────────────────────────────────────────
+	-- 유물 하나가 효과 하나를 단독으로 담당하므로 합산하지 않는다. 미보유(Lv0)면 0이다.
+	-- @ExecSpace를 붙이지 않는 이유: Counts/Levels가 @Sync라 서버·클라 양쪽에서 같은 값이 나오고,
+	-- 데미지 계산(서버)과 업그레이드 팝업 표시(클라)가 같은 함수를 써야 하기 때문이다.
+	method number GetRelicValue(integer relicIndex)
+		if relicIndex < 0 or relicIndex >= self.relicCount then return 0 end
+		local level = self:GetEffectiveLevel(relicIndex)
+		if level <= 0 then return 0 end
+		local row = self._relicEffectValues[relicIndex + 1]
+		if row == nil then return 0 end
+		if level > #row then level = #row end
+		return row[level]
 	end
 
-	method string GetEffectLabel(string effectType)
+	method number GetRelicValueAtLevel(integer relicIndex, integer level)
+		-- 업그레이드 팝업이 "다음 레벨이 되면 얼마" 를 미리 보여줄 때 쓴다
+		if relicIndex < 0 or relicIndex >= self.relicCount then return 0 end
+		local row = self._relicEffectValues[relicIndex + 1]
+		if row == nil or level <= 0 then return 0 end
+		if level > #row then level = #row end
+		return row[level]
+	end
+
+	method number GetEffectValue(string effectKey)
+		-- 효과 키로 현재 값을 찾는다. 각 효과를 담당하는 유물은 정확히 하나뿐이다.
+		for i = 0, self.relicCount - 1 do
+			if self._relicEffectKeys[i + 1] == effectKey then
+				return self:GetRelicValue(i)
+			end
+		end
+		return 0
+	end
+
+	method string GetEffectLabel(string effectKey)
 		-- 업그레이드 팝업의 옵션 설명에 쓰는 한글 라벨
-		if effectType == "gold" then return "골드 획득"
-		elseif effectType == "exp" then return "경험치 획득"
-		elseif effectType == "potionChance" then return "포션 드롭 확률"
-		elseif effectType == "potionHeal" then return "포션 회복량"
+		if effectKey == "basicAtk" then return "기본 공격력"
+		elseif effectKey == "basicSpeed" then return "기본 공격 속도"
+		elseif effectKey == "ailmentDuration" then return "상태이상 지속 시간"
+		elseif effectKey == "bossDamage" then return "보스에게 가하는 피해"
+		elseif effectKey == "skillDamage" then return "스킬 피해량"
+		elseif effectKey == "skillCooldown" then return "스킬 쿨타임 감소"
+		elseif effectKey == "enemySlow" then return "적 이동 속도 감소"
+		elseif effectKey == "bossSkillDrop" then return "보스 스킬 드롭율"
+		elseif effectKey == "gold" then return "골드 획득"
+		elseif effectKey == "ailmentDamage" then return "상태이상 적에게 주는 피해"
+		elseif effectKey == "critCoin" then return "치명타 시 2배 코인 확률"
+		elseif effectKey == "exp" then return "경험치 획득"
+		elseif effectKey == "critDamage" then return "크리티컬 피해"
+		elseif effectKey == "critChance" then return "크리티컬 확률"
+		elseif effectKey == "potionHeal" then return "포션 회복량"
+		elseif effectKey == "lowHpInvuln" then return "체력 10% 미만 시 무적"
+		elseif effectKey == "potionChance" then return "포션 드롭율"
+		elseif effectKey == "damageTaken" then return "몬스터에게 입는 피해 감소"
 		else return "알 수 없는 효과" end
 	end
 
-	method integer GetTotalLevelsForType(string effectType)
-		-- 지정한 효과 종류를 가진 유물들의 레벨 합계 — Levels/Counts는 @Sync라 서버/클라 어느 쪽에서
-		-- 불러도 값이 같다. 한 번도 뽑은 적 없는 유물은 GetEffectiveLevel이 0을 돌려줘서 자동 제외된다.
-		local total = 0
-		for i = 0, self.relicCount - 1 do
-			if self._relicEffectTypes[i + 1] == effectType then
-				total = total + self:GetEffectiveLevel(i)
-			end
-		end
-		return total
+	method string GetEffectUnit(string effectKey)
+		-- 값 뒤에 붙일 단위. 무적만 초 단위이고 나머지는 퍼센트다.
+		if effectKey == "lowHpInvuln" then return "초" end
+		return "%"
 	end
 
-	@ExecSpace("ServerOnly")
+	-- ── 전투 계열 훅 (GearEffectLogic 과 같은 모양으로 맞춘다) ────────────────
+	method number GetBasicAtkMult()
+		-- 시그너스의 손수건 — 기본공격 카드에만 곱한다 (스킬은 봉인된 오브 담당)
+		return 1.0 + self:GetEffectValue("basicAtk") / 100.0
+	end
+
+	method number GetSkillDamageMult()
+		-- 봉인된 오브 — 슬롯 스킬에만 곱한다 (기본공격은 시그너스의 손수건 담당)
+		return 1.0 + self:GetEffectValue("skillDamage") / 100.0
+	end
+
+	method number GetBasicSpeedReduction()
+		-- 만년설화 — "공격 속도 증가"를 기본공격 쿨타임 감소 비율로 적용한다
+		return self:GetEffectValue("basicSpeed") / 100.0
+	end
+
+	method number GetSkillCooldownReduction()
+		-- 지혜의 항아리 — 슬롯 스킬 쿨타임 감소 비율
+		return self:GetEffectValue("skillCooldown") / 100.0
+	end
+
+	method number GetBossDamageMult()
+		-- 룬 — 보스/보너스보스에게 주는 피해 배율
+		return 1.0 + self:GetEffectValue("bossDamage") / 100.0
+	end
+
+	method number GetCritChanceBonus()
+		-- 자수정 — CardManager.RollCrit 의 가산 확률에 더한다
+		return self:GetEffectValue("critChance") / 100.0
+	end
+
+	method number GetCritDamageBonus()
+		-- 무닌 — MonsterAI.TakeDamageCrit 의 크리티컬 피해 보너스에 더한다
+		return self:GetEffectValue("critDamage") / 100.0
+	end
+
+	method number GetDamageTakenReduction()
+		-- 검은 방패 — 플레이어가 받는 피해 감소 비율
+		return self:GetEffectValue("damageTaken") / 100.0
+	end
+
+	method number GetAilmentDurationMult()
+		-- 시몬수의자 — 스턴/빙결/속박 등 상태이상 지속시간 배율
+		return 1.0 + self:GetEffectValue("ailmentDuration") / 100.0
+	end
+
+	method number GetAilmentDamageMult()
+		-- 힘의 마법석 — 상태이상에 걸린 적에게 주는 피해 배율
+		return 1.0 + self:GetEffectValue("ailmentDamage") / 100.0
+	end
+
+	method number GetEnemySlowRatio()
+		-- 에오스의 돌 — 적 이동속도 감소 비율
+		return self:GetEffectValue("enemySlow") / 100.0
+	end
+
+	method number GetBossSkillDropBonus()
+		-- 황금 카드 — 보스 처치 시 슬롯 스킬 강화 드롭이 1개 더 나올 확률(%). 5 = 5%
+		return self:GetEffectValue("bossSkillDrop")
+	end
+
+	method number GetCritCoinChance()
+		-- 수리검 — 치명타 시 코인 2배가 될 확률 (0~1)
+		return self:GetEffectValue("critCoin") / 100.0
+	end
+
+	method number GetLowHpInvulnSeconds()
+		-- 팬더 허수아비 — 체력 10% 미만으로 떨어질 때 무적 지속시간(초). 0이면 미보유
+		return self:GetEffectValue("lowHpInvuln")
+	end
+
+	-- ── 재화/포션 계열 (기존 호출부가 그대로 쓰도록 이름을 유지한다) ──────────
 	method integer GetGoldBonusPercent()
-		-- "gold" 유물들의 레벨 합계 × 레벨당 보너스(%) — GameManager.GetGoldPerKill()이 사용한다
-		return math.floor(self:GetTotalLevelsForType("gold") * self.goldBonusPerLevel)
+		-- 성배 — GameManager.GetGoldPerKill()이 사용한다
+		return math.floor(self:GetEffectValue("gold"))
 	end
 
-	@ExecSpace("ServerOnly")
 	method integer GetExpBonusPercent()
-		-- "exp" 유물들의 레벨 합계 × 레벨당 보너스(%) — GameManager.GetExpPerKill()이 사용한다
-		return math.floor(self:GetTotalLevelsForType("exp") * self.expBonusPerLevel)
+		-- 낡은 피아노 — GameManager.GetExpPerKill()이 사용한다
+		return math.floor(self:GetEffectValue("exp"))
 	end
 
-	@ExecSpace("ServerOnly")
 	method number GetPotionChanceBonusPercent()
-		-- "potionChance" 유물들의 레벨 합계 × 레벨당 보너스(%p) — GameManager.TryDropHealPotion()이 사용한다
-		return self:GetTotalLevelsForType("potionChance") * self.potionChanceBonusPerLevel
+		-- 복주머니 — GameManager.TryDropHealPotion()이 사용한다 (%p)
+		return self:GetEffectValue("potionChance")
 	end
 
-	@ExecSpace("ServerOnly")
 	method number GetPotionHealBonusPercent()
-		-- "potionHeal" 유물들의 레벨 합계 × 레벨당 보너스(%p) — GameManager.ApplyPotionDrop()이 사용한다
-		return self:GetTotalLevelsForType("potionHeal") * self.potionHealBonusPerLevel
+		-- 소행성 — GameManager.ApplyPotionDrop()이 사용한다 (%)
+		return self:GetEffectValue("potionHeal")
 	end
 
 	@ExecSpace("ServerOnly")
@@ -217,23 +422,29 @@ script RelicInventory extends Logic
 		self._dirty = false
 		local plainCounts = {}
 		local plainLevels = {}
+		local plainNew = {}
 		for i = 0, self.relicCount - 1 do
 			local key = tostring(i)
 			-- 0은 저장하지 않는다 — 의미 없는 0이 쌓이면 다음 로드에서 "값이 있다"로 오인된다
 			-- (GetEffectiveLevel 주석 참고: 이것 때문에 유물이 전부 미보유로 판정되는 버그가 있었다)
 			if self.Counts[key] ~= nil and self.Counts[key] > 0 then plainCounts[key] = self.Counts[key] end
 			if self.Levels[key] ~= nil and self.Levels[key] > 0 then plainLevels[key] = self.Levels[key] end
+			if self.NewSet[key] == true then plainNew[key] = true end
 		end
 		self._storage:SetAndWait("Counts", _UtilLogic:TableToString(plainCounts))
 		self._storage:SetAndWait("Levels", _UtilLogic:TableToString(plainLevels))
+		self._storage:SetAndWait("NewSet", _UtilLogic:TableToString(plainNew))
 	end
 
 	@ExecSpace("ClientOnly")
 	method void OnSyncProperty(string name, any value)
 		-- 획득 개수나 레벨이 갱신될 때마다 유물 탭 UI를 새로고침한다
-		if name == "Counts" or name == "Levels" then
+		if name == "Counts" or name == "Levels" or name == "NewSet" then
 			_RelicUI:RefreshAllRelicSlots()
 			_RelicUpgradeUI:RefreshPanel()
+		end
+		if name == "NewSet" then
+			_TitleUI:RefreshRelicNavDot()
 		end
 	end
 

@@ -130,4 +130,49 @@ script EnhanceScrollLogic extends Logic
 		return currentLevel * self.GoldCostPerLevel
 	end
 
+	-- ── 강화 레벨 → 스탯 보너스 (2026-09-02 신규) ─────────────────────────────
+	-- 예전에는 Level 을 올리기만 하고 아무 스탯에도 반영하지 않았다(주문서/코인만 소모되고
+	-- 실제 효과가 0이었다). 이제 여기서 레벨당 가산량을 계산해 GearEffectLogic 이 더한다.
+	--
+	-- 구간이 올라갈수록 레벨당 상승폭이 커진다(유저 지정). Lv1 = 미강화라 보너스 0.
+	--   ~Lv5  +4 / Lv6~10 +4 / Lv11~20 +6 / Lv21~30 +10 / Lv31~40 +14 / Lv41~50 +20
+	--
+	-- ⚠ 불변 규칙 — "만강(G) > 다음 등급 노강(G+1)" 이 품질 F/S 양끝에서 성립해야 한다.
+	--   강화가 등급업보다 약하면 안 된다(유저 지적). 처음에 ~Lv5 를 +1 로 뒀다가
+	--   "노말 5강 < 매직 노강" 으로 뒤집혔던 전례가 있다. 이 표를 손댈 때마다 재검증할 것.
+	--
+	-- 등급별 상한(노말5/매직10/레어20/에픽30/유니크40/레전더리50)까지 올렸을 때 누적:
+	--   Lv5 +16 / Lv10 +36 / Lv20 +96 / Lv30 +196 / Lv40 +336 / Lv50 +536
+	--
+	-- 밸런스 기준(2026-09-02 유저 확정) — "구름정원(125%)에서 무기+갑옷 2부위 매직 만강이
+	-- 아슬아슬". 그 상태 ATK 61 → 시뮬 평균 생존 15분 20초로 목표 구간 하단에 맞춘 값이다.
+	-- 등급별 만강 수치(중앙값): 노말 31 / 매직 61 / 레어 141 / 에픽 286 / 유니크 496 / 레전더리 786.
+	-- ATK 는 곱연산이 아니라 스킬 기본값(평균 228)에 먼저 더해지므로, 이 표를 바꾸면
+	-- 데미지 배율이 (228+ATK)/228 로 직접 변한다.
+	--
+	-- 무기/방어구 구분 없이 같은 표를 쓴다. 무기는 ATK, 방어구는 HP 로 더해진다.
+	method integer GetStatBonusForLevel(integer level)
+		if level == nil or level <= 1 then
+			return 0
+		end
+
+		local total = 0
+		for l = 2, level do
+			if l <= 5 then total = total + 4
+			elseif l <= 10 then total = total + 4
+			elseif l <= 20 then total = total + 6
+			elseif l <= 30 then total = total + 10
+			elseif l <= 40 then total = total + 14
+			else total = total + 20
+			end
+		end
+
+		return total
+	end
+
+	-- 다음 레벨로 올렸을 때 얼마나 오르는지 — 강화 팝업에서 "+N" 미리보기에 쓴다
+	method integer GetStatBonusDelta(integer currentLevel)
+		return self:GetStatBonusForLevel(currentLevel + 1) - self:GetStatBonusForLevel(currentLevel)
+	end
+
 end

@@ -64,6 +64,10 @@ script PkgPlayerInventory extends Component
 			end
 		end
 		
+		-- 스탯 표가 바뀐 뒤 접속한 기존 장비를 보정한다(2026-09-02). 투구/장갑/망토는 원래 스탯이
+		-- 없어서 Atk/Hp 가 0으로 저장돼 있고, 그대로 두면 강화 수치만 붙고 기본 능력치가 0으로 보인다.
+		self:BackfillMissingGearStats()
+
 		self:CleanupExpiredItems(false)
 		
 		local dbItems = {}
@@ -838,6 +842,37 @@ script PkgPlayerInventory extends Component
 	--  · 상한은 현재 등급이 정한다(EnhanceScrollLogic.GetMaxLevel) — 등급업해도 레벨은 유지되므로
 	--    합성으로 상한만 열리고 이어서 올릴 수 있다(유저 지정)
 	--  · 골드는 런 전용 Gold가 아니라 영구 누적 TotalCoins에서 뺀다(GameManager.SpendCoins)
+	-- 이미 갖고 있는 장비의 빠진 기본 스탯을 채운다(2026-09-02 신설).
+	-- 투구/장갑/망토는 예전엔 StatField 가 없어서 Atk/Hp 가 0으로 저장돼 있다. 스탯이 생긴 지금
+	-- 그대로 두면 "강화 수치만 오르고 기본 능력치가 0"인 상태가 된다.
+	-- 이미 값이 있는 장비는 건드리지 않으므로 여러 번 호출해도 안전하다.
+	@ExecSpace("ServerOnly")
+	method void BackfillMissingGearStats()
+		local filled = 0
+		for guid, itemStruct in pairs(self.Items) do
+			local gearStruct = itemStruct:GetGearStruct()
+			if gearStruct ~= nil and _WeaponTierDataLogic:IsWeaponItem(itemStruct.ItemId) then
+				local statField = _WeaponTierDataLogic:GetStatField(itemStruct.ItemId)
+				if statField == "Atk" and gearStruct.Atk <= 0 then
+					gearStruct.Atk = _WeaponTierDataLogic:RollAtk(itemStruct.ItemId, gearStruct.Grade, gearStruct.Quality)
+					-- 등급업 미리보기가 쓰는 등급별 표도 같이 채워둔다(비어 있으면 폴백 재굴림이 돌아
+					-- "미리 본 값 ≠ 실제 받는 값"이 될 수 있다)
+					gearStruct.AtkByGrade = _WeaponTierDataLogic:RollAtkByGrade(itemStruct.ItemId, gearStruct.Quality)
+					filled = filled + 1
+				elseif statField == "Hp" and gearStruct.Hp <= 0 then
+					gearStruct.Hp = _WeaponTierDataLogic:RollHp(itemStruct.ItemId, gearStruct.Grade, gearStruct.Quality)
+					gearStruct.HpByGrade = _WeaponTierDataLogic:RollHpByGrade(itemStruct.ItemId, gearStruct.Quality)
+					filled = filled + 1
+				end
+			end
+		end
+
+		if filled > 0 then
+			self.IsSaveDB = true
+			log("PkgPlayerInventory: backfilled base stats on " .. tostring(filled) .. " gear item(s)")
+		end
+	end
+
 	@ExecSpace("ServerOnly")
 	method integer LevelUpGear(string gearGUID, boolean isBatch)
 		local userId = self.Entity.PlayerComponent.UserId
@@ -1675,6 +1710,12 @@ script PkgPlayerInventory extends Component
 		else
 			return false
 		end
+	end
+
+	-- 유저 요청: 가방 아이콘(로비 btnEquip)에 표시할 레드닷 — 확인 안 한 새 아이템이 하나라도 있으면 true
+	@ExecSpace("ClientOnly")
+	method boolean HasAnyNewItem()
+		return next(self.NewItemsSet) ~= nil
 	end
 
 end

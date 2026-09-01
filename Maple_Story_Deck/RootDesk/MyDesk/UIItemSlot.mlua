@@ -15,7 +15,15 @@ script UIItemSlot extends Component
 
 	property SpriteGUIRendererComponent IconItem = nil
 
-	property SpriteGUIRendererComponent IconRedDot = nil
+	-- 배지는 "어두운 원 + 밝은 하이라이트 + 느낌표" 3중 구조(UIItemSlot.model)라 스프라이트 컴포넌트만
+	-- 껐다 켜면 자식(하이라이트/느낌표)이 그대로 남는다 — 반드시 엔티티 단위로 토글할 것(Dim과 동일 패턴)
+	property Entity IconRedDot = nil
+
+	-- 강화 가능한(재료+골드 충분) 장비에 초록 점 표시 — 레드닷 바로 아래(우측 모서리).
+	-- ⚠ 유저 요청으로 현재 기능 중지(2026-09-01). 모델(UIItemSlot.model)의 GreenDot 엔티티도 같이
+	-- 꺼뒀다. 되살리려면 (1) 모델의 GreenDot MODEntity.Enable=true, (2) 아래 주석 처리한
+	-- self.IconGreenDot 관련 3곳(OnBeginPlay/Set/Clear)을 다시 살리면 된다.
+	property Entity IconGreenDot = nil
 
 	property SpriteGUIRendererComponent IconLock = nil
 
@@ -56,7 +64,9 @@ script UIItemSlot extends Component
 		self.IconBackground = entity.SpriteGUIRendererComponent
 		self.ImageGrade = entity:GetChildByName("Grade").SpriteGUIRendererComponent
 		self.IconItem = entity:GetChildByName("IconItem").SpriteGUIRendererComponent
-		self.IconRedDot = entity:GetChildByName("RedDot").SpriteGUIRendererComponent
+		self.IconRedDot = entity:GetChildByName("RedDot")
+		-- 그린닷 기능 중지(유저 요청) — 되살릴 때 아래 한 줄 주석 해제
+		-- self.IconGreenDot = entity:GetChildByName("GreenDot")
 		self.IconLock = entity:GetChildByName("IconLock").SpriteGUIRendererComponent
 		self.IconTime = entity:GetChildByName("IconTime").SpriteGUIRendererComponent
 		self.TextCount = entity:GetChildByName("Count").TextComponent
@@ -107,6 +117,8 @@ script UIItemSlot extends Component
 			self.ImageDim.Enable = false
 			self.IconBackground.Outline = false
 			self.QualityText.Enable = false
+			-- 그린닷 기능 중지(유저 요청) — 되살릴 때 주석 해제
+			-- self.IconGreenDot.Enable = false
 			-- 장비가 아닌 아이템 중 강화 주문서만 우측 하단에 부위 심볼을 덧붙인다(유저 요청:
 			-- "주문서 아이콘에 장착 슬롯의 하얀 벡터 심볼이 붙어야 뭔지 알 수 있다")
 			self:ApplyScrollSymbol(itemStruct.ItemId)
@@ -142,6 +154,10 @@ script UIItemSlot extends Component
 		self.IconBackground.OutlineWidth = 4
 		self.IconBackground.OutlineColor = _GearGradeEnum:GetEnumColor(itemGearStruct.Grade)
 
+		-- 강화(레벨업) 재료+골드가 충분한 장비는 초록 점으로 표시 — 유저 요청으로 기능 중지.
+		-- 판정 함수(IsGearUpgradable)는 그대로 남겨뒀으니 되살릴 때 아래 한 줄만 주석 해제하면 된다.
+		-- self.IconGreenDot.Enable = self:IsGearUpgradable(itemStruct, itemGearData, itemGearStruct)
+
 		-- 합성 진행도(ComposeCount) 원형 뱃지: 장비는 항상 NonStackable이라 TextCount(원래 개수
 		-- 표시용)가 위에서 이미 꺼져있는 상태라 재사용하고, 배경은 ImageGrade(원래 등급 오버레이용,
 		-- 지금은 CountBadge 원형 이미지로 고정)를 재사용한다. 다음 등급이 있고 진행중(ComposeCount>0)일 때만 표시
@@ -153,6 +169,28 @@ script UIItemSlot extends Component
 		else
 			self.ImageGrade.Enable = false
 		end
+	end
+
+	-- PkgPlayerInventory.LevelUpGear의 검증 조건을 그대로 읽기 전용으로 재현한다(서버 강화 로직과
+	-- 반드시 동일하게 유지 — 저기가 바뀌면 여기도 같이 바꿀 것). 실제 소비/강화는 하지 않고
+	-- "지금 강화 버튼을 누르면 성공하는가"만 판정한다.
+	@ExecSpace("ClientOnly")
+	method boolean IsGearUpgradable(ItemStruct itemStruct, any gearData, any gearStruct)
+		local scrollItemId = _EnhanceScrollLogic:GetScrollItemId(gearData.GearCategory)
+		if scrollItemId == 0 then return false end
+
+		local maxLevel = _EnhanceScrollLogic:GetMaxLevel(gearStruct.Grade)
+		if gearStruct.Level >= maxLevel then return false end
+
+		local scrollCost = _EnhanceScrollLogic:GetScrollCost(gearStruct.Level)
+		if scrollCost <= 0 then return false end
+
+		local goldCost = _EnhanceScrollLogic:GetGoldCost(gearStruct.Level)
+		local owned = _UserService.LocalPlayer.PkgPlayerInventory:GetItemCount(scrollItemId, nil)
+		if owned < scrollCost then return false end
+		if _GameManager.TotalCoins < goldCost then return false end
+
+		return true
 	end
 
 	@ExecSpace("ClientOnly")
@@ -184,6 +222,8 @@ script UIItemSlot extends Component
 		self.QualityBg.Enable = false
 
 		self.IconRedDot.Enable = false
+		-- 그린닷 기능 중지(유저 요청) — 되살릴 때 주석 해제
+		-- self.IconGreenDot.Enable = false
 		self.IconTime.Enable = false
 		self.IconLock.Enable = false
 		self.TextCount.Enable = false

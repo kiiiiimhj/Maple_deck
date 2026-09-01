@@ -102,6 +102,10 @@ script GameManager extends Logic
 	@Sync
 	property integer SelectedEpisode = 1
 
+	-- 에피소드별 몬스터 능력치 배율(2026-09-02 유저 지정) — 체력(GetTimeStepHp)과 공격력(GetWaveAttack)에
+	-- 같은 값을 곱한다. 키가 없는 에피소드는 1.0.
+	property any _episodeStatMultipliers = { [1] = 1.0, [2] = 1.25, [3] = 1.5 }
+
 	@Sync
 	property boolean TimeAttackMode = false
 
@@ -151,13 +155,21 @@ script GameManager extends Logic
 	-- 이어하기를 주지 않고 GameOverUI가 "다시하기만" 모드로 뜬다. RestartGame/RequestContinue에서 해제.
 	property number ExpPerKill = 30
 
-	property integer GoldPerKill = 5
+	-- 몬스터 1마리 처치당 지급 골드 (유저 지정 2026-09-01: 5 → 1).
+	-- 유물 성배(8번)의 골드 % 보너스는 킬마다가 아니라 TriggerGameOver에서 런 총액에 한 번에 곱한다.
+	property integer GoldPerKill = 1
 
 	-- 클라이언트 전용: 화면 흔들림 판정을 위한 이전 HP 기억
 	property integer _prevPlayerHp = 100
 
 	-- 피격 무적 (동시 다중 피격 방지)
 	property boolean _hitImmune = false
+	-- 유물 팬더 허수아비(15번) 저체력 무적 상태.
+	-- _relicInvulnUntil 은 무적이 끝나는 시각(ElapsedSeconds) — 기본 피격 무적(0.8초) 해제 타이머가
+	-- 유물 무적을 먼저 풀어버리지 않도록 비교용으로 쓴다.
+	-- _relicInvulnArmed 는 재장전 여부 — 체력이 10% 위로 올라오면 다시 true가 된다.
+	property number _relicInvulnUntil = 0
+	property boolean _relicInvulnArmed = true
 
 	-- UI 바인딩 (클라이언트 전용)
 	property SliderComponent hpBar = "da3cd53f-f7a1-4345-b09b-2f0e7d0b658e"
@@ -1063,8 +1075,15 @@ script GameManager extends Logic
 		-- 달팽이→파란달팽이→스포아→빨간달팽이→슬라임→돼지→주니어부기→스텀프→옥토퍼스→리본돼지(보스)
 		-- Card1 쿨타임 0.8s 기준 1회 공격당 대미지 (플레이어 HP=100)
 		local attacks = {3, 3, 5, 7, 10, 12, 14, 16, 18, 20}
-		if wave <= 10 then return attacks[wave] end
-		return math.floor(attacks[9] + 3 * (wave - 9))
+		local base = 0
+		if wave <= 10 then
+			base = attacks[wave]
+		else
+			base = math.floor(attacks[9] + 3 * (wave - 9))
+		end
+		-- 공격력도 체력과 같은 에피소드 배율을 쓴다(2026-09-02 유저 지정: "체력 늘어난 만큼").
+		-- 체력만 올리면 몬스터가 단단하기만 하고 위협적이지는 않아서 난이도 체감이 안 맞는다.
+		return math.floor(base * self:GetEpisodeStatMultiplier())
 	end
 
 	@ExecSpace("ServerOnly")
@@ -1082,9 +1101,30 @@ script GameManager extends Logic
 	@ExecSpace("ServerOnly")
 	method integer GetTimeStepHp(integer step)
 		local stepCount = #self._hpStepValues
-		if step < stepCount then return self._hpStepValues[step + 1] end
-		local lastValue = self._hpStepValues[stepCount]
-		return math.floor(lastValue * (1.15 ^ (step - stepCount + 1)))
+		local base = 0
+		if step < stepCount then
+			base = self._hpStepValues[step + 1]
+		else
+			local lastValue = self._hpStepValues[stepCount]
+			base = math.floor(lastValue * (1.15 ^ (step - stepCount + 1)))
+		end
+		-- 에피소드가 올라갈수록 같은 시간대라도 몬스터가 단단해진다(2026-09-02 유저 지정).
+		-- 장비 등급/강화 진행도가 이 배율을 한 단계씩 앞서도록 EnhanceScrollLogic 수치를 잡아두었다.
+		return math.floor(base * self:GetEpisodeStatMultiplier())
+	end
+
+	-- 에피소드별 몬스터 능력치 배율 — 체력과 공격력에 함께 곱한다. 표에 없으면 1.0(기본).
+	--   1 태초의 마을 100% / 2 구름정원 125% / 3 엘나스 150%
+	-- 맵 선택 화면(WorldSelect)이 이 값을 그대로 읽어 "공격력 125% / 체력 125%"로 표시한다.
+	method number GetEpisodeStatMultiplier()
+		return self:GetEpisodeStatMultiplierFor(self.SelectedEpisode)
+	end
+
+	-- 특정 에피소드의 배율 — 맵 선택 화면처럼 아직 고르지 않은 에피소드를 미리 보여줄 때 쓴다
+	method number GetEpisodeStatMultiplierFor(integer episode)
+		local mult = self._episodeStatMultipliers[episode]
+		if mult == nil then return 1.0 end
+		return mult
 	end
 
 	-- 웨이브별 몬스터 접근 속도 반환 (Wave 10 보스만 느리게 접근, 11부터는 평시 속도로 복귀)
@@ -3512,21 +3552,66 @@ script GameManager extends Logic
 		
 		local gearReduction = _GearEffectLogic:GetDamageTakenReduction()
 		if gearReduction > 0 then dmg = math.floor(dmg * (1.0 - gearReduction)) end
+		-- 유물 검은 방패(17번) — 장비 피해 감소와 같은 자리에서 곱연산으로 한 번 더 깎는다
+		local relicReduction = _RelicInventory:GetDamageTakenReduction()
+		if relicReduction > 0 then dmg = math.floor(dmg * (1.0 - relicReduction)) end
 		dmg = _GearEffectLogic:AbsorbDamage(dmg)
-		
+
 		self.PlayerHp = self.PlayerHp - dmg
 		log("Player hit! HP:" .. self.PlayerHp .. " (Wave " .. self.Wave .. " timeStep:" .. timeStep .. " dmg:" .. dmg .. ")")
 		-- 슈트B 레전더리(HP 20% 이하 즉시 회복)는 피해가 적용된 "뒤"에 판정해야 한다
 		_GearEffectLogic:OnAfterDamaged()
-		
+
+		-- 유물 팬더 허수아비(15번) — 체력이 10% 미만으로 떨어지는 순간 일정 시간 무적.
+		-- 10% 위로 회복하면 다시 장전되므로 한 런에서 여러 번 발동할 수 있지만, 10% 아래에
+		-- 머무는 동안 매 피격마다 재발동하지는 않는다.
+		self:TryRelicLowHpInvuln()
+
 		_TimerService:SetTimerOnce(function()
-			if isvalid(self) then self._hitImmune = false end
+			-- 유물 무적이 걸려 있는 동안에는 기본 피격 무적(0.8초)이 먼저 끝나도 풀지 않는다
+			if isvalid(self) and _UtilLogic.ElapsedSeconds >= self._relicInvulnUntil then
+				self._hitImmune = false
+			end
 		end, 0.8)
-		
+
 		if self.PlayerHp <= 0 then
 			self.PlayerHp = 0
 			self:TriggerGameOver()
 		end
+	end
+
+	-- 유물 수리검(10번) — 치명타로 마무리한 몬스터에 한해 확률로 골드를 한 번 더 지급한다(2배 효과).
+	-- MonsterAI.Die()가 마지막 타격이 치명타였을 때만 호출한다.
+	@ExecSpace("ServerOnly")
+	method void TryRelicCritCoinBonus()
+		if self.GameOver then return end
+		local chance = _RelicInventory:GetCritCoinChance()
+		if chance <= 0 then return end
+		if _UtilLogic:RandomDouble() >= chance then return end
+		self:AddGold(self:GetGoldPerKill())
+		log("Relic critCoin: gold doubled")
+	end
+
+	-- 유물 팬더 허수아비(15번) 발동 판정 — 피해가 적용된 "뒤"에 호출해야 한다
+	@ExecSpace("ServerOnly")
+	method void TryRelicLowHpInvuln()
+		local seconds = _RelicInventory:GetLowHpInvulnSeconds()
+		if seconds <= 0 then return end
+		local threshold = self.PlayerMaxHp * 0.1
+		if self.PlayerHp > threshold then
+			-- 10% 위로 돌아왔으면 다음 발동을 위해 재장전한다
+			self._relicInvulnArmed = true
+			return
+		end
+		if not self._relicInvulnArmed then return end
+		if self.PlayerHp <= 0 then return end
+		self._relicInvulnArmed = false
+		self._hitImmune = true
+		self._relicInvulnUntil = _UtilLogic.ElapsedSeconds + seconds
+		log("Relic lowHpInvuln: " .. tostring(seconds) .. "s")
+		_TimerService:SetTimerOnce(function()
+			if isvalid(self) then self._hitImmune = false end
+		end, seconds)
 	end
 
 	@ExecSpace("ServerOnly")
