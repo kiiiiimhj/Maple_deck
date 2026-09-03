@@ -9,8 +9,40 @@ script ShopUI extends Logic
 	property integer itemCount = 6
 	property integer currentIndex = 0
 	property number scrollTweenDuration = 0.28
-	-- 카드 340 + 간격 24 * 5장 + 좌우 패딩 40 - 뷰포트 1300 = 실제로 드래그 가능한 스크롤 폭(px)
-	property number scrollableRangePx = 900
+	-- 카드 391 * 6장 + 간격 28 * 5 + 좌우 패딩 46 - 뷰포트 1300 = 실제로 드래그 가능한 스크롤 폭(px).
+	-- 카드 크기를 바꾸면 이 값도 같이 고쳐야 드래그 감도가 어긋나지 않는다
+	property number scrollableRangePx = 1232
+
+	-- 인앱 상품을 Maker 포털에 실제로 등록하기 전까지는 false로 둔다. false면 카드를 눌러도 결제창을
+	-- 띄우지 않고 "준비 중" 안내만 보여준다 — 등록 안 된 productId로 PromptPurchase를 호출하면
+	-- 결제창 대신 오류만 뜨기 때문이다. 등록이 끝나면 ShopPurchaseLogic의 상품 ID를 실제 값으로 갈고
+	-- 이 값을 true로 바꾸면 그대로 결제가 붙는다
+	property boolean ProductsRegistered = false
+
+	-- 구매 준비중/실패 안내 배너. 공용 토스트(ToastGroup)는 별도 UIGroup이라 로비 위로 못 올라오고
+	-- GroupOrder는 건드리면 다른 .ui 순서까지 틀어지므로, ShopPanel 안에 자체 배너를 두고 쓴다
+	property Entity noticeBanner = "ecde70a5-c6a8-4d92-bdb7-aed8f5b17351"
+	property TextGUIRendererComponent noticeText = "4e364a51-fa43-4cd2-9742-a3de8e74dd76"
+	property number NoticeHoldSeconds = 2.5
+
+	property table _cardHandlers = {}
+	property integer _noticeTimerId = 0
+
+	-- 상단 탭(랭킹탭과 동일한 방식 — 버튼 스프라이트 색만 on/off로 바꾸고 내용 컨테이너를 토글한다)
+	property ButtonComponent tabDiamond = "a8f48a1b-6b99-4f61-9183-903941fdbdba"
+	property ButtonComponent tabSkin = "06c9008b-2d50-4603-adc7-9cc0482e19fb"
+	property Entity skinPanel = "fa83c977-b38f-4ab8-ae49-bf3e2f4eef0b"
+	property Color TabOnColor = Color(0.85, 0.63, 0.24, 1)
+	property Color TabOffColor = Color(0.34, 0.21, 0.11, 1)
+	property string _currentTab = "diamond"
+	property any _tabDiamondHandler = nil
+	property any _tabSkinHandler = nil
+
+	property Entity skinPanelRoot = "fa83c977-b38f-4ab8-ae49-bf3e2f4eef0b"
+	property Color SkinEquippedLabelColor = Color(1, 0.82, 0.35, 1)
+	property Color SkinNormalLabelColor = Color(1, 0.914, 0.659, 1)
+	property Color SkinLockedLabelColor = Color(0.62, 0.62, 0.68, 1)
+	property table _skinHandlers = {}
 
 	property any _prevHandler = nil
 	property any _nextHandler = nil
@@ -30,6 +62,220 @@ script ShopUI extends Logic
 		self._dragHandler = self.scrollTouchArea:ConnectEvent(UITouchDragEvent, self.OnScrollDrag)
 		-- 하단 스크롤바 핸들을 직접 끌면 카드 목록도 같이 움직이도록 연결한다
 		self._scrollBarHandler = self.scrollBar.Entity:ConnectEvent(SliderValueChangedEvent, self.OnScrollBarChanged)
+
+		self._tabDiamondHandler = self.tabDiamond.Entity:ConnectEvent(ButtonClickEvent, function() self:SelectTab("diamond") end)
+		self._tabSkinHandler = self.tabSkin.Entity:ConnectEvent(ButtonClickEvent, function() self:SelectTab("skin") end)
+
+		self.noticeBanner.Enable = false
+		self:ApplyProducts()
+		self:ConnectCards()
+		self:ConnectSkinCards()
+		self:RefreshSkinCards()
+		self:SelectTab("diamond")
+		log("ShopUI: shop tab ready, registered=" .. tostring(self.ProductsRegistered))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ConnectSkinCards()
+		-- 카드 8장을 눌렀을 때 몇 번 스킨인지 알아야 해서 인덱스를 클로저로 잡아 연결한다
+		local cat = _DamageSkinLogic:GetCatalog()
+		for i = 1, #cat do
+			local capturedIndex = i
+			local card = self.skinPanelRoot:GetChildByName("SkinCard_" .. tostring(i))
+			if isvalid(card) then
+				local h = card:ConnectEvent(ButtonClickEvent, function() self:OnSkinCardClicked(capturedIndex) end)
+				table.insert(self._skinHandlers, { entity = card, eventHandler = h })
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshSkinCards()
+		-- 보유/장착 상태에 맞춰 카드 문구와 색을 다시 칠한다.
+		-- DamageSkinLogic 의 @Sync 값이 바뀔 때마다(OnSyncProperty) 다시 불린다
+		local cat = _DamageSkinLogic:GetCatalog()
+		local equippedKey = _DamageSkinLogic:GetEquippedKey()
+
+		for i = 1, #cat do
+			local entry = cat[i]
+			local card = self.skinPanelRoot:GetChildByName("SkinCard_" .. tostring(i))
+			if isvalid(card) then
+				local owned = _DamageSkinLogic:IsOwned(entry.key)
+				local equipped = (entry.key == equippedKey)
+
+				local nameText = card:GetChildByName("NameText")
+				if isvalid(nameText) then nameText.TextGUIRendererComponent.Text = entry.name end
+
+				local statusLabel = ""
+				local labelColor = self.SkinNormalLabelColor
+				if equipped then
+					statusLabel = "장착중"
+					labelColor = self.SkinEquippedLabelColor
+				elseif owned then
+					statusLabel = "장착하기"
+				elseif entry.starterOnly then
+					statusLabel = "스타터팩 전용"
+					labelColor = self.SkinLockedLabelColor
+				else
+					statusLabel = "다이아 " .. tostring(entry.price)
+				end
+
+				-- 카드/버튼이 그림(금테 아트)으로 바뀌어서 예전처럼 스프라이트를 틴트하면 아트가 물든다.
+				-- 상태 구분은 버튼 안 글씨 색으로만 한다
+				local box = card:GetChildByName("StatusBox")
+				if isvalid(box) then
+					local statusText = box:GetChildByName("StatusText")
+					if isvalid(statusText) then
+						statusText.TextGUIRendererComponent.Text = statusLabel
+						statusText.TextGUIRendererComponent.FontColor = labelColor
+					end
+				end
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnSkinCardClicked(integer index)
+		local cat = _DamageSkinLogic:GetCatalog()
+		local entry = cat[index]
+		if entry == nil then return end
+
+		local owned = _DamageSkinLogic:IsOwned(entry.key)
+		if owned then
+			if entry.key == _DamageSkinLogic:GetEquippedKey() then return end
+			_DamageSkinLogic:RequestEquip(entry.key)
+			return
+		end
+
+		if entry.starterOnly then
+			self:ShowNotice("스타터 패키지에서만 얻을 수 있어요")
+			return
+		end
+
+		_DamageSkinLogic:RequestBuy(entry.key)
+	end
+
+	@ExecSpace("Multicast")
+	method void NotifyPurchaseFailed(string message)
+		-- 서버(RequestBuy)가 다이아 부족 등으로 거절했을 때 사유를 띄운다.
+		-- TitleUI.NotifyCoinsChanged 와 같은 이유로 Multicast 를 쓴다
+		if not self:IsClient() then return end
+		self:ShowNotice(message)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SelectTab(string tabName)
+		-- 다이아 탭은 기존 상품 스크롤(ScrollArea + 하단 스크롤바)을, 스킨 탭은 SkinPanel을 보여준다
+		self._currentTab = tabName
+		local isDiamond = (tabName == "diamond")
+		self.scrollTouchArea.Enable = isDiamond
+		self.scrollBar.Entity.Enable = isDiamond
+		self.skinPanel.Enable = not isDiamond
+		self:RefreshTabVisual()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshTabVisual()
+		-- 선택된 탭만 밝은 금색, 나머지는 어두운 갈색 (RankUI.RefreshTabVisual과 동일 패턴)
+		local d = self.tabDiamond.Entity.SpriteGUIRendererComponent
+		local s = self.tabSkin.Entity.SpriteGUIRendererComponent
+		if self._currentTab == "diamond" then
+			d.Color = self.TabOnColor
+			s.Color = self.TabOffColor
+		else
+			d.Color = self.TabOffColor
+			s.Color = self.TabOnColor
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ApplyProducts()
+		-- 카드에 찍히는 문구를 ShopPurchaseLogic의 상품표에서 그대로 가져와 채운다. 표시 문구와 실제
+		-- 지급량이 갈라지지 않도록 원본은 그쪽 한 곳에만 둔다(.ui의 텍스트는 에디터용 자리표시일 뿐)
+		local products = _ShopPurchaseLogic:GetProducts()
+		local list = self.productScroll.Entity
+		for i = 1, #products do
+			local p = products[i]
+			local card = list:GetChildByName("ProductCard_" .. tostring(i - 1))
+			if isvalid(card) then
+				local nameText = card:GetChildByName("NameText")
+				if isvalid(nameText) then nameText.TextGUIRendererComponent.Text = p.name end
+
+				local descText = card:GetChildByName("DescText")
+				if isvalid(descText) then descText.TextGUIRendererComponent.Text = p.desc end
+
+				local priceBox = card:GetChildByName("PriceBox")
+				if isvalid(priceBox) then
+					local priceText = priceBox:GetChildByName("PriceText")
+					if isvalid(priceText) then priceText.TextGUIRendererComponent.Text = p.price end
+				end
+
+				-- 스타터팩만 다이아 아이콘 옆에 골드 아이콘을 같이 띄운다
+				local iconSub = card:GetChildByName("IconSub")
+				if isvalid(iconSub) then iconSub.Enable = p.showSub end
+
+				-- 보너스/한정 배지는 있는 카드에만 붙어 있다(다이아 300/600은 배지 엔티티 자체가 없음)
+				local badge = card:GetChildByName("BonusBadge")
+				if isvalid(badge) and p.badge ~= nil then
+					local badgeText = badge:GetChildByName("BadgeText")
+					if isvalid(badgeText) then badgeText.TextGUIRendererComponent.Text = p.badge end
+				end
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ConnectCards()
+		-- 카드 6장 각각을 눌렀을 때 몇 번 상품인지 알아야 해서 인덱스를 클로저로 잡아 연결한다
+		local products = _ShopPurchaseLogic:GetProducts()
+		local list = self.productScroll.Entity
+		for i = 1, #products do
+			local capturedIndex = i
+			local card = list:GetChildByName("ProductCard_" .. tostring(i - 1))
+			if isvalid(card) then
+				local h = card:ConnectEvent(ButtonClickEvent, function() self:OnProductClicked(capturedIndex) end)
+				table.insert(self._cardHandlers, { entity = card, eventHandler = h })
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnProductClicked(integer index)
+		-- 카드 클릭 → 실제 결제창은 MSW의 월드상점이 띄워준다. 지급은 서버의 ShopPurchaseLogic 콜백이 담당
+		local products = _ShopPurchaseLogic:GetProducts()
+		local p = products[index]
+		if p == nil then return end
+
+		if not self.ProductsRegistered then
+			self:ShowNotice("상품 준비 중입니다")
+			log("ShopUI: purchase blocked, products not registered yet (id=" .. p.id .. ")")
+			return
+		end
+
+		log("ShopUI: PromptPurchase " .. p.id)
+		_WorldShopService:PromptPurchase(p.id)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ShowNotice(string message)
+		-- 배너를 띄우고 NoticeHoldSeconds 뒤에 끈다. 연타로 여러 번 불리면 앞 타이머를 버리고 다시 잰다
+		self.noticeText.Text = message
+		self.noticeBanner.Enable = true
+		if self._noticeTimerId ~= 0 then _TimerService:ClearTimer(self._noticeTimerId) end
+		self._noticeTimerId = _TimerService:SetTimerOnce(function()
+			self.noticeBanner.Enable = false
+			self._noticeTimerId = 0
+		end, self.NoticeHoldSeconds)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetProductSoldOut(integer index, boolean soldOut)
+		-- 1회한정 상품을 이미 산 유저에게 "구매 완료" 덮개를 씌운다. 인앱 등록 후 구매이력을 읽어와
+		-- 호출할 자리 — 지금은 아무도 부르지 않으므로 덮개는 계속 꺼진 상태다
+		local card = self.productScroll.Entity:GetChildByName("ProductCard_" .. tostring(index - 1))
+		if not isvalid(card) then return end
+		local cover = card:GetChildByName("SoldOutCover")
+		if isvalid(cover) then cover.Enable = soldOut end
 	end
 
 	@ExecSpace("ClientOnly")
@@ -108,6 +354,17 @@ script ShopUI extends Logic
 		if self._dragHandler then self.scrollTouchArea:DisconnectEvent(UITouchDragEvent, self._dragHandler) end
 		if self._scrollBarHandler then self.scrollBar.Entity:DisconnectEvent(SliderValueChangedEvent, self._scrollBarHandler) end
 		if self._scrollTween then self._scrollTween:Stop() end
+		for _, rec in ipairs(self._cardHandlers) do
+			if isvalid(rec.entity) then rec.entity:DisconnectEvent(ButtonClickEvent, rec.eventHandler) end
+		end
+		self._cardHandlers = {}
+		if self._noticeTimerId ~= 0 then _TimerService:ClearTimer(self._noticeTimerId) end
+		if self._tabDiamondHandler then self.tabDiamond.Entity:DisconnectEvent(ButtonClickEvent, self._tabDiamondHandler) end
+		if self._tabSkinHandler then self.tabSkin.Entity:DisconnectEvent(ButtonClickEvent, self._tabSkinHandler) end
+		for _, rec in ipairs(self._skinHandlers) do
+			if isvalid(rec.entity) then rec.entity:DisconnectEvent(ButtonClickEvent, rec.eventHandler) end
+		end
+		self._skinHandlers = {}
 	end
 
 end

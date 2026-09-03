@@ -1,0 +1,57 @@
+@Logic
+script ShopPurchaseLogic extends Logic
+
+	-- 상점 인앱 상품의 단일 원본.
+	--
+	-- id       : Maker 포털에 인앱 상품을 등록하면 발급되는 productId. 지금 값은 전부 자리표시라
+	--            등록 후 실제 ID로 갈아끼워야 하고, 그 뒤 ShopUI.ProductsRegistered를 true로 올린다.
+	-- name/desc/price : 카드에 찍히는 문구. ShopUI:ApplyProducts()가 여기서 읽어간다.
+	-- diamond/coin    : 결제 성공 시 실제로 지급할 양. 표시 문구와 지급량이 갈라지지 않게 한 테이블에 같이 둔다.
+	-- badge    : 우상단 배지 문구(없으면 nil). 배지 색은 .ui에 박혀 있는 순수 스타일이라 여기서 안 다룬다.
+	-- showSub  : 다이아 아이콘 옆에 골드 아이콘도 같이 띄울지(스타터팩만 true).
+	--
+	-- 카드 순서 = ProductCard_0 ~ ProductCard_5 순서다. 항목을 늘리려면 .ui의 카드도 같이 늘려야 한다.
+	method table GetProducts()
+		-- 상품표를 매번 새로 만들어 돌려준다(6줄짜리라 비용이 없고, OnBeginPlay 순서에 안 얽힌다)
+		return {
+			-- 골드는 인게임에서 넘쳐서(보유 900만 규모) 유료 상품 가치가 없다는 판단으로 뺐다.
+			-- 대신 유료 전용 코스메틱인 대미지 스킨(구미호)을 끼워준다 — 상점에서는 안 파는 전용 보상
+			{ id = "starterpack",   name = "스타터 패키지", desc = "다이아 500\n구미호 대미지 스킨", price = "₩1,200",  diamond = 500,  coin = 0,      skin = "gumiho", badge = "1회 한정",    showSub = true  },
+			{ id = "diamond_300",   name = "다이아 300",    desc = "",                          price = "₩3,300",  diamond = 300,  coin = 0,      badge = nil,           showSub = false },
+			{ id = "diamond_600",   name = "다이아 600",    desc = "",                          price = "₩6,500",  diamond = 600,  coin = 0,      badge = nil,           showSub = false },
+			{ id = "diamond_1300",  name = "다이아 1,300",  desc = "보너스 100 포함",           price = "₩13,000", diamond = 1300, coin = 0,      badge = "+8%",         showSub = false },
+			{ id = "diamond_2800",  name = "다이아 2,800",  desc = "보너스 300 포함",           price = "₩26,000", diamond = 2800, coin = 0,      badge = "+12%",        showSub = false },
+			{ id = "diamond_6500",  name = "다이아 6,500",  desc = "보너스 1,100 포함",         price = "₩59,000", diamond = 6500, coin = 0,      badge = "+20%",        showSub = false },
+		}
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		-- 결제가 승인되면 엔진이 ProcessPurchase를 부른다. true를 돌려줘야 결제가 확정되고,
+		-- false면 결제가 취소 처리되므로 지급에 실패했을 때만 false를 준다
+		_WorldShopService:SetProcessPurchaseCallback(self.ProcessPurchase)
+		log("ShopPurchaseLogic: purchase callback registered")
+	end
+
+	-- 인자 타입을 WorldShopPurchaseInfo로 못 적는다(@Misc 타입이라 'type is unavailable' 컴파일 에러).
+	-- any로 받고 필드(.ProductId / .UserId)만 읽는다
+	method boolean ProcessPurchase(any info)
+		-- 결제 성공 콜백(서버). productId로 상품표를 뒤져 해당하는 재화를 지급한다.
+		-- 모르는 productId면 지급할 게 없으므로 false를 반환해 결제를 확정하지 않는다
+		local products = self:GetProducts()
+		for i = 1, #products do
+			local p = products[i]
+			if p.id == info.ProductId then
+				if p.diamond > 0 then _GameManager:AddDiamond(p.diamond) end
+				if p.coin > 0 then _GameManager:AddCoins(p.coin) end
+				if p.skin ~= nil then _DamageSkinLogic:GrantSkin(p.skin) end
+				log("ShopPurchaseLogic: granted " .. p.id .. " (diamond=" .. p.diamond .. ", coin=" .. p.coin .. ", skin=" .. tostring(p.skin) .. ") user=" .. info.UserId)
+				return true
+			end
+		end
+
+		log_error("ShopPurchaseLogic: unknown productId '" .. info.ProductId .. "' — purchase not granted")
+		return false
+	end
+
+end

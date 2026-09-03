@@ -1,0 +1,190 @@
+@Logic
+script DamageSkinLogic extends Logic
+
+	-- 대미지 스킨 보유/장착 관리.
+	--
+	-- skinRuid : _DamageSkinService:Play 에 넘기는 스킨 데이터 RUID. 리소스 검색 인덱스에는 없고
+	--            Maker 의 DamageSkinSettingComponent.DamageSkinId 피커에서만 뽑을 수 있다.
+	-- iconRuid : 상점 카드에 띄우는 32x32 아이템 아이콘(sprite/item). 스킨 데이터와는 별개 리소스라
+	--            iconRuid 를 skinRuid 자리에 넣으면 LEA-3015 CannotLoad 가 난다 — 절대 섞지 말 것.
+	--
+	-- 색 매칭은 아이콘 PNG 의 대표 색상을 계산해서 실제 렌더된 스킨 색과 맞춘 것이다.
+
+	property string StorageName = "PlayerCosmetic"
+	property string StorageKey = "DamageSkin"
+
+	-- 기본 지급 스킨. 저장된 값이 없는 유저는 이걸 보유+장착한 상태로 시작한다
+	property string DefaultSkinKey = "basic"
+
+	-- 클라이언트가 대미지 숫자를 그릴 때 읽는다(MonsterAI.PlayDamageSkin 은 Multicast = 클라 실행).
+	-- @Sync 가 아니면 클라에서 빈 값으로 보여 스킨이 절대 안 바뀐다
+	@Sync
+	property string EquippedRuid = ""
+
+	@Sync
+	property string EquippedKey = ""
+
+	-- 상점 UI(클라)가 보유 여부를 그려야 해서 같이 동기화한다. 콤마로 이어붙인 key 문자열
+	@Sync
+	property string OwnedKeys = ""
+
+	property any _storage = nil
+	property boolean _dirty = false
+	property integer _flushTimerId = 0
+	property number FlushIntervalSeconds = 5
+
+	-- 스킨 카탈로그(단일 원본). 상점 카드 순서 = SkinCard_1 ~ SkinCard_8 순서다
+	method table GetCatalog()
+		-- 매번 새로 만들어 돌려준다 — 8줄짜리라 비용이 없고 OnBeginPlay 순서에 안 얽힌다
+		return {
+			{ key = "basic",      name = "기본",           price = 0,    starterOnly = false,
+			  skinRuid = "6ba67548f43f48f29eb23dafd0766383", iconRuid = "4d0a4fdbfb3e44bc8480b811fd102fc7" },
+			{ key = "jellybean",  name = "젤리빈",         price = 300,  starterOnly = false,
+			  skinRuid = "0910d8fa5eac47dbbff4f30e9fb07a50", iconRuid = "4387f40ac3fa44d6b1f4b2109766e95c" },
+			{ key = "ghost",      name = "고스트",         price = 400,  starterOnly = false,
+			  skinRuid = "4519a6e127d148d984d565f4bb0d176b", iconRuid = "1918b79d2dfa40bdba42249a1b269492" },
+			{ key = "starplanet", name = "스타플래닛",     price = 600,  starterOnly = false,
+			  skinRuid = "3e5ba6404738454192c239d34e25237c", iconRuid = "1e3536f16f084db28f8ff22c7126fc93" },
+			{ key = "blackrose",  name = "블랙로즈",       price = 800,  starterOnly = false,
+			  skinRuid = "c735c6cfd4ea4ff3ab2237014776e64f", iconRuid = "4fb4823f45f14d69a0b02a5273927dd8" },
+			{ key = "legend",     name = "전설의 Ver.2",   price = 1200, starterOnly = false,
+			  skinRuid = "289081862a43452c8fb8287f447d00b2", iconRuid = "8f1c5f4461f3497fb0730a3dba5fde5e" },
+			{ key = "sheriff",    name = "보안관",         price = 1800, starterOnly = false,
+			  skinRuid = "151e0dd3b495485989750562c01f2f8c", iconRuid = "acf2c595bca0484e831c3ce456892d0b" },
+			{ key = "gumiho",     name = "구미호",         price = 0,    starterOnly = true,
+			  skinRuid = "3fe8ef46e23f4aa580681d3467ee6f8f", iconRuid = "4a852844b8a1477992ea4eca75bd17fe" },
+		}
+	end
+
+	method table FindByKey(string key)
+		local cat = self:GetCatalog()
+		for i = 1, #cat do
+			if cat[i].key == key then return cat[i] end
+		end
+		return nil
+	end
+
+	-- 클라/서버 양쪽에서 부른다. 다른 Logic 의 property 를 직접 읽으면 nil 이 나올 수 있어
+	-- 접근은 반드시 이 메서드들을 거친다
+	method string GetEquippedRuid()
+		return self.EquippedRuid
+	end
+
+	method string GetEquippedKey()
+		return self.EquippedKey
+	end
+
+	method boolean IsOwned(string key)
+		-- OwnedKeys 는 "basic,jellybean,ghost" 꼴. 부분일치로 오탐하지 않도록 앞뒤에 콤마를 붙여 비교한다
+		if key == nil or key == "" then return false end
+		return string.find("," .. self.OwnedKeys .. ",", "," .. key .. ",", 1, true) ~= nil
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		self._storage = _DataStorageService:GetGlobalDataStorage(self.StorageName)
+		local errorCode, raw = self._storage:GetAndWait(self.StorageKey)
+
+		-- 저장 포맷: "<장착key>|<보유key1>,<보유key2>,..." — 플랫 문자열이라 4000바이트 근처도 안 간다
+		local loaded = false
+		if errorCode == 0 and raw ~= nil and raw ~= "" then
+			local barIdx = string.find(raw, "|", 1, true)
+			if barIdx ~= nil then
+				local equipKey = string.sub(raw, 1, barIdx - 1)
+				local owned = string.sub(raw, barIdx + 1)
+				if owned ~= "" then
+					self.OwnedKeys = owned
+					local entry = self:FindByKey(equipKey)
+					if entry ~= nil and self:IsOwned(equipKey) then
+						self.EquippedKey = entry.key
+						self.EquippedRuid = entry.skinRuid
+						loaded = true
+					end
+				end
+			end
+		end
+
+		if not loaded then
+			-- 신규 유저(또는 저장값 손상) — 기본 스킨만 보유/장착한 상태로 시작
+			local entry = self:FindByKey(self.DefaultSkinKey)
+			self.OwnedKeys = self.DefaultSkinKey
+			self.EquippedKey = entry.key
+			self.EquippedRuid = entry.skinRuid
+			self._dirty = true
+		end
+
+		-- 코인/다이아와 동일한 지연 flush — 구매/장착이 연달아 일어나도 저장은 모아서 한 번만 쓴다
+		self._flushTimerId = _TimerService:SetTimerRepeat(function() self:FlushIfDirty() end,
+			self.FlushIntervalSeconds, self.FlushIntervalSeconds)
+
+		log("DamageSkinLogic: equipped=" .. self.EquippedKey .. " owned=" .. self.OwnedKeys)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void FlushIfDirty()
+		if not self._dirty then return end
+		self._dirty = false
+		self._storage:SetAndWait(self.StorageKey, self.EquippedKey .. "|" .. self.OwnedKeys)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void GrantSkin(string key)
+		-- 스타터 패키지 결제 등 상점 밖에서 스킨을 지급하는 경로
+		local entry = self:FindByKey(key)
+		if entry == nil then
+			log_error("DamageSkinLogic: GrantSkin unknown key '" .. tostring(key) .. "'")
+			return
+		end
+		if self:IsOwned(key) then return end
+		self.OwnedKeys = self.OwnedKeys .. "," .. key
+		self._dirty = true
+		log("DamageSkinLogic: granted " .. key)
+	end
+
+	@ExecSpace("Server")
+	method void RequestBuy(string key)
+		local entry = self:FindByKey(key)
+		if entry == nil then return end
+		if entry.starterOnly then return end   -- 스타터팩 전용은 상점에서 살 수 없다
+		if self:IsOwned(key) then return end
+
+		if not _GameManager:SpendDiamond(entry.price) then
+			log("DamageSkinLogic: not enough diamond for " .. key .. " (need " .. entry.price .. ")")
+			_ShopUI:NotifyPurchaseFailed("다이아가 부족합니다")
+			return
+		end
+
+		self.OwnedKeys = self.OwnedKeys .. "," .. key
+		self.EquippedKey = entry.key
+		self.EquippedRuid = entry.skinRuid   -- 산 즉시 장착까지 해준다
+		self._dirty = true
+		log("DamageSkinLogic: bought+equipped " .. key)
+	end
+
+	@ExecSpace("Server")
+	method void RequestEquip(string key)
+		local entry = self:FindByKey(key)
+		if entry == nil then return end
+		if not self:IsOwned(key) then return end
+		if self.EquippedKey == key then return end
+		self.EquippedKey = entry.key
+		self.EquippedRuid = entry.skinRuid
+		self._dirty = true
+		log("DamageSkinLogic: equipped " .. key)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnSyncProperty(string name, any value)
+		-- 서버가 보유/장착을 바꾸면 상점 카드 표시를 즉시 갱신한다
+		if name == "OwnedKeys" or name == "EquippedKey" then
+			_ShopUI:RefreshSkinCards()
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnEndPlay()
+		if self._flushTimerId ~= 0 then _TimerService:ClearTimer(self._flushTimerId) end
+		self:FlushIfDirty()
+	end
+
+end
