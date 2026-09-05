@@ -1233,22 +1233,41 @@ script GameManager extends Logic
 
 	-- 웨이브별 몬스터 attack1 애니메이션 RUID. 원본 리소스에 attack1이 없는 몬스터(3/5/6/8/9/10웨이브)는
 	-- 빈 문자열 — MonsterAI가 빈 값이면 스프라이트 교체 대신 스케일 들이받기 연출로 대체한다
+	--
+	-- ⚠ 버그 수정(2026-09-05, 유저 리포트: "달팽이종류 몬스터 공격모션이 다 빠진듯") — 달팽이 3종
+	--   (웨이브 1/2/4)의 attack1은 **1프레임짜리 정지 포즈이고 stand와 눈으로 구분이 안 된다**
+	--   (실측: 달팽이 40×28 1프레임, 파란/빨간 36×36 1프레임 — 썸네일 대조까지 확인).
+	--   2026-08-27 무홉 정책([[feedback_monster_attack_no_hop_policy]])이 "attack1이 있으면 홉을 빼고
+	--   포즈 교체만" 하도록 바꾸면서, 이 3종은 "구분 안 되는 포즈로 0.25초 교체"만 남아 공격이 아예
+	--   안 보이게 됐다. 유저 지시 원문도 "그 모션 없는애들만 점프하는 걸로 만들어(기존 달팽이처럼)"라
+	--   달팽이는 원래 홉 쪽이 정답이다 — 빈 문자열로 되돌려 들이받기+홉 대체 연출을 복구한다.
 	@ExecSpace("ServerOnly")
 	method string GetWaveAttackRUID(integer wave)
 		local ruids = {
-			"a8a1c54cb27f489da57db7cc7ba5db04",  -- Wave  1: 달팽이
-			"781d08d159de4a4fb4d4d4435d2af300",  -- Wave  2: 파란 달팽이
+			"",                                    -- Wave  1: 달팽이 (attack1이 stand와 같은 1프레임 → 홉으로 대체)
+			"",                                    -- Wave  2: 파란 달팽이 (동일)
 			"",                                    -- Wave  3: 스포아 (없음)
-			"6b6bac121ef1497f985ddf339fc6ed7d",  -- Wave  4: 빨간 달팽이
+			"",                                    -- Wave  4: 빨간 달팽이 (동일)
 			"",                                    -- Wave  5: 슬라임 (없음)
 			"",                                    -- Wave  6: 돼지 (없음)
-			"bcc04483577743d9993960f38dfa04d3",  -- Wave  7: 주니어 부기
+			"bcc04483577743d9993960f38dfa04d3",  -- Wave  7: 주니어 부기 (12프레임짜리 진짜 공격 모션)
 			"",                                    -- Wave  8: 스텀프 (없음)
 			"",                                    -- Wave  9: 옥토퍼스 (없음)
 			"",                                    -- Wave 10: 리본 돼지 (없음)
 		}
 		local idx = math.max(1, math.min(wave, #ruids))
 		return ruids[idx]
+	end
+
+	-- 웨이브 종별 attack1 재생시간(초) — 맵 몬스터의 GetMapAttackDuration과 같은 역할.
+	-- ⚠ 버그 수정(2026-09-05): 웨이브 분기는 이 값을 아예 안 넘겨서 MonsterAI._attackDuration이 기본
+	--   0.25초에 머물렀다. 주니어 부기 attack1은 12프레임(1.25초)이라 4/5가 잘려 나가 공격 모션이
+	--   거의 안 보였다(맵 몬스터 쪽 "이 값이 없으면 기본값 0.25초에 잘려서 공격 모션이 거의 안 보인다"
+	--   주석과 완전히 같은 케이스). 프레임당 0.1초 + 0.05초 기준(이 코드베이스 실측 관례).
+	@ExecSpace("ServerOnly")
+	method number GetWaveAttackDuration(integer wave)
+		if wave == 7 then return 1.25 end  -- 주니어 부기 (12프레임)
+		return 0.25
 	end
 
 	-- 맵4~6 전용 몬스터 풀 (idx 1~4) stand 애니메이션 RUID. HP/공격력은 GetWaveHp/GetWaveAttack을

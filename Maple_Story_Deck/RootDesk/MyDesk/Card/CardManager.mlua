@@ -2748,7 +2748,8 @@ script CardManager extends Logic
 	-- 관통을 다 쓰거나 화면 끝에 닿았을 때 알파가 0까지 빠지는 시간
 	property number Card202BallFadeDuration = 0.18
 	property number Card202CastScale = 1.2
-	property number Card202HitScale = 1.0
+	-- 2026-09-05 유저 지정("타격 연출이 너무 큰 것 같은데 줄이자") — 1.0 → 0.7로 30% 축소.
+	property number Card202HitScale = 0.7
 	property number Card202SpawnYOffset = 0.3
 	property number Card202HitYOffset = 0.3
 	-- 리트리트 샷(Card106)과 동일한 횡 관통 방식 — 몬스터가 많은 쪽의 반대편 화면 끝에서 등장해
@@ -2968,6 +2969,323 @@ script CardManager extends Logic
 		end, tickInterval)
 	end
 
+	-- ── 린 전용: 슈리켄 봄버 (카드216, 조합 스킬) — 슈리켄 버스트(202)의 상위 호환.
+	-- 슈리켄 버스트 Lv5 + 자벨린 마스터리(210) + 래디컬 다크니스(212) 보유 시 선택지에 뜨고, 해금되면
+	-- 슈리켄 버스트가 있던 슬롯을 그대로 넘겨받는다(슈퍼 세븐(215)/암살(185)과 동일한 구조 — 패시브
+	-- 2개는 슬롯이 없어 비울 게 없다).
+	-- 매커니즘은 슈리켄 버스트와 완전히 동일한 "화면 끝에서 등장해 같은 줄을 가로지르는 관통형"이고,
+	-- 발사 수는 레벨 무관 2발 고정, 관통 대상이 3마리 → **4마리**로 늘고 비율도 전부 올라간다.
+	-- ⚠ 조합 스킬 관례대로 3레벨까지만 존재한다.
+	--
+	-- 연출(유저 지정):
+	--   · 날아가는 표창 본체는 슈리켄 버스트 것을 그대로 유지(Card202BallRUID) — 속도/판정/페이드도 공유
+	--   · 시전 연출만 신규(Card216Cast…) — 이 연출이 먼저 시작되고 그 뒤에 표창이 날아간다
+	--   · 타격 연출도 신규(Card216Hit…) — 관통으로 맞은 몬스터마다 큼직한 폭발이 터진다
+	-- 두 신규 연출은 프레임 수(6 / 17)가 확정돼 있어 네이티브 재생(루프) 대신 프레임을 직접 이어붙이는
+	-- 수동 재생을 쓴다 — 딱 한 바퀴만 돌고 사라져 "잘리거나 두 번 재생되는" 문제가 원천적으로 없다.
+	@Sync property integer ShurikenBomberLevel = 0
+	property number Card216Cooldown = 8.0  -- 레벨 무관 고정(유저 표, 슈리켄 버스트와 동일)
+	property string Card216Name = "슈리켄 봄버"
+	property string Card216IconRUID = "997b1b9b580b4495a34c185b998bc2ed"
+	-- 시전 연출 6프레임(animationclip f2313e90… 원본 프레임). 슈리켄 버스트는 좌/우 두 벌이 따로
+	-- 있었지만 이 리소스는 한 벌뿐이라 표창과 같은 기준으로 FlipX만 뒤집어 쓴다.
+	property any Card216CastFrameRUIDs = {
+		"e4ba0bb62c51452e9ee70ab6f6581164",
+		"a4cb5fe756a4468f8ac32e8241e6d42f",
+		"f6758d04a98545d389dfccf3979edcff",
+		"99cb9389adcf438981a870d01870704d",
+		"6d23eba84c0e42e3b7039299ce000ea6",
+		"df681cacb2a24011a985a89631d8ea72",
+	}
+	property number Card216CastFrameStepDuration = 0.06
+	property number Card216CastScale = 0.9
+	property boolean Card216CastFacesRight = true
+	-- 시전 연출이 먼저 시작되고 그 뒤에 표창이 날아간다(유저 지정) — 표창 스폰을 이만큼 늦춘다.
+	property number Card216CastLeadTime = 0.12
+	-- 타격 연출 17프레임(animationclip 3a11192a… 원본 프레임)
+	property any Card216HitFrameRUIDs = {
+		"1221545c0e8e4258906df130ecb90d86",
+		"a350dfc458f241d0981021b8686cc414",
+		"c653389d2d5d44198fc855b6767711c8",
+		"c4a522e2e96948dc85fc2b8e25a4486f",
+		"348cb3ad1b18492bb810c0f9014c1514",
+		"b2e070197e7c4eeca448352b06c15a1e",
+		"a3a60003ba634966b3b49fef1a2ff397",
+		"b4cccb5546ad45c5bb775fb686114ce5",
+		"ae4838dc7c964c40a73aca39cc876fe5",
+		"cbdffdf4bda54aac9c29c8bfaf4d8720",
+		"f3c39e443c8b4cbe84b2b66548c6f09c",
+		"dad6c1f2fb384e7799d4a7897eac2a92",
+		"8488e5142b1d4d62920c4926726976cb",
+		"a59483b03ac44db8a5180dedda3589a1",
+		"1a5c19f9aba34ad4be00161c2beee5d8",
+		"00024cd0545345aba76b56281f44e036",
+		"ee8f3f73e4514428be07470f83c62e85",
+	}
+	property number Card216HitFrameStepDuration = 0.05
+	-- 원본이 591×448로 슈리켄 버스트 타격(254×129)보다 훨씬 크다. 처음엔 0.5로 잡았는데 화면을
+	-- 덮어서, 2026-09-05 유저 지정("슈리켄 봄버는 더 줄이고")대로 0.3까지 내렸다(버스트는 -30%,
+	-- 봄버는 -40%). 실효 크기 177×134 vs 버스트 178×90 — 가로는 비슷하고 세로만 더 큰 정도로 맞춤.
+	property number Card216HitScale = 0.3
+	property boolean Card216HitFacesRight = true
+	-- 시전 사운드만 신규(묵직한 폭발음, 3.9초). 관통 타격음은 발당 최대 5번 겹치므로 짧은 슈리켄
+	-- 버스트 타격음(Card202HitSoundRUID, 1.83초)을 그대로 물려 쓴다.
+	property string Card216UseSoundRUID = "3e22f3bff5b24b7eb3dc588f56b6014f"
+
+	-- 레벨별 기준 대미지(유저 표) — 200/220/240. 조합 스킬이라 3레벨까지만.
+	method number GetShurikenBomberDamage(integer level)
+		if level >= 3 then return 240
+		elseif level >= 2 then return 220
+		end
+		return 200
+	end
+
+	-- 발사 수(유저 표) — 레벨 무관 2발 고정
+	method integer GetShurikenBomberTargetCount(integer level)
+		return 2
+	end
+
+	-- 관통 대상별 대미지 비율(유저 표). 첫 대상은 항상 100%이고 이 표는 그 뒤로 뚫고 지나가며 맞는
+	-- 추가 4마리의 비율이다(슈리켄 버스트는 최대 3마리) — 인덱스 순서가 곧 가까운 순서.
+	method table GetShurikenBomberPiercePercents(integer level)
+		if level >= 3 then return { 0.70, 0.60, 0.50, 0.40 } end
+		if level >= 2 then return { 0.60, 0.50, 0.40, 0.30 } end
+		return { 0.50, 0.40, 0.30, 0.20 }
+	end
+
+	method void PlayShurikenBomberUseSound()
+		-- 시전 순간 1회(발마다가 아님).
+		_SoundOptionLogic:PlaySfx(self.Card216UseSoundRUID, 1.0)
+	end
+
+	method void PlayShurikenBomberHitSound()
+		-- 관통 대상마다. 슈리켄 버스트 타격음을 그대로 쓴다.
+		_SoundOptionLogic:PlaySfx(self.Card202HitSoundRUID, 1.0)
+	end
+
+	-- 시전 연출 — 6프레임을 순서대로 한 번만 재생하고 사라진다(수동 프레임 스왑).
+	@ExecSpace("ServerOnly")
+	method void PlayShurikenBomberCastEffect(Vector3 pos, boolean flyDirRight)
+		-- 슈리켄 봄버 시전 연출(표창이 날아가기 직전 발사 지점에서 열린다).
+		local frames = self.Card216CastFrameRUIDs
+		local frameCount = #frames
+		if frameCount == 0 then return end
+		local fx = self:SpawnEffectWithModel(frames[1], pos, 0, 1.0, self.Card216CastScale, 1.0, "persistenteffect")
+		if fx == nil then return end
+		local renderer = fx.SpriteRendererComponent
+		if renderer ~= nil then
+			if self.Card216CastFacesRight then renderer.FlipX = not flyDirRight
+			else renderer.FlipX = flyDirRight end
+		end
+		local step = self.Card216CastFrameStepDuration
+		for i = 1, frameCount - 1 do
+			local frameRUID = frames[i + 1]
+			_TimerService:SetTimerOnce(function()
+				if isvalid(fx) then
+					local r = fx.SpriteRendererComponent
+					if r ~= nil then r.SpriteRUID = frameRUID end
+				end
+			end, i * step)
+		end
+		_TimerService:SetTimerOnce(function()
+			if isvalid(fx) then fx:Destroy() end
+		end, frameCount * step)
+	end
+
+	-- 타격 연출 — 17프레임을 순서대로 한 번만 재생하고 사라진다(수동 프레임 스왑).
+	@ExecSpace("ServerOnly")
+	method void PlayShurikenBomberHitEffect(Vector3 pos, boolean flyDirRight, number scaleRatio)
+		-- 슈리켄 봄버 관통 타격 폭발.
+		local frames = self.Card216HitFrameRUIDs
+		local frameCount = #frames
+		if frameCount == 0 then return end
+		local scale = self.Card216HitScale * scaleRatio
+		local fx = self:SpawnEffectWithModel(frames[1], pos, 0, 1.0, scale, 1.0, "persistenteffect")
+		if fx == nil then return end
+		local renderer = fx.SpriteRendererComponent
+		if renderer ~= nil then
+			if self.Card216HitFacesRight then renderer.FlipX = not flyDirRight
+			else renderer.FlipX = flyDirRight end
+		end
+		local step = self.Card216HitFrameStepDuration
+		for i = 1, frameCount - 1 do
+			local frameRUID = frames[i + 1]
+			_TimerService:SetTimerOnce(function()
+				if isvalid(fx) then
+					local r = fx.SpriteRendererComponent
+					if r ~= nil then r.SpriteRUID = frameRUID end
+				end
+			end, i * step)
+		end
+		_TimerService:SetTimerOnce(function()
+			if isvalid(fx) then fx:Destroy() end
+		end, frameCount * step)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ShurikenBomberAttack(number damage, boolean isCrit)
+		-- 슈리켄 버스트와 동일하게 몬스터가 많은 쪽의 반대편 화면 끝에서 등장해 무리를 가로지른다.
+		self:PlayShurikenBomberUseSound()
+		local map = self:GetCurrentMap()
+		if map == nil then return end
+
+		local monsters = self:GetMonstersInCurrentZone(map)
+		local leftCount, rightCount = 0, 0
+		for _, mob in ipairs(monsters) do
+			---@type MonsterAI
+			local m = mob
+			if isvalid(m) and not m._dead and isvalid(m.Entity) then
+				local x = m.Entity.TransformComponent.Position.x
+				if x < 0 then leftCount = leftCount + 1
+				elseif x > 0 then rightCount = rightCount + 1 end
+			end
+		end
+		local spawnOnRight = leftCount >= rightCount
+		local launchX = spawnOnRight and -self.Card202SidePositionX or self.Card202SidePositionX
+		local flyDirRight = not spawnOnRight
+
+		local level = self.ShurikenBomberLevel
+		local shotCount = self:GetShurikenBomberTargetCount(level)
+		local usedRows = {}
+		local castZoneIndex = _MapManager.CurrentMapIndex
+
+		for i = 1, shotCount do
+			local delay = (i - 1) * self.Card202ShotInterval
+			_TimerService:SetTimerOnce(function()
+				if not isvalid(self) then return end
+				self:FireShurikenBomberShot(map, launchX, flyDirRight, usedRows, damage, isCrit, castZoneIndex)
+			end, delay)
+		end
+		log("ShurikenBomberAttack: shots=" .. shotCount .. " spawnOnRight=" .. tostring(spawnOnRight) .. " lv=" .. level)
+	end
+
+	-- 표창 한 발 — 슈리켄 버스트(FireShurikenBurstShot)와 같은 흐름이지만, 시전 연출을 먼저 띄우고
+	-- Card216CastLeadTime 뒤에 표창을 내보낸다(유저 지정: "이 연출이 시작되고 수리검이 날아감").
+	@ExecSpace("ServerOnly")
+	method void FireShurikenBomberShot(Entity map, number launchX, boolean flyDirRight, table usedRows, number damage, boolean isCrit, integer castZoneIndex)
+		-- 발사 위치에서 가장 가까운(아직 다른 발이 안 쓴) 몬스터의 줄(Y)을 잡아 그 높이에서 가로지른다.
+		if castZoneIndex ~= _MapManager.CurrentMapIndex then return end
+		local primary = nil
+		local bestDist = -1
+		for _, mob in ipairs(self:GetMonstersInCurrentZone(map)) do
+			---@type MonsterAI
+			local m = mob
+			if isvalid(m) and not m._dead and isvalid(m.Entity) and not usedRows[m] then
+				local d = math.abs(m.Entity.TransformComponent.Position.x - launchX)
+				if bestDist < 0 or d < bestDist then
+					bestDist = d
+					primary = m
+				end
+			end
+		end
+		if primary == nil then return end
+		usedRows[primary] = true
+
+		local pp = primary.Entity.TransformComponent.Position
+		local launchPos = Vector3(launchX, pp.y + self.Card202SpawnYOffset, pp.z)
+
+		self:PlayShurikenBomberCastEffect(launchPos, flyDirRight)
+
+		local capturedMap = map
+		local capturedDamage = damage
+		local capturedIsCrit = isCrit
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) then return end
+			self:LaunchShurikenBomberBall(capturedMap, launchPos, launchX, flyDirRight, capturedDamage, capturedIsCrit, castZoneIndex)
+		end, self.Card216CastLeadTime)
+	end
+
+	-- 표창 본체 — 이동/판정/페이드는 슈리켄 버스트와 완전히 동일한 프로퍼티를 공유한다(유저 지정으로
+	-- 날아가는 연출을 그대로 유지). 다른 건 관통 비율표(4마리)와 타격 연출뿐이다.
+	@ExecSpace("ServerOnly")
+	method void LaunchShurikenBomberBall(Entity map, Vector3 launchPos, number launchX, boolean flyDirRight, number damage, boolean isCrit, integer castZoneIndex)
+		-- 시전 연출이 열린 자리에서 표창이 출발해 화면을 가로지르며 관통 판정을 돌린다.
+		if castZoneIndex ~= _MapManager.CurrentMapIndex then return end
+		local spawnZ = launchPos.z - self.Card202BallZLift
+		local ballZ = spawnZ - self.EffectDepthEpsilon
+		local fx = self:SpawnEffectWithModel(self.Card202BallRUID, Vector3(launchPos.x, launchPos.y, spawnZ), 0, 1.0, self.Card202BallScale, 1, "persistenteffect")
+		if fx == nil then return end
+		local renderer = fx.SpriteRendererComponent
+		if renderer ~= nil then
+			if self.Card202BallFacesRight then renderer.FlipX = not flyDirRight
+			else renderer.FlipX = flyDirRight end
+		end
+
+		-- flyDirRight(화면상 오른쪽)는 좌표계상 음수 방향이다
+		local dir = flyDirRight and -1 or 1
+		local edgeX = launchX + dir * (2 * self.Card202SidePositionX)
+		local percents = self:GetShurikenBomberPiercePercents(self.ShurikenBomberLevel)
+		local maxBudget = #percents + 1
+		local rowY = launchPos.y
+		local hitSet = {}
+		local hitCount = 0
+		local elapsedTime = 0
+		local tickInterval = 1 / 60
+		local timerId = nil
+
+		local totalTravelTime = math.abs(edgeX - launchX) / self.Card202BallSpeed
+		_TweenLogic:PlayTween(0.0, 1.0, totalTravelTime, EaseType.Linear, function(t)
+			if not isvalid(fx) then return end
+			local x = launchX + (edgeX - launchX) * t
+			fx.TransformComponent.Position = Vector3(x, rowY, ballZ)
+		end)
+
+		local finished = false
+		local finishBall = function()
+			if finished then return end
+			finished = true
+			if timerId then _TimerService:ClearTimer(timerId) end
+			self:FadeOutShurikenBall(fx)
+		end
+
+		-- Tween과 틱루프가 서로 다른 시계를 써서 끝에서 잠깐 멈춰 보이던 문제 — 같은 시간으로
+		-- 안전장치 타이머를 걸어 확실히 정리한다(슈리켄 버스트와 동일).
+		_TimerService:SetTimerOnce(function()
+			finishBall()
+		end, totalTravelTime)
+
+		timerId = _TimerService:SetTimerRepeat(function()
+			if not isvalid(self) or not isvalid(fx) then
+				if timerId then _TimerService:ClearTimer(timerId) end
+				return
+			end
+			if castZoneIndex ~= _MapManager.CurrentMapIndex then
+				if timerId then _TimerService:ClearTimer(timerId) end
+				if isvalid(fx) then fx:Destroy(0.05) end
+				return
+			end
+			elapsedTime = elapsedTime + tickInterval
+			local curX = launchX + dir * self.Card202BallSpeed * elapsedTime
+
+			for _, mob in ipairs(self:GetMonstersInCurrentZone(map)) do
+				---@type MonsterAI
+				local m = mob
+				if isvalid(m) and not m._dead and isvalid(m.Entity) and not hitSet[m] then
+					local mp = m.Entity.TransformComponent.Position
+					local ddx = mp.x - (curX + self.Card202HitOffsetX)
+					local ddy = mp.y - rowY
+					if self:InRect(ddx, ddy, self.Card202HitRadiusX, self.Card202YBandTolerance) then
+						hitSet[m] = true
+						hitCount = hitCount + 1
+						-- 첫 대상은 100%, 그 뒤로 관통 비율표(4마리)를 순서대로 적용한다
+						local finalDamage = damage
+						local pierceIdx = hitCount - 1
+						if pierceIdx > 0 then finalDamage = damage * percents[math.min(pierceIdx, #percents)] end
+						if isCrit then m:TakeDamageCrit(finalDamage * 2)
+						else m:TakeDamage(finalDamage) end
+						self:PlayShurikenBomberHitEffect(Vector3(mp.x, mp.y + self.Card202HitYOffset, launchPos.z), flyDirRight, self:GetEffectScaleRatio(m))
+						self:PlayShurikenBomberHitSound()
+					end
+				end
+			end
+
+			local reachedEdge = (dir > 0 and curX >= edgeX) or (dir < 0 and curX <= edgeX)
+			if hitCount >= maxBudget or reachedEdge then
+				finishBall()
+			end
+		end, tickInterval)
+	end
+
 	-- ── 린 전용: 윈드 탈리스만 (카드203, 슬롯형 액티브 3호) — 광역형.
 	-- 연출 순서(유저 지정): ① 몹 옆(플레이어가 있는 쪽)에서 시전 연출(effect)이 스케일 변화 없이
 	-- 제자리에 생겨 나오고 → ② 같은 자리에서 바람 부적(ball)이 생겨 몬스터 쪽으로 날아가 맞고 →
@@ -3175,6 +3493,300 @@ script CardManager extends Logic
 			end
 		end
 		log("WindTalismanHit: hit=" .. hitCount .. " dmg=" .. math.floor(isCrit and damage * 2 or damage))
+	end
+
+	-- ── 린 전용: 스톰 탈리스만 (카드218, 조합 스킬) — 윈드 탈리스만(203)의 상위 호환.
+	-- 윈드 탈리스만 Lv5 + 시프 커닝(213) + 스피릿 자벨린(211, 둘 다 슬롯 없는 패시브) 보유 시 선택지에
+	-- 뜨고, 해금되면 윈드 탈리스만이 있던 슬롯을 그대로 넘겨받는다(슈퍼 세븐(215)/슈리켄 봄버(216)와
+	-- 동일한 구조). ⚠ 조합 스킬 관례대로 3레벨까지만 존재한다.
+	--
+	-- 매커니즘: 부적이 몬스터 옆에서 생겨 날아가 터지는 광역 타격까지는 윈드 탈리스만과 **완전히 동일**
+	-- (시전/부적/타격 연출·사운드·판정 타원 전부 Card203 프로퍼티를 그대로 공유한다 — 상위 호환이라
+	-- 연출을 갈아엎지 않는다). 여기에 유저 지정으로 **스톰**이 추가된다:
+	--   "스톰은 탈리스만 공격이 끝나면 자연스럽게 생성되어 몬스터한테 이동됨"
+	--   "스톰에 닿으면 대미지 (30/40/50%)"
+	-- → 부적이 터진 그 자리에서 스톰이 알파 페이드인으로 생겨나, 지속시간 동안 가장 가까운 몬스터를
+	--   쫓아 이동하고, 닿은 몬스터에게 기준 대미지의 레벨별 비율만큼 대미지 + 타격 연출을 주고
+	--   페이드아웃으로 사라진다.
+	-- ⚠ 최초 구현(2026-09-05)은 허리케인 아이템처럼 **넉백 전용**이었는데, 같은 날 유저 지정으로
+	--   "그냥 대미지 들어가는 걸로 바꾸자"고 바뀌었다 — 넉백은 완전히 제거됐다.
+	-- ⚠ 같은 몬스터를 매 프레임 때리지 않도록 대상별 재타격 쿨다운(Card218StormHitCooldown)을 둔다
+	--   — 허리케인에서 가져온 구조를 그대로 유지(값도 동일 0.5초).
+	@Sync property integer StormTalismanLevel = 0
+	property number Card218Cooldown = 6.0  -- 레벨 무관 고정(유저 표, 윈드 탈리스만과 동일)
+	property string Card218Name = "스톰 탈리스만"
+	-- ⚠ 유저 제공 아이콘 RUID. 리소스 검색 인덱스에서는 조회되지 않았지만(notFound) 인덱스에 없어도
+	--   실제로는 로드되는 경우가 있어 그대로 넣어둔다 — 인게임에서 아이콘이 비어 보이면 교체 필요.
+	property string Card218IconRUID = "03efd1261b234191a0cfd01e39e35c4b"
+	-- 스톰 본체(신규) — 180×188, 3프레임
+	property string Card218StormRUID = "598b41dbec5d478ba7fdffd6be6f642c"
+	property string Card218StormSoundRUID = "bc493a6500e045b68970acc6bdb45b94"
+	property number Card218StormScale = 1.0
+	-- 스톰 지속시간(유저 표 2s)
+	property number Card218StormDuration = 2.0
+	-- 이동 속도 / 타격 판정 반경 / 대상별 재타격 쿨다운 — 전부 허리케인 아이템과 같은 값
+	-- (GameManager.HurricaneMoveSpeed / HurricaneHitRadius / HurricaneHitCooldown)
+	property number Card218StormMoveSpeed = 4.0
+	property number Card218StormHitRadius = 0.5
+	property number Card218StormHitCooldown = 0.5
+	-- 스톰 타격 연출(유저 제공 2026-09-05) — maplestory/skill/510/skill/5101014/hit/0, 6프레임 124×112.
+	-- 6프레임 × 0.06초 = 0.36초라 수명을 클립 길이에 맞춰 두면 잘리지도 두 번 돌지도 않는다
+	-- (10프레임 이하의 작은 임팩트라 수동 프레임 재생까지는 안 간다).
+	property string Card218StormHitRUID = "95e0e1b196624d059c4f044ae4c75512"
+	property number Card218StormHitScale = 1.0
+	property number Card218StormHitYOffset = 0.3
+	property number Card218StormHitLifetime = 0.36
+	-- 노릴 적이 하나도 없을 때 직진하며 다시 찾아보는 주기(윙대거 RetryInterval과 같은 역할)
+	property number Card218StormRetryInterval = 0.3
+	property number Card218StormYOffset = 0.0
+	-- 스톰이 몬스터보다 앞에 그려지도록 Z를 이만큼 당긴다(허리케인의 HurricaneDepthZ와 같은 이유).
+	-- ⚠ 아래 이동 Tween이 매 프레임 Position을 덮어쓰므로, SpawnEffectWithModel이 내부에서 빼는
+	--   EffectDepthEpsilon까지 포함한 최종 Z를 Tween에도 그대로 써야 첫 프레임에 Z가 튀지 않는다.
+	property number Card218StormZLift = 0.15
+	property number Card218StormFadeInDuration = 0.2
+	property number Card218StormFadeOutDuration = 0.2
+
+	-- 레벨별 기준 대미지(유저 표) — 280/300/320. 조합 스킬이라 3레벨까지만.
+	method number GetStormTalismanDamage(integer level)
+		if level >= 3 then return 320
+		elseif level >= 2 then return 300
+		end
+		return 280
+	end
+
+	-- 타겟 수(유저 표) — 레벨 무관 2명 고정(윈드 탈리스만 Lv3~5와 동일)
+	method integer GetStormTalismanTargetCount(integer level)
+		return 2
+	end
+
+	-- 스톰에 닿았을 때의 대미지 비율(유저 표) — 30/40/50%. 기준은 부적 타격과 같은 damage 값이다.
+	method number GetStormTalismanStormPercent(integer level)
+		if level >= 3 then return 0.50
+		elseif level >= 2 then return 0.40
+		end
+		return 0.30
+	end
+
+	method void PlayStormTalismanStormSound()
+		-- 스톰이 생겨나는 순간(부적 1발당 1회).
+		_SoundOptionLogic:PlaySfx(self.Card218StormSoundRUID, 1.0)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void StormTalismanAttack(number damage, boolean isCrit)
+		-- 윈드 탈리스만과 동일하게 타겟마다 부적을 한 발씩 띄우고, 터진 자리에 스톰을 남긴다.
+		self:PlayWindTalismanUseSound()
+		local map = self:GetCurrentMap()
+		if map == nil then return end
+
+		local targets = self:GetClosestTargets(self:GetStormTalismanTargetCount(self.StormTalismanLevel))
+		for shotIndex, mob in ipairs(targets) do
+			---@type MonsterAI
+			local target = mob
+			if isvalid(target) and isvalid(target.Entity) then
+				-- 연출은 대상 생사와 무관하게 끝까지 재생한다(공통 정책) — 좌표를 시전 시점에 값으로 캡처.
+				local tp = self:WorldToCurrentMapLocal(target.Entity.TransformComponent.WorldPosition)
+				local hitPos = Vector3(tp.x, tp.y + self.Card203HitYOffset, tp.z)
+				local castZoneIndex = target._spawnZoneIndex
+				local capturedTarget = target
+				local capturedMap = map
+				local delay = (shotIndex - 1) * self.Card203ShotInterval
+
+				_TimerService:SetTimerOnce(function()
+					if not isvalid(self) then return end
+					if castZoneIndex ~= _MapManager.CurrentMapIndex then return end
+					self:FireWindTalismanBall(hitPos)
+					-- 부적이 실제로 꽂히는 순간에 타격 연출 + 광역 판정 (윈드 탈리스만 것을 그대로 재사용)
+					_TimerService:SetTimerOnce(function()
+						if not isvalid(self) then return end
+						if castZoneIndex ~= _MapManager.CurrentMapIndex then return end
+						self:ResolveWindTalismanHit(capturedMap, hitPos, damage, isCrit, capturedTarget)
+						-- 유저 지정: "탈리스만 공격이 끝나면 자연스럽게 생성되어 몬스터한테 이동됨"
+						self:SpawnStormTalismanStorm(capturedMap, hitPos, damage, isCrit, castZoneIndex)
+					end, self.Card203CastLeadTime + self.Card203FlightDuration)
+				end, delay)
+			end
+		end
+		log("StormTalismanAttack: targets=" .. #targets .. " lv=" .. self.StormTalismanLevel .. " dmg=" .. math.floor(damage))
+	end
+
+	-- 스톰 하나 — 부적이 터진 자리에서 페이드인으로 생겨나 지속시간 동안 가장 가까운 몬스터를 쫓아
+	-- 이동하고, 닿은 몬스터에게 대미지 + 타격 연출을 준 뒤 페이드아웃으로 사라진다.
+	-- ⚠ 이동은 "목표까지 직선 = 1구간"으로 끊어 Tween을 새로 거는 방식이다(스로잉 윙대거(205)와 동일).
+	--   서버에서 매 틱 Position을 직접 쓰면 클라로 동기화가 안 돼 제자리에 멈춰 보인다. 이전 구간의
+	--   Tween 콜백은 세대 번호(segGen)로 무력화한다.
+	@ExecSpace("ServerOnly")
+	method void SpawnStormTalismanStorm(Entity map, Vector3 pos, number damage, boolean isCrit, integer castZoneIndex)
+		-- 스톰 탈리스만의 스톰 생성 + 추적 이동 + 타격.
+		local spawnZ = pos.z - self.Card218StormZLift
+		local stormZ = spawnZ - self.EffectDepthEpsilon
+		local fx = self:SpawnEffectWithModel(self.Card218StormRUID, Vector3(pos.x, pos.y + self.Card218StormYOffset, spawnZ), 0, 1.0, self.Card218StormScale, 0, "skilleffectlong")
+		if fx == nil then return end
+		self:PlayStormTalismanStormSound()
+
+		local renderer = fx.SpriteRendererComponent
+		if renderer ~= nil then
+			_TweenLogic:PlayTween(0.0, 1.0, self.Card218StormFadeInDuration, EaseType.Linear, function(alpha)
+				if isvalid(renderer) then renderer:SetAlpha(alpha) end
+			end)
+		end
+
+		local speed = self.Card218StormMoveSpeed
+		local totalDuration = self.Card218StormDuration
+		local tickInterval = 1 / 60
+		local timerId = nil
+		local finished = false
+		local totalTime = 0
+		-- 대상별 재타격 쿨다운(허리케인과 동일) — 같은 몬스터를 매 프레임 때리지 않게 막는다
+		local hitCooldowns = {}
+		local hitCount = 0
+		local stormDamage = damage * self:GetStormTalismanStormPercent(self.StormTalismanLevel)
+
+		local segStartX = pos.x
+		local segStartY = pos.y + self.Card218StormYOffset
+		local segDirX = 1.0
+		local segDirY = 0.0
+		local segTime = 0
+		local segDuration = 0
+		local segGen = 0
+
+		local finishStorm = nil
+		finishStorm = function()
+			if finished then return end
+			finished = true
+			segGen = segGen + 1  -- 남아 있는 Tween 콜백 무력화
+			if timerId then _TimerService:ClearTimer(timerId) end
+			log("StormTalismanStorm: ended hits=" .. hitCount .. " tickDmg=" .. math.floor(stormDamage) .. " duration=" .. string.format("%.2f", totalTime))
+			if not isvalid(fx) then return end
+			local fade = self.Card218StormFadeOutDuration
+			if renderer ~= nil then
+				_TweenLogic:PlayTween(renderer.Color.a, 0.0, fade, EaseType.Linear, function(alpha)
+					if isvalid(renderer) then renderer:SetAlpha(alpha) end
+				end)
+			end
+			fx:Destroy(fade)
+		end
+
+		local retarget = nil
+		retarget = function()
+			-- 지금 위치에서 가장 가까운 살아있는 몬스터를 골라 새 구간을 시작한다(윙대거와 달리
+			-- hitSet으로 제외하지 않는다 — 스톰은 대미지가 아니라 넉백이라 같은 대상을 다시 노려도 된다).
+			local best = nil
+			local bestDistSq = 0
+			local bestDX = 0
+			local bestDY = 0
+			for _, mob in ipairs(self:GetMonstersInCurrentZone(map)) do
+				---@type MonsterAI
+				local m = mob
+				if isvalid(m) and not m._dead and isvalid(m.Entity) then
+					local mp = m.Entity.TransformComponent.Position
+					local ddx = mp.x - segStartX
+					local ddy = mp.y - segStartY
+					local d = ddx * ddx + ddy * ddy
+					if best == nil or d < bestDistSq then
+						best = m
+						bestDistSq = d
+						bestDX = ddx
+						bestDY = ddy
+					end
+				end
+			end
+
+			if best == nil then
+				segDuration = self.Card218StormRetryInterval
+			else
+				local dist = math.sqrt(bestDistSq)
+				if dist < 0.001 then dist = 0.001 end
+				segDirX = bestDX / dist
+				segDirY = bestDY / dist
+				segDuration = dist / speed
+			end
+			segTime = 0
+
+			segGen = segGen + 1
+			local myGen = segGen
+			local sx = segStartX
+			local sy = segStartY
+			local dx = segDirX
+			local dy = segDirY
+			local dur = segDuration
+			if dur < 0.02 then dur = 0.02 end
+			_TweenLogic:PlayTween(0.0, 1.0, dur, EaseType.Linear, function(t)
+				if myGen ~= segGen then return end
+				if not isvalid(fx) then return end
+				local tt = t * dur
+				fx.TransformComponent.Position = Vector3(sx + dx * speed * tt, sy + dy * speed * tt, stormZ)
+			end)
+		end
+
+		retarget()
+
+		-- Tween/틱루프가 서로 다른 시계를 써서 끝에서 어긋나는 것 방지(윙대거와 동일한 이중 경로)
+		_TimerService:SetTimerOnce(function()
+			finishStorm()
+		end, totalDuration)
+
+		timerId = _TimerService:SetTimerRepeat(function()
+			if not isvalid(self) or not isvalid(fx) then
+				if timerId then _TimerService:ClearTimer(timerId) end
+				return
+			end
+			-- 이동 도중 존이 넘어가면 즉시 정리한다(다음 존에 남는 것 방지)
+			if castZoneIndex ~= _MapManager.CurrentMapIndex then
+				finishStorm()
+				return
+			end
+			totalTime = totalTime + tickInterval
+			segTime = segTime + tickInterval
+			-- ⚠ 판정 좌표는 **엔티티의 실제 Position을 그대로 읽는다**. 윙대거(205)처럼 틱 누적
+			--   시간으로 좌표를 다시 계산하면 Tween과 시계가 어긋난다 — 라이브 로그에서 지속시간
+			--   2.0초짜리 스톰의 틱 누적이 1.6초로 찍혔다(틱루프가 1/60을 못 지키고 ~50fps로 돔).
+			--   그만큼 판정이 연출보다 뒤처져서, 눈에는 스톰이 지나갔는데 넉백이 안 되는 구간이 생긴다
+			--   ([[feedback_arrow_tween_tickloop_clock_drift]]와 같은 클래스). 이동 Tween은 서버가
+			--   직접 쓰는 값이라 Position이 곧 연출 위치 그 자체다.
+			local stormPos = fx.TransformComponent.Position
+			local curX = stormPos.x
+			local curY = stormPos.y
+
+			for _, mob in ipairs(self:GetMonstersInCurrentZone(map)) do
+				---@type MonsterAI
+				local m = mob
+				if isvalid(m) and not m._dead and isvalid(m.Entity) then
+					local cd = hitCooldowns[m]
+					if cd ~= nil then
+						cd = cd - tickInterval
+						if cd <= 0 then cd = nil end
+						hitCooldowns[m] = cd
+					end
+					if hitCooldowns[m] == nil then
+						local mp = m.Entity.TransformComponent.Position
+						local ddx = mp.x - curX
+						local ddy = mp.y - curY
+						if self:InEllipse(ddx, ddy, self.Card218StormHitRadius, self.Card218StormHitRadius) then
+							-- 유저 지정(2026-09-05 변경): 넉백이 아니라 대미지를 준다(기준 대미지의 30/40/50%).
+							-- 크리티컬은 부적 타격의 판정을 그대로 물려받는다.
+							if isCrit then m:TakeDamageCrit(stormDamage * 2)
+							else m:TakeDamage(stormDamage) end
+							local hfx = self:SpawnEffect(self.Card218StormHitRUID, Vector3(mp.x, mp.y + self.Card218StormHitYOffset, mp.z), 0, 1.0, self.Card218StormHitScale * self:GetEffectScaleRatio(m), 1)
+							if hfx ~= nil then hfx:Destroy(self.Card218StormHitLifetime) end
+							hitCooldowns[m] = self.Card218StormHitCooldown
+							hitCount = hitCount + 1
+						end
+					end
+				end
+			end
+
+			-- 목표 좌표까지 갔으면(그 사이 몹이 이동했거나 죽었으면 포함) 다시 조준한다
+			if segTime >= segDuration then
+				segStartX = curX
+				segStartY = curY
+				retarget()
+			end
+
+			if totalTime >= totalDuration then
+				finishStorm()
+			end
+		end, tickInterval)
 	end
 
 	-- ── 린 전용: 쉐도우 스플릿 (카드204, 슬롯형 액티브 4호) — 분열 컨셉.
@@ -3436,10 +4048,13 @@ script CardManager extends Logic
 				return
 			end
 			elapsedTime = elapsedTime + tickInterval
-			-- 위 Tween과 같은 식으로 좌표를 다시 계산한다(Tween과 틱루프가 서로 다른 시계를 쓰므로
-			-- 엔티티 Position을 읽지 않고 식으로 맞춘다)
-			local curX = originPos.x + vx * elapsedTime
-			local curY = originPos.y + vy * elapsedTime
+			-- ⚠ 버그 수정(2026-09-05) — 원래는 틱 누적 시간으로 좌표를 다시 계산했는데, 그러면 이동
+			--   Tween과 판정이 서로 다른 시계를 쓰게 돼 부하가 걸릴 때 판정이 연출보다 뒤처진다
+			--   (스톰 탈리스만 218에서 2.0초 연출의 틱 누적이 1.6초로 실측). 엔티티 Position이 곧
+			--   연출 위치 그 자체다 — 205/218/219와 같은 수정.
+			local fragPos = fx.TransformComponent.Position
+			local curX = fragPos.x
+			local curY = fragPos.y
 
 			for _, mob in ipairs(self:GetMonstersInCurrentZone(map)) do
 				---@type MonsterAI
@@ -3464,6 +4079,251 @@ script CardManager extends Logic
 		end, tickInterval)
 
 		-- Tween과 틱루프가 서로 다른 시계를 써서 끝에서 잠깐 남는 것을 막는 안전장치(슈리켄 버스트와 동일)
+		_TimerService:SetTimerOnce(function()
+			if timerId then _TimerService:ClearTimer(timerId) end
+			if isvalid(fx) then fx:Destroy() end
+		end, duration)
+	end
+
+	-- ── 린 전용: 팬텀 스플릿 (카드219, 조합 스킬) — 쉐도우 스플릿(204)의 상위 호환.
+	-- 쉐도우 스플릿 Lv5 + 래디컬 다크니스(212) + 스로잉 액셀레이션(209) + 자벨린 마스터리(210)
+	-- (셋 다 슬롯 없는 패시브) 보유 시 선택지에 뜨고, 해금되면 쉐도우 스플릿이 있던 슬롯을 그대로
+	-- 넘겨받는다. ⚠ 린 조합 스킬 중 유일하게 **선행 패시브가 3개**다(215/216/218은 2개, 217은 1개).
+	-- ⚠ 조합 스킬 관례대로 3레벨까지만 존재한다.
+	--
+	-- 매커니즘은 쉐도우 스플릿과 완전히 동일하다 — 몬스터 옆에서 시전 연출 → 표창이 날아가 꽂히며
+	-- 원본 대미지 1회 → 그 자리에서 위쪽으로 분열. 달라지는 건 세 가지뿐:
+	--   · 분열 3개 → **5개**(부채꼴이 넓어지도록 SpreadX도 0.45 → 0.7)
+	--   · 분열 대미지 30~70% → **80/90/100%**
+	--   · 시전/타격/표창 리소스를 전용 세트(maplestory/skill/1411/skill/14111021)로 교체
+	-- 사운드는 유저 지정("사운드는 동일하게")대로 쉐도우 스플릿 것을 그대로 재사용한다.
+	@Sync property integer PhantomSplitLevel = 0
+	property number Card219Cooldown = 6.0  -- 레벨 무관 고정(유저 표, 쉐도우 스플릿과 동일)
+	property string Card219Name = "팬텀 스플릿"
+	property string Card219IconRUID = "0807bdcf057f40b5acd8b4491e86fa84"
+	-- 전용 리소스 3종 — 전부 4프레임이라 쉐도우 스플릿과 같은 수명/재생 설정을 그대로 쓸 수 있다.
+	property string Card219BallRUID = "93fcd9d660184ecab77ddc7f213be31e"   -- 90×49
+	property string Card219CastRUID = "8ec8ef64bcaa4a6fa820cd39a0827aa0"   -- 113×164
+	property string Card219HitRUID = "8fc08b2af4944a90be3f1822479c0fd9"    -- 151×141
+	property number Card219CastScale = 1.0
+	-- 4프레임짜리라 클립 길이(≈0.3초)에 맞춘다 — 더 길게 두면 스프라이트 애니가 루프라 두 번 돈다
+	property number Card219CastLifetime = 0.3
+	property boolean Card219FlipDefault = true
+	property number Card219BallScale = 2.2
+	property number Card219HitScale = 1.0
+	-- 분열 — 유저 표 5개. 조각이 늘어난 만큼 부채꼴을 넓혀야 겹쳐 보이지 않는다(204는 3개에 0.45).
+	property integer Card219SplitCount = 5
+	property number Card219SplitSpreadX = 0.7
+
+	-- 레벨별 기준 대미지(유저 표) — 220/240/260. 조합 스킬이라 3레벨까지만.
+	method number GetPhantomSplitDamage(integer level)
+		if level >= 3 then return 260
+		elseif level >= 2 then return 240
+		end
+		return 220
+	end
+
+	-- 타겟 수(유저 표) — 레벨 무관 2명 고정(쉐도우 스플릿 Lv3~5와 동일)
+	method integer GetPhantomSplitTargetCount(integer level)
+		return 2
+	end
+
+	-- 분열 표창 1개가 넣는 대미지 비율(유저 표) — 80/90/100%
+	method number GetPhantomSplitFragmentPercent(integer level)
+		if level >= 3 then return 1.00
+		elseif level >= 2 then return 0.90
+		end
+		return 0.80
+	end
+
+	-- 시전 연출/표창의 좌우 축 뒤집기 — 쉐도우 스플릿과 같은 이유(어느 쪽 옆에서 생겨나느냐에 따라
+	-- 날아가는 방향이 반대가 된다). 리소스가 달라 기본 방향이 다를 수 있어 플래그를 따로 뒀다.
+	@ExecSpace("ServerOnly")
+	method void ApplyPhantomSplitFlip(Entity fx, boolean movingRight)
+		-- 팬텀 스플릿 연출 좌우 반전.
+		if not isvalid(fx) then return end
+		local renderer = fx.SpriteRendererComponent
+		if renderer == nil then return end
+		if movingRight then
+			renderer.FlipX = self.Card219FlipDefault
+		else
+			renderer.FlipX = not self.Card219FlipDefault
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void PhantomSplitAttack(number damage, boolean isCrit)
+		-- 쉐도우 스플릿과 동일하게 가까운 순서로 타겟을 뽑아 각 타겟 옆에서 표창을 한 발씩 던진다.
+		local map = self:GetCurrentMap()
+		if map == nil then return end
+
+		local targets = self:GetClosestTargets(self:GetPhantomSplitTargetCount(self.PhantomSplitLevel))
+		for shotIndex, mob in ipairs(targets) do
+			---@type MonsterAI
+			local target = mob
+			if isvalid(target) and isvalid(target.Entity) then
+				-- 연출은 대상 생사와 무관하게 끝까지 재생한다(공통 정책) — 좌표를 시전 시점에 값으로 캡처.
+				local tp = self:WorldToCurrentMapLocal(target.Entity.TransformComponent.WorldPosition)
+				local hitPos = Vector3(tp.x, tp.y + self.Card204HitYOffset, tp.z)
+				local castZoneIndex = target._spawnZoneIndex
+				local capturedTarget = target
+				local capturedMap = map
+				local delay = (shotIndex - 1) * self.Card204ShotInterval
+
+				_TimerService:SetTimerOnce(function()
+					if not isvalid(self) then return end
+					if castZoneIndex ~= _MapManager.CurrentMapIndex then return end
+					self:FirePhantomSplitShuriken(hitPos)
+					_TimerService:SetTimerOnce(function()
+						if not isvalid(self) then return end
+						if castZoneIndex ~= _MapManager.CurrentMapIndex then return end
+						self:ResolvePhantomSplitHit(capturedMap, hitPos, damage, isCrit, capturedTarget, castZoneIndex)
+					end, self.Card204CastLeadTime + self.Card204FlightDuration)
+				end, delay)
+			end
+		end
+		log("PhantomSplitAttack: targets=" .. #targets .. " lv=" .. self.PhantomSplitLevel .. " dmg=" .. math.floor(damage))
+	end
+
+	-- 원본 표창 한 발 — 배치/타이밍은 쉐도우 스플릿(FireShadowSplitShuriken)과 완전히 동일하고
+	-- 리소스만 전용 세트를 쓴다.
+	@ExecSpace("ServerOnly")
+	method void FirePhantomSplitShuriken(Vector3 hitPos)
+		-- 팬텀 스플릿 원본 표창 1발 발사 + 시전 연출.
+		local playerLocalX = self:WorldToCurrentMapLocal(Vector3(self:GetPlayerCenterX(), 0, 0)).x
+		local sideSign = 1.0
+		if hitPos.x >= playerLocalX then sideSign = -1.0 end
+		local castPos  = Vector3(hitPos.x + sideSign * self.Card204CastOffsetX,  hitPos.y + self.Card204SpawnOffsetY, hitPos.z)
+		local startPos = Vector3(hitPos.x + sideSign * self.Card204SpawnOffsetX, hitPos.y + self.Card204SpawnOffsetY, hitPos.z)
+		local movingRight = (sideSign < 0)
+
+		local cfx = self:SpawnEffect(self.Card219CastRUID, castPos, 0, 1.0, self.Card219CastScale, 1)
+		if cfx ~= nil then
+			self:ApplyPhantomSplitFlip(cfx, movingRight)
+			cfx:Destroy(self.Card219CastLifetime)
+		end
+
+		-- ⚠ 타겟 생사 체크 없음 — 이 딜레이 사이에 적이 죽어도 표창은 나가야 한다(공통 정책).
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) then return end
+			local fx = self:SpawnEffect(self.Card219BallRUID, startPos, 0, self.Card204BallPlayRate, self.Card219BallScale, 1)
+			if fx == nil then return end
+			self:ApplyPhantomSplitFlip(fx, movingRight)
+			local duration = self.Card204FlightDuration
+			_TweenLogic:PlayTween(0.0, 1.0, duration, EaseType.Linear, function(t)
+				if not isvalid(fx) then return end
+				local x = startPos.x + (hitPos.x - startPos.x) * t
+				local y = startPos.y + (hitPos.y - startPos.y) * t
+				fx.TransformComponent.Position = Vector3(x, y, startPos.z)
+			end)
+			_TimerService:SetTimerOnce(function()
+				if isvalid(fx) then fx:Destroy() end
+			end, duration)
+		end, self.Card204CastLeadTime)
+	end
+
+	-- 원본 표창 충돌 1회 — 대미지 1회 + 타격 연출, 이어서 5갈래로 분열시킨다.
+	@ExecSpace("ServerOnly")
+	method void ResolvePhantomSplitHit(Entity map, Vector3 hitPos, number damage, boolean isCrit, MonsterAI target, integer castZoneIndex)
+		-- 팬텀 스플릿 원본 타격 + 분열 시작.
+		local fx = self:SpawnEffect(self.Card219HitRUID, hitPos, 0, 1.0, self.Card219HitScale, 1)
+		if fx ~= nil then fx:Destroy(self.HitEffectLifetime) end
+		self:PlayShadowSplitHitSound()
+
+		-- 연출은 위에서 이미 재생했고, 대미지만 생존 체크한다(공통 정책)
+		if isvalid(target) and isvalid(target.Entity) and not target._dead then
+			if isCrit then target:TakeDamageCrit(damage * 2)
+			else target:TakeDamage(damage) end
+		end
+
+		self:SpawnPhantomSplitFragments(map, hitPos, damage, isCrit, target, castZoneIndex)
+	end
+
+	-- 분열 — 원본이 꽂힌 자리에서 표창 5개가 부채꼴로 흩어진다(좌 / 좌중 / 수직 / 우중 / 우).
+	@ExecSpace("ServerOnly")
+	method void SpawnPhantomSplitFragments(Entity map, Vector3 originPos, number damage, boolean isCrit, MonsterAI depthAnchor, integer castZoneIndex)
+		-- 팬텀 스플릿 분열 5발 생성.
+		self:PlayShadowSplitSplitSound()
+		local fragmentDamage = damage * self:GetPhantomSplitFragmentPercent(self.PhantomSplitLevel)
+		local spread = self.Card219SplitSpreadX
+		local dirXList = { -spread, -spread * 0.5, 0.0, spread * 0.5, spread }
+		for i = 1, self.Card219SplitCount do
+			local dirX = dirXList[i]
+			-- SplitCount를 5보다 크게 올리면 남는 조각은 가운데(수직)로 보낸다
+			if dirX == nil then dirX = 0.0 end
+			self:FlyPhantomSplitFragment(map, originPos, dirX, 1.0, fragmentDamage, isCrit, depthAnchor, castZoneIndex)
+		end
+		log("PhantomSplitFragments: count=" .. self.Card219SplitCount .. " dmg=" .. math.floor(fragmentDamage))
+	end
+
+	-- 분열 표창 1개 — 원본의 1/2 크기로 직선으로 날아가며 경로에 걸린 몬스터를 한 마리당 한 번씩 때린다.
+	@ExecSpace("ServerOnly")
+	method void FlyPhantomSplitFragment(Entity map, Vector3 originPos, number dirX, number dirY, number fragmentDamage, boolean isCrit, MonsterAI depthAnchor, integer castZoneIndex)
+		-- 팬텀 스플릿 분열 표창 1개의 비행 + 경로 타격.
+		local scale = self.Card219BallScale * self.Card204SplitScaleRatio
+		local fx = self:SpawnEffect(self.Card219BallRUID, originPos, 0, self.Card204BallPlayRate, scale, 1)
+		if fx == nil then return end
+		self:ApplyPhantomSplitFlip(fx, dirX >= 0)
+
+		-- 방향을 단위벡터로 정규화해 조각들의 속도를 같게 맞춘다(대각선 조각이 더 빨라지는 것 방지)
+		local len = math.sqrt(dirX * dirX + dirY * dirY)
+		if len <= 0 then len = 1 end
+		local vx = (dirX / len) * self.Card204SplitSpeed
+		local vy = (dirY / len) * self.Card204SplitSpeed
+		local duration = self.Card204SplitTravel / self.Card204SplitSpeed
+
+		_TweenLogic:PlayTween(0.0, 1.0, duration, EaseType.Linear, function(t)
+			if not isvalid(fx) then return end
+			local tt = t * duration
+			fx.TransformComponent.Position = Vector3(originPos.x + vx * tt, originPos.y + vy * tt, originPos.z)
+		end)
+
+		local hitSet = {}
+		local elapsedTime = 0
+		local tickInterval = 1 / 60
+		local timerId = nil
+
+		timerId = _TimerService:SetTimerRepeat(function()
+			if not isvalid(self) or not isvalid(fx) then
+				if timerId then _TimerService:ClearTimer(timerId) end
+				return
+			end
+			if castZoneIndex ~= _MapManager.CurrentMapIndex then
+				if timerId then _TimerService:ClearTimer(timerId) end
+				if isvalid(fx) then fx:Destroy(0.05) end
+				return
+			end
+			elapsedTime = elapsedTime + tickInterval
+			-- ⚠ 판정 좌표는 엔티티의 실제 Position을 그대로 읽는다 — 틱 누적 시간으로 다시 계산하면
+			--   이동 Tween과 시계가 어긋나 판정이 연출보다 뒤처진다
+			--   ([[feedback_arrow_tween_tickloop_clock_drift]], 스톰 탈리스만 218에서 실측).
+			local fragPos = fx.TransformComponent.Position
+			local curX = fragPos.x
+			local curY = fragPos.y
+
+			for _, mob in ipairs(self:GetMonstersInCurrentZone(map)) do
+				---@type MonsterAI
+				local m = mob
+				if isvalid(m) and not m._dead and isvalid(m.Entity) and not hitSet[m] then
+					local mp = m.Entity.TransformComponent.Position
+					local ddx = mp.x - curX
+					local ddy = mp.y - curY
+					if self:InEllipse(ddx, ddy, self.Card204SplitHitRadius, self.Card204SplitHitRadius) and self:IsSameDepthBand(depthAnchor, m) then
+						hitSet[m] = true
+						if isCrit then m:TakeDamageCrit(fragmentDamage * 2)
+						else m:TakeDamage(fragmentDamage) end
+						local hitFx = self:SpawnEffect(self.Card219HitRUID, Vector3(mp.x, mp.y + self.Card204HitYOffset, originPos.z), 0, 1.0, self.Card219HitScale * self.Card204SplitScaleRatio, 1)
+						if hitFx ~= nil then hitFx:Destroy(self.HitEffectLifetime) end
+					end
+				end
+			end
+
+			if elapsedTime >= duration then
+				if timerId then _TimerService:ClearTimer(timerId) end
+			end
+		end, tickInterval)
+
+		-- Tween과 틱루프가 서로 다른 시계를 써서 끝에서 잠깐 남는 것을 막는 안전장치
 		_TimerService:SetTimerOnce(function()
 			if timerId then _TimerService:ClearTimer(timerId) end
 			if isvalid(fx) then fx:Destroy() end
@@ -3676,10 +4536,15 @@ script CardManager extends Logic
 			end
 			totalTime = totalTime + tickInterval
 			segTime = segTime + tickInterval
-			-- 위 Tween과 같은 식으로 좌표를 다시 계산한다(둘이 서로 다른 시계를 쓰므로 엔티티
-			-- Position을 읽지 않고 식으로 맞춘다)
-			local curX = segStartX + segDirX * speed * segTime
-			local curY = segStartY + segDirY * speed * segTime
+			-- ⚠ 버그 수정(2026-09-05) — 원래는 틱 누적 시간(segTime)으로 좌표를 다시 계산했는데,
+			--   그러면 이동 Tween과 판정이 **서로 다른 시계**를 쓰게 된다. SetTimerRepeat(1/60)은 부하가
+			--   걸리면 1/60을 못 지키고 늦게 돌아서(스톰 탈리스만 218 라이브 실측: 2.0초 지속인데 틱
+			--   누적은 1.6초) 판정이 연출보다 그만큼 뒤처진다 — 눈에는 윙대거가 지나갔는데 안 맞는
+			--   구간이 생긴다. 이동 Tween은 서버가 직접 쓰는 값이라 Position이 곧 연출 위치 그 자체다.
+			--   ([[feedback_arrow_tween_tickloop_clock_drift]]와 같은 클래스)
+			local daggerPos = fx.TransformComponent.Position
+			local curX = daggerPos.x
+			local curY = daggerPos.y
 
 			local retargeted = false
 			for _, mob in ipairs(self:GetMonstersInCurrentZone(map)) do
@@ -3717,6 +4582,398 @@ script CardManager extends Logic
 				finishDagger()
 			end
 		end, tickInterval)
+	end
+
+	-- ── 린 전용: 스로잉 붐대거 (카드220, 조합 스킬) — 스로잉 윙대거(205)의 상위 호환.
+	-- 스로잉 윙대거 Lv5 + 스피릿 자벨린(211) + 표창술(214) + 시프 커닝(213, 셋 다 슬롯 없는 패시브)
+	-- 보유 시 선택지에 뜨고, 해금되면 스로잉 윙대거가 있던 슬롯을 그대로 넘겨받는다.
+	-- ⚠ 조합 스킬 관례대로 3레벨까지만 존재한다.
+	--
+	-- 유저 지정: "기존꺼랑 같은데 다른점은 표창이 사라질때쯤 표창이 폭파하면서 해당 연출 범위만큼
+	-- 광역 대미지". 즉 3초 추적 비행 / 몹당 1회 타격 / 경로상 적도 타격까지 전부 스로잉 윙대거와
+	-- 동일하고(Card205 프로퍼티를 그대로 공유 — 표창·시전·타격 연출과 사운드도 205 것 그대로),
+	-- **수명이 끝나 사라지는 그 자리에서 폭발**이 추가된다.
+	--   · 폭발 연출(Card220BoomRUID)이 터지고, 그 연출 크기만큼의 타원 범위 안 몬스터 전부에게
+	--     기준 대미지의 레벨별 비율(40/50/60%)이 들어간다.
+	--   · 폭발에 맞은 몬스터마다 전용 타격 연출(Card220BoomHitRUID)이 따로 뜬다.
+	-- ⚠ 폭발은 비행 중 타격했던 몬스터(hitSet)도 다시 때린다 — 비행 타격과 폭발은 별개의 판정이다.
+	@Sync property integer BoomDaggerLevel = 0
+	property number Card220Cooldown = 10.0  -- 레벨 무관 고정(유저 표, 스로잉 윙대거와 동일)
+	property string Card220Name = "스로잉 붐대거"
+	property string Card220IconRUID = "624b9b3862554c2aa56f88fbee0aa7b2"
+	-- 폭발 연출(신규) — maplestory/skill/6410/skill/64101008/special, 347×296, 12프레임.
+	-- ⚠ 유저 리포트(2026-09-05): "연출이 루프 돌아서 터지고 연출이 한번더 실행됨". 처음엔 프레임당
+	--   0.1초로 어림해 Destroy(1.25초)를 걸었는데 실제 클립이 그보다 짧아 한 바퀴를 더 돌았다.
+	--   스프라이트 애니는 항상 루프라 수명 추정이 조금만 길어도 재생이 반복된다 → **원본 프레임을
+	--   직접 이어붙이는 수동 재생**으로 바꿔 딱 한 바퀴만 돌게 못박았다
+	--   ([[feedback_skill_effect_manual_frame_default]]).
+	property string Card220BoomRUID = "496b7e91460a43098120e130f1409a22"  -- 프레임 추출 원본(참조용)
+	property any Card220BoomFrameRUIDs = {
+		"0da42ce35a4f4696a7d196ac6595fa7a",
+		"80b7fe3c99764c06b5d5f98876e0fa41",
+		"a42b89884a544b2987704069e506249d",
+		"79b02862ba6143aaa9cb3f3b14e2d52e",
+		"0ccad93d8f2c4b85b193b8b86205131a",
+		"939473d217194da4bc3f8f0c79b29895",
+		"3c05e6b2d8724836befa632ae12fe4f8",
+		"2b78b55350524268a2ca565af92687ef",
+		"a727cf17bb624023ad5a4ef09b9ada36",
+		"ec17bd2f72f24bb0946ed8e18bddc886",
+		"4d16e6b6dd5c41079bc3152245bad528",
+		"afb3977ce598415682e42469cdb5f753",
+	}
+	property number Card220BoomFrameStepDuration = 0.06  -- 12프레임 × 0.06 = 0.72초, 딱 1회 재생
+	-- 유저 지정(2026-09-05): 폭발 연출 크기 15% 축소 — 1.0 → 0.85
+	property number Card220BoomScale = 0.85
+	property number Card220BoomYOffset = 0.0
+	-- 폭발 판정 타원 — "해당 연출 범위만큼"(유저 지정). 원본 347×296 = 3.47×2.96 월드 유닛이라
+	-- 스프라이트 경계 기준 반경이 1.7 × 1.45였는데, 위에서 연출을 15% 줄였으므로 **줄인 만큼 범위도
+	-- 같이 줄인다**(유저 지정) — 1.7×0.85 = 1.445, 1.45×0.85 = 1.2325.
+	property number Card220BoomHalfW = 1.445
+	property number Card220BoomHalfH = 1.2325
+	-- 폭발에 맞은 몬스터마다 뜨는 타격 연출(신규) — .../64101008/hit/0, 208×188, 8프레임
+	property string Card220BoomHitRUID = "954e91223d4143ddba8158b374510c8c"
+	property number Card220BoomHitScale = 0.7
+	-- 폭발 본체와 같은 이유로 짧게 잡는다(8프레임 × 0.06 = 0.48초). 0.85초로 뒀더니 이쪽도 루프였다.
+	property number Card220BoomHitLifetime = 0.48
+	property number Card220BoomHitYOffset = 0.3
+	-- 소멸 직전 강제 추적(유저 승인 2026-09-05) — 라이브 로그에서 폭발이 7번 중 6번 hit=0이었다.
+	-- 원인은 "3초가 끝나는 순간 대거가 다음 미타격 몹으로 이동 중"이면 몹과 몹 사이 허공에서 터지기
+	-- 때문. 마지막 이 시간 동안은 **이미 때린 적까지 포함해** 가장 가까운 몬스터에 계속 붙어서
+	-- 폭발이 실제로 몹을 덮게 한다("사라지는 자리에서 폭발"이라는 원래 스펙은 그대로).
+	property number Card220FinalChaseLead = 0.6      -- 소멸 몇 초 전부터 강제 추적할지
+	property number Card220FinalChaseInterval = 0.15 -- 강제 추적 중 재조준 주기(몹이 움직이므로)
+	-- 화면 이탈 방지 안전망(유저 리포트 2026-09-05: "터지기전에 표창이 화면 밖으로 나가는 경우가 있음").
+	-- 제자리 정지(retarget의 best==nil 분기)만으로 못 막는 케이스 — 멀리 있는 몹을 쫓다가, 또는 쫓던
+	-- 몹이 도중에 죽어 그 목적지까지 관성으로 날아가다가 — 를 위해 매 틱 X를 화면 안전범위로 자른다.
+	-- 반폭 5.0은 넉백/스폰 로직이 쓰는 "플레이어 위치 ±5" 관례와 동일(카메라 가시범위 대략 ±6.4 안쪽).
+	property number Card220ScreenSafeHalfWidth = 5.0
+
+	-- 레벨별 기준 대미지(유저 표) — 160/180/200. 조합 스킬이라 3레벨까지만.
+	method number GetBoomDaggerDamage(integer level)
+		if level >= 3 then return 200
+		elseif level >= 2 then return 180
+		end
+		return 160
+	end
+
+	-- 폭발 대미지 비율(유저 표) — 40/50/60%
+	method number GetBoomDaggerBoomPercent(integer level)
+		if level >= 3 then return 0.60
+		elseif level >= 2 then return 0.50
+		end
+		return 0.40
+	end
+
+	@ExecSpace("ServerOnly")
+	method void BoomDaggerAttack(number damage, boolean isCrit)
+		-- 스로잉 윙대거와 동일하게 플레이어 옆에서 대거를 하나 띄워 3초 동안 순회시킨다.
+		self:PlayThrowingWingDaggerUseSound()
+		local map = self:GetCurrentMap()
+		if map == nil then return end
+		-- 출발은 스로잉 윙대거와 같은 원점(플레이어가 표창을 던지는 자리)
+		local startPos = self:GetRinThrowPosition()
+		-- 존을 넘어간 뒤에도 대거/폭발이 남아 다음 존에서 터지면 안 된다 — 시전 시점 존을 캡처해 거른다
+		local castZoneIndex = _MapManager.CurrentMapIndex
+
+		local cfx = self:SpawnEffect(self.Card205CastRUID, startPos, 0, 1.0, self.Card205CastScale, 1)
+		if cfx ~= nil then cfx:Destroy(self.Card205CastLifetime) end
+
+		self:FlyBoomDagger(map, startPos, damage, isCrit, castZoneIndex)
+		log("BoomDaggerAttack: lv=" .. self.BoomDaggerLevel .. " dmg=" .. math.floor(damage))
+	end
+
+	-- 대거 본체 — 스로잉 윙대거(FlyThrowingWingDagger)와 완전히 같은 순회 로직이고, 끝나는 순간에
+	-- 폭발(ResolveBoomDaggerExplosion)만 추가된다.
+	@ExecSpace("ServerOnly")
+	method void FlyBoomDagger(Entity map, Vector3 startPos, number damage, boolean isCrit, integer castZoneIndex)
+		-- 스로잉 붐대거 비행 + 순회 타격 + 소멸 시 폭발.
+		local fx = self:SpawnEffectWithModel(self.Card205BallRUID, startPos, 0, self.Card205BallPlayRate, self.Card205BallScale, 1, "persistenteffect")
+		if fx == nil then return end
+
+		local speed = self.Card205MoveSpeed
+		local totalDuration = self.Card205Duration
+		local tickInterval = 1 / 60
+		local hitSet = {}
+		local timerId = nil
+		local finished = false
+		local totalTime = 0
+
+		local segStartX = startPos.x
+		local segStartY = startPos.y
+		local segDirX = 1.0
+		local segDirY = 0.0
+		local segTime = 0
+		local segDuration = 0
+		local segGen = 0
+		local finalChase = false      -- 소멸 직전 강제 추적 구간 진입 여부
+		local finalChaseTick = 0
+
+		local finishDagger = nil
+		finishDagger = function()
+			if finished then return end
+			finished = true
+			segGen = segGen + 1  -- 남아 있는 Tween 콜백 무력화
+			if timerId then _TimerService:ClearTimer(timerId) end
+			self:PlayThrowingWingDaggerEndSound()
+			-- 유저 지정: "표창이 사라질때쯤 표창이 폭파" — 사라지는 그 자리에서 폭발시킨다.
+			-- 좌표는 엔티티에서 직접 읽는다(연출 위치 그 자체).
+			if isvalid(fx) then
+				local p = fx.TransformComponent.Position
+				self:ResolveBoomDaggerExplosion(map, Vector3(p.x, p.y, p.z), damage, isCrit, castZoneIndex)
+				fx:Destroy(0.05)
+			end
+		end
+
+		local retarget = nil
+		retarget = function()
+			-- 지금 위치에서 가장 가까운 미타격 몬스터를 골라 새 구간을 시작한다.
+			-- ⚠ 붐대거는 여기서 스로잉 윙대거와 딱 하나 다르게 동작한다(2026-09-05 라이브 실측 반영):
+			--   205는 때릴 적이 없으면 그냥 직진해서 화면 밖 허공으로 나가는데, 붐대거는 **끝나는
+			--   자리에서 폭발**하는 게 핵심이라 그러면 폭발이 항상 빈 공간에서 터진다(첫 구현 라이브
+			--   로그에서 BoomDaggerExplosion이 매번 hit=0이었다). 그래서 미타격 대상이 없으면
+			--   **이미 때린 적까지 포함해** 가장 가까운 몬스터를 계속 쫓게 해서, 3초가 끝날 때 대거가
+			--   몹 근처에 머물러 폭발이 실제로 몬스터를 덮도록 한다(추가 타격은 hitSet이 막으므로
+			--   비행 중 중복 대미지는 여전히 없다).
+			--   추가로 소멸 직전(Card220FinalChaseLead) 구간에서는 finalChase가 켜져서 미타격 여부를
+			--   아예 무시하고 가장 가까운 몹에 붙는다.
+			--   ⚠ 조준 대상은 화면 안전범위(플레이어 ±Card220ScreenSafeHalfWidth) 안의 몹으로 제한한다 —
+			--   존이 화면보다 넓으면 화면 밖 몹을 쫓다가 대거가 같이 화면 밖으로 나가버린다(유저 리포트).
+			--   여기서 걸러두면 아래 위치 클램프가 매 틱 재조준과 싸우며 경계에서 떠는 일도 없다.
+			local aimPlayerLocalX = self:WorldToCurrentMapLocal(Vector3(self:GetPlayerCenterX(), 0, 0)).x
+			local aimMinX = aimPlayerLocalX - self.Card220ScreenSafeHalfWidth
+			local aimMaxX = aimPlayerLocalX + self.Card220ScreenSafeHalfWidth
+			local best = nil
+			local bestDistSq = 0
+			local bestDX = 0
+			local bestDY = 0
+			for _, mob in ipairs(self:GetMonstersInCurrentZone(map)) do
+				---@type MonsterAI
+				local m = mob
+				if isvalid(m) and not m._dead and isvalid(m.Entity) and (finalChase or not hitSet[m]) then
+					local mp = m.Entity.TransformComponent.Position
+					if mp.x >= aimMinX and mp.x <= aimMaxX then
+						local ddx = mp.x - segStartX
+						local ddy = mp.y - segStartY
+						local d = ddx * ddx + ddy * ddy
+						if best == nil or d < bestDistSq then
+							best = m
+							bestDistSq = d
+							bestDX = ddx
+							bestDY = ddy
+						end
+					end
+				end
+			end
+			-- 미타격 대상이 하나도 없으면 이미 때린 적 중에서라도 가장 가까운 쪽으로 붙는다
+			if best == nil then
+				for _, mob in ipairs(self:GetMonstersInCurrentZone(map)) do
+					---@type MonsterAI
+					local m = mob
+					if isvalid(m) and not m._dead and isvalid(m.Entity) and m.Entity.TransformComponent.Position.x >= aimMinX and m.Entity.TransformComponent.Position.x <= aimMaxX then
+						local mp = m.Entity.TransformComponent.Position
+						local ddx = mp.x - segStartX
+						local ddy = mp.y - segStartY
+						local d = ddx * ddx + ddy * ddy
+						if best == nil or d < bestDistSq then
+							best = m
+							bestDistSq = d
+							bestDX = ddx
+							bestDY = ddy
+						end
+					end
+				end
+			end
+
+			if best == nil then
+				-- ⚠ 205와 다른 점 2번(유저 리포트 2026-09-05: "터지기전에 표창이 화면 밖으로 나가는
+				--   경우가 있음") — 205는 대상이 없으면 마지막 방향으로 계속 직진해서 화면 밖으로
+				--   빠져나가는 게 정상 동작이지만, 붐대거는 **끝나는 자리에서 폭발**하므로 그대로 두면
+				--   폭발이 화면 밖에서 터진다. 대상이 없으면 직진 대신 제자리에 떠 있게 한다.
+				segDuration = self.Card205RetryInterval
+				segDirX = 0.0
+				segDirY = 0.0
+			else
+				local dist = math.sqrt(bestDistSq)
+				if dist < 0.001 then dist = 0.001 end
+				segDirX = bestDX / dist
+				segDirY = bestDY / dist
+				segDuration = dist / speed
+			end
+			segTime = 0
+
+			self:ApplyThrowingWingDaggerFlip(fx, segDirX >= 0)
+
+			-- 이동은 구간 단위 Tween(서버에서 매 틱 Position을 직접 쓰면 클라 동기화가 안 된다).
+			-- 이전 구간의 Tween 콜백은 세대 번호로 무력화한다.
+			segGen = segGen + 1
+			local myGen = segGen
+			local sx = segStartX
+			local sy = segStartY
+			local dx = segDirX
+			local dy = segDirY
+			local dur = segDuration
+			if dur < 0.02 then dur = 0.02 end
+			_TweenLogic:PlayTween(0.0, 1.0, dur, EaseType.Linear, function(t)
+				if myGen ~= segGen then return end
+				if not isvalid(fx) then return end
+				local tt = t * dur
+				fx.TransformComponent.Position = Vector3(sx + dx * speed * tt, sy + dy * speed * tt, startPos.z)
+			end)
+		end
+
+		retarget()
+
+		_TimerService:SetTimerOnce(function()
+			finishDagger()
+		end, totalDuration)
+
+		timerId = _TimerService:SetTimerRepeat(function()
+			if not isvalid(self) or not isvalid(fx) then
+				if timerId then _TimerService:ClearTimer(timerId) end
+				return
+			end
+			if castZoneIndex ~= _MapManager.CurrentMapIndex then
+				finishDagger()
+				return
+			end
+			totalTime = totalTime + tickInterval
+			segTime = segTime + tickInterval
+			-- ⚠ 판정 좌표는 엔티티의 실제 Position을 그대로 읽는다(205/218/219와 동일한 이유).
+			local daggerPos = fx.TransformComponent.Position
+			local curX = daggerPos.x
+			local curY = daggerPos.y
+
+			local retargeted = false
+
+			-- 화면 안전범위 클램프 — 폭발은 대거가 사라진 자리에서 터지므로 화면 밖으로 나가면 안 된다.
+			-- (플레이어 X는 월드 좌표라 대거/몬스터와 같은 존 로컬 프레임으로 변환해서 비교한다.)
+			local playerLocalX = self:WorldToCurrentMapLocal(Vector3(self:GetPlayerCenterX(), 0, 0)).x
+			local safeMinX = playerLocalX - self.Card220ScreenSafeHalfWidth
+			local safeMaxX = playerLocalX + self.Card220ScreenSafeHalfWidth
+			if curX < safeMinX or curX > safeMaxX then
+				local clampedX = curX
+				if clampedX < safeMinX then clampedX = safeMinX end
+				if clampedX > safeMaxX then clampedX = safeMaxX end
+				segGen = segGen + 1  -- 진행 중인 Tween 무력화(안 그러면 다음 프레임에 다시 밖으로 끌고 나간다)
+				fx.TransformComponent.Position = Vector3(clampedX, curY, daggerPos.z)
+				curX = clampedX
+				segStartX = curX
+				segStartY = curY
+				retarget()
+				retargeted = true
+			end
+
+			for _, mob in ipairs(self:GetMonstersInCurrentZone(map)) do
+				---@type MonsterAI
+				local m = mob
+				if isvalid(m) and not m._dead and isvalid(m.Entity) and not hitSet[m] then
+					local mp = m.Entity.TransformComponent.Position
+					local ddx = mp.x - curX
+					local ddy = mp.y - curY
+					if self:InEllipse(ddx, ddy, self.Card205HitRadius, self.Card205HitRadius) then
+						hitSet[m] = true
+						if isCrit then m:TakeDamageCrit(damage * 2)
+						else m:TakeDamage(damage) end
+						local hitFx = self:SpawnEffect(self.Card205HitRUID, Vector3(mp.x, mp.y + self.Card205HitYOffset, startPos.z), 0, 1.0, self.Card205HitScale, 1)
+						if hitFx ~= nil then hitFx:Destroy(self.HitEffectLifetime) end
+						self:PlayThrowingWingDaggerHitSound()
+						segStartX = curX
+						segStartY = curY
+						retarget()
+						retargeted = true
+						break
+					end
+				end
+			end
+
+			-- 소멸 직전 강제 추적 — 이미 때린 적 포함 가장 가까운 몹으로 계속 재조준한다.
+			-- (재조준 주기를 두는 이유: 몹이 움직이므로 한 번 조준한 지점에 가면 이미 비어 있다.)
+			if not finalChase and totalTime >= totalDuration - self.Card220FinalChaseLead then
+				finalChase = true
+				finalChaseTick = self.Card220FinalChaseInterval  -- 진입 즉시 한 번 재조준
+			end
+			if finalChase and not retargeted then
+				finalChaseTick = finalChaseTick + tickInterval
+				if finalChaseTick >= self.Card220FinalChaseInterval then
+					finalChaseTick = 0
+					segStartX = curX
+					segStartY = curY
+					retarget()
+					retargeted = true
+				end
+			end
+
+			if not retargeted and segTime >= segDuration then
+				segStartX = curX
+				segStartY = curY
+				retarget()
+			end
+
+			if totalTime >= totalDuration then
+				finishDagger()
+			end
+		end, tickInterval)
+	end
+
+	-- 폭발 연출 — 원본 12프레임을 순서대로 딱 한 바퀴만 재생하고 사라진다(수동 프레임 스왑).
+	-- 네이티브 재생 + 어림한 Destroy는 클립 길이를 모른 채 자른 값이라 유저 리포트대로 한 바퀴를
+	-- 더 돌았다("터지고 연출이 한번더 실행됨").
+	@ExecSpace("ServerOnly")
+	method void PlayBoomDaggerBoomEffect(Vector3 pos)
+		-- 스로잉 붐대거 소멸 폭발 연출(원본 프레임 그대로 1회 재생).
+		local frames = self.Card220BoomFrameRUIDs
+		local frameCount = #frames
+		if frameCount == 0 then return end
+		local fx = self:SpawnEffectWithModel(frames[1], pos, 0, 1.0, self.Card220BoomScale, 1.0, "persistenteffect")
+		if fx == nil then return end
+		local step = self.Card220BoomFrameStepDuration
+		for i = 1, frameCount - 1 do
+			local frameRUID = frames[i + 1]
+			_TimerService:SetTimerOnce(function()
+				if isvalid(fx) then
+					local r = fx.SpriteRendererComponent
+					if r ~= nil then r.SpriteRUID = frameRUID end
+				end
+			end, i * step)
+		end
+		_TimerService:SetTimerOnce(function()
+			if isvalid(fx) then fx:Destroy() end
+			log("BoomDaggerBoomEffect: played frames=" .. frameCount .. " total=" .. (frameCount * step) .. "s")
+		end, frameCount * step)
+	end
+
+	-- 소멸 폭발 — 대거가 사라진 자리에서 폭발 연출을 띄우고, 그 연출 크기만큼의 타원 안 몬스터
+	-- 전부에게 기준 대미지의 레벨별 비율을 넣는다. 맞은 몬스터마다 전용 타격 연출도 따로 뜬다.
+	-- ⚠ 비행 중 이미 맞은 몬스터도 폭발에는 다시 맞는다(별개 판정).
+	@ExecSpace("ServerOnly")
+	method void ResolveBoomDaggerExplosion(Entity map, Vector3 boomPos, number damage, boolean isCrit, integer castZoneIndex)
+		-- 스로잉 붐대거 소멸 폭발.
+		if castZoneIndex ~= _MapManager.CurrentMapIndex then return end
+		local center = Vector3(boomPos.x, boomPos.y + self.Card220BoomYOffset, boomPos.z)
+		self:PlayBoomDaggerBoomEffect(center)
+
+		local boomDamage = damage * self:GetBoomDaggerBoomPercent(self.BoomDaggerLevel)
+		local hitCount = 0
+		for _, mob in ipairs(self:GetMonstersInCurrentZone(map)) do
+			---@type MonsterAI
+			local m = mob
+			if isvalid(m) and not m._dead and isvalid(m.Entity) then
+				local mp = m.Entity.TransformComponent.Position
+				local ddx = mp.x - center.x
+				local ddy = mp.y - center.y
+				if self:InEllipse(ddx, ddy, self.Card220BoomHalfW, self.Card220BoomHalfH) then
+					if isCrit then m:TakeDamageCrit(boomDamage * 2)
+					else m:TakeDamage(boomDamage) end
+					local hfx = self:SpawnEffectWithModel(self.Card220BoomHitRUID, Vector3(mp.x, mp.y + self.Card220BoomHitYOffset, mp.z), 0, 1.0, self.Card220BoomHitScale, 1, "skilleffectlong")
+					if hfx ~= nil then hfx:Destroy(self.Card220BoomHitLifetime) end
+					hitCount = hitCount + 1
+				end
+			end
+		end
+		-- dxFromPlayer: 폭발이 화면 안(플레이어 ±Card220ScreenSafeHalfWidth) 에서 터졌는지 확인용
+		local dxFromPlayer = center.x - self:WorldToCurrentMapLocal(Vector3(self:GetPlayerCenterX(), 0, 0)).x
+		log("BoomDaggerExplosion: hit=" .. hitCount .. " dmg=" .. math.floor(boomDamage) .. " (" .. math.floor(self:GetBoomDaggerBoomPercent(self.BoomDaggerLevel) * 100) .. "%) dxFromPlayer=" .. string.format("%.2f", dxFromPlayer))
 	end
 
 	-- ── 린 전용: 쇼다운 챌린지 (카드206, 슬롯형 액티브 6호) — 즉발 광역형.
@@ -4080,15 +5337,19 @@ script CardManager extends Logic
 	@Sync property integer ShadowTrapLevel = 0
 	property number Card208Cooldown = 5.0  -- 레벨 무관 고정(유저 표)
 	property string Card208Name = "쉐도우 트랩"
-	property string Card208IconRUID = "cdbd9959dee2488b923d01636d71327c"
-	-- 몬스터 위에 뜨는 마크(팩의 "mob" 클립)
-	property string Card208MarkRUID = "cb59756d1b244558aed53dd0ec7b5571"
+	property string Card208IconRUID = "4ff247d41f3a437d950265851dbb4956"
+	-- 몬스터 위에 뜨는 마크. 2026-09-05 유저 지정으로 교체(구 "cb59756d…"는 데스 트랩(217)이 물려받았다).
+	property string Card208MarkRUID = "7f960146daa04f5b820dc3dbb1217ddb"
 	-- 속박 연출(유저 지정 별도 리소스)
 	property string Card208RootRUID = "c63aed35502a4d9d9ba247130c9839b3"
 	property string Card208SoundRUID = "774af2f74f4a467b9d828ee69c0afc98"
 	-- mob 마크 크기(유저 지정 20% 확대: 1.0 → 1.2)
 	property number Card208MarkScale = 1.2
-	property number Card208MarkLifetime = 0.8
+	-- 유저 지정(2026-09-05): "마크가 서서히 나오게" — 알파 0에서 이 시간 동안 1까지 올린다.
+	property number Card208MarkFadeInDuration = 0.3
+	-- 유저 지정(2026-09-05): 마크는 속박이 끝날 때까지 유지된다(고정 수명 프로퍼티 없음 — 호출부가
+	-- 그 대상의 실제 속박 지속시간 dur을 그대로 넘긴다). 끝에서 이 시간 동안 알파를 빼며 사라진다.
+	property number Card208MarkFadeOutDuration = 0.3
 	property number Card208MarkYOffset = 0.5
 	-- 속박 연출 클립의 원래 길이(초). 10프레임 × 프레임당 0.06초 = 0.6초.
 	-- 프레임당 0.06초는 이 코드베이스의 실측치에서 가져왔다(Card118 hit/0: "5프레임 animationclip,
@@ -4101,6 +5362,9 @@ script CardManager extends Logic
 	property number Card208RootFadeOutDuration = 0.3
 	-- 보스/엘리트 속박 지속시간 배율(유저 표 "반감")
 	property number Card208BossDurationMult = 0.5
+	-- 트랩 지속 연출(마크/속박)이 "대상이 죽었는지"를 확인하는 주기. 208/217 공용
+	-- (FadeTrapEffectOnDeath). 0.1초면 눈으로는 즉시로 보이고 타이머 부담도 없다.
+	property number TrapDeathPollInterval = 0.1
 
 	-- 레벨별 기준 대미지(유저 표) — 70/90/110/130/140
 	method number GetShadowTrapDamage(integer level)
@@ -4147,13 +5411,14 @@ script CardManager extends Logic
 			local target = mob
 			if isvalid(target) and isvalid(target.Entity) then
 				local tp = target.Entity.TransformComponent.Position
-				-- 몬스터 "위"에 마크
-				local mfx = self:SpawnEffect(self.Card208MarkRUID, Vector3(tp.x, tp.y + self.Card208MarkYOffset, tp.z), 0, 1.0, self.Card208MarkScale, 1)
-				if mfx ~= nil then mfx:Destroy(self.Card208MarkLifetime) end
 
 				-- 보스/엘리트는 지속시간 반감(유저 표)
 				local dur = baseDuration
 				if target._isBoss or target._isElite then dur = baseDuration * self.Card208BossDurationMult end
+
+				-- 몬스터 "위"에 마크 — 속박이 끝날 때까지 떠 있는다(유저 지정). 보스/엘리트의 반감된
+				-- 지속시간에도 자동으로 맞는다.
+				self:PlayTrapMark(self.Card208MarkRUID, target, Vector3(tp.x, tp.y + self.Card208MarkYOffset, tp.z), self.Card208MarkScale, self.Card208MarkFadeInDuration, self.Card208MarkFadeOutDuration, dur)
 
 				-- ⚠ 연출·속박을 대미지보다 **먼저** 건다. 반대 순서로 두면 이 일격에 몬스터가 죽는 순간
 				--   PlayShadowTrapRootEffect의 `target._dead` 가드에 걸려 속박 연출이 통째로 안 뜬다
@@ -4170,6 +5435,83 @@ script CardManager extends Logic
 			end
 		end
 		log("ShadowTrapAttack: targets=" .. #targets .. " bound=" .. boundCount .. " lv=" .. level .. " dmg=" .. math.floor(damage) .. " root=" .. baseDuration)
+	end
+
+	-- 트랩 지속 연출(마크/속박)의 소멸을 한 곳에서 관리한다.
+	-- 유저 지정(2026-09-05): "처음에 대미지 들어가고 속박이 유지되어있잖아 몬스터 죽어도. 그러면 안되고
+	-- 그 속박연출은 빼자. 자연스럽게 알파 빠지면서 사라지면 좋을듯!"
+	-- → 지속시간을 다 채우거나 **대상이 먼저 죽으면 그 즉시** 알파를 빼며 사라진다. 시체도 없는 자리에
+	--   속박 연출이 2초 내내 남아 있던 게 원래 문제였다.
+	-- ⚠ 이 프로젝트 공통 정책인 "연출은 대상 생사와 무관하게 끝까지 재생"은 **한 번 터지고 마는 타격
+	--   연출** 얘기다. 트랩처럼 지속시간 동안 붙어 있는 연출은 대상이 사라지면 같이 걷어야 한다.
+	--   (그래서 217 추가타 연출 ResolveDeathTrapFinisher는 지금도 생사와 무관하게 재생한다.)
+	-- ⚠ 수명을 여기서 전담하므로 호출부는 fx:Destroy를 따로 걸지 않는다. 만약을 대비한 안전망은
+	--   "skilleffectlong" 모델의 SkillEffectAI Duration(2.5초)이 맡는다(최대 2.0 + 페이드 0.3 < 2.5).
+	@ExecSpace("ServerOnly")
+	method void FadeTrapEffectOnDeath(Entity fx, MonsterAI target, number duration, number fadeOutDuration)
+		-- 지속 연출을 duration 동안 유지하되, 대상이 먼저 죽으면 즉시 페이드아웃으로 넘어간다.
+		if not isvalid(fx) then return end
+		local renderer = fx.SpriteRendererComponent
+		if renderer == nil then
+			fx:Destroy(duration)
+			return
+		end
+		local fade = math.min(fadeOutDuration, duration)
+		local finished = false
+		local pollId = nil
+		local startFade = function(byDeath)
+			if finished then return end
+			finished = true
+			if pollId then _TimerService:ClearTimer(pollId) end
+			if not isvalid(fx) or not isvalid(renderer) then return end
+			-- 페이드인 도중에 죽었을 수도 있어서 시작 알파는 현재 값에서 가져온다(1.0로 고정하면 튄다)
+			local fromAlpha = renderer.Color.a
+			_TweenLogic:PlayTween(fromAlpha, 0.0, fade, EaseType.Linear, function(alpha)
+				if isvalid(renderer) then renderer:SetAlpha(alpha) end
+			end)
+			fx:Destroy(fade)
+			log("TrapEffectFade: byDeath=" .. tostring(byDeath) .. " fromAlpha=" .. string.format("%.2f", fromAlpha) .. " fade=" .. fade)
+		end
+		-- 지속시간을 다 채운 정상 종료
+		_TimerService:SetTimerOnce(function()
+			startFade(false)
+		end, math.max(0, duration - fade))
+		-- 대상 사망 감시 — 죽는 순간 위 예약보다 먼저 페이드로 넘어간다
+		pollId = _TimerService:SetTimerRepeat(function()
+			if finished or not isvalid(fx) then
+				if pollId then _TimerService:ClearTimer(pollId) end
+				return
+			end
+			if not isvalid(target) or not isvalid(target.Entity) or target._dead then
+				startFade(true)
+			end
+		end, self.TrapDeathPollInterval)
+	end
+
+	-- 트랩 마크 — 즉시 뜨지 않고 알파를 0→1로 올려 서서히 드러나고, **속박이 끝날 때까지 떠 있다가**
+	-- 끝에서 다시 알파를 빼며 사라진다(유저 지정 2026-09-05: "마크가 서서히 나오게", "마크는 스킬이
+	-- 끝날 때까지 지속되면 좋겠어 — 업글 전·후 둘 다"). 대상이 먼저 죽으면 속박 연출과 함께 즉시
+	-- 페이드아웃한다(FadeTrapEffectOnDeath). 쉐도우 트랩(208)과 데스 트랩(217) 공용이고 RUID/크기/
+	-- 지속시간만 다르다.
+	-- ⚠ lifetime이 최대 2초라 기본 "skilleffect"(SkillEffectAI Duration 0.8초 캡)로는 중간에 잘린다 —
+	--   속박 연출과 동일하게 "skilleffectlong"(2.5초 캡)을 쓴다.
+	-- ⚠ 마크 클립은 8프레임짜리라 지속시간 동안 여러 바퀴 돈다. 몬스터 위에 떠 있는 "표식"이라 반복이
+	--   자연스러워서 일부러 PlayRate를 늦추지 않았다 — 한 바퀴만 돌게 하려면 속박 연출처럼
+	--   (클립길이 / lifetime)을 PlayRate로 넘기면 된다.
+	@ExecSpace("ServerOnly")
+	method void PlayTrapMark(string markRUID, MonsterAI target, Vector3 pos, number scale, number fadeInDuration, number fadeOutDuration, number lifetime)
+		-- 몬스터 위 마크를 알파 0으로 띄워 페이드인하고, 속박이 끝나거나 대상이 죽을 때까지 유지한다.
+		if lifetime <= 0 then return end
+		local mfx = self:SpawnEffectWithModel(markRUID, pos, 0, 1.0, scale, 0, "skilleffectlong")
+		if mfx == nil then return end
+		local renderer = mfx.SpriteRendererComponent
+		if renderer ~= nil then
+			local fadeIn = math.min(fadeInDuration, lifetime)
+			_TweenLogic:PlayTween(0.0, 1.0, fadeIn, EaseType.Linear, function(alpha)
+				if isvalid(renderer) then renderer:SetAlpha(alpha) end
+			end)
+		end
+		self:FadeTrapEffectOnDeath(mfx, target, lifetime, fadeOutDuration)
 	end
 
 	-- 속박 연출 — 지속시간 전체를 한 번에 재생하고 끝에서 알파를 빼며 사라진다(PlayAquaTrapEffect와
@@ -4191,17 +5533,214 @@ script CardManager extends Logic
 		local playRate = self.Card208RootClipSeconds / duration
 		local fx = self:SpawnEffectWithModel(self.Card208RootRUID, pos, 0, playRate, self.Card208RootScale, self.Card208RootBaseAlpha, "skilleffectlong")
 		if fx == nil then return end
-		fx:Destroy(duration)
-		local renderer = fx.SpriteRendererComponent
-		if renderer == nil then return end
-		local fadeDuration = math.min(self.Card208RootFadeOutDuration, duration)
-		local fadeDelay = duration - fadeDuration
+		-- 소멸(정상 종료 / 대상 사망 시 조기 페이드아웃)은 공용 헬퍼가 전담한다
+		self:FadeTrapEffectOnDeath(fx, target, duration, self.Card208RootFadeOutDuration)
+	end
+
+	-- ── 린 전용: 데스 트랩 (카드217, 조합 스킬) — 쉐도우 트랩(208)의 상위 호환.
+	-- 쉐도우 트랩 Lv5 + 스로잉 액셀레이션(209, 슬롯 없는 패시브) 보유 시 선택지에 뜨고, 해금되면
+	-- 쉐도우 트랩이 있던 슬롯을 그대로 넘겨받는다(슈퍼 세븐(215)/슈리켄 봄버(216)와 동일한 구조).
+	-- 매커니즘은 쉐도우 트랩과 같은 "마크 → 대미지 → 100% 속박"인데, 여기에 **속박이 끝나는 시점의
+	-- 추가타**가 붙는다. 추가타 비율은 레벨 무관 매번 30~100% 랜덤(유저 지정).
+	-- ⚠ 조합 스킬 관례대로 3레벨까지만 존재한다.
+	--
+	-- 연출(유저 지정):
+	--   · 마크는 쉐도우 트랩이 원래 쓰던 클립(cb59756d…)을 그대로 물려받는다(208은 신규 마크로 교체됨).
+	--     208과 동일하게 알파 0에서 서서히 드러난다(PlayTrapMark 공용).
+	--   · 속박 연출/타격 연출/사운드는 전부 신규 리소스.
+	--   · **타격 연출은 속박이 끝나는 시점에 자연스럽게 이어져야 한다** — 속박 연출이 페이드아웃을
+	--     시작하는 구간과 겹치도록 Card217HitLeadTime만큼 앞당겨 띄운다.
+	@Sync property integer DeathTrapLevel = 0
+	property number Card217Cooldown = 5.0  -- 레벨 무관 고정(유저 표, 쉐도우 트랩과 동일)
+	property string Card217Name = "데스 트랩"
+	property string Card217IconRUID = "0d2a1d366e1041009c0a45527a91273c"
+	-- 마크 — 쉐도우 트랩이 쓰던 구 클립을 승계(유저 지정). 48×56, 8프레임.
+	property string Card217MarkRUID = "cb59756d1b244558aed53dd0ec7b5571"
+	-- 속박 연출(신규) — 217×209, 12프레임
+	property string Card217RootRUID = "80aef397c5cb49e9b90d99558a941597"
+	-- 추가타 타격 연출(신규) — 320×204, 8프레임. 원본 클립 RUID는 출처 기록용이고, 실제 재생은
+	-- 아래 프레임 표를 직접 이어붙인다(사유는 Card217HitFrameRUIDs 주석 참고).
+	property string Card217HitRUID = "fbd8d9a5223642b7ae23110fdc4565e0"
+	-- 유저 지적(2026-09-05, "타격연출이 원래 애니만큼 나오는지 확인이 필요"): 실제로 잘리고 있었다.
+	-- 공용 SpawnEffect + Destroy(HitEffectLifetime=0.3초)로는 자연 재생시간(8프레임 × 0.06초 = 0.48초)
+	-- 보다 짧아 뒤쪽 3프레임이 안 나왔다. 원본 프레임을 직접 이어붙여 딱 한 바퀴만 재생한다.
+	property any Card217HitFrameRUIDs = {
+		"914c9db2ff4b4866be8aaa00240b235b",
+		"eb7f97808b584f51aab37fc573e53b4f",
+		"4ef6c6a3c36340a5ba620fe0b3314085",
+		"5c9d960da72741b8a1d9723ab04efa88",
+		"d3faef4f52bc48c199124dfc4c92b914",
+		"7180112379114d15897f641818adad77",
+		"26cc3a307d804dbdaf9bc416d260507c",
+		"f57501e018a24af7813a36912673a3e6",
+	}
+	property number Card217HitFrameStepDuration = 0.06
+	property string Card217SoundRUID = "ba6acaff6ec74b94bc3321d2575f1f2e"
+	property number Card217MarkScale = 1.2
+	property number Card217MarkFadeInDuration = 0.3
+	-- 208과 동일 — 마크는 속박이 끝날 때까지 유지되고 끝에서 이 시간 동안 페이드아웃한다.
+	property number Card217MarkFadeOutDuration = 0.3
+	property number Card217MarkYOffset = 0.5
+	-- 속박 연출 클립의 원래 길이(초). 12프레임 × 0.06초 = 0.72초(208의 0.6초와 같은 실측 기준).
+	-- 아래 재생속도가 전부 이 값에서 계산되니, 눈으로 보고 어긋나면 이 값만 고치면 된다.
+	property number Card217RootClipSeconds = 0.72
+	-- 원본이 217×209로 쉐도우 트랩 속박(136×67)보다 커서 줄여 맞췄다.
+	property number Card217RootScale = 0.7
+	property number Card217RootYOffset = 0.0
+	property number Card217RootBaseAlpha = 1.0
+	property number Card217RootFadeOutDuration = 0.3
+	-- 타격 연출(320×204)도 같은 이유로 축소. 슈리켄 계열 타격들과 비슷한 화면 점유율로 맞춘 값.
+	property number Card217HitScale = 0.7
+	property number Card217HitYOffset = 0.3
+	-- 속박 연출이 페이드아웃을 시작하는 구간과 겹치도록 추가타를 이만큼 앞당겨 띄운다(유저 지정:
+	-- "속박 끝날때쯤에 자연스럽게 연결되야함"). 속박 페이드아웃(0.3초)의 중간쯤에 터진다.
+	property number Card217HitLeadTime = 0.25
+	-- 보스/엘리트 속박 지속시간 배율 — 쉐도우 트랩의 반감 규칙을 그대로 승계한다.
+	property number Card217BossDurationMult = 0.5
+	-- 추가타 비율 범위(유저 지정) — 레벨 무관, 매 타격마다 이 사이에서 균등 랜덤
+	property number Card217FinisherMinPercent = 0.30
+	property number Card217FinisherMaxPercent = 1.00
+
+	-- 레벨별 기준 대미지(유저 표) — 160/180/220. 조합 스킬이라 3레벨까지만.
+	method number GetDeathTrapDamage(integer level)
+		if level >= 3 then return 220
+		elseif level >= 2 then return 180
+		end
+		return 160
+	end
+
+	-- 타겟 수(유저 확인) — 레벨 무관 3명 고정. 쉐도우 트랩 Lv5(3명)를 그대로 이어받는다.
+	method integer GetDeathTrapTargetCount(integer level)
+		return 3
+	end
+
+	-- 속박 지속시간(유저 표) — 레벨 무관 2초 고정. 보스·엘리트 반감은 호출부에서 따로 곱한다.
+	method number GetDeathTrapRootDuration(integer level)
+		return 2.0
+	end
+
+	method void PlayDeathTrapSound()
+		-- 트랩이 걸리는 순간. 팩에 사운드가 이거 하나라 시전 때 한 번만 울린다(쉐도우 트랩과 동일).
+		_SoundOptionLogic:PlaySfx(self.Card217SoundRUID, 1.0)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void DeathTrapAttack(number damage, boolean isCrit)
+		-- 가까운 순서로 3명을 잡아 마크 → 대미지 → 100% 속박을 걸고, 속박이 끝날 때 추가타를 넣는다.
+		local map = self:GetCurrentMap()
+		if map == nil then return end
+		self:PlayDeathTrapSound()
+
+		local level = self.DeathTrapLevel
+		local baseDuration = self:GetDeathTrapRootDuration(level)
+		local targets = self:GetClosestTargets(self:GetDeathTrapTargetCount(level))
+		local castZoneIndex = _MapManager.CurrentMapIndex
+		local boundCount = 0
+		for _, mob in ipairs(targets) do
+			---@type MonsterAI
+			local target = mob
+			if isvalid(target) and isvalid(target.Entity) then
+				local tp = target.Entity.TransformComponent.Position
+
+				-- 보스/엘리트는 지속시간 반감(쉐도우 트랩 규칙 승계)
+				local dur = baseDuration
+				if target._isBoss or target._isElite then dur = baseDuration * self.Card217BossDurationMult end
+
+				-- 마크는 속박이 끝날 때까지 떠 있는다(유저 지정, 208과 동일)
+				self:PlayTrapMark(self.Card217MarkRUID, target, Vector3(tp.x, tp.y + self.Card217MarkYOffset, tp.z), self.Card217MarkScale, self.Card217MarkFadeInDuration, self.Card217MarkFadeOutDuration, dur)
+
+				-- ⚠ 쉐도우 트랩과 같은 이유로 연출·속박을 대미지보다 **먼저** 건다(이 일격에 죽으면
+				--   _dead 가드에 걸려 속박 연출이 통째로 안 뜨던 버그).
+				target:ApplyStun(dur, false)
+				self:PlayDeathTrapRootEffect(target, dur)
+
+				if isCrit then target:TakeDamageCrit(damage * 2)
+				else target:TakeDamage(damage) end
+				boundCount = boundCount + 1
+
+				-- 추가타는 속박이 풀리는 시점에 맞춰 예약한다. 연출이 끊겨 보이지 않도록 속박 연출의
+				-- 페이드아웃 구간과 겹치게 HitLeadTime만큼 앞당긴다.
+				-- ⚠ 좌표/크기를 **여기서 값으로 캡처**해서 넘긴다. 2초 뒤에 target에서 다시 읽으려 하면
+				--   그 사이 대상이 죽었을 때(이 스킬은 속박 2초짜리라 흔하다) isvalid 가드에 걸려 추가타
+				--   연출이 통째로 안 뜬다 — 첫 구현에서 실제로 그랬고, 라이브 로그에 Finisher가 0건이었다.
+				--   "연출은 대상 생사와 무관하게 끝까지 재생, 대미지만 생존 체크"가 프로젝트 공통 정책이다.
+				--   속박 중에는 대상이 움직이지 못하므로 시전 시점 좌표를 그대로 써도 어긋나지 않는다.
+				local capturedTarget = target
+				local capturedDamage = damage
+				local capturedIsCrit = isCrit
+				local capturedHitPos = Vector3(tp.x, tp.y + self.Card217HitYOffset, tp.z)
+				local capturedScaleRatio = self:GetEffectScaleRatio(target)
+				local finisherDelay = math.max(0, dur - self.Card217HitLeadTime)
+				_TimerService:SetTimerOnce(function()
+					if not isvalid(self) then return end
+					self:ResolveDeathTrapFinisher(capturedTarget, capturedHitPos, capturedScaleRatio, capturedDamage, capturedIsCrit, castZoneIndex)
+				end, finisherDelay)
+			end
+		end
+		log("DeathTrapAttack: targets=" .. #targets .. " bound=" .. boundCount .. " lv=" .. level .. " dmg=" .. math.floor(damage) .. " root=" .. baseDuration)
+	end
+
+	-- 속박 연출 — 쉐도우 트랩(PlayShadowTrapRootEffect)과 동일한 방식. 지속시간 전체를 클립 1회로
+	-- 채우도록 재생속도를 늦추고, 끝에서 알파를 빼며 사라진다.
+	@ExecSpace("ServerOnly")
+	method void PlayDeathTrapRootEffect(MonsterAI target, number duration)
+		-- 데스 트랩 속박 연출.
+		if not isvalid(self) or not isvalid(target) or not isvalid(target.Entity) or target._dead then return end
+		if self:GetCurrentMap() == nil or target._spawnZoneIndex ~= _MapManager.CurrentMapIndex then return end
+		if duration <= 0 then return end
+		local p = target.Entity.TransformComponent.Position
+		local pos = Vector3(p.x, p.y + self.Card217RootYOffset, p.z)
+		local playRate = self.Card217RootClipSeconds / duration
+		local fx = self:SpawnEffectWithModel(self.Card217RootRUID, pos, 0, playRate, self.Card217RootScale, self.Card217RootBaseAlpha, "skilleffectlong")
+		if fx == nil then return end
+		-- 소멸(정상 종료 / 대상 사망 시 조기 페이드아웃)은 공용 헬퍼가 전담한다
+		self:FadeTrapEffectOnDeath(fx, target, duration, self.Card217RootFadeOutDuration)
+	end
+
+	-- 추가타 타격 연출 — 원본 8프레임을 순서대로 딱 한 바퀴만 재생하고 사라진다(수동 프레임 스왑).
+	-- 네이티브 재생 + 임의 Destroy는 클립 길이를 모른 채 자른 값이라 뒤쪽 프레임이 통째로 날아갔다.
+	@ExecSpace("ServerOnly")
+	method void PlayDeathTrapHitEffect(Vector3 pos, number scaleRatio)
+		-- 데스 트랩 추가타 폭발(원본 프레임 그대로 1회 재생).
+		local frames = self.Card217HitFrameRUIDs
+		local frameCount = #frames
+		if frameCount == 0 then return end
+		local fx = self:SpawnEffectWithModel(frames[1], pos, 0, 1.0, self.Card217HitScale * scaleRatio, 1.0, "persistenteffect")
+		if fx == nil then return end
+		local step = self.Card217HitFrameStepDuration
+		for i = 1, frameCount - 1 do
+			local frameRUID = frames[i + 1]
+			_TimerService:SetTimerOnce(function()
+				if isvalid(fx) then
+					local r = fx.SpriteRendererComponent
+					if r ~= nil then r.SpriteRUID = frameRUID end
+				end
+			end, i * step)
+		end
 		_TimerService:SetTimerOnce(function()
-			if not isvalid(fx) or not isvalid(renderer) then return end
-			_TweenLogic:PlayTween(self.Card208RootBaseAlpha, 0.0, fadeDuration, EaseType.Linear, function(alpha)
-				if isvalid(renderer) then renderer:SetAlpha(alpha) end
-			end)
-		end, fadeDelay)
+			if isvalid(fx) then fx:Destroy() end
+			log("DeathTrapHitEffect: played frames=" .. frameCount .. " total=" .. (frameCount * step) .. "s")
+		end, frameCount * step)
+	end
+
+	-- 속박이 풀리는 시점의 추가타 — 기준 대미지의 30~100%를 매번 새로 굴려 적용한다(유저 지정).
+	-- 연출은 대상 생사와 무관하게 재생하고 대미지만 생존 체크한다(프로젝트 공통 정책).
+	@ExecSpace("ServerOnly")
+	method void ResolveDeathTrapFinisher(MonsterAI target, Vector3 hitPos, number scaleRatio, number damage, boolean isCrit, integer castZoneIndex)
+		-- 데스 트랩 마무리 추가타. 좌표는 시전 시점에 캡처해서 받으므로 대상이 죽어도 연출은 뜬다.
+		if castZoneIndex ~= _MapManager.CurrentMapIndex then return end
+		self:PlayDeathTrapHitEffect(hitPos, scaleRatio)
+
+		local span = self.Card217FinisherMaxPercent - self.Card217FinisherMinPercent
+		local percent = self.Card217FinisherMinPercent + _UtilLogic:RandomDouble() * span
+		local finalDamage = damage * percent
+		local landed = false
+		if isvalid(target) and isvalid(target.Entity) and not target._dead then
+			if isCrit then target:TakeDamageCrit(finalDamage * 2)
+			else target:TakeDamage(finalDamage) end
+			landed = true
+		end
+		log("DeathTrapFinisher: percent=" .. math.floor(percent * 100) .. "% dmg=" .. math.floor(finalDamage) .. " landed=" .. tostring(landed))
 	end
 
 	-- 표창이 사라질 때 알파를 빼면서 없앤다. 이동 Tween은 그대로 두므로 날아가면서 서서히 흐려진다.
@@ -4365,7 +5904,8 @@ script CardManager extends Logic
 	@Sync property integer SuperSevenLevel = 0
 	property number Card215Cooldown = 4.0  -- 레벨 무관 고정(유저 표, 럭키 세븐과 동일)
 	property string Card215Name = "슈퍼 세븐"
-	property string Card215IconRUID = "467660bc40df41df9024e69e73506211"
+	-- 2026-09-05 유저 지정으로 교체(구 "467660bc…")
+	property string Card215IconRUID = "098792a5debc40d9be80dbfb29051bfa"
 	-- 표창 본체(낙하하는 이미지) — 럭키 세븐은 공용 RinShurikenRUID를 쓰지만 슈퍼 세븐은 전용 리소스다
 	property string Card215ShurikenRUID = "2b6de5c42f9e4741b9cd705eb710b5f7"
 	-- 던지는 아크(몬스터 위 1회)
@@ -4385,7 +5925,10 @@ script CardManager extends Logic
 	property number Card215CritBonus = 0.20
 	property number Card215DamageNumberSpacing = 0.22
 	-- 타격 연출 크기(유저 지정 60% 축소: 1.0 → 0.4). 표창과 같은 비율로 맞췄다.
-	property number Card215HitScale = 0.4
+	-- 2026-09-05 유저 지정으로 여기서 10% 더 축소: 0.4 → 0.36
+	property number Card215HitScale = 0.36
+	-- 타격 연출 불투명도(유저 지정 2026-09-05: "알파 20% 빼줘") — 1.0 → 0.8
+	property number Card215HitAlpha = 0.8
 	property number Card215HitYOffset = 0.3
 	-- 표창 크기(유저 지정 60% 축소: 2.0 → 0.8 / 0.9 → 0.36). 낙하하면서 Start→End로 줄어드는
 	-- 원근 축소는 그대로 두고 두 값에 같은 비율(×0.4)만 곱했다.
@@ -4476,7 +6019,7 @@ script CardManager extends Logic
 								if hitCrit then target:TakeDamageCritWithOffset(hitDamage * 2, Vector2(0, numberOffsetY))
 								else target:TakeDamageWithOffset(hitDamage, Vector2(0, numberOffsetY)) end
 							end
-							local hfx = self:SpawnEffect(self.Card215HitRUID, hitPos, 0, 1.0, self.Card215HitScale * scaleRatio, 1)
+							local hfx = self:SpawnEffect(self.Card215HitRUID, hitPos, 0, 1.0, self.Card215HitScale * scaleRatio, self.Card215HitAlpha)
 							if hfx ~= nil then hfx:Destroy(self.HitEffectLifetime) end
 							self:PlaySuperSevenHitSound()
 						end, self.Card215FlightDuration)
@@ -13034,6 +14577,11 @@ script CardManager extends Logic
 		if cardIdx == 213 then return self.ThiefCunningLevel > 0 end
 		if cardIdx == 214 then return self.ShurikenMasteryLevel > 0 end
 		if cardIdx == 215 then return self.SuperSevenLevel > 0 end
+		if cardIdx == 216 then return self.ShurikenBomberLevel > 0 end
+		if cardIdx == 217 then return self.DeathTrapLevel > 0 end
+		if cardIdx == 218 then return self.StormTalismanLevel > 0 end
+		if cardIdx == 219 then return self.PhantomSplitLevel > 0 end
+		if cardIdx == 220 then return self.BoomDaggerLevel > 0 end
 		if cardIdx == 185 then return self.AssassinateLevel > 0 end
 		if cardIdx == 186 then return self.SonicBlowLevel > 0 end
 		if cardIdx == 187 then return self.SmokeRampageLevel > 0 end
@@ -13309,6 +14857,11 @@ script CardManager extends Logic
 		elseif cardIdx == 207 then base = self:GetSpinThrowDamage(self.SpinThrowLevel)
 		elseif cardIdx == 208 then base = self:GetShadowTrapDamage(self.ShadowTrapLevel)
 		elseif cardIdx == 215 then base = self:GetSuperSevenDamage(self.SuperSevenLevel)
+		elseif cardIdx == 216 then base = self:GetShurikenBomberDamage(self.ShurikenBomberLevel)
+		elseif cardIdx == 217 then base = self:GetDeathTrapDamage(self.DeathTrapLevel)
+		elseif cardIdx == 218 then base = self:GetStormTalismanDamage(self.StormTalismanLevel)
+		elseif cardIdx == 219 then base = self:GetPhantomSplitDamage(self.PhantomSplitLevel)
+		elseif cardIdx == 220 then base = self:GetBoomDaggerDamage(self.BoomDaggerLevel)
 		elseif cardIdx == 173 then base = self:GetSavageBlowDamage(self.SavageBlowLevel)
 		elseif cardIdx == 174 then base = self:GetSmokeGrenadeDamage(self.SmokeGrenadeLevel)
 		elseif cardIdx == 175 then base = self:GetMuspelheimDamage(self.MuspelheimLevel)
@@ -13546,6 +15099,11 @@ script CardManager extends Logic
 		elseif cardIdx == 207 then return self.Card207Cooldown
 		elseif cardIdx == 208 then return self.Card208Cooldown
 		elseif cardIdx == 215 then return self.Card215Cooldown
+		elseif cardIdx == 216 then return self.Card216Cooldown
+		elseif cardIdx == 217 then return self.Card217Cooldown
+		elseif cardIdx == 218 then return self.Card218Cooldown
+		elseif cardIdx == 219 then return self.Card219Cooldown
+		elseif cardIdx == 220 then return self.Card220Cooldown
 		elseif cardIdx == 185 then return self.Card185Cooldown
 		elseif cardIdx == 186 then return self.Card186Cooldown
 		elseif cardIdx == 187 then return self.Card187Cooldown
@@ -13885,6 +15443,11 @@ script CardManager extends Logic
 		elseif cardIdx == 213 then return self.ThiefCunningLevel
 		elseif cardIdx == 214 then return self.ShurikenMasteryLevel
 		elseif cardIdx == 215 then return self.SuperSevenLevel
+		elseif cardIdx == 216 then return self.ShurikenBomberLevel
+		elseif cardIdx == 217 then return self.DeathTrapLevel
+		elseif cardIdx == 218 then return self.StormTalismanLevel
+		elseif cardIdx == 219 then return self.PhantomSplitLevel
+		elseif cardIdx == 220 then return self.BoomDaggerLevel
 		elseif cardIdx == 185 then return self.AssassinateLevel
 		elseif cardIdx == 186 then return self.SonicBlowLevel
 		elseif cardIdx == 187 then return self.SmokeRampageLevel
@@ -13992,6 +15555,11 @@ script CardManager extends Logic
 		elseif cardIdx == 213 then self.ThiefCunningLevel = level
 		elseif cardIdx == 214 then self.ShurikenMasteryLevel = level
 		elseif cardIdx == 215 then self.SuperSevenLevel = level
+		elseif cardIdx == 216 then self.ShurikenBomberLevel = level
+		elseif cardIdx == 217 then self.DeathTrapLevel = level
+		elseif cardIdx == 218 then self.StormTalismanLevel = level
+		elseif cardIdx == 219 then self.PhantomSplitLevel = level
+		elseif cardIdx == 220 then self.BoomDaggerLevel = level
 		elseif cardIdx == 185 then self.AssassinateLevel = level
 		elseif cardIdx == 186 then self.SonicBlowLevel = level
 		elseif cardIdx == 187 then self.SmokeRampageLevel = level
@@ -14614,6 +16182,36 @@ script CardManager extends Logic
 				"피해량 +30",
 				"피해량 +30",
 			}
+		elseif cardIdx == 216 then
+			return {
+				"조합! (대미지 200, 2발, 관통 4마리 50/40/30/20%)",
+				"피해량 +20, 관통 비율 +10%p",
+				"피해량 +20, 관통 비율 +10%p",
+			}
+		elseif cardIdx == 217 then
+			return {
+				"조합! (대미지 160, 타겟 3명, 속박 2초, 해제 시 추가타 30~100%)",
+				"피해량 +20",
+				"피해량 +40",
+			}
+		elseif cardIdx == 218 then
+			return {
+				"조합! (대미지 280, 타겟 2명, 스톰 2초 — 닿으면 30%)",
+				"피해량 +20, 스톰 대미지 +10%p",
+				"피해량 +20, 스톰 대미지 +10%p",
+			}
+		elseif cardIdx == 219 then
+			return {
+				"조합! (대미지 220, 타겟 2명, 5개 분열 80%)",
+				"피해량 +20, 분열 대미지 +10%p",
+				"피해량 +20, 분열 대미지 +10%p",
+			}
+		elseif cardIdx == 220 then
+			return {
+				"조합! (대미지 160, 지속 3초, 소멸 시 폭발 40%)",
+				"피해량 +20, 폭발 대미지 +10%p",
+				"피해량 +20, 폭발 대미지 +10%p",
+			}
 		elseif cardIdx == 214 then
 			return {
 				"해금! (기본 공격 10% 확률로 추가 공격 100%, 영구)",
@@ -15068,7 +16666,16 @@ script CardManager extends Logic
 		-- BuildActiveUpgradePool/GenerateLevelUpChoices/GetEliteUpgradeType 다음 13번째 지점).
 		elseif name == "DoubleStepLevel" then self:RefreshSlotIfHoldsCard(171)
 		elseif name == "LuckySevenLevel" then self:RefreshSlotIfHoldsCard(201)
+		-- 버그 수정(2026-09-05) — 린 조합 카드 215가 이 체인에서 빠져 있었다(쉐이드 조합 185~191은
+		-- 전부 있었는데 215만 누락). 위 2026-08-12 주석과 완전히 같은 클래스의 버그로, Slot*Card
+		-- 동기화가 레벨 동기화보다 먼저 도착하면 슬롯 Lv 표시가 갱신 안 된 채 남는다.
+		elseif name == "SuperSevenLevel" then self:RefreshSlotIfHoldsCard(215)
 		elseif name == "ShurikenBurstLevel" then self:RefreshSlotIfHoldsCard(202)
+		elseif name == "ShurikenBomberLevel" then self:RefreshSlotIfHoldsCard(216)
+		elseif name == "DeathTrapLevel" then self:RefreshSlotIfHoldsCard(217)
+		elseif name == "StormTalismanLevel" then self:RefreshSlotIfHoldsCard(218)
+		elseif name == "PhantomSplitLevel" then self:RefreshSlotIfHoldsCard(219)
+		elseif name == "BoomDaggerLevel" then self:RefreshSlotIfHoldsCard(220)
 		elseif name == "WindTalismanLevel" then self:RefreshSlotIfHoldsCard(203)
 		elseif name == "ShadowSplitLevel" then self:RefreshSlotIfHoldsCard(204)
 		elseif name == "ThrowingWingDaggerLevel" then self:RefreshSlotIfHoldsCard(205)
@@ -16223,8 +17830,13 @@ script CardManager extends Logic
 		elseif cardIdx == 204 then
 			local lv204 = self.ShadowSplitLevel
 			extraStr = "타겟 " .. self:GetShadowSplitTargetCount(lv204) .. "명  |  분열 " .. self.Card204SplitCount .. "개(" .. math.floor(self:GetShadowSplitFragmentPercent(lv204) * 100) .. "%)"
+		elseif cardIdx == 219 then
+			local lv219 = self.PhantomSplitLevel
+			extraStr = "타겟 " .. self:GetPhantomSplitTargetCount(lv219) .. "명  |  분열 " .. self.Card219SplitCount .. "개(" .. math.floor(self:GetPhantomSplitFragmentPercent(lv219) * 100) .. "%)"
 		elseif cardIdx == 205 then
 			extraStr = "지속 " .. string.format("%.0f", self.Card205Duration) .. "초  |  추적  |  경로상 적 타격"
+		elseif cardIdx == 220 then
+			extraStr = "지속 " .. string.format("%.0f", self.Card205Duration) .. "초  |  추적  |  경로상 적 타격  |  소멸 시 폭발 " .. math.floor(self:GetBoomDaggerBoomPercent(self.BoomDaggerLevel) * 100) .. "%(광역)"
 		elseif cardIdx == 206 then
 			extraStr = "타겟 1명  |  광역"
 		elseif cardIdx == 208 then
@@ -16238,6 +17850,16 @@ script CardManager extends Logic
 			extraStr = "타겟 " .. self:GetShurikenBurstTargetCount(lv202) .. "명  |  관통 " .. #self:GetShurikenBurstPiercePercents(lv202) .. "마리"
 		elseif cardIdx == 215 then
 			extraStr = "타겟 " .. self:GetSuperSevenTargetCount(self.SuperSevenLevel) .. "명  |  4연타(" .. math.floor(self.Card215HitPercent * 100) .. "% × 4)  |  크리 +" .. math.floor(self.Card215CritBonus * 100) .. "%"
+		elseif cardIdx == 216 then
+			local lv216 = self.ShurikenBomberLevel
+			local pp216 = self:GetShurikenBomberPiercePercents(lv216)
+			extraStr = self:GetShurikenBomberTargetCount(lv216) .. "발  |  관통 " .. #pp216 .. "마리(" .. math.floor(pp216[1] * 100) .. "/" .. math.floor(pp216[2] * 100) .. "/" .. math.floor(pp216[3] * 100) .. "/" .. math.floor(pp216[4] * 100) .. "%)"
+		elseif cardIdx == 217 then
+			local lv217 = self.DeathTrapLevel
+			extraStr = "타겟 " .. self:GetDeathTrapTargetCount(lv217) .. "명  |  속박 " .. string.format("%.0f", self:GetDeathTrapRootDuration(lv217)) .. "초(100%)  |  해제 시 추가타 " .. math.floor(self.Card217FinisherMinPercent * 100) .. "~" .. math.floor(self.Card217FinisherMaxPercent * 100) .. "%  |  보스·엘리트 지속 1/2"
+		elseif cardIdx == 218 then
+			local lv218 = self.StormTalismanLevel
+			extraStr = "타겟 " .. self:GetStormTalismanTargetCount(lv218) .. "명  |  광역  |  스톰 " .. string.format("%.0f", self.Card218StormDuration) .. "초 추적(닿으면 " .. math.floor(self:GetStormTalismanStormPercent(lv218) * 100) .. "%, 같은 대상 " .. string.format("%.1f", self.Card218StormHitCooldown) .. "초당 1회)"
 		elseif cardIdx == 201 then
 			local lv201 = self.LuckySevenLevel
 			extraStr = "타겟 " .. self:GetLuckySevenTargetCount(lv201) .. "명  |  3연타(40/30/30%)"
@@ -16707,6 +18329,16 @@ script CardManager extends Logic
 					self:ShadowTrapAttack(damage, isCrit)
 				elseif cardIndex == 215 then
 					self:SuperSevenAttack(damage, isCrit)
+				elseif cardIndex == 216 then
+					self:ShurikenBomberAttack(damage, isCrit)
+				elseif cardIndex == 217 then
+					self:DeathTrapAttack(damage, isCrit)
+				elseif cardIndex == 218 then
+					self:StormTalismanAttack(damage, isCrit)
+				elseif cardIndex == 219 then
+					self:PhantomSplitAttack(damage, isCrit)
+				elseif cardIndex == 220 then
+					self:BoomDaggerAttack(damage, isCrit)
 				elseif cardIndex == 173 then
 					self:SavageBlowAttack(damage, isCrit, nil)
 				elseif cardIndex == 174 then
@@ -19282,31 +20914,75 @@ script CardManager extends Logic
 			end
 
 			-- 슈리켄 버스트(Card202, 슬롯형 액티브 2호)
-			if self.ShurikenBurstLevel == 0 then
-				if hasEmptySlot then table.insert(pool, { card = 202, type = "unlock" }) end
-			elseif self.ShurikenBurstLevel < 5 then
-				table.insert(pool, { card = 202, type = "shurikenburst_up" })
+			-- (슈리켄 봄버로 이미 조합된 뒤에는 더 이상 등장하지 않음 — 그 슬롯을 이미 떠났으므로)
+			if self.ShurikenBomberLevel == 0 then
+				if self.ShurikenBurstLevel == 0 then
+					if hasEmptySlot then table.insert(pool, { card = 202, type = "unlock" }) end
+				elseif self.ShurikenBurstLevel < 5 then
+					table.insert(pool, { card = 202, type = "shurikenburst_up" })
+				end
+			end
+
+			-- 슈리켄 봄버(Card216, 조합 스킬 — 슈리켄 버스트 슬롯을 그대로 넘겨받는다. 자벨린 마스터리/
+			-- 래디컬 다크니스는 둘 다 슬롯 없는 패시브라 비울 슬롯이 없음 — 슈퍼 세븐(215)과 동일한 구조)
+			if self.ShurikenBurstLevel >= 5 and self:IsCardUnlocked(210) and self:IsCardUnlocked(212) and self.ShurikenBomberLevel == 0 then
+				table.insert(pool, { card = 216, type = "unlock" })
+			elseif self.ShurikenBomberLevel > 0 and self.ShurikenBomberLevel < 3 then
+				table.insert(pool, { card = 216, type = "shurikenbomber_up" })
 			end
 
 			-- 윈드 탈리스만(Card203, 슬롯형 액티브 3호)
-			if self.WindTalismanLevel == 0 then
-				if hasEmptySlot then table.insert(pool, { card = 203, type = "unlock" }) end
-			elseif self.WindTalismanLevel < 5 then
-				table.insert(pool, { card = 203, type = "windtalisman_up" })
+			-- (스톰 탈리스만으로 이미 조합된 뒤에는 더 이상 등장하지 않음 — 그 슬롯을 이미 떠났으므로)
+			if self.StormTalismanLevel == 0 then
+				if self.WindTalismanLevel == 0 then
+					if hasEmptySlot then table.insert(pool, { card = 203, type = "unlock" }) end
+				elseif self.WindTalismanLevel < 5 then
+					table.insert(pool, { card = 203, type = "windtalisman_up" })
+				end
+			end
+
+			-- 스톰 탈리스만(Card218, 조합 스킬 — 윈드 탈리스만 슬롯을 그대로 넘겨받는다. 시프 커닝/
+			-- 스피릿 자벨린은 둘 다 슬롯 없는 패시브라 비울 슬롯이 없음)
+			if self.WindTalismanLevel >= 5 and self:IsCardUnlocked(213) and self:IsCardUnlocked(211) and self.StormTalismanLevel == 0 then
+				table.insert(pool, { card = 218, type = "unlock" })
+			elseif self.StormTalismanLevel > 0 and self.StormTalismanLevel < 3 then
+				table.insert(pool, { card = 218, type = "stormtalisman_up" })
 			end
 
 			-- 쉐도우 스플릿(Card204, 슬롯형 액티브 4호)
-			if self.ShadowSplitLevel == 0 then
-				if hasEmptySlot then table.insert(pool, { card = 204, type = "unlock" }) end
-			elseif self.ShadowSplitLevel < 5 then
-				table.insert(pool, { card = 204, type = "shadowsplit_up" })
+			-- (팬텀 스플릿으로 이미 조합된 뒤에는 더 이상 등장하지 않음 — 그 슬롯을 이미 떠났으므로)
+			if self.PhantomSplitLevel == 0 then
+				if self.ShadowSplitLevel == 0 then
+					if hasEmptySlot then table.insert(pool, { card = 204, type = "unlock" }) end
+				elseif self.ShadowSplitLevel < 5 then
+					table.insert(pool, { card = 204, type = "shadowsplit_up" })
+				end
+			end
+
+			-- 팬텀 스플릿(Card219, 조합 스킬 — 쉐도우 스플릿 슬롯을 그대로 넘겨받는다. 래디컬 다크니스/
+			-- 스로잉 액셀레이션/자벨린 마스터리는 셋 다 슬롯 없는 패시브라 비울 슬롯이 없음)
+			if self.ShadowSplitLevel >= 5 and self:IsCardUnlocked(212) and self:IsCardUnlocked(209) and self:IsCardUnlocked(210) and self.PhantomSplitLevel == 0 then
+				table.insert(pool, { card = 219, type = "unlock" })
+			elseif self.PhantomSplitLevel > 0 and self.PhantomSplitLevel < 3 then
+				table.insert(pool, { card = 219, type = "phantomsplit_up" })
 			end
 
 			-- 스로잉 윙대거(Card205, 슬롯형 액티브 5호)
-			if self.ThrowingWingDaggerLevel == 0 then
-				if hasEmptySlot then table.insert(pool, { card = 205, type = "unlock" }) end
-			elseif self.ThrowingWingDaggerLevel < 5 then
-				table.insert(pool, { card = 205, type = "throwingwingdagger_up" })
+			-- (스로잉 붐대거로 이미 조합된 뒤에는 더 이상 등장하지 않음 — 그 슬롯을 이미 떠났으므로)
+			if self.BoomDaggerLevel == 0 then
+				if self.ThrowingWingDaggerLevel == 0 then
+					if hasEmptySlot then table.insert(pool, { card = 205, type = "unlock" }) end
+				elseif self.ThrowingWingDaggerLevel < 5 then
+					table.insert(pool, { card = 205, type = "throwingwingdagger_up" })
+				end
+			end
+
+			-- 스로잉 붐대거(Card220, 조합 스킬 — 스로잉 윙대거 슬롯을 그대로 넘겨받는다. 스피릿 자벨린/
+			-- 표창술/시프 커닝은 셋 다 슬롯 없는 패시브라 비울 슬롯이 없음)
+			if self.ThrowingWingDaggerLevel >= 5 and self:IsCardUnlocked(211) and self:IsCardUnlocked(214) and self:IsCardUnlocked(213) and self.BoomDaggerLevel == 0 then
+				table.insert(pool, { card = 220, type = "unlock" })
+			elseif self.BoomDaggerLevel > 0 and self.BoomDaggerLevel < 3 then
+				table.insert(pool, { card = 220, type = "boomdagger_up" })
 			end
 
 			-- 쇼다운 챌린지(Card206, 슬롯형 액티브 6호)
@@ -19324,10 +21000,21 @@ script CardManager extends Logic
 			end
 
 			-- 쉐도우 트랩(Card208, 슬롯형 액티브 8호)
-			if self.ShadowTrapLevel == 0 then
-				if hasEmptySlot then table.insert(pool, { card = 208, type = "unlock" }) end
-			elseif self.ShadowTrapLevel < 5 then
-				table.insert(pool, { card = 208, type = "shadowtrap_up" })
+			-- (데스 트랩으로 이미 조합된 뒤에는 더 이상 등장하지 않음 — 그 슬롯을 이미 떠났으므로)
+			if self.DeathTrapLevel == 0 then
+				if self.ShadowTrapLevel == 0 then
+					if hasEmptySlot then table.insert(pool, { card = 208, type = "unlock" }) end
+				elseif self.ShadowTrapLevel < 5 then
+					table.insert(pool, { card = 208, type = "shadowtrap_up" })
+				end
+			end
+
+			-- 데스 트랩(Card217, 조합 스킬 — 쉐도우 트랩 슬롯을 그대로 넘겨받는다. 스로잉 액셀레이션은
+			-- 슬롯 없는 패시브라 비울 슬롯이 없음 — 슈퍼 세븐(215)/슈리켄 봄버(216)와 동일한 구조)
+			if self.ShadowTrapLevel >= 5 and self:IsCardUnlocked(209) and self.DeathTrapLevel == 0 then
+				table.insert(pool, { card = 217, type = "unlock" })
+			elseif self.DeathTrapLevel > 0 and self.DeathTrapLevel < 3 then
+				table.insert(pool, { card = 217, type = "deathtrap_up" })
 			end
 
 			-- ── 린 패시브 5종(209~213). 슬롯을 안 쓰므로 hasEmptySlot 조건이 붙지 않는다.
@@ -20163,6 +21850,46 @@ script CardManager extends Logic
 			icon.ImageRUID = _CardRegistry:GetIcon(215)
 			title.Text = "Lv" .. nextLevel
 			name.Text  = _CardRegistry:GetName(215)
+			return
+		end
+
+		if cardIdx == 216 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.ShurikenBomberLevel + 1)
+			icon.ImageRUID = _CardRegistry:GetIcon(216)
+			title.Text = "Lv" .. nextLevel
+			name.Text  = _CardRegistry:GetName(216)
+			return
+		end
+
+		if cardIdx == 217 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.DeathTrapLevel + 1)
+			icon.ImageRUID = _CardRegistry:GetIcon(217)
+			title.Text = "Lv" .. nextLevel
+			name.Text  = _CardRegistry:GetName(217)
+			return
+		end
+
+		if cardIdx == 218 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.StormTalismanLevel + 1)
+			icon.ImageRUID = _CardRegistry:GetIcon(218)
+			title.Text = "Lv" .. nextLevel
+			name.Text  = _CardRegistry:GetName(218)
+			return
+		end
+
+		if cardIdx == 219 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.PhantomSplitLevel + 1)
+			icon.ImageRUID = _CardRegistry:GetIcon(219)
+			title.Text = "Lv" .. nextLevel
+			name.Text  = _CardRegistry:GetName(219)
+			return
+		end
+
+		if cardIdx == 220 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.BoomDaggerLevel + 1)
+			icon.ImageRUID = _CardRegistry:GetIcon(220)
+			title.Text = "Lv" .. nextLevel
+			name.Text  = _CardRegistry:GetName(220)
 			return
 		end
 
@@ -22064,6 +23791,106 @@ script CardManager extends Logic
 			return
 		end
 
+		-- 슈리켄 봄버(린 전용, 조합 스킬 — 슈리켄 버스트 슬롯을 그대로 넘겨받는다)
+		if cardIdx == 216 then
+			if upgradeType == "unlock" then
+				self.ShurikenBomberLevel = 1
+				local burstSlot = self:GetSlotForCard(202)
+				if burstSlot > 0 then
+					self:AssignCardToSlot(burstSlot, 216)
+					self:ResetSlotTimer(burstSlot)
+					self:PlayThunderStormFusionEffect(burstSlot)
+					log("Card216(ShurikenBomber) fused into Slot" .. burstSlot .. " (was ShurikenBurst)")
+				else
+					log_warning("ShurikenBomber: ShurikenBurst not found in any slot — fusion could not place the card")
+				end
+			elseif upgradeType == "shurikenbomber_up" and self.ShurikenBomberLevel < 3 then
+				self.ShurikenBomberLevel = self.ShurikenBomberLevel + 1
+			end
+			log("ShurikenBomber L" .. self.ShurikenBomberLevel .. " (dmg=" .. math.floor(self:GetShurikenBomberDamage(self.ShurikenBomberLevel)) .. " shots=" .. self:GetShurikenBomberTargetCount(self.ShurikenBomberLevel) .. " 관통 " .. #self:GetShurikenBomberPiercePercents(self.ShurikenBomberLevel) .. "마리)")
+			return
+		end
+
+		-- 데스 트랩(린 전용, 조합 스킬 — 쉐도우 트랩 슬롯을 그대로 넘겨받는다)
+		if cardIdx == 217 then
+			if upgradeType == "unlock" then
+				self.DeathTrapLevel = 1
+				local trapSlot = self:GetSlotForCard(208)
+				if trapSlot > 0 then
+					self:AssignCardToSlot(trapSlot, 217)
+					self:ResetSlotTimer(trapSlot)
+					self:PlayThunderStormFusionEffect(trapSlot)
+					log("Card217(DeathTrap) fused into Slot" .. trapSlot .. " (was ShadowTrap)")
+				else
+					log_warning("DeathTrap: ShadowTrap not found in any slot — fusion could not place the card")
+				end
+			elseif upgradeType == "deathtrap_up" and self.DeathTrapLevel < 3 then
+				self.DeathTrapLevel = self.DeathTrapLevel + 1
+			end
+			log("DeathTrap L" .. self.DeathTrapLevel .. " (dmg=" .. math.floor(self:GetDeathTrapDamage(self.DeathTrapLevel)) .. " targets=" .. self:GetDeathTrapTargetCount(self.DeathTrapLevel) .. " 속박 " .. self:GetDeathTrapRootDuration(self.DeathTrapLevel) .. "초)")
+			return
+		end
+
+		-- 스톰 탈리스만(린 전용, 조합 스킬 — 윈드 탈리스만 슬롯을 그대로 넘겨받는다)
+		if cardIdx == 218 then
+			if upgradeType == "unlock" then
+				self.StormTalismanLevel = 1
+				local talismanSlot = self:GetSlotForCard(203)
+				if talismanSlot > 0 then
+					self:AssignCardToSlot(talismanSlot, 218)
+					self:ResetSlotTimer(talismanSlot)
+					self:PlayThunderStormFusionEffect(talismanSlot)
+					log("Card218(StormTalisman) fused into Slot" .. talismanSlot .. " (was WindTalisman)")
+				else
+					log_warning("StormTalisman: WindTalisman not found in any slot — fusion could not place the card")
+				end
+			elseif upgradeType == "stormtalisman_up" and self.StormTalismanLevel < 3 then
+				self.StormTalismanLevel = self.StormTalismanLevel + 1
+			end
+			log("StormTalisman L" .. self.StormTalismanLevel .. " (dmg=" .. math.floor(self:GetStormTalismanDamage(self.StormTalismanLevel)) .. " targets=" .. self:GetStormTalismanTargetCount(self.StormTalismanLevel) .. " 스톰 " .. self.Card218StormDuration .. "초 " .. math.floor(self:GetStormTalismanStormPercent(self.StormTalismanLevel) * 100) .. "%)")
+			return
+		end
+
+		-- 팬텀 스플릿(린 전용, 조합 스킬 — 쉐도우 스플릿 슬롯을 그대로 넘겨받는다)
+		if cardIdx == 219 then
+			if upgradeType == "unlock" then
+				self.PhantomSplitLevel = 1
+				local splitSlot = self:GetSlotForCard(204)
+				if splitSlot > 0 then
+					self:AssignCardToSlot(splitSlot, 219)
+					self:ResetSlotTimer(splitSlot)
+					self:PlayThunderStormFusionEffect(splitSlot)
+					log("Card219(PhantomSplit) fused into Slot" .. splitSlot .. " (was ShadowSplit)")
+				else
+					log_warning("PhantomSplit: ShadowSplit not found in any slot — fusion could not place the card")
+				end
+			elseif upgradeType == "phantomsplit_up" and self.PhantomSplitLevel < 3 then
+				self.PhantomSplitLevel = self.PhantomSplitLevel + 1
+			end
+			log("PhantomSplit L" .. self.PhantomSplitLevel .. " (dmg=" .. math.floor(self:GetPhantomSplitDamage(self.PhantomSplitLevel)) .. " targets=" .. self:GetPhantomSplitTargetCount(self.PhantomSplitLevel) .. " 분열 " .. self.Card219SplitCount .. "개 " .. math.floor(self:GetPhantomSplitFragmentPercent(self.PhantomSplitLevel) * 100) .. "%)")
+			return
+		end
+
+		-- 스로잉 붐대거(린 전용, 조합 스킬 — 스로잉 윙대거 슬롯을 그대로 넘겨받는다)
+		if cardIdx == 220 then
+			if upgradeType == "unlock" then
+				self.BoomDaggerLevel = 1
+				local daggerSlot = self:GetSlotForCard(205)
+				if daggerSlot > 0 then
+					self:AssignCardToSlot(daggerSlot, 220)
+					self:ResetSlotTimer(daggerSlot)
+					self:PlayThunderStormFusionEffect(daggerSlot)
+					log("Card220(BoomDagger) fused into Slot" .. daggerSlot .. " (was ThrowingWingDagger)")
+				else
+					log_warning("BoomDagger: ThrowingWingDagger not found in any slot — fusion could not place the card")
+				end
+			elseif upgradeType == "boomdagger_up" and self.BoomDaggerLevel < 3 then
+				self.BoomDaggerLevel = self.BoomDaggerLevel + 1
+			end
+			log("BoomDagger L" .. self.BoomDaggerLevel .. " (dmg=" .. math.floor(self:GetBoomDaggerDamage(self.BoomDaggerLevel)) .. " 지속 " .. self.Card205Duration .. "초 폭발 " .. math.floor(self:GetBoomDaggerBoomPercent(self.BoomDaggerLevel) * 100) .. "%)")
+			return
+		end
+
 		if cardIdx == 214 then
 			if upgradeType == "unlock" then
 				self.ShurikenMasteryLevel = 1
@@ -22519,6 +24346,11 @@ script CardManager extends Logic
 		self.ThiefCunningLevel = 0
 		self.ShurikenMasteryLevel = 0
 		self.SuperSevenLevel = 0
+		self.ShurikenBomberLevel = 0
+		self.DeathTrapLevel = 0
+		self.StormTalismanLevel = 0
+		self.PhantomSplitLevel = 0
+		self.BoomDaggerLevel = 0
 		-- 버그 수정(2026-08-13, 유저 지적: "Reset() 리셋 누락도 같이 고쳐줘") — 173~179(새비지블로우~
 		-- 다크플레어)가 여기서 전부 빠져있어서 "다시하기"해도 레벨이 그대로 남아있었다(레이온에서 이미
 		-- 한 번 터졌던 것과 동일한 클래스 버그). 쉐도우 파트너(178)는 소환된 파트너가 있어도 Phoenix
@@ -22723,6 +24555,11 @@ script CardManager extends Logic
 			if self:IsCardUnlocked(207) and self.SpinThrowLevel < 5 then table.insert(pool, 207) end
 			if self:IsCardUnlocked(208) and self.ShadowTrapLevel < 5 then table.insert(pool, 208) end
 			if self:IsCardUnlocked(215) and self.SuperSevenLevel < 3 then table.insert(pool, 215) end
+			if self:IsCardUnlocked(216) and self.ShurikenBomberLevel < 3 then table.insert(pool, 216) end
+			if self:IsCardUnlocked(217) and self.DeathTrapLevel < 3 then table.insert(pool, 217) end
+			if self:IsCardUnlocked(218) and self.StormTalismanLevel < 3 then table.insert(pool, 218) end
+			if self:IsCardUnlocked(219) and self.PhantomSplitLevel < 3 then table.insert(pool, 219) end
+			if self:IsCardUnlocked(220) and self.BoomDaggerLevel < 3 then table.insert(pool, 220) end
 			return pool
 		end
 		if _GameManager.SelectedCharacter == 3 then
@@ -22818,6 +24655,11 @@ script CardManager extends Logic
 		elseif cardIdx == 213 then return "thiefcunning_up"
 		elseif cardIdx == 214 then return "shurikenmastery_up"
 		elseif cardIdx == 215 then return "superseven_up"
+		elseif cardIdx == 216 then return "shurikenbomber_up"
+		elseif cardIdx == 217 then return "deathtrap_up"
+		elseif cardIdx == 218 then return "stormtalisman_up"
+		elseif cardIdx == 219 then return "phantomsplit_up"
+		elseif cardIdx == 220 then return "boomdagger_up"
 		elseif cardIdx == 185 then return "assassinate_up"
 		elseif cardIdx == 186 then return "sonicblow_up"
 		elseif cardIdx == 187 then return "smokerampage_up"
