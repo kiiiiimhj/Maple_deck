@@ -3506,14 +3506,15 @@ script CardManager extends Logic
 	-- "오른쪽으로 날아갈 때" 쓸 FlipX 값(윈드 탈리스만에서 라이브로 확인된 값과 동일)
 	property boolean Card205FlipDefault = true
 
-	-- 레벨별 기준 대미지(유저 표) — 120/140/160/180/200
+	-- 레벨별 기준 대미지(유저 표) — 60/80/100/120/140
+	-- 라이브 밸런스 너프 2회(2026-09-04): 120~200 → 80~160 → 60~140.
 	method number GetThrowingWingDaggerDamage(integer level)
-		if level >= 5 then return 200
-		elseif level >= 4 then return 180
-		elseif level >= 3 then return 160
-		elseif level >= 2 then return 140
+		if level >= 5 then return 140
+		elseif level >= 4 then return 120
+		elseif level >= 3 then return 100
+		elseif level >= 2 then return 80
 		end
-		return 120
+		return 60
 	end
 
 	method void PlayThrowingWingDaggerUseSound()
@@ -3738,17 +3739,26 @@ script CardManager extends Logic
 	-- 연출이 먼저 보이고 나서 판정이 들어가는 시점
 	property number Card206HitDelay = 0.15
 	-- 광역 판정 사각 — "시전 연출(effect) 범위"에 맞춘다. 중심은 타격 좌표에서 이만큼 옮긴다.
-	-- 웹 튜너에서 잡은 값(2026-09-04). 도형을 타원 → 사각으로 바꿨고(연출이 가로로 넓은 판이라
-	-- 타원은 모서리가 많이 남았다), 튜너의 rect ry 는 "전체 높이"라 halfH 로 넣을 땐 ÷2 한다
-	-- — ry 0.88 → 0.44.
-	property number Card206HalfW = 0.8
-	property number Card206HalfH = 0.44
-	property number Card206OffsetX = -0.33
+	-- 웹 튜너에서 잡은 값(2026-09-04 재조정: rx 0.8→0.9 / ry 0.88→0.97 / ox -0.33→-0.39).
+	-- 도형을 타원 → 사각으로 바꿨고(연출이 가로로 넓은 판이라 타원은 모서리가 많이 남았다),
+	-- 튜너의 rect rx 는 "반폭"이라 halfW 에 그대로, ry 는 "전체 높이"라 halfH 로 넣을 땐 ÷2 한다
+	-- — ry 0.97 → 0.485. (튜너 SVG 렌더 코드로 확인: x=px-rx, width=rx*2 / y=py-ry/2, height=ry)
+	property number Card206HalfW = 0.9
+	property number Card206HalfH = 0.485
+	property number Card206OffsetX = -0.39
 	-- ⚠ 이 값은 "연출 자리(hitPos)" 기준이다. hitPos 는 몬스터보다 HitYOffset(0.3)만큼 위라,
-	--   튜너에서 잡은 중심(몬스터 기준 +0.31)을 넣으려면 0.31 - 0.3 = 0.01 이 된다.
+	--   튜너에서 잡은 중심(몬스터 기준 oy)을 넣으려면 oy - 0.3 을 해야 한다.
 	--   이걸 빼먹으면 dy 가 항상 -0.3 으로 깔려서, halfH 가 0.3 보다 작아지는 순간 정중앙 타겟조차
 	--   판정 밖으로 빠진다(라이브 로그: dx=0.00 dy=-0.30 inEllipse=false, hit=0/9).
-	property number Card206OffsetY = 0.01
+	-- 2026-09-04 유저 재조정: 튜너 oy 0.31 → 0.18. 상자가 몬스터 머리 위로 떠 있어서 세로 여유가
+	--   0.13밖에 안 남던 것(실측 dy 항상 -0.31)을 내렸다. 0.18 - 0.3 = -0.12.
+	property number Card206OffsetY = -0.12
+	-- "오른쪽을 향할 때" 쓸 FlipX 값(린 기준, 203/205에서 라이브 확인된 값과 동일 — 원본 스프라이트가
+	-- 왼쪽을 보고 있다). ⚠ 연출을 뒤집으면 판정 중심 OffsetX 도 같이 미러링해야 한다 — 안 하면
+	-- 몬스터가 플레이어 오른쪽에 있을 때 판정만 계속 왼쪽(바깥쪽)으로 밀린다.
+	-- 실측(2026-09-04): 몹이 오른쪽에 몰린 판에서 dx +1.13 / +1.20 이 사각형 밖으로 빠졌는데,
+	-- 미러링하면 중심이 0.78 오른쪽으로 가서 둘 다 들어온다.
+	property boolean Card206FlipDefault = true
 
 	-- 레벨별 기준 대미지(유저 표) — 80/100/120/140/160
 	method number GetShowdownChallengeDamage(integer level)
@@ -3760,12 +3770,27 @@ script CardManager extends Logic
 		return 80
 	end
 
+	-- 쇼다운 챌린지 연출의 좌우 축 뒤집기 — 205 ApplyThrowingWingDaggerFlip 과 같은 관례.
+	@ExecSpace("ServerOnly")
+	method void ApplyShowdownChallengeFlip(Entity fx, boolean movingRight)
+		-- 쇼다운 챌린지 시전 연출 좌우 반전.
+		if not isvalid(fx) then return end
+		local renderer = fx.SpriteRendererComponent
+		if renderer == nil then return end
+		if movingRight then
+			renderer.FlipX = self.Card206FlipDefault
+		else
+			renderer.FlipX = not self.Card206FlipDefault
+		end
+	end
+
 	@ExecSpace("ServerOnly")
 	method void ShowdownChallengeAttack(number damage, boolean isCrit)
 		-- 가장 가까운 몬스터 자리에 연출을 띄우고, 잠깐 뒤 그 범위를 한 번에 판정한다.
 		local map = self:GetCurrentMap()
 		if map == nil then return end
 
+		local playerX = self:GetPlayerCenterX()
 		local targets = self:GetClosestTargets(1)
 		for _, mob in ipairs(targets) do
 			---@type MonsterAI
@@ -3777,17 +3802,27 @@ script CardManager extends Logic
 				-- 존을 넘어간 뒤 지연 콜백이 실행되면 다음 존에 연출이 남는다 — 캐스트 시점 존을 캡처해 거른다
 				local castZoneIndex = target._spawnZoneIndex
 				local capturedTarget = target
+				-- 타겟이 플레이어 기준 어느 쪽에 있는지 — 연출 반전과 판정 미러링의 기준이다
+				local dirRight = (target.Entity.TransformComponent.WorldPosition.x >= playerX)
 
 				-- 시전 연출은 여기서 한 번만 스폰하고 수명만 걸어둔다. 타겟 엔티티를 참조하지 않으므로
 				-- 재생 도중 몬스터가 죽어도 연출은 끊기지 않는다(라이브 확인:
 				-- "Card206Cast: aliveNearEnd=true targetDead=true").
 				local cfx = self:SpawnEffect(self.Card206CastRUID, hitPos, 0, 1.0, self.Card206CastScale, 1)
-				if cfx ~= nil then cfx:Destroy(self.Card206CastLifetime) end
+				if cfx ~= nil then
+					self:ApplyShowdownChallengeFlip(cfx, dirRight)
+					cfx:Destroy(self.Card206CastLifetime)
+				end
+
+				-- 판정 중심도 연출과 같은 쪽으로 뒤집는다(웹 튜너 값은 왼쪽을 향한 원본 기준이라
+				-- 오른쪽을 향할 땐 부호를 뒤집어야 연출과 판정이 같은 자리에 온다)
+				local offX = self.Card206OffsetX
+				if dirRight then offX = -offX end
 
 				_TimerService:SetTimerOnce(function()
 					if not isvalid(self) then return end
 					if castZoneIndex ~= _MapManager.CurrentMapIndex then return end
-					self:ResolveShowdownChallengeHit(map, hitPos, damage, isCrit, capturedTarget)
+					self:ResolveShowdownChallengeHit(map, hitPos, damage, isCrit, capturedTarget, offX)
 				end, self.Card206HitDelay)
 			end
 		end
@@ -3797,12 +3832,18 @@ script CardManager extends Logic
 	-- 광역 판정 1회 — 타원 안의 몬스터를 전부 한 번씩 때리고 각자에게 타격 연출을 올린다.
 	-- 앞/뒤 깊이가 다른 몬스터는 제외한다(의사 3D 깊이 정책) — 기준은 연출이 뜬 그 타겟이다.
 	@ExecSpace("ServerOnly")
-	method void ResolveShowdownChallengeHit(Entity map, Vector3 hitPos, number damage, boolean isCrit, MonsterAI depthAnchor)
-		-- 쇼다운 챌린지 광역 판정 + 타격 연출.
-		local centerX = hitPos.x + self.Card206OffsetX
+	method void ResolveShowdownChallengeHit(Entity map, Vector3 hitPos, number damage, boolean isCrit, MonsterAI depthAnchor, number offsetX)
+		-- 쇼다운 챌린지 광역 판정 + 타격 연출. offsetX 는 호출부가 좌우 반전까지 반영해 넘긴 값이다.
+		local centerX = hitPos.x + offsetX
 		local centerY = hitPos.y + self.Card206OffsetY
 		local hitCount = 0
 		local candidateCount = 0
+		-- 빠진 이유를 도형/밴드로 나눠 센다. 웹 튜너는 IsSameDepthBand 를 그릴 수 없어서(튜너 페이지가
+		-- 스스로 명시한 한계) "사각형 밖이라 빠진 건지 밴드가 달라서 빠진 건지"를 화면으로는 구분할 수
+		-- 없다 — 이 두 카운터가 그 구분을 대신한다. 2026-09-04 실측에서 rejBand 는 6회 시전 내내 0이었다
+		-- (75건 평가). "범위가 좁다"는 리포트의 원인은 전부 도형 쪽이었다.
+		local rejectRect = 0
+		local rejectBand = 0
 		for _, mob in ipairs(self:GetMonstersInCurrentZone(map)) do
 			---@type MonsterAI
 			local m = mob
@@ -3811,7 +3852,12 @@ script CardManager extends Logic
 				local mp = m.Entity.TransformComponent.Position
 				local ddx = mp.x - centerX
 				local ddy = mp.y - centerY
-				if self:InRect(ddx, ddy, self.Card206HalfW, self.Card206HalfH) and self:IsSameDepthBand(depthAnchor, m) then
+				local inRect = self:InRect(ddx, ddy, self.Card206HalfW, self.Card206HalfH)
+				local sameBand = self:IsSameDepthBand(depthAnchor, m)
+				if not inRect then rejectRect = rejectRect + 1
+				elseif not sameBand then rejectBand = rejectBand + 1
+				end
+				if inRect and sameBand then
 					hitCount = hitCount + 1
 					if isCrit then m:TakeDamageCrit(damage * 2)
 					else m:TakeDamage(damage) end
@@ -3820,7 +3866,342 @@ script CardManager extends Logic
 				end
 			end
 		end
-		log("ShowdownChallengeHit: hit=" .. hitCount .. "/" .. candidateCount .. " dmg=" .. math.floor(damage) .. " halfW=" .. self.Card206HalfW .. " halfH=" .. self.Card206HalfH)
+		log("ShowdownChallengeHit: hit=" .. hitCount .. "/" .. candidateCount .. " rejRect=" .. rejectRect .. " rejBand=" .. rejectBand .. " dmg=" .. math.floor(damage) .. " halfW=" .. self.Card206HalfW .. " halfH=" .. self.Card206HalfH)
+	end
+
+	-- ── 린 전용: 스핀 스로우 (카드207, 슬롯형 액티브 7호) — 설치 지속 광역형("장판" 계열).
+	-- 유저 지정: 볼이 날아가지 않는다. 타겟 옆에 살짝 겹치게 그 자리에 나타나서, 지속 시간 동안
+	-- 제자리에서 톱니처럼 돈다(볼 클립 자체를 2배속으로 돌려 회전감을 낸다 — 유저 지정 "일단 2배속").
+	-- 그 범위 안에 들어온 적이 대미지를 맞고, 볼은 지속 시간 동안 점점 커지며 판정 범위도 같은
+	-- 비율로 같이 커진다(유저 표 "점차 커짐(범위도,연출도)": 볼 크기의 1/2에서 시작해 3/2까지).
+	-- ⚠ 몬스터 한 마리당 1회만 타격한다(hitSet, 205와 동일 관례) — 볼이 몹 위에 겹쳐 있는 동안 매 틱
+	--   중복으로 때리는 것을 막는다. "범위에 적이 오면 대미지가 들어간다"는 곧 "새로 들어온 적이 한 번
+	--   맞는다"는 뜻이고, 커지는 범위가 바깥에 있던 적을 차례로 걷어 담는 구조가 된다.
+	-- ⚠ 판정 반경은 크기 Tween의 값을 읽지 않고 틱루프가 자기 경과 시간으로 다시 계산한다 — 둘이 서로
+	--   다른 시계를 쓰기 때문에 한쪽을 읽어 쓰면 연출 크기와 판정 크기가 어긋난다(화살 Tween/틱루프에서
+	--   이미 겪은 것과 같은 종류의 버그).
+	-- ⚠ 판정 중심은 볼이 아니라 "몬스터 라인"까지 내린다(Card207HitOffsetY). 볼은 몬스터보다
+	--   BallOffsetY(0.45)만큼 위에 놓이는데, 그 상태로 볼을 중심으로 잡으면 dy가 항상 -0.45로 깔려서
+	--   반경이 작은 초반(×0.5)에 자기가 붙어 있는 그 타겟조차 판정 밖으로 빠진다(206에서 실측한 함정).
+	-- ⚠ 이 팩의 사운드는 1개(558fd538…)뿐이라 시전 시점에 한 번만 재생한다(리프 어택과 같은 관례).
+	@Sync property integer SpinThrowLevel = 0
+	property number Card207Cooldown = 9.0  -- 레벨 무관 고정(유저 표)
+	property string Card207Name = "스핀 스로우"
+	property string Card207IconRUID = "ea15a1b333cf46719984b09c3d55c3ea"
+	property string Card207BallRUID = "a6b2528080104fe58a5a02a7467d5736"
+	-- 등장 연출(effect/effect0) — 원본 스킬에서 한 쌍으로 같이 도는 리소스인데, 유저 지시로 **현재
+	-- 사용하지 않는다**(2026-09-04, "볼 회전하기 전에 뜨는 연출 없애줘"). 되살리려면 PlaceSpinThrowBall
+	-- 맨 앞에서 이 둘을 SpawnEffect 하면 된다.
+	property string Card207CastRUID = "81b30c4c0ed94cc28c9532ab7e71d3ca"
+	property string Card207CastSubRUID = "ded50be169394b8ab8d483dbae7ddf0b"
+	-- 타격 연출 — 팩의 hit/0(86e3db58…)이 깜빡이는 느낌이라 유저 지시로 교체(2026-09-04)
+	property string Card207HitRUID = "e9d08712afa2479f8d9b2fc60712c8e2"
+	property string Card207UseSoundRUID = "558fd53846a74e0db4f2c40e46eb613a"
+	property number Card207BallScale = 1.0
+	-- 톱니처럼 보이려면 클립이 빨리 돌아야 한다(유저 지정 2배속)
+	property number Card207BallPlayRate = 2.0
+	-- 지속 동안의 크기 성장 배율(유저 지정 1/2 → 3/2). 연출 크기와 판정 반경에 같이 곱한다.
+	property number Card207ScaleStart = 0.5
+	property number Card207ScaleEnd = 1.5
+	-- 볼을 놓는 자리 — 타겟 옆구리에 "살짝 겹치게"
+	property number Card207BallOffsetX = 0.35
+	-- 볼 높이(유저 지시로 0.3 → 0.45 상향). ⚠ 이 값을 바꾸면 아래 Card207HitOffsetY 도 같은 크기의
+	-- 음수로 같이 바꿔야 한다 — 판정 중심을 몬스터 라인까지 되돌리는 짝이라 한쪽만 고치면 dy 가
+	-- 그 차이만큼 깔린 채로 남는다.
+	property number Card207BallOffsetY = 0.45
+	-- 판정 타원(성장 배율 ×1.0 기준). 초반 ×0.5에서도 붙어 있는 타겟은 들어오도록 잡았다.
+	property number Card207HitRadiusX = 0.8
+	property number Card207HitRadiusY = 0.5
+	property number Card207HitOffsetX = 0.0
+	property number Card207HitOffsetY = -0.45
+	property number Card207CastScale = 0.8
+	property number Card207CastLifetime = 0.5
+	property number Card207HitScale = 1.0
+	property number Card207HitYOffset = 0.3
+	-- 볼이 제자리에 서 있어서 1/60까지 갈 이유가 없다 — 20Hz면 판정도 성장도 충분히 매끄럽다.
+	property number Card207TickInterval = 0.05
+
+	-- 레벨별 기준 대미지(유저 표) — 80/100/120/140/160
+	method number GetSpinThrowDamage(integer level)
+		if level >= 5 then return 160
+		elseif level >= 4 then return 140
+		elseif level >= 3 then return 120
+		elseif level >= 2 then return 100
+		end
+		return 80
+	end
+
+	-- 레벨별 타겟 수(유저 표) — 1/1/2/2/2. 타겟마다 볼을 하나씩 설치한다.
+	method integer GetSpinThrowTargetCount(integer level)
+		if level >= 3 then return 2 end
+		return 1
+	end
+
+	-- 레벨별 지속 시간(유저 표) — 2/2/2/2/3초
+	method number GetSpinThrowDuration(integer level)
+		if level >= 5 then return 3.0 end
+		return 2.0
+	end
+
+	method void PlaySpinThrowUseSound()
+		-- 볼을 설치하는 순간. 이 팩에 있는 사운드가 이거 하나뿐이라 시전 때 한 번만 울린다.
+		_SoundOptionLogic:PlaySfx(self.Card207UseSoundRUID, 1.0)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SpinThrowAttack(number damage, boolean isCrit)
+		-- 타겟마다 회전하는 볼을 하나씩 그 자리에 설치하고, 지속 시간 동안 범위 판정을 돌린다.
+		local map = self:GetCurrentMap()
+		if map == nil then return end
+		self:PlaySpinThrowUseSound()
+
+		local level = self.SpinThrowLevel
+		local targets = self:GetClosestTargets(self:GetSpinThrowTargetCount(level))
+		local duration = self:GetSpinThrowDuration(level)
+		local playerX = self:GetPlayerCenterX()
+		-- 존을 넘어간 뒤에도 볼이 남아 다음 존을 때리면 안 된다 — 시전 시점 존을 캡처해 거른다
+		local castZoneIndex = _MapManager.CurrentMapIndex
+
+		for _, mob in ipairs(targets) do
+			---@type MonsterAI
+			local target = mob
+			if isvalid(target) and isvalid(target.Entity) then
+				-- 좌표는 시전 시점에 값으로 캡처한다 — 재생 도중 몬스터가 죽어도 연출이 끊기지 않는다(공통 정책).
+				local tp = self:WorldToCurrentMapLocal(target.Entity.TransformComponent.WorldPosition)
+				-- "타겟 옆에 살짝 겹치게" — 플레이어를 향한 쪽 옆구리에 놓는다.
+				local side = 1.0
+				if target.Entity.TransformComponent.WorldPosition.x >= playerX then side = -1.0 end
+				local ballPos = Vector3(tp.x + self.Card207BallOffsetX * side, tp.y + self.Card207BallOffsetY, tp.z)
+				self:PlaceSpinThrowBall(map, ballPos, damage, isCrit, duration, castZoneIndex, target)
+			end
+		end
+		log("SpinThrowAttack: targets=" .. #targets .. " lv=" .. level .. " dmg=" .. math.floor(damage) .. " dur=" .. duration)
+	end
+
+	-- 볼 1개 설치 — 제자리에서 커지면서 돌고, 범위에 들어온 적을 한 번씩 때린다.
+	-- 앞/뒤 깊이가 다른 몬스터는 제외한다(의사 3D 깊이 정책) — 기준은 볼이 붙은 그 타겟이다.
+	@ExecSpace("ServerOnly")
+	method void PlaceSpinThrowBall(Entity map, Vector3 ballPos, number damage, boolean isCrit, number duration, integer castZoneIndex, MonsterAI depthAnchor)
+		-- 스핀 스로우 볼 설치 + 지속 판정.
+		-- ⚠ 등장 연출(effect/effect0)은 유저 지시로 제거했다(2026-09-04) — 볼이 돌기 전에 한 번 번쩍이는
+		--   게 불필요하다는 판단. 볼만 바로 나타나서 돌기 시작한다. RUID 프로퍼티는 되살릴 때를 위해
+		--   남겨뒀다(Card207CastRUID / Card207CastSubRUID / Card207CastScale / Card207CastLifetime).
+
+		-- 수명을 호출부가 직접 관리해야 하므로(최대 3초 > skilleffect의 0.8초) "persistenteffect" 모델을 쓴다.
+		local startScale = self.Card207BallScale * self.Card207ScaleStart
+		local endScale = self.Card207BallScale * self.Card207ScaleEnd
+		local fx = self:SpawnEffectWithModel(self.Card207BallRUID, ballPos, 0, self.Card207BallPlayRate, startScale, 1, "persistenteffect")
+		if fx == nil then return end
+
+		-- 크기 성장은 Tween으로 건다 — 서버에서 매 틱 Transform을 직접 쓰면 클라로 동기화가 안 된다
+		-- (205 이동 처리에서 확인된 것과 같은 이유).
+		_TweenLogic:PlayTween(startScale, endScale, duration, EaseType.Linear, function(s)
+			if not isvalid(fx) then return end
+			local tc = fx.TransformComponent
+			if tc ~= nil then tc.Scale = Vector3(s, s, 1) end
+		end)
+
+		local centerX = ballPos.x + self.Card207HitOffsetX
+		local centerY = ballPos.y + self.Card207HitOffsetY
+		local tickInterval = self.Card207TickInterval
+		local hitSet = {}
+		local elapsed = 0
+		local hitCount = 0
+		local timerId = nil
+		local finished = false
+
+		local finishBall = nil
+		finishBall = function()
+			if finished then return end
+			finished = true
+			if timerId then _TimerService:ClearTimer(timerId) end
+			if isvalid(fx) then fx:Destroy(0.05) end
+			log("SpinThrowBall end: hit=" .. hitCount .. " dur=" .. duration)
+		end
+
+		-- 틱루프/Tween과 별개로 확실히 끝내는 안전장치(205와 동일한 이중 경로)
+		_TimerService:SetTimerOnce(function()
+			finishBall()
+		end, duration)
+
+		timerId = _TimerService:SetTimerRepeat(function()
+			if not isvalid(self) or not isvalid(fx) then
+				if timerId then _TimerService:ClearTimer(timerId) end
+				return
+			end
+			-- 지속 도중 존이 넘어가면 즉시 정리한다(다음 존에 장판이 남는 것 방지)
+			if castZoneIndex ~= _MapManager.CurrentMapIndex then
+				finishBall()
+				return
+			end
+			elapsed = elapsed + tickInterval
+			-- 판정 반경도 연출과 같은 비율로 자란다 — Tween 값을 읽지 않고 여기서 다시 계산한다.
+			local t = elapsed / duration
+			if t > 1 then t = 1 end
+			local grow = self.Card207ScaleStart + (self.Card207ScaleEnd - self.Card207ScaleStart) * t
+			local rx = self.Card207HitRadiusX * grow
+			local ry = self.Card207HitRadiusY * grow
+
+			for _, mob in ipairs(self:GetMonstersInCurrentZone(map)) do
+				---@type MonsterAI
+				local m = mob
+				if isvalid(m) and not m._dead and isvalid(m.Entity) and not hitSet[m] then
+					local mp = m.Entity.TransformComponent.Position
+					local ddx = mp.x - centerX
+					local ddy = mp.y - centerY
+					if self:InEllipse(ddx, ddy, rx, ry) and self:IsSameDepthBand(depthAnchor, m) then
+						hitSet[m] = true
+						hitCount = hitCount + 1
+						if isCrit then m:TakeDamageCrit(damage * 2)
+						else m:TakeDamage(damage) end
+						local hfx = self:SpawnEffect(self.Card207HitRUID, Vector3(mp.x, mp.y + self.Card207HitYOffset, ballPos.z), 0, 1.0, self.Card207HitScale, 1)
+						if hfx ~= nil then hfx:Destroy(self.HitEffectLifetime) end
+					end
+				end
+			end
+
+			if elapsed >= duration then
+				finishBall()
+			end
+		end, tickInterval)
+	end
+
+	-- ── 린 전용: 쉐도우 트랩 (카드208, 슬롯형 액티브 8호) — 즉발 단일 + 속박형.
+	-- 유저 지정: 타겟 몬스터 위에 마크(mob 클립)가 뜨고, 대미지가 들어간 뒤 그 자리에 속박 연출이
+	-- 지속시간 내내 깔린다. 속박 확률은 100%(굴림 없음).
+	-- ⚠ 보스/엘리트는 속박 지속시간이 절반이다 — `(m._isBoss or m._isElite) and (d*0.5) or d` 는
+	--   Card16/썬더볼트 등에서 이미 쓰는 프로젝트 공통 관용구다.
+	-- ⚠ 속박은 `ApplyStun(dur, false)` 하나로만 건다. showIndicator=false 는 자체 연출이 있을 때의
+	--   관례(아쿠아 트랩과 동일)다. 리프 어택/아쿠아 트랩이 같이 쓰는 `ApplyLevitate`(공중 부양)는
+	--   **일부러 쓰지 않는다** — "트랩"은 바닥에 붙잡아 두는 그림이라 띄우면 반대로 보인다.
+	-- ⚠ 속박 연출은 지속시간 전체를 한 번에 재생하고 끝에서 페이드아웃한다(PlayAquaTrapEffect와 같은
+	--   방식). 짧은 세그먼트를 이어붙이면 경계에서 다시 시작하는 것처럼 보이고 1방 킬 때 아예 안 뜨는
+	--   버그가 반복됐던 전례가 있다. 최대 2초라 "skilleffectlong"(2.5초 캡) 안에 들어온다.
+	@Sync property integer ShadowTrapLevel = 0
+	property number Card208Cooldown = 5.0  -- 레벨 무관 고정(유저 표)
+	property string Card208Name = "쉐도우 트랩"
+	property string Card208IconRUID = "cdbd9959dee2488b923d01636d71327c"
+	-- 몬스터 위에 뜨는 마크(팩의 "mob" 클립)
+	property string Card208MarkRUID = "cb59756d1b244558aed53dd0ec7b5571"
+	-- 속박 연출(유저 지정 별도 리소스)
+	property string Card208RootRUID = "c63aed35502a4d9d9ba247130c9839b3"
+	property string Card208SoundRUID = "774af2f74f4a467b9d828ee69c0afc98"
+	-- mob 마크 크기(유저 지정 20% 확대: 1.0 → 1.2)
+	property number Card208MarkScale = 1.2
+	property number Card208MarkLifetime = 0.8
+	property number Card208MarkYOffset = 0.5
+	-- 속박 연출 클립의 원래 길이(초). 10프레임 × 프레임당 0.06초 = 0.6초.
+	-- 프레임당 0.06초는 이 코드베이스의 실측치에서 가져왔다(Card118 hit/0: "5프레임 animationclip,
+	-- 실측 0.3초"). 클립마다 프레임 딜레이가 다를 수 있으니 눈으로 보고 어긋나면 이 값만 고치면 된다
+	-- — 아래 재생속도는 전부 이 값에서 계산된다.
+	property number Card208RootClipSeconds = 0.6
+	property number Card208RootScale = 1.0
+	property number Card208RootYOffset = 0.0
+	property number Card208RootBaseAlpha = 1.0
+	property number Card208RootFadeOutDuration = 0.3
+	-- 보스/엘리트 속박 지속시간 배율(유저 표 "반감")
+	property number Card208BossDurationMult = 0.5
+
+	-- 레벨별 기준 대미지(유저 표) — 70/90/110/130/140
+	method number GetShadowTrapDamage(integer level)
+		if level >= 5 then return 140
+		elseif level >= 4 then return 130
+		elseif level >= 3 then return 110
+		elseif level >= 2 then return 90
+		end
+		return 70
+	end
+
+	-- 레벨별 타겟 수(유저 표) — 1/2/2/3/3
+	method integer GetShadowTrapTargetCount(integer level)
+		if level >= 4 then return 3
+		elseif level >= 2 then return 2
+		end
+		return 1
+	end
+
+	-- 레벨별 속박 지속시간(유저 표) — 1/1/2/2/2초. 보스·엘리트 반감은 호출부에서 따로 곱한다.
+	method number GetShadowTrapRootDuration(integer level)
+		if level >= 3 then return 2.0 end
+		return 1.0
+	end
+
+	method void PlayShadowTrapSound()
+		-- 트랩이 걸리는 순간. 팩에 사운드가 이거 하나라 시전 때 한 번만 울린다.
+		_SoundOptionLogic:PlaySfx(self.Card208SoundRUID, 1.0)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ShadowTrapAttack(number damage, boolean isCrit)
+		-- 가까운 순서로 타겟을 잡아 마크를 띄우고, 대미지 + 100% 속박을 건다.
+		local map = self:GetCurrentMap()
+		if map == nil then return end
+		self:PlayShadowTrapSound()
+
+		local level = self.ShadowTrapLevel
+		local baseDuration = self:GetShadowTrapRootDuration(level)
+		local targets = self:GetClosestTargets(self:GetShadowTrapTargetCount(level))
+		local boundCount = 0
+		for _, mob in ipairs(targets) do
+			---@type MonsterAI
+			local target = mob
+			if isvalid(target) and isvalid(target.Entity) then
+				local tp = target.Entity.TransformComponent.Position
+				-- 몬스터 "위"에 마크
+				local mfx = self:SpawnEffect(self.Card208MarkRUID, Vector3(tp.x, tp.y + self.Card208MarkYOffset, tp.z), 0, 1.0, self.Card208MarkScale, 1)
+				if mfx ~= nil then mfx:Destroy(self.Card208MarkLifetime) end
+
+				-- 보스/엘리트는 지속시간 반감(유저 표)
+				local dur = baseDuration
+				if target._isBoss or target._isElite then dur = baseDuration * self.Card208BossDurationMult end
+
+				-- ⚠ 연출·속박을 대미지보다 **먼저** 건다. 반대 순서로 두면 이 일격에 몬스터가 죽는 순간
+				--   PlayShadowTrapRootEffect의 `target._dead` 가드에 걸려 속박 연출이 통째로 안 뜬다
+				--   (유저 리포트 "속박연출이 안 나올 때도 있는디"의 원인). 연출 엔티티는 맵에 붙고 좌표를
+				--   값으로 캡처하므로, 먼저 띄워두면 대상이 죽어도 지속시간 내내 정상 재생된다
+				--   ("연출은 대상 생사와 무관하게 끝까지 재생한다" — 프로젝트 공통 정책).
+				-- 자체 연출이 있으니 별 이펙트는 끈다(아쿠아 트랩과 동일 관례)
+				target:ApplyStun(dur, false)
+				self:PlayShadowTrapRootEffect(target, dur)
+
+				if isCrit then target:TakeDamageCrit(damage * 2)
+				else target:TakeDamage(damage) end
+				boundCount = boundCount + 1
+			end
+		end
+		log("ShadowTrapAttack: targets=" .. #targets .. " bound=" .. boundCount .. " lv=" .. level .. " dmg=" .. math.floor(damage) .. " root=" .. baseDuration)
+	end
+
+	-- 속박 연출 — 지속시간 전체를 한 번에 재생하고 끝에서 알파를 빼며 사라진다(PlayAquaTrapEffect와
+	-- 같은 방식). 존을 벗어난 대상은 조용히 건너뛴다(다른 존에 엉뚱하게 뜨는 것 방지).
+	@ExecSpace("ServerOnly")
+	method void PlayShadowTrapRootEffect(MonsterAI target, number duration)
+		-- 쉐도우 트랩 속박 연출.
+		if not isvalid(self) or not isvalid(target) or not isvalid(target.Entity) or target._dead then return end
+		if self:GetCurrentMap() == nil or target._spawnZoneIndex ~= _MapManager.CurrentMapIndex then return end
+		if duration <= 0 then return end
+		local p = target.Entity.TransformComponent.Position
+		local pos = Vector3(p.x, p.y + self.Card208RootYOffset, p.z)
+		-- fxAI.Duration을 스폰 후에 덮어써봐야 무효라 fx:Destroy(duration)으로 직접 건다
+		-- ([[feedback_skilleffect_duration_timing]]과 동일한 패턴). 기본 "skilleffect"는 0.8초 캡이라
+		-- 최대 2초를 담으려면 "skilleffectlong"(2.5초 캡)이 필요하다.
+		-- 재생속도를 늦춰 클립 1회가 정확히 속박 지속시간을 채우게 한다(유저 지정: "속박 연출이 2초 동안
+		-- 유지되어야 하니 속도를 늦춰 2초로"). 스프라이트 애니는 항상 루프라 PlayRate=1로 두면 0.6초짜리가
+		-- 2초 동안 3번 넘게 돌아 "다시 시작하는" 것처럼 보인다. 보스·엘리트(지속 절반)에도 자동으로 맞는다.
+		local playRate = self.Card208RootClipSeconds / duration
+		local fx = self:SpawnEffectWithModel(self.Card208RootRUID, pos, 0, playRate, self.Card208RootScale, self.Card208RootBaseAlpha, "skilleffectlong")
+		if fx == nil then return end
+		fx:Destroy(duration)
+		local renderer = fx.SpriteRendererComponent
+		if renderer == nil then return end
+		local fadeDuration = math.min(self.Card208RootFadeOutDuration, duration)
+		local fadeDelay = duration - fadeDuration
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(fx) or not isvalid(renderer) then return end
+			_TweenLogic:PlayTween(self.Card208RootBaseAlpha, 0.0, fadeDuration, EaseType.Linear, function(alpha)
+				if isvalid(renderer) then renderer:SetAlpha(alpha) end
+			end)
+		end, fadeDelay)
 	end
 
 	-- 표창이 사라질 때 알파를 빼면서 없앤다. 이동 Tween은 그대로 두므로 날아가면서 서서히 흐려진다.
@@ -3973,6 +4354,137 @@ script CardManager extends Logic
 			end
 		end
 		log("LuckySevenAttack: targets=" .. #targets .. " lv=" .. self.LuckySevenLevel)
+	end
+
+	-- ── 린 전용: 슈퍼 세븐 (카드215, 조합 스킬) — 럭키 세븐(201)의 상위 호환.
+	-- 럭키 세븐 Lv5 + 표창술(214) + 시프 커닝(213) 보유 시 선택지에 뜨고, 해금되면 럭키 세븐이
+	-- 있던 슬롯을 그대로 넘겨받는다(암살(185)과 동일한 구조 — 패시브 2개는 슬롯이 없어 비울 게 없다).
+	-- 구조는 럭키 세븐과 같은 "위에서 순차 낙하 + 발마다 1타"인데, 3연타(40/30/30%) → **4연타(전부 30%)**,
+	-- 타겟 3 → 4, 크리 보너스 +10% → +20%로 전부 올라간다. 리소스도 전용 4종을 따로 쓴다.
+	-- ⚠ 조합 스킬 관례대로 3레벨까지만 존재한다.
+	@Sync property integer SuperSevenLevel = 0
+	property number Card215Cooldown = 4.0  -- 레벨 무관 고정(유저 표, 럭키 세븐과 동일)
+	property string Card215Name = "슈퍼 세븐"
+	property string Card215IconRUID = "467660bc40df41df9024e69e73506211"
+	-- 표창 본체(낙하하는 이미지) — 럭키 세븐은 공용 RinShurikenRUID를 쓰지만 슈퍼 세븐은 전용 리소스다
+	property string Card215ShurikenRUID = "2b6de5c42f9e4741b9cd705eb710b5f7"
+	-- 던지는 아크(몬스터 위 1회)
+	property string Card215CastRUID = "6d94c9c1e4554d3886c1265434dcdb6b"
+	property string Card215HitRUID = "7b616d5e0bcd41e7bdfc265709f9e4eb"
+	property string Card215HitSoundRUID = "d7d22108af1946dfa6a674b9ec713a31"
+	property number Card215CastRotation = 200
+	property number Card215CastScale = 1.3
+	property number Card215CastYOffset = 1.7
+	property number Card215CastLifetime = 0.5
+	property number Card215DropHeight = 2.2
+	-- 4발이라 럭키 세븐(1.0)보다 살짝 넓게 벌린다
+	property number Card215SpreadX = 1.35
+	property number Card215FlightDuration = 0.22
+	property number Card215HitInterval = 0.12
+	-- 크리티컬 보너스(유저 표 20% — 럭키 세븐의 10%에서 상향). RollCrit(215)에서 가산된다.
+	property number Card215CritBonus = 0.20
+	property number Card215DamageNumberSpacing = 0.22
+	-- 타격 연출 크기(유저 지정 60% 축소: 1.0 → 0.4). 표창과 같은 비율로 맞췄다.
+	property number Card215HitScale = 0.4
+	property number Card215HitYOffset = 0.3
+	-- 표창 크기(유저 지정 60% 축소: 2.0 → 0.8 / 0.9 → 0.36). 낙하하면서 Start→End로 줄어드는
+	-- 원근 축소는 그대로 두고 두 값에 같은 비율(×0.4)만 곱했다.
+	property number Card215StartScale = 0.8
+	property number Card215EndScale = 0.36
+	-- 4연타 비율(유저 표) — 레벨 무관 전부 30%
+	property number Card215HitPercent = 0.30
+	property integer Card215HitCount = 4
+
+	-- 레벨별 기준 대미지(유저 표) — 210/240/270. 조합 스킬이라 3레벨까지만.
+	method number GetSuperSevenDamage(integer level)
+		if level >= 3 then return 270
+		elseif level >= 2 then return 240
+		end
+		return 210
+	end
+
+	-- 타겟 수(유저 표) — 레벨 무관 4명 고정
+	method integer GetSuperSevenTargetCount(integer level)
+		return 4
+	end
+
+	method void PlaySuperSevenHitSound()
+		-- 표창이 꽂히는 순간(발마다).
+		_SoundOptionLogic:PlaySfx(self.Card215HitSoundRUID, 1.0)
+	end
+
+	-- 표창 한 발이 위에서 내리꽂히는 연출 — DropLuckySevenShuriken과 같은 원근 축소인데 전용 RUID를 쓴다.
+	@ExecSpace("ServerOnly")
+	method void DropSuperSevenShuriken(Vector3 hitPos, number offsetX, number scaleRatio)
+		-- 슈퍼 세븐 표창 낙하 연출.
+		local startPos = Vector3(hitPos.x + offsetX, hitPos.y + self.Card215DropHeight, hitPos.z)
+		local startScale = self.Card215StartScale * scaleRatio
+		local endScale = self.Card215EndScale * scaleRatio
+		local fx = self:SpawnEffect(self.Card215ShurikenRUID, startPos, 0, self.RinShurikenPlayRate, startScale, 1)
+		if fx == nil then return end
+		local duration = self.Card215FlightDuration
+		local squashY = self.RinShurikenYSquash
+		_TweenLogic:PlayTween(0.0, 1.0, duration, EaseType.QuadEaseIn, function(t)
+			if not isvalid(fx) then return end
+			local x = startPos.x + (hitPos.x - startPos.x) * t
+			local y = startPos.y + (hitPos.y - startPos.y) * t
+			fx.TransformComponent.Position = Vector3(x, y, -0.1)
+			local sc = startScale + (endScale - startScale) * t
+			fx.TransformComponent.Scale = Vector3(sc, sc * squashY, 1)
+		end)
+		_TimerService:SetTimerOnce(function()
+			if isvalid(fx) then fx:Destroy() end
+		end, duration)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SuperSevenAttack(number damage, boolean isCrit)
+		-- 타겟마다 표창 4발을 위에서 순차로 떨어뜨리고, 발마다 30%씩 대미지를 넣는다.
+		local targets = self:GetClosestTargets(self:GetSuperSevenTargetCount(self.SuperSevenLevel))
+		for _, mob in ipairs(targets) do
+			---@type MonsterAI
+			local target = mob
+			if isvalid(target) and isvalid(target.Entity) then
+				-- 연출은 대상 생사와 무관하게 끝까지 재생하고 대미지만 생존 체크한다(공통 정책).
+				local tp = self:WorldToCurrentMapLocal(target.Entity.TransformComponent.WorldPosition)
+				local hitPos = Vector3(tp.x, tp.y + self.Card215HitYOffset, tp.z)
+				local scaleRatio = self:GetEffectScaleRatio(target)
+				local castZoneIndex = target._spawnZoneIndex
+
+				local castPos = Vector3(hitPos.x, hitPos.y + self.Card215CastYOffset, hitPos.z)
+				local cfx = self:SpawnEffect(self.Card215CastRUID, castPos, self.Card215CastRotation, 1.0, self.Card215CastScale * scaleRatio, 1)
+				if cfx ~= nil then cfx:Destroy(self.Card215CastLifetime) end
+
+				-- 좌 → 중좌 → 중우 → 우 순서로 4발 순차 낙하. 럭키 세븐의 3발 배치를 4발로 늘린 것.
+				local spread = { -self.Card215SpreadX, -self.Card215SpreadX / 3, self.Card215SpreadX / 3, self.Card215SpreadX }
+				for hitIndex = 1, self.Card215HitCount do
+					local capturedIndex = hitIndex
+					local capturedOffsetX = spread[hitIndex]
+					local delay = (hitIndex - 1) * self.Card215HitInterval
+					_TimerService:SetTimerOnce(function()
+						if not isvalid(self) then return end
+						if castZoneIndex ~= _MapManager.CurrentMapIndex then return end
+						self:DropSuperSevenShuriken(hitPos, capturedOffsetX, scaleRatio)
+						_TimerService:SetTimerOnce(function()
+							if not isvalid(self) then return end
+							local hitDamage = damage * self.Card215HitPercent
+							-- 럭키 세븐과 동일하게 크리티컬은 타마다 따로 판정한다(RollCrit 안에 카드215
+							-- 전용 +20%가 가산돼 있다).
+							local hitCrit = self:RollCrit(215)
+							if isvalid(target) and isvalid(target.Entity) and not target._dead then
+								local numberOffsetY = (capturedIndex - 1) * self.Card215DamageNumberSpacing
+								if hitCrit then target:TakeDamageCritWithOffset(hitDamage * 2, Vector2(0, numberOffsetY))
+								else target:TakeDamageWithOffset(hitDamage, Vector2(0, numberOffsetY)) end
+							end
+							local hfx = self:SpawnEffect(self.Card215HitRUID, hitPos, 0, 1.0, self.Card215HitScale * scaleRatio, 1)
+							if hfx ~= nil then hfx:Destroy(self.HitEffectLifetime) end
+							self:PlaySuperSevenHitSound()
+						end, self.Card215FlightDuration)
+					end, delay)
+				end
+			end
+		end
+		log("SuperSevenAttack: targets=" .. #targets .. " lv=" .. self.SuperSevenLevel .. " dmg=" .. math.floor(damage))
 	end
 
 	method void PlayRinBasicAttackSound()
@@ -11494,6 +12006,20 @@ script CardManager extends Logic
 	property SpriteGUIRendererComponent physicalTrainingFill = "35fc2734-80d5-4fca-b3a3-9da554b64407"
 	property Entity darkSightBuff = "8a1c7267-b3db-4ae2-8237-c0cfba6130ca"
 	property SpriteGUIRendererComponent darkSightFill = "c17c3709-5725-401e-8475-a7a3c0689faf"
+	-- 린 패시브 5종(209~213) 버프 아이콘. 효과는 쉐이드 패시브와 같지만 아이콘 패널은 완전히 독립이다
+	-- (유저 지정) — 캐릭터마다 자기 아이콘이 떠야 하므로 쉐이드 패널을 재사용하지 않는다.
+	property Entity throwingAccelBuff = "08b5ff51-d943-4590-b22e-8a7320ca0e41"
+	property SpriteGUIRendererComponent throwingAccelFill = "cf1fe4eb-a51a-483a-9029-79b198a022d6"
+	property Entity javelinMasteryBuff = "faf81e04-08c1-49fd-8259-3b76073fbd13"
+	property SpriteGUIRendererComponent javelinMasteryFill = "36f71f75-f1d1-4043-90b2-6958b982da2e"
+	property Entity spiritJavelinBuff = "f7d58416-5f69-4427-9482-3f4367fd6ccc"
+	property SpriteGUIRendererComponent spiritJavelinFill = "13026c0a-9f92-4be5-afe1-41a7bb2df38c"
+	property Entity radicalDarknessBuff = "2107badc-3493-467d-819a-957390fecea5"
+	property SpriteGUIRendererComponent radicalDarknessFill = "7bcf9ca6-51ce-442c-be16-532cca54ee2e"
+	property Entity thiefCunningBuff = "4f023ff8-2911-4e55-8503-8d800099d95e"
+	property SpriteGUIRendererComponent thiefCunningFill = "1aa9a335-495d-43a1-8174-70fb2e1194a3"
+	property Entity shurikenMasteryBuff = "19069288-076e-4840-88b0-8e2ecf0ecb20"
+	property SpriteGUIRendererComponent shurikenMasteryFill = "9f007204-66a9-4e92-960f-b1755fa319fe"
 
 	-- 활성 버프 순서 추적 (획득 순으로 왼쪽부터)
 	property any _activeBuffOrder = nil
@@ -11666,6 +12192,65 @@ script CardManager extends Logic
 	-- 피지컬 트레이닝(183) 피해량 배율 — 워리어 마스터리와 동일한 패턴으로 GetCardDamage 전역 곱연산.
 	method number GetPhysicalTrainingMult()
 		return 1.0 + _CardRegistry:GetChance(183, self.PhysicalTrainingLevel)
+	end
+
+	-- ── 린 패시브 5종(209~213) — 쉐이드 패시브(180~184)와 수치·적용 지점이 완전히 동일하고 이름만
+	-- 다르다. 슬롯을 차지하지 않고 해금 즉시 영구 적용된다.
+	@Sync property integer ThrowingAccelLevel = 0
+	@Sync property integer JavelinMasteryLevel = 0
+	@Sync property integer SpiritJavelinLevel = 0
+	@Sync property integer RadicalDarknessLevel = 0
+	@Sync property integer ThiefCunningLevel = 0
+	@Sync property integer ShurikenMasteryLevel = 0
+
+	-- 스로잉 액셀레이션(209) 쿨타임 감소율 — GetEffectiveCooldown에서 곱연산.
+	method number GetThrowingAccelReduction()
+		return _CardRegistry:GetChance(209, self.ThrowingAccelLevel)
+	end
+
+	-- 스피릿 자벨린(211) 크리티컬 대미지 보너스 — MonsterAI.TakeDamageCrit* 3곳에서 가산.
+	method number GetSpiritJavelinBonus()
+		return _CardRegistry:GetChance(211, self.SpiritJavelinLevel)
+	end
+
+	-- 시프 커닝(213) 피해량 배율 — GetCardDamage 전역 곱연산.
+	method number GetThiefCunningMult()
+		return 1.0 + _CardRegistry:GetChance(213, self.ThiefCunningLevel)
+	end
+
+	-- 래디컬 다크니스(212) 공격 회피 확률 — MonsterAI.OnReachPlayer에서 다크 사이트와 가산 판정.
+	method number GetRadicalDarknessEvadeChance()
+		return _CardRegistry:GetChance(212, self.RadicalDarknessLevel)
+	end
+
+	-- 표창술(214) 추가 공격 발동 확률 — 기본 공격이 나갈 때마다 TickCard(slotIndex==0)에서 굴린다.
+	method number GetShurikenMasteryChance()
+		return _CardRegistry:GetChance(214, self.ShurikenMasteryLevel)
+	end
+
+	-- 표창술(214) 추가 공격 대미지 배율(유저 표) — 100/120/140/160/180%.
+	-- 확률과 배율이 레벨마다 같이 오르는 구조라 확률은 CardRegistry, 배율은 여기서 관리한다.
+	method number GetShurikenMasteryDamageMult(integer level)
+		if level >= 5 then return 1.8
+		elseif level >= 4 then return 1.6
+		elseif level >= 3 then return 1.4
+		elseif level >= 2 then return 1.2
+		end
+		return 1.0
+	end
+
+	-- 기본 공격 1회마다 호출 — 확률에 걸리면 추가 기본 공격을 1회 더 때린다.
+	-- TriggerExtraBasicAttack은 린(카드200) 분기에서 RinBasicAttack(연출 포함)을 그대로 재사용한다.
+	@ExecSpace("ServerOnly")
+	method void TryProcShurikenMastery()
+		-- 표창술 추가 공격 굴림.
+		if self.ShurikenMasteryLevel <= 0 then return end
+		local chance = self:GetShurikenMasteryChance()
+		if chance <= 0 then return end
+		if _UtilLogic:RandomDouble() >= chance then return end
+		local mult = self:GetShurikenMasteryDamageMult(self.ShurikenMasteryLevel)
+		self:TriggerExtraBasicAttack(mult)
+		log("ShurikenMastery proc! chance=" .. math.floor(chance * 100) .. "% mult=" .. mult)
 	end
 
 	-- 다크 사이트(184) 공격 회피 확률 — MonsterAI.OnReachPlayer에서 몬스터 공격 도달 시 이 확률로
@@ -12428,6 +13013,8 @@ script CardManager extends Logic
 		if cardIdx == 204 then return self.ShadowSplitLevel > 0 end
 		if cardIdx == 205 then return self.ThrowingWingDaggerLevel > 0 end
 		if cardIdx == 206 then return self.ShowdownChallengeLevel > 0 end
+		if cardIdx == 207 then return self.SpinThrowLevel > 0 end
+		if cardIdx == 208 then return self.ShadowTrapLevel > 0 end
 		if cardIdx == 173 then return self.SavageBlowLevel > 0 end
 		if cardIdx == 174 then return self.SmokeGrenadeLevel > 0 end
 		if cardIdx == 175 then return self.MuspelheimLevel > 0 end
@@ -12440,6 +13027,13 @@ script CardManager extends Logic
 		if cardIdx == 182 then return self.KarmaLevel > 0 end
 		if cardIdx == 183 then return self.PhysicalTrainingLevel > 0 end
 		if cardIdx == 184 then return self.DarkSightLevel > 0 end
+		if cardIdx == 209 then return self.ThrowingAccelLevel > 0 end
+		if cardIdx == 210 then return self.JavelinMasteryLevel > 0 end
+		if cardIdx == 211 then return self.SpiritJavelinLevel > 0 end
+		if cardIdx == 212 then return self.RadicalDarknessLevel > 0 end
+		if cardIdx == 213 then return self.ThiefCunningLevel > 0 end
+		if cardIdx == 214 then return self.ShurikenMasteryLevel > 0 end
+		if cardIdx == 215 then return self.SuperSevenLevel > 0 end
 		if cardIdx == 185 then return self.AssassinateLevel > 0 end
 		if cardIdx == 186 then return self.SonicBlowLevel > 0 end
 		if cardIdx == 187 then return self.SmokeRampageLevel > 0 end
@@ -12712,6 +13306,9 @@ script CardManager extends Logic
 		elseif cardIdx == 204 then base = self:GetShadowSplitDamage(self.ShadowSplitLevel)
 		elseif cardIdx == 205 then base = self:GetThrowingWingDaggerDamage(self.ThrowingWingDaggerLevel)
 		elseif cardIdx == 206 then base = self:GetShowdownChallengeDamage(self.ShowdownChallengeLevel)
+		elseif cardIdx == 207 then base = self:GetSpinThrowDamage(self.SpinThrowLevel)
+		elseif cardIdx == 208 then base = self:GetShadowTrapDamage(self.ShadowTrapLevel)
+		elseif cardIdx == 215 then base = self:GetSuperSevenDamage(self.SuperSevenLevel)
 		elseif cardIdx == 173 then base = self:GetSavageBlowDamage(self.SavageBlowLevel)
 		elseif cardIdx == 174 then base = self:GetSmokeGrenadeDamage(self.SmokeGrenadeLevel)
 		elseif cardIdx == 175 then base = self:GetMuspelheimDamage(self.MuspelheimLevel)
@@ -12739,7 +13336,7 @@ script CardManager extends Logic
 		if self:IsBasicAttackCard(cardIdx) then
 			relicMult = _RelicInventory:GetBasicAtkMult()
 		end
-		return base * self:GetMeditationMult() * self:GetSkillInvDamageMult(cardIdx) * self:GetRapidFireMult() * self:GetWarriorMasteryMult() * self:GetPhysicalTrainingMult() * _GearEffectLogic:GetDamageMult() * relicMult
+		return base * self:GetMeditationMult() * self:GetSkillInvDamageMult(cardIdx) * self:GetRapidFireMult() * self:GetWarriorMasteryMult() * self:GetPhysicalTrainingMult() * self:GetThiefCunningMult() * _GearEffectLogic:GetDamageMult() * relicMult
 	end
 
 	-- 2026-08-03: 몬스터 체력을 플레이어 화력에 비례시키던 GetBasicAttackCardIdx/GetStrongestActiveDamage는
@@ -12946,6 +13543,9 @@ script CardManager extends Logic
 		elseif cardIdx == 204 then return self.Card204Cooldown
 		elseif cardIdx == 205 then return self.Card205Cooldown
 		elseif cardIdx == 206 then return self.Card206Cooldown
+		elseif cardIdx == 207 then return self.Card207Cooldown
+		elseif cardIdx == 208 then return self.Card208Cooldown
+		elseif cardIdx == 215 then return self.Card215Cooldown
 		elseif cardIdx == 185 then return self.Card185Cooldown
 		elseif cardIdx == 186 then return self.Card186Cooldown
 		elseif cardIdx == 187 then return self.Card187Cooldown
@@ -13131,6 +13731,8 @@ script CardManager extends Logic
 		elseif cardIdx == 204 then return "shadowsplit_up"
 		elseif cardIdx == 205 then return "throwingwingdagger_up"
 		elseif cardIdx == 206 then return "showdownchallenge_up"
+		elseif cardIdx == 207 then return "spinthrow_up"
+		elseif cardIdx == 208 then return "shadowtrap_up"
 		elseif cardIdx == 173 then return "savageblow_up"
 		elseif cardIdx == 174 then return "smokegrenade_up"
 		elseif cardIdx == 175 then return "muspelheim_up"
@@ -13179,6 +13781,8 @@ script CardManager extends Logic
 		elseif cardIdx == 204 then self.ShadowSplitLevel = 1
 		elseif cardIdx == 205 then self.ThrowingWingDaggerLevel = 1
 		elseif cardIdx == 206 then self.ShowdownChallengeLevel = 1
+		elseif cardIdx == 207 then self.SpinThrowLevel = 1
+		elseif cardIdx == 208 then self.ShadowTrapLevel = 1
 		elseif cardIdx == 173 then self.SavageBlowLevel = 1
 		elseif cardIdx == 174 then self.SmokeGrenadeLevel = 1
 		elseif cardIdx == 175 then self.MuspelheimLevel = 1
@@ -13260,6 +13864,8 @@ script CardManager extends Logic
 		elseif cardIdx == 204 then return self.ShadowSplitLevel
 		elseif cardIdx == 205 then return self.ThrowingWingDaggerLevel
 		elseif cardIdx == 206 then return self.ShowdownChallengeLevel
+		elseif cardIdx == 207 then return self.SpinThrowLevel
+		elseif cardIdx == 208 then return self.ShadowTrapLevel
 		elseif cardIdx == 173 then return self.SavageBlowLevel
 		elseif cardIdx == 174 then return self.SmokeGrenadeLevel
 		elseif cardIdx == 175 then return self.MuspelheimLevel
@@ -13272,6 +13878,13 @@ script CardManager extends Logic
 		elseif cardIdx == 182 then return self.KarmaLevel
 		elseif cardIdx == 183 then return self.PhysicalTrainingLevel
 		elseif cardIdx == 184 then return self.DarkSightLevel
+		elseif cardIdx == 209 then return self.ThrowingAccelLevel
+		elseif cardIdx == 210 then return self.JavelinMasteryLevel
+		elseif cardIdx == 211 then return self.SpiritJavelinLevel
+		elseif cardIdx == 212 then return self.RadicalDarknessLevel
+		elseif cardIdx == 213 then return self.ThiefCunningLevel
+		elseif cardIdx == 214 then return self.ShurikenMasteryLevel
+		elseif cardIdx == 215 then return self.SuperSevenLevel
 		elseif cardIdx == 185 then return self.AssassinateLevel
 		elseif cardIdx == 186 then return self.SonicBlowLevel
 		elseif cardIdx == 187 then return self.SmokeRampageLevel
@@ -13358,6 +13971,8 @@ script CardManager extends Logic
 		elseif cardIdx == 204 then self.ShadowSplitLevel = level
 		elseif cardIdx == 205 then self.ThrowingWingDaggerLevel = level
 		elseif cardIdx == 206 then self.ShowdownChallengeLevel = level
+		elseif cardIdx == 207 then self.SpinThrowLevel = level
+		elseif cardIdx == 208 then self.ShadowTrapLevel = level
 		elseif cardIdx == 173 then self.SavageBlowLevel = level
 		elseif cardIdx == 174 then self.SmokeGrenadeLevel = level
 		elseif cardIdx == 175 then self.MuspelheimLevel = level
@@ -13370,6 +13985,13 @@ script CardManager extends Logic
 		elseif cardIdx == 182 then self.KarmaLevel = level
 		elseif cardIdx == 183 then self.PhysicalTrainingLevel = level
 		elseif cardIdx == 184 then self.DarkSightLevel = level
+		elseif cardIdx == 209 then self.ThrowingAccelLevel = level
+		elseif cardIdx == 210 then self.JavelinMasteryLevel = level
+		elseif cardIdx == 211 then self.SpiritJavelinLevel = level
+		elseif cardIdx == 212 then self.RadicalDarknessLevel = level
+		elseif cardIdx == 213 then self.ThiefCunningLevel = level
+		elseif cardIdx == 214 then self.ShurikenMasteryLevel = level
+		elseif cardIdx == 215 then self.SuperSevenLevel = level
 		elseif cardIdx == 185 then self.AssassinateLevel = level
 		elseif cardIdx == 186 then self.SonicBlowLevel = level
 		elseif cardIdx == 187 then self.SmokeRampageLevel = level
@@ -13826,6 +14448,22 @@ script CardManager extends Logic
 				"피해량 +30, 4연타 확률 +5%",
 				"피해량 +40, 4연타 확률 +10%",
 			}
+		elseif cardIdx == 208 then
+			return {
+				"해금! (대미지 70, 타겟 1명, 속박 1초)",
+				"피해량 +20, 타겟 2명",
+				"피해량 +20, 속박 2초",
+				"피해량 +20, 타겟 3명",
+				"피해량 +10",
+			}
+		elseif cardIdx == 207 then
+			return {
+				"해금! (대미지 80, 타겟 1명, 지속 2초, 범위 점차 증가)",
+				"피해량 +20",
+				"피해량 +20, 타겟 2명",
+				"피해량 +20",
+				"피해량 +20, 지속 +1초",
+			}
 		elseif cardIdx == 206 then
 			return {
 				"해금! (대미지 80, 타겟 1명, 광역)",
@@ -13836,7 +14474,7 @@ script CardManager extends Logic
 			}
 		elseif cardIdx == 205 then
 			return {
-				"해금! (대미지 120, 3초간 추적, 경로상 적 타격)",
+				"해금! (대미지 60, 3초간 추적, 경로상 적 타격)",
 				"피해량 +20",
 				"피해량 +20",
 				"피해량 +20",
@@ -13937,6 +14575,60 @@ script CardManager extends Logic
 				"피해량 +30, 공격 대상 +1",
 				"피해량 +20",
 				"피해량 +30",
+			}
+		elseif cardIdx == 209 then
+			return {
+				"해금! (쿨타임 -5%, 영구)",
+				"쿨타임 감소량 +2%",
+				"쿨타임 감소량 +3%",
+				"쿨타임 감소량 +2%",
+				"쿨타임 감소량 +3%",
+			}
+		elseif cardIdx == 210 then
+			return {
+				"해금! (크리티컬 확률 10%, 영구)",
+				"크리티컬 확률 +2%",
+				"크리티컬 확률 +3%",
+				"크리티컬 확률 +2%",
+				"크리티컬 확률 +3%",
+			}
+		elseif cardIdx == 211 then
+			return {
+				"해금! (크리티컬 대미지 +10%, 영구)",
+				"크리티컬 대미지 +10%",
+				"크리티컬 대미지 +10%",
+				"크리티컬 대미지 +10%",
+				"크리티컬 대미지 +10%",
+			}
+		elseif cardIdx == 212 then
+			return {
+				"해금! (공격 회피 3%, 영구)",
+				"공격 회피 +2%",
+				"공격 회피 +2%",
+				"공격 회피 +2%",
+				"공격 회피 +3%",
+			}
+		elseif cardIdx == 215 then
+			return {
+				"조합! (대미지 210, 타겟 4명, 4연타 30%, 크리 +20%)",
+				"피해량 +30",
+				"피해량 +30",
+			}
+		elseif cardIdx == 214 then
+			return {
+				"해금! (기본 공격 10% 확률로 추가 공격 100%, 영구)",
+				"발동 확률 +5%, 추가 공격 대미지 +20%",
+				"발동 확률 +5%, 추가 공격 대미지 +20%",
+				"발동 확률 +5%, 추가 공격 대미지 +20%",
+				"발동 확률 +5%, 추가 공격 대미지 +20%",
+			}
+		elseif cardIdx == 213 then
+			return {
+				"해금! (피해량 +5%, 영구)",
+				"피해량 +3%",
+				"피해량 +4%",
+				"피해량 +4%",
+				"피해량 +4%",
 			}
 		elseif cardIdx == 180 then
 			return {
@@ -14075,6 +14767,9 @@ script CardManager extends Logic
 		if self.DaggerAccelLevel > 0 then
 			base = base * (1.0 - self:GetDaggerAccelReduction())
 		end
+		if self.ThrowingAccelLevel > 0 then
+			base = base * (1.0 - self:GetThrowingAccelReduction())
+		end
 		-- 장비 쿨타임 감소(활 유니크 상시 + 투구 레어 50마리 처치 해금)
 		local gearCooldownReduction = _GearEffectLogic:GetCooldownReduction()
 		if gearCooldownReduction > 0 then
@@ -14123,6 +14818,8 @@ script CardManager extends Logic
 	method boolean RollCrit(integer cardIdx)
 		local chance = self:GetMagicCriticalChance() + self:GetSkillInvCardCritBonus(cardIdx) + self:GetPiercingWillChance()
 			+ _CardRegistry:GetChance(161, self.ChanceAttackLevel) + _CardRegistry:GetChance(181, self.CriticalEdgeLevel)
+			-- 린 자벨린 마스터리(210) — 쉐이드 크리티컬 엣지(181)와 동일하게 가산
+			+ _CardRegistry:GetChance(210, self.JavelinMasteryLevel)
 			+ _GearEffectLogic:GetCritChanceBonus()
 			-- 유물 자수정(13번) — 장비 크리티컬과 동일하게 가산한다
 			+ _RelicInventory:GetCritChanceBonus()
@@ -14134,6 +14831,8 @@ script CardManager extends Logic
 		if cardIdx == 118 then chance = chance + self:GetArrowFletterCritChance(self.ArrowFletterLevel) end
 		-- 럭키 세븐(카드201) 전용 — 레벨 무관 +10%(유저 지정). 3연타는 타마다 따로 굴린다.
 		if cardIdx == 201 then chance = chance + self.Card201CritBonus end
+		-- 슈퍼 세븐(카드215, 럭키 세븐 조합) 전용 — 레벨 무관 +20%(유저 표). 4연타도 타마다 따로 굴린다.
+		if cardIdx == 215 then chance = chance + self.Card215CritBonus end
 		-- 언카운트에로우V(카드119) 전용 크리티컬 확률 보너스(유저 지정: 10%/15%/20%)
 		if cardIdx == 119 then chance = chance + self:GetUncounterArrowVCritChance(self.UncounterArrowVLevel) end
 		-- 무스펠하임(카드175) 전용 크리티컬 확률 보너스(유저 지정: 10/15/20/25/30%)
@@ -14374,6 +15073,8 @@ script CardManager extends Logic
 		elseif name == "ShadowSplitLevel" then self:RefreshSlotIfHoldsCard(204)
 		elseif name == "ThrowingWingDaggerLevel" then self:RefreshSlotIfHoldsCard(205)
 		elseif name == "ShowdownChallengeLevel" then self:RefreshSlotIfHoldsCard(206)
+		elseif name == "SpinThrowLevel" then self:RefreshSlotIfHoldsCard(207)
+		elseif name == "ShadowTrapLevel" then self:RefreshSlotIfHoldsCard(208)
 		elseif name == "SavageBlowLevel" then self:RefreshSlotIfHoldsCard(173)
 		elseif name == "SmokeGrenadeLevel" then self:RefreshSlotIfHoldsCard(174)
 		elseif name == "MuspelheimLevel" then self:RefreshSlotIfHoldsCard(175)
@@ -14393,6 +15094,18 @@ script CardManager extends Logic
 			if self.PhysicalTrainingLevel > 0 then self:NotifyPhysicalTrainingOnPermanent() end
 		elseif name == "DarkSightLevel" then
 			if self.DarkSightLevel > 0 then self:NotifyDarkSightOnPermanent() end
+		elseif name == "ThrowingAccelLevel" then
+			if self.ThrowingAccelLevel > 0 then self:NotifyThrowingAccelOnPermanent() end
+		elseif name == "JavelinMasteryLevel" then
+			if self.JavelinMasteryLevel > 0 then self:NotifyJavelinMasteryOnPermanent() end
+		elseif name == "SpiritJavelinLevel" then
+			if self.SpiritJavelinLevel > 0 then self:NotifySpiritJavelinOnPermanent() end
+		elseif name == "RadicalDarknessLevel" then
+			if self.RadicalDarknessLevel > 0 then self:NotifyRadicalDarknessOnPermanent() end
+		elseif name == "ThiefCunningLevel" then
+			if self.ThiefCunningLevel > 0 then self:NotifyThiefCunningOnPermanent() end
+		elseif name == "ShurikenMasteryLevel" then
+			if self.ShurikenMasteryLevel > 0 then self:NotifyShurikenMasteryOnPermanent() end
 		elseif name == "AssassinateLevel" then self:RefreshSlotIfHoldsCard(185)
 		elseif name == "SonicBlowLevel" then self:RefreshSlotIfHoldsCard(186)
 		elseif name == "SmokeRampageLevel" then self:RefreshSlotIfHoldsCard(187)
@@ -14726,6 +15439,43 @@ script CardManager extends Logic
 		self:ShowBuffIconPermanent(self.darkSightBuff, self.darkSightFill)
 	end
 
+	-- ── 린 패시브 5종(209~213) 버프 아이콘. 쉐이드와 효과는 같아도 패널은 독립이다(유저 지정).
+	@ExecSpace("Multicast")
+	method void NotifyThrowingAccelOnPermanent()
+		if self:IsServer() then return end
+		self:ShowBuffIconPermanent(self.throwingAccelBuff, self.throwingAccelFill)
+	end
+
+	@ExecSpace("Multicast")
+	method void NotifyJavelinMasteryOnPermanent()
+		if self:IsServer() then return end
+		self:ShowBuffIconPermanent(self.javelinMasteryBuff, self.javelinMasteryFill)
+	end
+
+	@ExecSpace("Multicast")
+	method void NotifySpiritJavelinOnPermanent()
+		if self:IsServer() then return end
+		self:ShowBuffIconPermanent(self.spiritJavelinBuff, self.spiritJavelinFill)
+	end
+
+	@ExecSpace("Multicast")
+	method void NotifyRadicalDarknessOnPermanent()
+		if self:IsServer() then return end
+		self:ShowBuffIconPermanent(self.radicalDarknessBuff, self.radicalDarknessFill)
+	end
+
+	@ExecSpace("Multicast")
+	method void NotifyThiefCunningOnPermanent()
+		if self:IsServer() then return end
+		self:ShowBuffIconPermanent(self.thiefCunningBuff, self.thiefCunningFill)
+	end
+
+	@ExecSpace("Multicast")
+	method void NotifyShurikenMasteryOnPermanent()
+		if self:IsServer() then return end
+		self:ShowBuffIconPermanent(self.shurikenMasteryBuff, self.shurikenMasteryFill)
+	end
+
 	-- 버프 아이콘 패널 Entity ↔ 내부 buffName 키 매핑. 신규 패시브 추가 시 이 두 함수(과 그 역함수
 	-- GetBuffPanelForKey)에만 한 줄씩 추가하면 Show/Hide/Reposition 전부에 반영된다 — 예전에는 아래
 	-- 4개 함수(ShowBuffIconPermanent/ShowBuffIcon/HideBuffIcon/RepositionBuffIcons) 각각에 동일한
@@ -14751,6 +15501,12 @@ script CardManager extends Logic
 		elseif panel == self.karmaBuff then return "karma"
 		elseif panel == self.physicalTrainingBuff then return "physicaltraining"
 		elseif panel == self.darkSightBuff then return "darksight"
+		elseif panel == self.throwingAccelBuff then return "throwingaccel"
+		elseif panel == self.javelinMasteryBuff then return "javelinmastery"
+		elseif panel == self.spiritJavelinBuff then return "spiritjavelin"
+		elseif panel == self.radicalDarknessBuff then return "radicaldarkness"
+		elseif panel == self.thiefCunningBuff then return "thiefcunning"
+		elseif panel == self.shurikenMasteryBuff then return "shurikenmastery"
 		end
 		return ""
 	end
@@ -14776,6 +15532,12 @@ script CardManager extends Logic
 		elseif buffName == "karma" then return self.karmaBuff
 		elseif buffName == "physicaltraining" then return self.physicalTrainingBuff
 		elseif buffName == "darksight" then return self.darkSightBuff
+		elseif buffName == "throwingaccel" then return self.throwingAccelBuff
+		elseif buffName == "javelinmastery" then return self.javelinMasteryBuff
+		elseif buffName == "spiritjavelin" then return self.spiritJavelinBuff
+		elseif buffName == "radicaldarkness" then return self.radicalDarknessBuff
+		elseif buffName == "thiefcunning" then return self.thiefCunningBuff
+		elseif buffName == "shurikenmastery" then return self.shurikenMasteryBuff
 		end
 		return nil
 	end
@@ -14804,6 +15566,12 @@ script CardManager extends Logic
 		self:HideBuffIcon(self.karmaBuff, self.karmaFill)
 		self:HideBuffIcon(self.physicalTrainingBuff, self.physicalTrainingFill)
 		self:HideBuffIcon(self.darkSightBuff, self.darkSightFill)
+		self:HideBuffIcon(self.throwingAccelBuff, self.throwingAccelFill)
+		self:HideBuffIcon(self.javelinMasteryBuff, self.javelinMasteryFill)
+		self:HideBuffIcon(self.spiritJavelinBuff, self.spiritJavelinFill)
+		self:HideBuffIcon(self.radicalDarknessBuff, self.radicalDarknessFill)
+		self:HideBuffIcon(self.thiefCunningBuff, self.thiefCunningFill)
+		self:HideBuffIcon(self.shurikenMasteryBuff, self.shurikenMasteryFill)
 	end
 
 	@ExecSpace("ClientOnly")
@@ -15189,6 +15957,18 @@ script CardManager extends Logic
 			dmg = "피해량 증가 : +" .. math.floor(_CardRegistry:GetChance(183, self.PhysicalTrainingLevel) * 100) .. "%  (영구)"
 		elseif cardIdx == 184 then
 			dmg = "공격 회피 " .. math.floor(_CardRegistry:GetChance(184, self.DarkSightLevel) * 100) .. "%  (영구)"
+		elseif cardIdx == 209 then
+			dmg = "쿨타임 -" .. math.floor(_CardRegistry:GetChance(209, self.ThrowingAccelLevel) * 100) .. "%  (영구)"
+		elseif cardIdx == 210 then
+			dmg = "크리티컬 " .. math.floor(_CardRegistry:GetChance(210, self.JavelinMasteryLevel) * 100) .. "%  (영구)"
+		elseif cardIdx == 211 then
+			dmg = "크리티컬 대미지 +" .. math.floor(_CardRegistry:GetChance(211, self.SpiritJavelinLevel) * 100) .. "%  (영구)"
+		elseif cardIdx == 212 then
+			dmg = "공격 회피 " .. math.floor(_CardRegistry:GetChance(212, self.RadicalDarknessLevel) * 100) .. "%  (영구)"
+		elseif cardIdx == 213 then
+			dmg = "피해량 증가 : +" .. math.floor(_CardRegistry:GetChance(213, self.ThiefCunningLevel) * 100) .. "%  (영구)"
+		elseif cardIdx == 214 then
+			dmg = "추가 공격 " .. math.floor(self:GetShurikenMasteryChance() * 100) .. "% (대미지 " .. math.floor(self:GetShurikenMasteryDamageMult(self.ShurikenMasteryLevel) * 100) .. "%)  (영구)"
 		elseif cardIdx == 165 then
 			-- 1타/2타 나눠 쓰지 않고 합산 1개 숫자로.
 			dmg = "대미지 : " .. math.floor(self:GetCardDamage(cardIdx) + self:GetCardDamage(cardIdx) * self:GetSpiritBladeSecondHitPercent(self.SpiritBladeLevel))
@@ -15255,6 +16035,8 @@ script CardManager extends Logic
 			or cardIdx == 109 or cardIdx == 110 or cardIdx == 111 or cardIdx == 112 or cardIdx == 113
 			or cardIdx == 151 or cardIdx == 161 or cardIdx == 162 or cardIdx == 163 or cardIdx == 164
 			or cardIdx == 180 or cardIdx == 181 or cardIdx == 182 or cardIdx == 183 or cardIdx == 184
+			or cardIdx == 209 or cardIdx == 210 or cardIdx == 211 or cardIdx == 212 or cardIdx == 213
+			or cardIdx == 214
 		local cdStr = isPassiveCard and "패시브 스킬" or ("쿨타임 : " .. string.format("%.1f", cd) .. "s")
 		local boosterOn = false
 		if self._activeBuffOrder ~= nil then
@@ -15445,9 +16227,17 @@ script CardManager extends Logic
 			extraStr = "지속 " .. string.format("%.0f", self.Card205Duration) .. "초  |  추적  |  경로상 적 타격"
 		elseif cardIdx == 206 then
 			extraStr = "타겟 1명  |  광역"
+		elseif cardIdx == 208 then
+			local lv208 = self.ShadowTrapLevel
+			extraStr = "타겟 " .. self:GetShadowTrapTargetCount(lv208) .. "명  |  속박 " .. string.format("%.0f", self:GetShadowTrapRootDuration(lv208)) .. "초(100%)  |  보스·엘리트 지속 1/2"
+		elseif cardIdx == 207 then
+			local lv207 = self.SpinThrowLevel
+			extraStr = "타겟 " .. self:GetSpinThrowTargetCount(lv207) .. "명  |  지속 " .. string.format("%.0f", self:GetSpinThrowDuration(lv207)) .. "초  |  설치 광역(범위 점차 증가)"
 		elseif cardIdx == 202 then
 			local lv202 = self.ShurikenBurstLevel
 			extraStr = "타겟 " .. self:GetShurikenBurstTargetCount(lv202) .. "명  |  관통 " .. #self:GetShurikenBurstPiercePercents(lv202) .. "마리"
+		elseif cardIdx == 215 then
+			extraStr = "타겟 " .. self:GetSuperSevenTargetCount(self.SuperSevenLevel) .. "명  |  4연타(" .. math.floor(self.Card215HitPercent * 100) .. "% × 4)  |  크리 +" .. math.floor(self.Card215CritBonus * 100) .. "%"
 		elseif cardIdx == 201 then
 			local lv201 = self.LuckySevenLevel
 			extraStr = "타겟 " .. self:GetLuckySevenTargetCount(lv201) .. "명  |  3연타(40/30/30%)"
@@ -15773,6 +16563,8 @@ script CardManager extends Logic
 				-- 레전더리 무기 스킬 확률 발동만 별개로 체크한다(유저 지정)
 				if slotIndex == 0 then
 					self:TryProcWeaponSkill()
+					-- 표창술(카드214, 린 패시브) — 기본 공격마다 확률로 추가 기본 공격 1회
+					self:TryProcShurikenMastery()
 					-- 장비 등급 스킬의 기본 공격 트리거(장갑 20/30/10회 주기, 활·자마다르 레전더리 확률).
 					-- 대미지 배율을 소비하기 "전"에 불러야 이번 타격에 예약분이 반영된다
 					_GearEffectLogic:OnBasicAttack()
@@ -15909,6 +16701,12 @@ script CardManager extends Logic
 					self:ThrowingWingDaggerAttack(damage, isCrit)
 				elseif cardIndex == 206 then
 					self:ShowdownChallengeAttack(damage, isCrit)
+				elseif cardIndex == 207 then
+					self:SpinThrowAttack(damage, isCrit)
+				elseif cardIndex == 208 then
+					self:ShadowTrapAttack(damage, isCrit)
+				elseif cardIndex == 215 then
+					self:SuperSevenAttack(damage, isCrit)
 				elseif cardIndex == 173 then
 					self:SavageBlowAttack(damage, isCrit, nil)
 				elseif cardIndex == 174 then
@@ -18466,10 +19264,21 @@ script CardManager extends Logic
 
 		if isRin then
 			-- 럭키 세븐(Card201, 슬롯형 액티브 1호 — 린의 첫 스킬)
-			if self.LuckySevenLevel == 0 then
-				if hasEmptySlot then table.insert(pool, { card = 201, type = "unlock" }) end
-			elseif self.LuckySevenLevel < 5 then
-				table.insert(pool, { card = 201, type = "luckyseven_up" })
+			-- (슈퍼 세븐으로 이미 조합된 뒤에는 더 이상 등장하지 않음 — 그 슬롯을 이미 떠났으므로)
+			if self.SuperSevenLevel == 0 then
+				if self.LuckySevenLevel == 0 then
+					if hasEmptySlot then table.insert(pool, { card = 201, type = "unlock" }) end
+				elseif self.LuckySevenLevel < 5 then
+					table.insert(pool, { card = 201, type = "luckyseven_up" })
+				end
+			end
+
+			-- 슈퍼 세븐(Card215, 조합 스킬 — 럭키 세븐 슬롯을 그대로 넘겨받는다. 표창술/시프 커닝은
+			-- 둘 다 슬롯 없는 패시브라 비울 슬롯이 없음 — 암살(185)과 동일한 구조)
+			if self.LuckySevenLevel >= 5 and self:IsCardUnlocked(214) and self:IsCardUnlocked(213) and self.SuperSevenLevel == 0 then
+				table.insert(pool, { card = 215, type = "unlock" })
+			elseif self.SuperSevenLevel > 0 and self.SuperSevenLevel < 3 then
+				table.insert(pool, { card = 215, type = "superseven_up" })
 			end
 
 			-- 슈리켄 버스트(Card202, 슬롯형 액티브 2호)
@@ -18505,6 +19314,57 @@ script CardManager extends Logic
 				if hasEmptySlot then table.insert(pool, { card = 206, type = "unlock" }) end
 			elseif self.ShowdownChallengeLevel < 5 then
 				table.insert(pool, { card = 206, type = "showdownchallenge_up" })
+			end
+
+			-- 스핀 스로우(Card207, 슬롯형 액티브 7호)
+			if self.SpinThrowLevel == 0 then
+				if hasEmptySlot then table.insert(pool, { card = 207, type = "unlock" }) end
+			elseif self.SpinThrowLevel < 5 then
+				table.insert(pool, { card = 207, type = "spinthrow_up" })
+			end
+
+			-- 쉐도우 트랩(Card208, 슬롯형 액티브 8호)
+			if self.ShadowTrapLevel == 0 then
+				if hasEmptySlot then table.insert(pool, { card = 208, type = "unlock" }) end
+			elseif self.ShadowTrapLevel < 5 then
+				table.insert(pool, { card = 208, type = "shadowtrap_up" })
+			end
+
+			-- ── 린 패시브 5종(209~213). 슬롯을 안 쓰므로 hasEmptySlot 조건이 붙지 않는다.
+			if self.ThrowingAccelLevel == 0 then
+				table.insert(pool, { card = 209, type = "unlock" })
+			elseif self.ThrowingAccelLevel < 5 then
+				table.insert(pool, { card = 209, type = "throwingaccel_up" })
+			end
+
+			if self.JavelinMasteryLevel == 0 then
+				table.insert(pool, { card = 210, type = "unlock" })
+			elseif self.JavelinMasteryLevel < 5 then
+				table.insert(pool, { card = 210, type = "javelinmastery_up" })
+			end
+
+			if self.SpiritJavelinLevel == 0 then
+				table.insert(pool, { card = 211, type = "unlock" })
+			elseif self.SpiritJavelinLevel < 5 then
+				table.insert(pool, { card = 211, type = "spiritjavelin_up" })
+			end
+
+			if self.RadicalDarknessLevel == 0 then
+				table.insert(pool, { card = 212, type = "unlock" })
+			elseif self.RadicalDarknessLevel < 5 then
+				table.insert(pool, { card = 212, type = "radicaldarkness_up" })
+			end
+
+			if self.ThiefCunningLevel == 0 then
+				table.insert(pool, { card = 213, type = "unlock" })
+			elseif self.ThiefCunningLevel < 5 then
+				table.insert(pool, { card = 213, type = "thiefcunning_up" })
+			end
+
+			if self.ShurikenMasteryLevel == 0 then
+				table.insert(pool, { card = 214, type = "unlock" })
+			elseif self.ShurikenMasteryLevel < 5 then
+				table.insert(pool, { card = 214, type = "shurikenmastery_up" })
 			end
 		end
 
@@ -19265,6 +20125,63 @@ script CardManager extends Logic
 			return
 		end
 
+		-- ── 린 패시브 5종(209~213)
+		if cardIdx == 209 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.ThrowingAccelLevel + 1)
+			icon.ImageRUID = _CardRegistry:GetIcon(209)
+			title.Text = "Lv" .. nextLevel
+			name.Text  = _CardRegistry:GetName(209)
+			return
+		end
+
+		if cardIdx == 210 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.JavelinMasteryLevel + 1)
+			icon.ImageRUID = _CardRegistry:GetIcon(210)
+			title.Text = "Lv" .. nextLevel
+			name.Text  = _CardRegistry:GetName(210)
+			return
+		end
+
+		if cardIdx == 211 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.SpiritJavelinLevel + 1)
+			icon.ImageRUID = _CardRegistry:GetIcon(211)
+			title.Text = "Lv" .. nextLevel
+			name.Text  = _CardRegistry:GetName(211)
+			return
+		end
+
+		if cardIdx == 212 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.RadicalDarknessLevel + 1)
+			icon.ImageRUID = _CardRegistry:GetIcon(212)
+			title.Text = "Lv" .. nextLevel
+			name.Text  = _CardRegistry:GetName(212)
+			return
+		end
+
+		if cardIdx == 215 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.SuperSevenLevel + 1)
+			icon.ImageRUID = _CardRegistry:GetIcon(215)
+			title.Text = "Lv" .. nextLevel
+			name.Text  = _CardRegistry:GetName(215)
+			return
+		end
+
+		if cardIdx == 214 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.ShurikenMasteryLevel + 1)
+			icon.ImageRUID = _CardRegistry:GetIcon(214)
+			title.Text = "Lv" .. nextLevel
+			name.Text  = _CardRegistry:GetName(214)
+			return
+		end
+
+		if cardIdx == 213 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.ThiefCunningLevel + 1)
+			icon.ImageRUID = _CardRegistry:GetIcon(213)
+			title.Text = "Lv" .. nextLevel
+			name.Text  = _CardRegistry:GetName(213)
+			return
+		end
+
 		if cardIdx == 185 then
 			local nextLevel = (upgradeType == "unlock") and 1 or (self.AssassinateLevel + 1)
 			icon.ImageRUID = _CardRegistry:GetIcon(185)
@@ -19323,6 +20240,22 @@ script CardManager extends Logic
 
 		-- 럭키 세븐(린) — 이 함수는 카드마다 블록이 따로 있어야 한다(레지스트리 폴백이 없어서,
 		-- 블록이 빠지면 선택 카드에 이름 대신 카드 번호가 그대로 찍힌다)
+		if cardIdx == 208 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.ShadowTrapLevel + 1)
+			icon.ImageRUID = _CardRegistry:GetIcon(208)
+			title.Text = "Lv" .. nextLevel
+			name.Text  = _CardRegistry:GetName(208)
+			return
+		end
+
+		if cardIdx == 207 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.SpinThrowLevel + 1)
+			icon.ImageRUID = _CardRegistry:GetIcon(207)
+			title.Text = "Lv" .. nextLevel
+			name.Text  = _CardRegistry:GetName(207)
+			return
+		end
+
 		if cardIdx == 206 then
 			local nextLevel = (upgradeType == "unlock") and 1 or (self.ShowdownChallengeLevel + 1)
 			icon.ImageRUID = _CardRegistry:GetIcon(206)
@@ -20672,6 +21605,40 @@ script CardManager extends Logic
 			return
 		end
 
+		-- 쉐도우 트랩(린 전용, 슬롯형 액티브 — 즉발 단일 + 속박)
+		if cardIdx == 208 then
+			if upgradeType == "unlock" then
+				self.ShadowTrapLevel = 1
+				local slotIdx = self:GetNextEmptySlot()
+				if slotIdx > 0 then
+					self:AssignCardToSlot(slotIdx, 208)
+					self:ResetSlotTimer(slotIdx)
+					log("Card208(ShadowTrap) -> Slot" .. slotIdx)
+				end
+			elseif upgradeType == "shadowtrap_up" and self.ShadowTrapLevel < 5 then
+				self.ShadowTrapLevel = self.ShadowTrapLevel + 1
+			end
+			log("ShadowTrap L" .. self.ShadowTrapLevel .. " (dmg=" .. math.floor(self:GetShadowTrapDamage(self.ShadowTrapLevel)) .. " targets=" .. self:GetShadowTrapTargetCount(self.ShadowTrapLevel) .. " root=" .. self:GetShadowTrapRootDuration(self.ShadowTrapLevel) .. "s)")
+			return
+		end
+
+		-- 스핀 스로우(린 전용, 슬롯형 액티브 — 설치 지속 광역)
+		if cardIdx == 207 then
+			if upgradeType == "unlock" then
+				self.SpinThrowLevel = 1
+				local slotIdx = self:GetNextEmptySlot()
+				if slotIdx > 0 then
+					self:AssignCardToSlot(slotIdx, 207)
+					self:ResetSlotTimer(slotIdx)
+					log("Card207(SpinThrow) -> Slot" .. slotIdx)
+				end
+			elseif upgradeType == "spinthrow_up" and self.SpinThrowLevel < 5 then
+				self.SpinThrowLevel = self.SpinThrowLevel + 1
+			end
+			log("SpinThrow L" .. self.SpinThrowLevel .. " (dmg=" .. math.floor(self:GetSpinThrowDamage(self.SpinThrowLevel)) .. " targets=" .. self:GetSpinThrowTargetCount(self.SpinThrowLevel) .. " dur=" .. self:GetSpinThrowDuration(self.SpinThrowLevel) .. "s)")
+			return
+		end
+
 		-- 쇼다운 챌린지(린 전용, 슬롯형 액티브 — 즉발 광역)
 		if cardIdx == 206 then
 			if upgradeType == "unlock" then
@@ -21027,6 +21994,95 @@ script CardManager extends Logic
 			end
 			self:NotifyDarkSightOnPermanent()
 			log("DarkSight L" .. self.DarkSightLevel .. " (회피 " .. math.floor(self:GetDarkSightEvadeChance() * 100) .. "%)")
+			return
+		end
+
+		-- ── 린 패시브 5종(209~213). 슬롯 배정이 없고 해금 즉시 영구 적용된다.
+		-- ⚠ 쉐이드 패시브와 달리 버프 아이콘(Notify*OnPermanent)을 아직 안 띄운다 — 아이콘 패널이
+		--   .ui에 없어서다(별도 작업 필요). 수치 적용은 전부 정상 동작한다.
+		if cardIdx == 209 then
+			if upgradeType == "unlock" then
+				self.ThrowingAccelLevel = 1
+			elseif upgradeType == "throwingaccel_up" and self.ThrowingAccelLevel < 5 then
+				self.ThrowingAccelLevel = self.ThrowingAccelLevel + 1
+			end
+			self:NotifyThrowingAccelOnPermanent()
+			log("ThrowingAccel L" .. self.ThrowingAccelLevel .. " (쿨타임 -" .. math.floor(self:GetThrowingAccelReduction() * 100) .. "%)")
+			return
+		end
+
+		if cardIdx == 210 then
+			if upgradeType == "unlock" then
+				self.JavelinMasteryLevel = 1
+			elseif upgradeType == "javelinmastery_up" and self.JavelinMasteryLevel < 5 then
+				self.JavelinMasteryLevel = self.JavelinMasteryLevel + 1
+			end
+			self:NotifyJavelinMasteryOnPermanent()
+			log("JavelinMastery L" .. self.JavelinMasteryLevel .. " (크리티컬 " .. math.floor(_CardRegistry:GetChance(210, self.JavelinMasteryLevel) * 100) .. "%)")
+			return
+		end
+
+		if cardIdx == 211 then
+			if upgradeType == "unlock" then
+				self.SpiritJavelinLevel = 1
+			elseif upgradeType == "spiritjavelin_up" and self.SpiritJavelinLevel < 5 then
+				self.SpiritJavelinLevel = self.SpiritJavelinLevel + 1
+			end
+			self:NotifySpiritJavelinOnPermanent()
+			log("SpiritJavelin L" .. self.SpiritJavelinLevel .. " (크리티컬 대미지 +" .. math.floor(self:GetSpiritJavelinBonus() * 100) .. "%)")
+			return
+		end
+
+		if cardIdx == 212 then
+			if upgradeType == "unlock" then
+				self.RadicalDarknessLevel = 1
+			elseif upgradeType == "radicaldarkness_up" and self.RadicalDarknessLevel < 5 then
+				self.RadicalDarknessLevel = self.RadicalDarknessLevel + 1
+			end
+			self:NotifyRadicalDarknessOnPermanent()
+			log("RadicalDarkness L" .. self.RadicalDarknessLevel .. " (회피 " .. math.floor(self:GetRadicalDarknessEvadeChance() * 100) .. "%)")
+			return
+		end
+
+		-- 슈퍼 세븐(린 전용, 조합 스킬 — 럭키 세븐 슬롯을 그대로 넘겨받는다)
+		if cardIdx == 215 then
+			if upgradeType == "unlock" then
+				self.SuperSevenLevel = 1
+				local luckySevenSlot = self:GetSlotForCard(201)
+				if luckySevenSlot > 0 then
+					self:AssignCardToSlot(luckySevenSlot, 215)
+					self:ResetSlotTimer(luckySevenSlot)
+					self:PlayThunderStormFusionEffect(luckySevenSlot)
+					log("Card215(SuperSeven) fused into Slot" .. luckySevenSlot .. " (was LuckySeven)")
+				else
+					log_warning("SuperSeven: LuckySeven not found in any slot — fusion could not place the card")
+				end
+			elseif upgradeType == "superseven_up" and self.SuperSevenLevel < 3 then
+				self.SuperSevenLevel = self.SuperSevenLevel + 1
+			end
+			log("SuperSeven L" .. self.SuperSevenLevel .. " (dmg=" .. math.floor(self:GetSuperSevenDamage(self.SuperSevenLevel)) .. " targets=" .. self:GetSuperSevenTargetCount(self.SuperSevenLevel) .. " 4연타 " .. math.floor(self.Card215HitPercent * 100) .. "%)")
+			return
+		end
+
+		if cardIdx == 214 then
+			if upgradeType == "unlock" then
+				self.ShurikenMasteryLevel = 1
+			elseif upgradeType == "shurikenmastery_up" and self.ShurikenMasteryLevel < 5 then
+				self.ShurikenMasteryLevel = self.ShurikenMasteryLevel + 1
+			end
+			self:NotifyShurikenMasteryOnPermanent()
+			log("ShurikenMastery L" .. self.ShurikenMasteryLevel .. " (확률 " .. math.floor(self:GetShurikenMasteryChance() * 100) .. "% 대미지 " .. math.floor(self:GetShurikenMasteryDamageMult(self.ShurikenMasteryLevel) * 100) .. "%)")
+			return
+		end
+
+		if cardIdx == 213 then
+			if upgradeType == "unlock" then
+				self.ThiefCunningLevel = 1
+			elseif upgradeType == "thiefcunning_up" and self.ThiefCunningLevel < 5 then
+				self.ThiefCunningLevel = self.ThiefCunningLevel + 1
+			end
+			self:NotifyThiefCunningOnPermanent()
+			log("ThiefCunning L" .. self.ThiefCunningLevel .. " (피해량 +" .. math.floor(_CardRegistry:GetChance(213, self.ThiefCunningLevel) * 100) .. "%)")
 			return
 		end
 
@@ -21456,6 +22512,13 @@ script CardManager extends Logic
 		self.KarmaLevel = 0
 		self.PhysicalTrainingLevel = 0
 		self.DarkSightLevel = 0
+		self.ThrowingAccelLevel = 0
+		self.JavelinMasteryLevel = 0
+		self.SpiritJavelinLevel = 0
+		self.RadicalDarknessLevel = 0
+		self.ThiefCunningLevel = 0
+		self.ShurikenMasteryLevel = 0
+		self.SuperSevenLevel = 0
 		-- 버그 수정(2026-08-13, 유저 지적: "Reset() 리셋 누락도 같이 고쳐줘") — 173~179(새비지블로우~
 		-- 다크플레어)가 여기서 전부 빠져있어서 "다시하기"해도 레벨이 그대로 남아있었다(레이온에서 이미
 		-- 한 번 터졌던 것과 동일한 클래스 버그). 쉐도우 파트너(178)는 소환된 파트너가 있어도 Phoenix
@@ -21515,6 +22578,8 @@ script CardManager extends Logic
 		self.ShadowSplitLevel = 0
 		self.ThrowingWingDaggerLevel = 0
 		self.ShowdownChallengeLevel = 0
+		self.SpinThrowLevel = 0
+		self.ShadowTrapLevel = 0
 
 		self._choiceCard1 = 0 ; self._choiceCard2 = 0 ; self._choiceCard3 = 0
 		self._choiceType1 = "" ; self._choiceType2 = "" ; self._choiceType3 = ""
@@ -21655,6 +22720,9 @@ script CardManager extends Logic
 			if self:IsCardUnlocked(204) and self.ShadowSplitLevel < 5 then table.insert(pool, 204) end
 			if self:IsCardUnlocked(205) and self.ThrowingWingDaggerLevel < 5 then table.insert(pool, 205) end
 			if self:IsCardUnlocked(206) and self.ShowdownChallengeLevel < 5 then table.insert(pool, 206) end
+			if self:IsCardUnlocked(207) and self.SpinThrowLevel < 5 then table.insert(pool, 207) end
+			if self:IsCardUnlocked(208) and self.ShadowTrapLevel < 5 then table.insert(pool, 208) end
+			if self:IsCardUnlocked(215) and self.SuperSevenLevel < 3 then table.insert(pool, 215) end
 			return pool
 		end
 		if _GameManager.SelectedCharacter == 3 then
@@ -21729,6 +22797,8 @@ script CardManager extends Logic
 		elseif cardIdx == 204 then return "shadowsplit_up"
 		elseif cardIdx == 205 then return "throwingwingdagger_up"
 		elseif cardIdx == 206 then return "showdownchallenge_up"
+		elseif cardIdx == 207 then return "spinthrow_up"
+		elseif cardIdx == 208 then return "shadowtrap_up"
 		elseif cardIdx == 173 then return "savageblow_up"
 		elseif cardIdx == 174 then return "smokegrenade_up"
 		elseif cardIdx == 175 then return "muspelheim_up"
@@ -21741,6 +22811,13 @@ script CardManager extends Logic
 		elseif cardIdx == 182 then return "karma_up"
 		elseif cardIdx == 183 then return "physicaltraining_up"
 		elseif cardIdx == 184 then return "darksight_up"
+		elseif cardIdx == 209 then return "throwingaccel_up"
+		elseif cardIdx == 210 then return "javelinmastery_up"
+		elseif cardIdx == 211 then return "spiritjavelin_up"
+		elseif cardIdx == 212 then return "radicaldarkness_up"
+		elseif cardIdx == 213 then return "thiefcunning_up"
+		elseif cardIdx == 214 then return "shurikenmastery_up"
+		elseif cardIdx == 215 then return "superseven_up"
 		elseif cardIdx == 185 then return "assassinate_up"
 		elseif cardIdx == 186 then return "sonicblow_up"
 		elseif cardIdx == 187 then return "smokerampage_up"
