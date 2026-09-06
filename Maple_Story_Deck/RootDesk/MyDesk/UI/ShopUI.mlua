@@ -9,15 +9,20 @@ script ShopUI extends Logic
 	property integer itemCount = 7
 	property integer currentIndex = 0
 	property number scrollTweenDuration = 0.28
-	-- 카드 391 * 7장 + 간격 28 * 6 + 좌우 패딩 46 - 뷰포트 1300 = 실제로 드래그 가능한 스크롤 폭(px).
-	-- 카드 크기나 장수를 바꾸면 이 값도 같이 고쳐야 드래그 감도가 어긋나지 않는다
+	-- 실제로 드래그 가능한 스크롤 폭(px). 예전엔 1651을 손으로 박아뒀는데, 스타터팩 구매 후
+	-- 카드가 한 장 빠지면서 장수가 런타임에 바뀌게 되어 계산식으로 돌렸다(RecalcScrollMetrics).
+	-- 카드 크기/간격을 .ui에서 바꾸면 아래 상수만 맞춰주면 된다.
 	property number scrollableRangePx = 1651
+	property number CardWidthPx = 391
+	property number CardSpacingPx = 28
+	property number ListPaddingPx = 46
+	property number ViewportWidthPx = 1300
 
-	-- 인앱 상품을 Maker 포털에 실제로 등록하기 전까지는 false로 둔다. false면 카드를 눌러도 결제창을
-	-- 띄우지 않고 "준비 중" 안내만 보여준다 — 등록 안 된 productId로 PromptPurchase를 호출하면
-	-- 결제창 대신 오류만 뜨기 때문이다. 등록이 끝나면 ShopPurchaseLogic의 상품 ID를 실제 값으로 갈고
-	-- 이 값을 true로 바꾸면 그대로 결제가 붙는다
-	property boolean ProductsRegistered = false
+	-- 인앱 상품 7종을 포털에 등록(2026-09-06)하고 ShopPurchaseLogic의 ID를 실제 값으로 채웠으므로 true.
+	-- false면 카드를 눌러도 결제창 대신 "준비 중" 안내만 뜬다 — 등록 안 된 productId로 PromptPurchase를
+	-- 부르면 결제창이 아니라 오류가 나기 때문에 두는 안전장치다. 상품을 다시 만드는 등 ID가 어긋난
+	-- 동안에는 이 값을 잠시 false로 내려두면 된다
+	property boolean ProductsRegistered = true
 
 	-- 구매 준비중/실패 안내 배너. 공용 토스트(ToastGroup)는 별도 UIGroup이라 로비 위로 못 올라오고
 	-- GroupOrder는 건드리면 다른 .ui 순서까지 틀어지므로, ShopPanel 안에 자체 배너를 두고 쓴다
@@ -27,6 +32,13 @@ script ShopUI extends Logic
 
 	property table _cardHandlers = {}
 	property integer _noticeTimerId = 0
+
+	-- 스타터 패키지(PASS) 보유 여부. 서버가 알려주기 전까지는 false로 둔다 — 아직 안 산 유저의
+	-- 카드를 잘못 빼서 못 사게 만드는 것보다, 잠깐 보였다가 사라지는 쪽이 낫다
+	property boolean _starterOwned = false
+	-- 스크롤이 갈 수 있는 최대 정규화 위치. 스타터를 산 뒤 꺼둔 뒤쪽 빈 슬롯이 화면에 들어오지
+	-- 않도록 드래그/스크롤바를 여기까지만 허용한다(RecalcScrollMetrics가 계산)
+	property number _maxScrollNorm = 1
 
 	-- 상단 탭(랭킹탭과 동일한 방식 — 버튼 스프라이트 색만 on/off로 바꾸고 내용 컨테이너를 토글한다)
 	property ButtonComponent tabDiamond = "a8f48a1b-6b99-4f61-9183-903941fdbdba"
@@ -72,6 +84,9 @@ script ShopUI extends Logic
 		self:ConnectSkinCards()
 		self:RefreshSkinCards()
 		self:SelectTab("diamond")
+		-- 스타터팩을 이미 샀는지 서버에 물어본다. 답이 오면 ReplyStarterOwned → SetStarterOwned로
+		-- 돌아와 카드에 "구매 완료" 덮개가 씌워진다
+		_ShopPurchaseLogic:RequestStarterOwned()
 		log("ShopUI: shop tab ready, registered=" .. tostring(self.ProductsRegistered))
 	end
 
@@ -188,16 +203,39 @@ script ShopUI extends Logic
 		end
 	end
 
+	method table GetVisibleProducts()
+		-- 화면에 실제로 깔 상품 목록. 스타터팩을 이미 산 유저에게는 그 항목을 빼고 뒤를 당긴다
+		-- (덮개로 자리를 계속 차지하지 않게 — 유저 지정). 원본 표는 건드리지 않고 새 테이블을 만든다.
+		local products = _ShopPurchaseLogic:GetProducts()
+		if not self._starterOwned then return products end
+		local out = {}
+		for i = 2, #products do table.insert(out, products[i]) end
+		return out
+	end
+
 	@ExecSpace("ClientOnly")
 	method void ApplyProducts()
 		-- 카드에 찍히는 문구를 ShopPurchaseLogic의 상품표에서 그대로 가져와 채운다. 표시 문구와 실제
-		-- 지급량이 갈라지지 않도록 원본은 그쪽 한 곳에만 둔다(.ui의 텍스트는 에디터용 자리표시일 뿐)
-		local products = _ShopPurchaseLogic:GetProducts()
+		-- 지급량이 갈라지지 않도록 원본은 그쪽 한 곳에만 둔다(.ui의 텍스트는 에디터용 자리표시일 뿐).
+		--
+		-- ⚠ ScrollLayoutGroup은 로드 시 한 번만 배치하고 런타임에 다시 계산하지 않는다(실측:
+		-- 카드를 Enable=false 하거나 RectSize=0으로 만들거나 AttachTo로 부모에서 빼도 뒤 카드가
+		-- 안 당겨진다). 그래서 "카드를 빼는" 게 아니라 "내용을 당겨 쓰고 남는 뒤쪽 슬롯을 끄는"
+		-- 방식으로 구현한다 — 슬롯 x좌표는 고정이라 이러면 첫 칸부터 빈틈 없이 채워진다.
+		local products = self:GetVisibleProducts()
 		local list = self.productScroll.Entity
+
+		-- 남는 뒤쪽 슬롯은 끈다(스타터 구매 후 7번째 칸)
+		for i = #products, 6 do
+			local extra = list:GetChildByName("ProductCard_" .. tostring(i))
+			if isvalid(extra) then extra.Enable = false end
+		end
+
 		for i = 1, #products do
 			local p = products[i]
 			local card = list:GetChildByName("ProductCard_" .. tostring(i - 1))
 			if isvalid(card) then
+				card.Enable = true
 				local nameText = card:GetChildByName("NameText")
 				if isvalid(nameText) then nameText.TextGUIRendererComponent.Text = p.name end
 
@@ -214,11 +252,19 @@ script ShopUI extends Logic
 				local iconSub = card:GetChildByName("IconSub")
 				if isvalid(iconSub) then iconSub.Enable = p.showSub end
 
-				-- 보너스/한정 배지는 있는 카드에만 붙어 있다(다이아 300/600은 배지 엔티티 자체가 없음)
+				-- 보너스/한정 배지. 내용을 당겨 쓰면 배지 있는 카드에 배지 없는 상품이 들어올 수 있어서
+				-- 반드시 켜고 끄기까지 해야 한다 — 예전엔 p.badge가 nil이면 그냥 넘어가서 앞 상품의
+				-- 배지 문구가 그대로 남았다.
+				-- ⚠ 배지 엔티티는 카드 0·3·4·5·6에만 있다(다이아 300/600 카드엔 없음). 그래서 스타터를
+				-- 산 뒤 한 칸씩 당겨지면 다이아 1,300의 "+8%"가 배지 없는 카드로 밀려 안 보인다.
+				-- 제대로 고치려면 .ui에서 모든 카드에 BonusBadge를 달아야 한다.
 				local badge = card:GetChildByName("BonusBadge")
-				if isvalid(badge) and p.badge ~= nil then
-					local badgeText = badge:GetChildByName("BadgeText")
-					if isvalid(badgeText) then badgeText.TextGUIRendererComponent.Text = p.badge end
+				if isvalid(badge) then
+					badge.Enable = (p.badge ~= nil)
+					if p.badge ~= nil then
+						local badgeText = badge:GetChildByName("BadgeText")
+						if isvalid(badgeText) then badgeText.TextGUIRendererComponent.Text = p.badge end
+					end
 				end
 			end
 		end
@@ -226,8 +272,15 @@ script ShopUI extends Logic
 
 	@ExecSpace("ClientOnly")
 	method void ConnectCards()
-		-- 카드 6장 각각을 눌렀을 때 몇 번 상품인지 알아야 해서 인덱스를 클로저로 잡아 연결한다
-		local products = _ShopPurchaseLogic:GetProducts()
+		-- 카드 각각을 눌렀을 때 몇 번 상품인지 알아야 해서 인덱스를 클로저로 잡아 연결한다.
+		-- 인덱스는 GetVisibleProducts 기준이라 스타터를 산 뒤에는 1번이 다이아 300이 된다.
+		-- 스타터 보유 여부가 바뀌면 다시 불리므로, 먼저 이전 핸들러를 끊어 중복 연결을 막는다.
+		for _, rec in ipairs(self._cardHandlers) do
+			if isvalid(rec.entity) then rec.entity:DisconnectEvent(ButtonClickEvent, rec.eventHandler) end
+		end
+		self._cardHandlers = {}
+
+		local products = self:GetVisibleProducts()
 		local list = self.productScroll.Entity
 		for i = 1, #products do
 			local capturedIndex = i
@@ -252,6 +305,14 @@ script ShopUI extends Logic
 			return
 		end
 
+		-- 방어용. 스타터팩을 이미 샀으면 카드 자체가 비활성이라 여기까지 올 일이 없고, 설령
+		-- 올라와도 PASS라 결제창에서 엔진이 막는다 — 그래도 오류 문구 대신 이유를 보여준다
+		if index == 1 and self._starterOwned then
+			self:ShowNotice("이미 구매한 상품입니다")
+			log("ShopUI: starter purchase blocked, already owned")
+			return
+		end
+
 		log("ShopUI: PromptPurchase " .. p.id)
 		_WorldShopService:PromptPurchase(p.id)
 	end
@@ -269,9 +330,55 @@ script ShopUI extends Logic
 	end
 
 	@ExecSpace("ClientOnly")
+	method void SetStarterOwned(boolean owned)
+		-- 서버(ShopPurchaseLogic)가 UserHasPassAndWait 결과를 돌려줄 때, 그리고 스타터팩 결제가
+		-- 지급될 때 불린다. 상태를 여기 한 곳에서만 갱신하고 화면 반영은 아래로 넘긴다
+		self._starterOwned = owned
+		self:ApplyStarterVisibility()
+		log("ShopUI: starter owned=" .. tostring(owned))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ApplyStarterVisibility()
+		-- 스타터 보유 여부가 정해졌을 때(입장 조회 응답 / 구매 직후) 카드 내용을 다시 깐다.
+		self:ApplyProducts()
+		self:ConnectCards()
+		self:RecalcScrollMetrics()
+
+		-- 장수가 줄면 기존 스크롤 위치가 새 한계를 넘을 수 있어 맨 앞으로 되돌린다
+		self.currentIndex = 0
+		self.productScroll:SetScrollNormalizedPosition(UITransformAxis.Horizontal, 0)
+		self:SyncScrollBar(0)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RecalcScrollMetrics()
+		-- itemCount(화살표가 갈 수 있는 마지막 칸)와 스크롤 한계를 보이는 장수에 맞춰 다시 잡는다.
+		--
+		-- ⚠ scrollableRangePx(드래그 감도의 분모)는 **줄이면 안 된다**. 정규화 0~1은 언제나
+		-- .ui에 박힌 7칸 전체 폭을 기준으로 매핑되므로, 분모를 6칸 폭으로 줄이면 손가락 이동량과
+		-- 화면 이동량이 어긋난다. 대신 갈 수 있는 최대 정규화 값(_maxScrollNorm)을 따로 두고
+		-- 드래그/스크롤바에서 거기까지만 허용해, 꺼둔 뒤쪽 빈 슬롯이 화면에 안 들어오게 막는다.
+		local totalCards = #_ShopPurchaseLogic:GetProducts()
+		local visible = #self:GetVisibleProducts()
+		self.itemCount = visible
+
+		local fullContent = self.CardWidthPx * totalCards + self.CardSpacingPx * (totalCards - 1) + self.ListPaddingPx
+		local fullRange = fullContent - self.ViewportWidthPx
+		if fullRange < 1 then fullRange = 1 end
+		self.scrollableRangePx = fullRange
+
+		local visContent = self.CardWidthPx * visible + self.CardSpacingPx * (visible - 1) + self.ListPaddingPx
+		local visRange = visContent - self.ViewportWidthPx
+		if visRange < 0 then visRange = 0 end
+		self._maxScrollNorm = math.min(1, visRange / fullRange)
+	end
+
+	@ExecSpace("ClientOnly")
 	method void SetProductSoldOut(integer index, boolean soldOut)
-		-- 1회한정 상품을 이미 산 유저에게 "구매 완료" 덮개를 씌운다. 인앱 등록 후 구매이력을 읽어와
-		-- 호출할 자리 — 지금은 아무도 부르지 않으므로 덮개는 계속 꺼진 상태다
+		-- 카드에 "구매 완료" 덮개를 씌운다. 스타터팩은 덮개 대신 카드를 통째로 빼는 방식으로
+		-- 바꿔서(ApplyStarterVisibility) 지금은 아무도 부르지 않는다 — 나중에 "산 뒤에도 목록에는
+		-- 남겨두고 싶은" 1회한정 상품이 생기면 그때 쓰라고 남겨둔 훅이다
 		local card = self.productScroll.Entity:GetChildByName("ProductCard_" .. tostring(index - 1))
 		if not isvalid(card) then return end
 		local cover = card:GetChildByName("SoldOutCover")
@@ -296,8 +403,11 @@ script ShopUI extends Logic
 			self._scrollTween:Stop()
 			self._scrollTween = nil
 		end
-		self.productScroll:SetScrollNormalizedPosition(UITransformAxis.Horizontal, event.Value)
-		self.currentIndex = math.floor(event.Value * (self.itemCount - 1) + 0.5)
+		-- 핸들을 끝까지 끌어도 빈 슬롯이 안 보이도록 같은 한계를 적용한다
+		local v = math.max(0, math.min(self._maxScrollNorm, event.Value))
+		self.productScroll:SetScrollNormalizedPosition(UITransformAxis.Horizontal, v)
+		self.currentIndex = math.floor((v / self._maxScrollNorm) * (self.itemCount - 1) + 0.5)
+		if v ~= event.Value then self:SyncScrollBar(v) end
 	end
 
 	@ExecSpace("ClientOnly")
@@ -309,9 +419,11 @@ script ShopUI extends Logic
 		end
 		local current = self.productScroll:GetScrollNormalizedPosition(UITransformAxis.Horizontal)
 		local delta = -event.TouchDelta.x / self.scrollableRangePx
-		local newValue = math.max(0, math.min(1, current + delta))
+		-- 상한은 1이 아니라 _maxScrollNorm — 스타터 구매 후 꺼둔 뒤쪽 빈 슬롯이 안 보이게 막는다
+		local newValue = math.max(0, math.min(self._maxScrollNorm, current + delta))
 		self.productScroll:SetScrollNormalizedPosition(UITransformAxis.Horizontal, newValue)
-		self.currentIndex = math.floor(newValue * (self.itemCount - 1) + 0.5)
+		-- 0~_maxScrollNorm 구간을 0~(itemCount-1)로 환산해야 현재 칸 번호가 맞는다
+		self.currentIndex = math.floor((newValue / self._maxScrollNorm) * (self.itemCount - 1) + 0.5)
 		self:SyncScrollBar(newValue)
 	end
 

@@ -17102,24 +17102,101 @@ script CardManager extends Logic
 	-- 그리는 쪽은 각 클라이언트라, 서버에서 미리 불러두면 아무 효과가 없다 — 반드시 클라에서 돈다.
 	@ExecSpace("ClientOnly")
 	method void PreloadEffectFrames()
-		-- 프레임 간격이 0.07초로 가장 촘촘한 두 스킬부터 예열한다. 다른 수동 프레임 스킬도 같은
-		-- 증상이 있을 수 있으니, 확인되면 여기에 RUID를 추가하면 된다.
+		-- 스킬 연출용 RUID를 **전부** 미리 로드한다.
+		--
+		-- 왜 전부인가: 예열 안 된 RUID는 그 스킬을 처음 쓸 때만 연출이 잘려 보인다. SpawnEffect가
+		-- 스폰과 동시에 소멸 타이머(skilleffect=0.8초)를 걸어버리는데, 첫 재생에서는 리소스 로딩이
+		-- 끝나기를 기다리느라 앞부분을 흘려보내고 그 상태로 타이머가 만료되기 때문이다. 두 번째
+		-- 시전부터는 캐시가 살아 있어 멀쩡하게 나온다 — "처음 얻었을 때만 이상하다"는 리포트의 정체.
+		--
+		-- 예전엔 증상이 확인된 스킬(Card107/119)만 31개 넣어두고 "확인되면 여기에 추가"로 운영했는데,
+		-- 그러다 페페(Card12)에서 같은 리포트가 또 나왔다. 스킬이 늘 때마다 같은 버그가 재발하는
+		-- 구조라, 두 개씩 땜빵하지 않고 연출 RUID 전체를 대상으로 바꿨다(2026-09-06).
+		--
+		-- 대상 규칙: 이 스크립트의 **32자리 RUID를 담은 string 프로퍼티 전부**에서
+		-- **이름에 Icon 또는 Sound가 들어간 것만 뺀 나머지**(324개).
+		-- 아이콘은 카드 UI가 뜰 때 다른 경로로 로드되고, 사운드는 프레임이 잘리는 증상 자체가 없다.
+		--
+		-- ⚠ 규칙을 "Card<숫자>~"로 좁히면 안 된다. 레이온/린/쉐이드 계열은 `LeionAttackEffectRUID`,
+		-- `RinShurikenRUID`, `AssassinateHit1CastRUID`처럼 카드 번호가 안 붙은 이름을 쓴다 —
+		-- 처음 이 목록을 만들 때 그 105개를 통째로 빠뜨렸다가 전수조사에서 잡았다.
+		-- ⚠ 새 스킬의 연출 RUID를 추가할 때 이 목록에도 같이 넣어야 한다. 빠뜨리면 그 스킬만
+		-- "처음 한 번 연출이 잘리는" 증상이 되살아난다(에러는 전혀 안 난다).
 		local ruids = {
-			self.Card107CastFrame0RUID, self.Card107CastFrame1RUID, self.Card107CastFrame2RUID,
-			self.Card107CastFrame3RUID, self.Card107CastFrame4RUID, self.Card107CastFrame5RUID,
-			self.Card107CastFrame6RUID, self.Card107CastFrame7RUID, self.Card107CastFrame8RUID,
-			self.Card107CastFrame9RUID, self.Card107CastFrame10RUID, self.Card107CastFrame11RUID,
-			self.Card107CastFrame12RUID, self.Card107CastFrame13RUID, self.Card107HitRUID,
-			self.Card119CastFrame0RUID, self.Card119CastFrame1RUID, self.Card119CastFrame2RUID,
-			self.Card119CastFrame3RUID, self.Card119CastFrame4RUID, self.Card119CastFrame5RUID,
-			self.Card119CastFrame6RUID, self.Card119CastFrame7RUID, self.Card119CastFrame8RUID,
-			self.Card119CastFrame9RUID, self.Card119CastFrame10RUID, self.Card119CastFrame11RUID,
-			self.Card119CastFrame12RUID, self.Card119CastFrame13RUID, self.Card119CastFrame14RUID,
-			self.Card119HitRUID,
+			self.Card1EffectRUID, self.Card2EffectRUID, self.Card3EffectRUID, self.Card3SecondEffectRUID, self.Card4EffectRUID,
+			self.ChainLightningEffectRUID, self.Card5EffectRUID, self.Potion1RUID, self.Potion2RUID, self.Potion3RUID,
+			self.Potion4RUID, self.Potion5RUID, self.EmptySlotRUID, self.CardFrameRUID, self.Card9EffectRUID,
+			self.Card9ExplosionRUID, self.Card23BurstRUID, self.Card11EffectRUID, self.Card12EffectRUID_A, self.Card12EffectRUID_B,
+			self.Card13EffectRUID, self.Card21EffectRUID_C, self.Card21EffectRUID_D, self.Card14EffectRUID, self.ArrowShotEffectRUID,
+			self.ArrowShotHitRUID2, self.ArrowShotHitRUID3, self.ArrowShotHitRUID4, self.ArrowShotHitRUID5, self.LeionAttackEffectRUID,
+			self.ComboOrbRUID, self.SlashEffectRUID, self.SlashHitEffectRUID, self.BrandishSwingEffectRUID, self.BrandishHitEffectRUID,
+			self.FlashSlashTravelEffectRUID, self.FlashSlashHitEffectRUID, self.ChargeEffect1RUID, self.ChargeEffect2RUID, self.ChargeHitEffectRUID,
+			self.AuraBladeSlashEffectRUID, self.AuraBladeVerticalEffectRUID, self.AuraBladeHitEffectRUID, self.SolarBladeSlashEffectRUID, self.SolarBladeVerticalEffectRUID,
+			self.SolarBladeHitEffectRUID, self.RagingBlowNormalAttackRUID, self.RagingBlowNormalHitRUID, self.RagingBlowEnhancedAttackRUID, self.RagingBlowEnhancedHitRUID,
+			self.FuriousBlowNormalAttackRUID, self.FuriousBlowNormalHitRUID, self.FuriousBlowEnhancedAttackRUID, self.FuriousBlowEnhancedHitRUID, self.DoubleStepAttackRUID,
+			self.AssassinateHit1CastRUID, self.AssassinateHit1HitRUID, self.AssassinateHit2CastRUID, self.AssassinateHit2HitRUID, self.SavageBlowAttackRUID,
+			self.SavageBlowHitRUID, self.SonicBlowCastRUID, self.SonicBlowHitRUID, self.ShadeAttackEffectRUID1, self.ShadeAttackEffectRUID2,
+			self.RinShurikenRUID, self.RinHitRUID, self.Card202BallRUID, self.Card202CastLeftRUID, self.Card202CastRightRUID,
+			self.Card202HitRUID, self.Card203BallRUID, self.Card203CastRUID, self.Card203HitRUID, self.Card218StormRUID,
+			self.Card218StormHitRUID, self.Card204BallRUID, self.Card204CastRUID, self.Card204HitRUID, self.Card219BallRUID,
+			self.Card219CastRUID, self.Card219HitRUID, self.Card205BallRUID, self.Card205CastRUID, self.Card205HitRUID,
+			self.Card220BoomRUID, self.Card220BoomHitRUID, self.Card206CastRUID, self.Card206HitRUID, self.Card206HitAltRUID,
+			self.Card221CastRUID, self.Card221HitRUID, self.Card207BallRUID, self.Card207CastRUID, self.Card207CastSubRUID,
+			self.Card207HitRUID, self.Card222BallRUID, self.Card222HitRUID, self.Card208MarkRUID, self.Card208RootRUID,
+			self.Card217MarkRUID, self.Card217RootRUID, self.Card217HitRUID, self.Card201CastRUID, self.Card201HitRUID,
+			self.Card215ShurikenRUID, self.Card215CastRUID, self.Card215HitRUID, self.SmokeGrenadeThrowRUID, self.SmokeGrenadeCloudRUID,
+			self.SmokeRampageSigilRUID, self.SmokeRampageBurstHitRUID, self.Card175CastRUID, self.Card175Cast2RUID, self.Card175ExplosionRUID,
+			self.Card176CastRUID, self.Card176ExclaimRUID, self.AzureEdgeEnhanceCastRUID, self.AzureEdgePropulsionRUID4, self.AzureEdgePropulsionRUID5,
+			self.AzureEdgeRideRUID, self.AzureEdgeStealFlashRUID, self.Card177ExplosionRUID, self.Card177HitRUID0, self.Card177HitRUID1,
+			self.Card177HitRUID2, self.Card177HitRUID3, self.Card177HitRUID4, self.Card177HitRUID5, self.Card177HitRUID6,
+			self.Card177HitRUID7, self.Card177HitRUID8, self.Card189ChargeRUID, self.Card189ExplosionRUID, self.Card189HitRUID,
+			self.Card178CastRUID, self.Card178CastRUID2, self.Card178IdleRUID, self.Card178WalkRUID, self.Card178AttackRUID,
+			self.Card178DieRUID, self.Card179CastRUID, self.LeapAttackEffectBaseRUID, self.LeapAttackEffectRUID, self.LeapAttackHitRUID,
+			self.BraveSlashSwingEffectRUID, self.BraveSlashHitEffectRUID, self.Card159SummonedRUID, self.Card159MoveRUID, self.Card159AttackRUID,
+			self.Card159HitRUID, self.Card159DieRUID, self.ScarringBladeSummonedRUID, self.ScarringBladeMoveRUID, self.ScarringBladeAttackRUID,
+			self.ScarringBladeHitRUID, self.ScarringBladeDieRUID, self.Card101BowGlowRUID, self.Card101BowEffectRUID, self.Card101ArrowEffectRUID,
+			self.Card101HitRUID, self.Card101ExtraHitEffectRUID, self.Card116HitRUID, self.Card116ArrowRUID, self.Card116ShootRUID,
+			self.Card102BowFrame9RUID, self.Card102BowFrame10RUID, self.Card102BowFrame11RUID, self.Card102BowFrame12RUID, self.Card102BowFrame13RUID,
+			self.Card102BowFrame14RUID, self.Card102BowFrame15RUID, self.Card102BowReleaseClipRUID, self.Card102ArrowEffectRUID, self.Card102EnhancedArrowEffectRUID,
+			self.Card102HitRUID, self.Card117ShootRUID, self.Card117BasicArrowRUID, self.Card117EnhancedArrowRUID, self.Card117EnhancedHitRUID,
+			self.Card103Frame7RUID, self.Card103Frame8RUID, self.Card103Frame9RUID, self.Card103Frame10RUID, self.Card103Frame11RUID,
+			self.Card103Frame12RUID, self.Card103Frame13RUID, self.Card103Frame14RUID, self.Card103Frame15RUID, self.Card104Frame7RUID,
+			self.Card104Frame8RUID, self.Card104Frame9RUID, self.Card104Frame10RUID, self.Card104Frame11RUID, self.Card104Frame12RUID,
+			self.Card104Frame13RUID, self.Card104Frame14RUID, self.Card104Frame15RUID, self.Card105SummonedRUID, self.Card105FlyRUID,
+			self.Card105StandRUID, self.Card105AttackRUID, self.Card105DieRUID, self.Card105HitRUID, self.Card115SummonRUID,
+			self.Card115MoveRUID, self.Card115DieRUID, self.Card115AttackRUID, self.Card115HitEffectRUID, self.Card106CastRUID,
+			self.Card106CastFrame0RUID, self.Card106CastFrame1RUID, self.Card106CastFrame2RUID, self.Card106CastFrame3RUID, self.Card106ArrowRUID,
+			self.Card106HitRUID, self.Card118CastFrame0RUID, self.Card118CastFrame1RUID, self.Card118CastFrame2RUID, self.Card118CastFrame3RUID,
+			self.Card118CastFrame4RUID, self.Card118CastFrame5RUID, self.Card118CastFrame6RUID, self.Card118CastFrame7RUID, self.Card118CastFrame8RUID,
+			self.Card118ArrowRUID, self.Card118HitRUID, self.Card107CastRUID, self.Card107CastFrame0RUID, self.Card107CastFrame1RUID,
+			self.Card107CastFrame2RUID, self.Card107CastFrame3RUID, self.Card107CastFrame4RUID, self.Card107CastFrame5RUID, self.Card107CastFrame6RUID,
+			self.Card107CastFrame7RUID, self.Card107CastFrame8RUID, self.Card107CastFrame9RUID, self.Card107CastFrame10RUID, self.Card107CastFrame11RUID,
+			self.Card107CastFrame12RUID, self.Card107CastFrame13RUID, self.Card107HitRUID, self.Card119CastFrame0RUID, self.Card119CastFrame1RUID,
+			self.Card119CastFrame2RUID, self.Card119CastFrame3RUID, self.Card119CastFrame4RUID, self.Card119CastFrame5RUID, self.Card119CastFrame6RUID,
+			self.Card119CastFrame7RUID, self.Card119CastFrame8RUID, self.Card119CastFrame9RUID, self.Card119CastFrame10RUID, self.Card119CastFrame11RUID,
+			self.Card119CastFrame12RUID, self.Card119CastFrame13RUID, self.Card119CastFrame14RUID, self.Card119HitRUID, self.Card108EffectRUID,
+			self.Card108EffectFrame0RUID, self.Card108EffectFrame1RUID, self.Card108EffectFrame2RUID, self.Card108EffectFrame3RUID, self.Card108EffectFrame4RUID,
+			self.Card108EffectFrame5RUID, self.Card108EffectFrame6RUID, self.Card108EffectFrame7RUID, self.Card108EffectFrame8RUID, self.Card108EffectFrame9RUID,
+			self.Card108EffectFrame10RUID, self.Card108EffectFrame11RUID, self.Card108EffectFrame12RUID, self.Card108EffectFrame13RUID, self.Card108EffectFrame14RUID,
+			self.Card108EffectFrame15RUID, self.Card108EffectFrame16RUID, self.Card108EffectFrame17RUID, self.Card108EffectFrame18RUID, self.Card108EffectFrame19RUID,
+			self.Card108CollisionHitRUID, self.Card120ExplosionRUID, self.Card24EffectRUID, self.Card24ExtraEffectRUID, self.Card15EffectRUID,
+			self.Card16EffectRUID, self.Card17EffectRUID, self.Card19ChainRUID, self.Card19FinalRUID, self.ComaNormalEffectRUID,
+			self.ComaEnhancedEffectRUID, self.SpiritBladeFrame12RUID, self.SpiritBladeFrame13RUID, self.SpiritBladeFrame14RUID, self.SpiritBladeFrame15RUID,
+			self.SpiritBladeFrame16RUID, self.SpiritBladeAffectedRUID, self.SpiritBladeSplashRUID, self.BurningRushCastEffectRUID, self.BurningRushHitFrame8RUID,
+			self.BurningRushHitFrame9RUID, self.BurningRushHitFrame10RUID, self.BurningRushHitFrame11RUID, self.BurningRushHitFrame12RUID, self.BurningRushBurstFrame4RUID,
+			self.BurningRushBurstFrame5RUID, self.BurningRushBurstFrame6RUID, self.BurningRushBurstFrame7RUID, self.BurningRushBurstFrame8RUID, self.BurningRushBurstOverlayRUID,
+			self.SlashStormSwingFrame6RUID, self.SlashStormSwingFrame7RUID, self.SlashStormSwingFrame8RUID, self.SlashStormSwingFrame9RUID, self.SlashStormSwingFrame10RUID,
+			self.SlashStormSwingFrame11RUID, self.SlashStormSwingFrame12RUID, self.SlashStormSwingFrame13RUID, self.SlashStormCastEffectRUID, self.SlashStormOverlayEffectRUID,
+			self.SlashStormHitFrame5RUID, self.SlashStormHitFrame6RUID, self.SlashStormHitOverlayRUID, self.SlashStormHitAnimClipRUID,
 		}
 		local count = #ruids
+		-- 목록을 크게 늘렸으므로 소요시간을 같이 남긴다. 로딩 화면(최소 2초)보다 오래 걸려도
+		-- 치명적이지는 않다 — 런을 시작하고 카드를 얻기까지가 훨씬 기니까. 다만 이 값이 크게
+		-- 늘어나면 목록을 "런에서 실제로 등장할 수 있는 카드"로 좁히는 걸 검토할 것.
+		local startedAt = _UtilLogic.ElapsedSeconds
 		_ResourceService:PreloadAsync(ruids, function()
-			log("CardManager: effect frame preload done (" .. count .. ")")
+			local elapsed = _UtilLogic.ElapsedSeconds - startedAt
+			log("CardManager: effect frame preload done (" .. count .. ") in " .. string.format("%.2f", elapsed) .. "s")
 		end)
 		log("CardManager: effect frame preload requested (" .. count .. ")")
 	end
