@@ -518,6 +518,130 @@ script MonsterSpawner extends Logic
 	-- GameManager.OnBossDefeated()가 보스 처치 시점에 호출 — 다음 SpawnWave/ActivateMap 틱부터
 	-- 다시 보스를 스폰할 수 있게 참조를 비운다 (사실상 Wave가 곧 11로 넘어가 다시 안 쓰이지만,
 	-- 넘어가기 직전의 짧은 틈에도 중복 스폰을 막기 위해 명시적으로 정리한다)
+	-- ── 치트: 보스 즉시 소환(개발자 전용) ────────────────────────────────────────────
+	-- 보스는 원래 FirstBossTime(10분) / BossRepeatInterval(10분) 타이머로만 나와서 라이브 확인이
+	-- 오래 걸린다. 에피소드1 보스(가디언 엔젤 슬라임)의 분열 연출을 바로 보려고 만든 진입점이다.
+	--
+	-- 사용법 — **게임 안에서 B키**(보스 소환) / **N키**(보스 빈사). CardManager.DebugMode가 true일
+	-- 때만 먹는다(배포 전 false로 내리면 같이 죽는다 — 기존 디버그 키 L/K/P/O와 동일한 게이트).
+	-- 살아있는 보스가 있으면 먼저 치우고 새로 소환한다. 분열체가 남아 있으면 그 카운트도 리셋하므로
+	-- 여러 번 눌러도 "분열체 다 잡아야 끝"이 꼬이지 않는다.
+	@ExecSpace("ServerOnly")
+	method void CheatSpawnBossNow()
+		-- 이전 보스/분열체 잔재 정리 — 카운트가 남아 있으면 새 보스를 잡아도 웨이브가 안 끝난다
+		self._ep1SplitsAlive = 0
+		if isvalid(self._currentBoss) then
+			self._currentBoss:Destroy()
+			self._currentBoss = nil
+			self._bossZone = -1
+		end
+		self._nextBossTimer = -1
+		self:TrySpawnPersistentBoss()
+		if isvalid(self._currentBoss) then
+			log("CHEAT: boss spawned now at zone " .. tostring(self._bossZone))
+		else
+			log_warning("CHEAT: boss spawn failed (몬스터 없는 존이거나 맵을 못 찾음)")
+		end
+	end
+
+	-- 치트: 보스를 즉시 빈사 상태로 만든다 — 분열 연출만 빠르게 반복 확인할 때 쓴다.
+	-- 실제로 죽이지는 않는다(마지막 한 대는 직접 때려야 정상 사망 경로를 그대로 탄다).
+	@ExecSpace("ServerOnly")
+	method void CheatWeakenBoss()
+		if not isvalid(self._currentBoss) then
+			log_warning("CHEAT: 살아있는 보스가 없다")
+			return
+		end
+		---@type MonsterAI
+		local ai = self._currentBoss:GetComponent("script.MonsterAI")
+		if ai == nil then return end
+		ai.CurrentHp = 1
+		log("CHEAT: boss HP set to 1")
+	end
+
+	-- 디버그 키(클라이언트)에서 부르는 진입점. 위 Cheat*는 ServerOnly라 클라에서 그냥 부르면
+	-- **조용히 무시**되므로, Server RPC를 한 겹 씌워야 실제로 서버에서 실행된다.
+	@ExecSpace("Server")
+	method void CheatRequestSpawnBoss()
+		self:CheatSpawnBossNow()
+	end
+
+	@ExecSpace("Server")
+	method void CheatRequestWeakenBoss()
+		self:CheatWeakenBoss()
+	end
+
+	-- ── 에피소드1 보스 분열(2페이즈) ────────────────────────────────────────────────
+	-- 보스가 죽으면 MonsterAI.DieAndSplitEp1Boss가 이걸 부른다. 분열체를 화산 분출처럼 포물선으로
+	-- 쏘아 올려 발판에 착지시키고, 살아있는 수를 센다 — 전부 죽어야 보스 웨이브가 끝난다.
+	property integer _ep1SplitsAlive = 0
+
+	@ExecSpace("ServerOnly")
+	method void SpawnEp1BossSplits(integer zoneIndex, Vector3 originPos)
+		local map = self:GetZoneEntity(zoneIndex)
+		if map == nil then return end
+		local count = _GameManager.Ep1BossSplitCount
+		self._ep1SplitsAlive = 0
+		for i = 1, count do
+			-- 착지 지점은 기존 스폰 로직(발판 기반)을 그대로 재사용해 "타일 위"를 보장한다.
+			-- isBoss=false로 뽑아야 일반 몬스터와 같은 발판 후보에서 고른다.
+			local landPos = self:GetSpawnPosition(zoneIndex, false, 0, map)
+			-- 분열체는 일반 몬스터보다 훨씬 작아서(1/3) 같은 Y에 두면 발판 위에 떠 보인다 — 내려준다
+			landPos = Vector3(landPos.x, landPos.y + _GameManager.Ep1BossSplitLandYOffset, landPos.z)
+			local entity = _SpawnService:SpawnByModelId(self.MonsterModelId, "Ep1BossSplit", originPos, map)
+			if entity ~= nil then
+				---@type MonsterAI
+				local ai = entity:GetComponent("script.MonsterAI")
+				if ai ~= nil then
+					ai:InitializeStats(zoneIndex, _GameManager.Wave, false, 0)
+					-- ⚠ 순서 중요: MarkElite가 금색 아웃라인 머티리얼과 ×1.15 스케일을 걸고,
+					-- InitializeAsEp1BossSplit이 그 뒤에 아웃라인을 벗기고 크기를 1/3로 줄인다.
+					-- 뒤집으면 아웃라인이 그대로 남고 크기 축소도 덮어써진다.
+					ai:MarkElite()   -- 유저 지정: 분열체는 엘리트급(스탯만, 아웃라인 제외)
+					ai:InitializeAsEp1BossSplit()
+					self._ep1SplitsAlive = self._ep1SplitsAlive + 1
+					self:LaunchEp1SplitArc(entity, ai, originPos, landPos)
+				end
+			end
+		end
+		log("MonsterSpawner: ep1 boss split spawned = " .. self._ep1SplitsAlive)
+	end
+
+	-- 화산 폭발처럼 포물선을 그리며 착지 지점까지 날아간다. 분열체는 착지할 때까지 전투 판정을
+	-- 하지 않도록 접근을 멈춰두고(_isLevitating 재사용), 착지하면 평소대로 움직이기 시작한다.
+	@ExecSpace("ServerOnly")
+	method void LaunchEp1SplitArc(Entity entity, any ai, Vector3 fromPos, Vector3 toPos)
+		local dur = _GameManager.Ep1BossSplitLaunchDuration
+		local peak = _GameManager.Ep1BossSplitLaunchHeight
+		ai._isLevitating = true
+		_TweenLogic:PlayTween(0.0, 1.0, dur, EaseType.Linear, function(t)
+			if not isvalid(entity) then return end
+			local x = fromPos.x + (toPos.x - fromPos.x) * t
+			local y = fromPos.y + (toPos.y - fromPos.y) * t
+			-- 4*h*t*(1-t) — t=0/1에서 0, t=0.5에서 정점 h가 되는 표준 포물선
+			y = y + peak * 4 * t * (1 - t)
+			entity.TransformComponent.Position = Vector3(x, y, fromPos.z)
+		end)
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(entity) then return end
+			entity.TransformComponent.Position = Vector3(toPos.x, toPos.y, toPos.z)
+			if isvalid(ai) then ai._isLevitating = false end
+		end, dur)
+	end
+
+	-- 분열체 1마리가 죽을 때마다 MonsterAI.Die가 호출 — 마지막 1마리에서 보스 웨이브를 끝낸다.
+	@ExecSpace("ServerOnly")
+	method void OnEp1SplitKilled(Vector3 worldPos)
+		if self._ep1SplitsAlive <= 0 then return end
+		self._ep1SplitsAlive = self._ep1SplitsAlive - 1
+		log("MonsterSpawner: ep1 split killed, remaining = " .. self._ep1SplitsAlive)
+		if self._ep1SplitsAlive > 0 then return end
+		-- 전멸 — 이제서야 보스 처치 보상 + 다음 보스 타이머(OnBossDefeated 안에서 ClearCurrentBoss).
+		-- 낙하 연출 파라미터는 마지막 분열체가 죽은 자리를 기준으로 넘긴다.
+		_GameManager:OnBossDefeated(worldPos, 0, worldPos.y, 1.0)
+		log("MonsterSpawner: ep1 boss wave cleared (all splits dead)")
+	end
+
 	@ExecSpace("ServerOnly")
 	method void ClearCurrentBoss()
 		self._currentBoss = nil

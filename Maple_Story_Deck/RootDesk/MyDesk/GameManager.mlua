@@ -603,6 +603,55 @@ script GameManager extends Logic
 	-- 죽으면 끝 — 별도로 거대 네펜데스를 소환/변신시키지 않는다(유저 요청, 2026-08-10 최종 확정).
 	-- 이 프로퍼티들은 존 풀 테이블에 하드코딩된 값과 일치시켜두는 참고용 상수이자 MonsterAI.ReviveAsPhase2가
 	-- 실제로 읽어가는 값이다.
+	-- ── 에피소드1 보스: 가디언 엔젤 슬라임 (유저 지정, 2026-09-06) ──────────────────────
+	-- 예전엔 "그 존의 일반 몬스터가 2.5배로 커진 것"이 보스였는데, 에피소드1만은 전용 외형을 고정으로
+	-- 쓴다. 클립은 뽑기 보스레이드(GachaUI._bossSpecies의 "가디언 엔젤 슬라임")와 같은 리소스팩이다.
+	-- 재생시간은 프로젝트 관례(거대 네펜데스 9프레임=0.95초, 약 0.105초/프레임)로 환산했다.
+	property string Ep1BossStandRUID = "96af297ca7ff4bbc9fc58849ac3ba473"    -- stand, 24프레임
+	property string Ep1BossMoveRUID = "b7085b82b6224790a0bd5c8b2c844778"     -- move, 12프레임
+	-- ⚠ 재생시간은 **추정하지 말고 실측할 것**. 이 팩은 프레임당 0.090초라, 다른 종에서 뽑은
+	-- 관례값(0.105초/프레임)을 쓰면 클립이 한 바퀴 더 돌아 "연출이 두 번 나오는" 것처럼 보인다.
+	-- 측정법: play 중 client 컨텍스트에서
+	--   local c = _ResourceService:LoadAnimationClipAndWait(ruid)
+	--   for _,f in ipairs(c.Frames:ToTable()) do total = total + f.Delay end
+	property string Ep1BossAttackRUID = "5126d2297418481894fc9f22456559c4"   -- attack1, 20프레임
+	property number Ep1BossAttackDuration = 1.8   -- 실측: 20 × 0.090
+	property string Ep1BossHitRUID = "ffbd8c4990c04102a365a5078b72c332"      -- hit1, 1프레임
+	-- ⚠ 사망 연출은 팩의 die1(b9b432c7…)이 아니라 **skill2** 클립이다 — 유저가 이 RUID를 콕 집어
+	-- 지정했다. 나중에 "죽는 모션이 좀 이상한데?" 소리가 나오면 die1로 바꾸면 되는 자리다.
+	property string Ep1BossDieRUID = "22953ddb704e442f8b9e9d5c6419b78f"      -- skill2, 21프레임
+	-- 클립은 21프레임(21 × 0.090 = 1.89초)이지만 **17프레임까지만 쓴다**(유저 지정) —
+	-- 17 × 0.090 = 1.53초. 뒤 4프레임은 안 보여주고 그 시점에 알파가 빠지면서 분열이 터진다.
+	-- 이 값이 실제보다 길면 클립이 한 바퀴 더 돌고 본체가 화면에 남는다(예전 리포트).
+	property number Ep1BossDieDuration = 1.53
+	property string Ep1BossAttackSoundRUID = "fe21c9f0eff348028577e5be813b2853"
+	property string Ep1BossDieSoundRUID = "5b862c8125ff400092c938c96b6bd678"
+	-- 보스 공통 배율(×2.5) 위에 이 종에만 더 곱하는 값. 슬라임 스프라이트 자체가 커서
+	-- (stand 494×365, 사망 클립은 717×531) 공통 배율만 태우면 화면을 다 덮는다 —
+	-- 유저 지정으로 1/10로 줄였다가(0.1), 다시 "한 크기 키워달라"고 해서 60% 올렸다.
+	-- 최종 = 2.5 × 0.16 = 0.4배. 다른 에피소드 보스는 영향 없다.
+	property number Ep1BossScaleMultiplier = 0.16
+	-- 분열체 전용 크기 배율(유저 지정: 1/3로 축소). 엘리트 승급 배율(×1.15) 위에 곱해진다.
+	property number Ep1BossSplitScaleMultiplier = 0.3333
+
+	-- 에피소드1 보스의 2페이즈 = **분열**(유저 지정). 보스 체력이 0이 되면 사망 연출이 나오기 **전에**
+	-- 분열체가 화산 분출처럼 포물선을 그리며 튀어나와 발판에 착지하고, 그 4마리를 전부 잡아야 보스
+	-- 웨이브가 끝난다(= OnBossDefeated/다음 보스 타이머가 그때서야 돌아간다).
+	property string Ep1BossSplitStandRUID = "61b34772d92a4e02be27465d3404cd0f"  -- stand, 16프레임
+	-- ⚠ 분열체 리소스팩(npc/1013615)엔 die 클립이 없다 — 유저가 angry 클립을 사망 연출로 쓰라고
+	-- 지정했다(알파가 빠지면서 사라지는 연출과 함께).
+	property string Ep1BossSplitDieRUID = "72ad3894b1574876a804e9ff01b9048b"    -- angry, 17프레임
+	property number Ep1BossSplitDieDuration = 2.04   -- 실측: 17 × 0.120 (이 팩은 보스와 프레임 간격이 다르다)
+	-- 분열체 착지 Y 보정(유저 리포트: "타일 위에 살짝 떠 있음"). 스폰 위치는 일반 몬스터 기준이라
+	-- 크기를 1/3로 줄이면 스프라이트 아래쪽이 그만큼 떠 보인다 — 그 차이를 여기서 내린다.
+	-- 값이 클수록(더 음수) 아래로 내려간다.
+	property number Ep1BossSplitLandYOffset = -0.25
+	property integer Ep1BossSplitCount = 4
+	-- 분출 연출 — 튀어나가는 시간과 포물선 정점 높이(월드 유닛), 좌우로 흩어지는 최대 거리
+	property number Ep1BossSplitLaunchDuration = 0.75
+	property number Ep1BossSplitLaunchHeight = 2.2
+	property number Ep1BossSplitSpreadX = 2.8
+
 	property string GiantNepenthesStandRUID = "886d6be444184e68b0afc64787e954b3"
 
 	property string GiantNepenthesHitRUID = "b1e10364d7ea466888f7f47ef003a6a2"

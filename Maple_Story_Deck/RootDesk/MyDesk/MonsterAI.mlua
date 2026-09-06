@@ -140,6 +140,11 @@ script MonsterAI extends Component
 
 	-- 웨이브10 리본돼지 보스인지 여부 — Die()에서 GameManager에 보스 처치를 알리는 데 사용
 	property boolean _isBoss = false
+	-- 에피소드1 보스 분열(2페이즈) 관련. _ep1BossSplitDone은 보스 쪽 1회 가드,
+	-- _isEp1BossSplit은 튀어나온 분열체 쪽 표식(사망 시 스포너에 생존 수를 알려야 한다)
+	property boolean _ep1BossSplitDone = false
+	property boolean _isEp1BossSplit = false
+	property integer _ep1SplitFadeTimerId = 0
 
 	-- 맵10 보너스 스테이지 전용 보스 여부 — true면 접근/공격 대신 배회하고, 사실상 무적이며
 	-- 맞을 때마다(죽지 않고) 골드/포션/스킬을 지급한다. MonsterSpawner.InitializeBonusBoss()가 설정한다.
@@ -278,6 +283,17 @@ script MonsterAI extends Component
 	-- 포즈를 MonsterSprite 동기화가 되돌려버리면 안 된다"를 판단한다 — _attackRUID/_hitRUID 자체는
 	-- @Sync가 아니라 클라이언트에서 항상 ""로 읽히므로 그 값으로는 판단할 수 없다(실측으로 확인된 함정).
 	property boolean _isPlayingTransientSprite = false
+
+	-- 공격 연출(attack1)이 화면에 떠 있는 동안만 true. 위 _isPlayingTransientSprite는 피격 연출에도
+	-- 켜지기 때문에 "지금 공격 중인가"를 구분할 수 없어서 따로 뒀다. PlayAttackAnimation이 켜고
+	-- 그 복원 타이머가 끈다(둘 다 클라이언트) — 같은 클라 안에서만 쓰므로 @Sync가 필요 없다.
+	property boolean _isPlayingAttackSprite = false
+
+	-- 켜져 있으면 공격 연출 재생 중에는 피격 연출로 갈아끼우지 않는다(대미지는 그대로 들어간다).
+	-- 유저 지정 — 에피소드1 보스는 attack1이 1.8초로 길어서, 그 사이에 맞을 때마다 1프레임짜리
+	-- hit1로 튀어 공격 연출이 계속 끊겨 보였다. 서버(InitializeStats)가 정하고 클라의
+	-- PlayHitAnimation이 읽어야 하므로 @Sync가 필요하다.
+	@Sync property boolean _noHitAnimDuringAttack = false
 
 	-- 버그 수정(2026-08-27, 유저 리포트: "웨어울프나 라이칸이나 연출이 끝까지 나올때가 있고 그냥
 	-- 안나올때가 있는거 같아") — 공격 주기(AttackInterval)가 attack1 재생시간(_attackDuration)보다
@@ -981,6 +997,38 @@ script MonsterAI extends Component
 			end
 		end
 		
+		-- 에피소드1 보스는 "존 몬스터가 커진 것"이 아니라 전용 외형(가디언 엔젤 슬라임)으로 고정한다
+		-- (유저 지정, 2026-09-06). 존 풀에서 읽어온 값들을 여기서 통째로 덮어쓴다 — 거대 네펜데스
+		-- 1페이즈 덮어쓰기와 같은 방식이다. HP 배율·접근속도·스케일(×2.5)은 위 isBoss 분기가 이미
+		-- 처리했으므로 건드리지 않는다.
+		if isBoss and _GameManager.SelectedEpisode == 1 then
+			self._standRUID = _GameManager.Ep1BossStandRUID
+			self._moveRUID = _GameManager.Ep1BossMoveRUID
+			self._attackRUID = _GameManager.Ep1BossAttackRUID
+			self._attackDuration = _GameManager.Ep1BossAttackDuration
+			self._attackSoundRUID = _GameManager.Ep1BossAttackSoundRUID
+			self._hitRUID = _GameManager.Ep1BossHitRUID
+			self._hitSoundRUID = ""
+			self._dieRUID = _GameManager.Ep1BossDieRUID
+			self._dieDuration = _GameManager.Ep1BossDieDuration
+			self._dieSoundRUID = _GameManager.Ep1BossDieSoundRUID
+			-- 존 풀에서 딸려온 특수 거동은 전부 끈다 — 원거리/고정형/2페이즈 종이 보스로 뽑혔을 때
+			-- 그 성질이 슬라임에 그대로 묻어오면 안 된다(분열은 별도 경로로 처리한다)
+			self._isRangedInk = false
+			self._isRangedSlash = false
+			self._neverAttacks = false
+			self._isGiantNepenthes = false
+			self._hasPhase2 = false
+			self._hitEffectRUID = ""
+			-- attack1이 2.1초로 길어서 기본 간격이면 다음 공격이 연출을 잘라먹는다
+			self._customAttackInterval = self._attackDuration + 0.7
+			-- 슬라임 스프라이트가 원래 커서 보스 공통 배율(×2.5)만 태우면 화면을 덮는다 — 여기서 더 줄인다
+			self._scaleMultiplier = self._scaleMultiplier * _GameManager.Ep1BossScaleMultiplier
+			-- attack1이 1.8초로 길어서 그 사이 피격될 때마다 1프레임 hit1로 튀면 공격 연출이 계속
+			-- 끊겨 보인다(유저 리포트) — 공격 중에는 피격 연출을 건너뛴다(대미지는 정상 적용)
+			self._noHitAnimDuringAttack = true
+		end
+
 		-- 접근 중엔 move, 이미 도달(_reachedPlayer)했거나 애초에 move 연출이 없는 종(빈 문자열 — 공중형은
 		-- 항상 여기 해당)은 stand로 시작한다. OnUpdate가 도달하는 순간 다시 stand로 갈아끼운다.
 		if not self._isFlying and self._moveRUID ~= "" then
@@ -2397,6 +2445,9 @@ script MonsterAI extends Component
 	method void PlayHitAnimation(string hitRUID, string standRUID)
 		if self:IsServer() then return end
 		if self._dead then return end
+		-- 공격 연출 중에는 피격 포즈로 갈아끼우지 않는다(유저 지정 — 대미지는 그대로 들어간다).
+		-- 사운드도 같이 건너뛴다: 스프라이트를 안 바꾸는데 피격음만 나면 어색하다.
+		if self._noHitAnimDuringAttack and self._isPlayingAttackSprite then return end
 		if self._hitSoundRUID ~= "" then _SoundOptionLogic:PlaySfx(self._hitSoundRUID, 1.0) end
 		local renderer = self.Entity.SpriteRendererComponent
 		if renderer == nil or hitRUID == "" then return end
@@ -3231,6 +3282,14 @@ script MonsterAI extends Component
 			self:DieAndRevivePhase1Generic()
 			return
 		end
+		-- 에피소드1 보스(가디언 엔젤 슬라임)의 2페이즈 = 분열. 여기서 진짜 죽지 않고(보상/다음 보스
+		-- 타이머를 아직 돌리지 않는다) 분열체를 뿜어낸 뒤 사망 연출만 재생하고 사라진다. 보스 웨이브는
+		-- 분열체를 전부 잡아야 끝난다 — MonsterSpawner.OnEp1SplitKilled가 마지막 1마리를 확인하면
+		-- 그때 OnBossDefeated를 부른다.
+		if self._isBoss and _GameManager.SelectedEpisode == 1 and not self._ep1BossSplitDone then
+			self:DieAndSplitEp1Boss()
+			return
+		end
 		self._dead = true
 		-- 존2 마노 이스터에그 — 제한시간 안에 잡았을 때만 여기로 온다(시간 초과는 EndManoLife가
 		-- 보상 없이 despawn). 남은 수명 타이머를 정리하고 보상 지급을 Logic으로 넘긴다
@@ -3289,6 +3348,12 @@ script MonsterAI extends Component
 			if self._lastHitWasCrit then
 				_GameManager:TryRelicCritCoinBonus()
 			end
+		end
+		-- 에피소드1 보스 분열체 — 마지막 1마리가 죽는 순간 보스 웨이브가 끝난다(스포너가 판정).
+		-- 일반 처치 보상(위 OnMonsterKilled)은 그대로 받고, 보스 보상만 그쪽에서 따로 지급된다.
+		if self._isEp1BossSplit then
+			_MonsterSpawner:OnEp1SplitKilled(self.Entity.TransformComponent.WorldPosition)
+			self:StartEp1SplitFadeOut()
 		end
 		-- 비행형(박쥐 등)은 사망 위치가 공중이므로, 드랍 연출이 실제 발판(몬스터가 걸어다니는 바닥) 높이까지
 		-- 먼저 빙그르르 돌며 떨어지도록 그 높이차(UI px)를 같이 넘긴다. FlyingWanderMinY는 배회 궤적의
@@ -3517,6 +3582,105 @@ script MonsterAI extends Component
 	-- DieAndRevivePhase1과 완전히 동일한 구조(진짜 죽지 않고 die1 재생 후 2페이즈로 부활)이되, 종마다
 	-- 다른 외형을 존 풀 테이블(appearanceZone 기준)에서 읽어야 해서 self._spawnZoneIndex/_speciesIdx를
 	-- 사용하는 별도 메서드로 분리했다.
+	-- 분열체를 보스에서 뿜어낸 직후 스포너가 호출 — 존 몬스터 외형 대신 전용 외형으로 갈아끼우고
+	-- 분열체 표식을 세운다. 스탯(엘리트급)은 스포너가 MarkElite로 따로 올린다.
+	@ExecSpace("ServerOnly")
+	method void InitializeAsEp1BossSplit()
+		self._isEp1BossSplit = true
+		self._standRUID = _GameManager.Ep1BossSplitStandRUID
+		-- 이 팩엔 move/attack 클립이 없다 — move가 빈 문자열이면 stand로 접근하고, attack이 비면
+		-- 기존 정책대로 홉(점프)으로 공격을 대체한다(달팽이류와 동일 경로)
+		self._moveRUID = ""
+		self._attackRUID = ""
+		self._attackDuration = 0
+		self._customAttackInterval = 0
+		self._hitRUID = ""
+		self._hitSoundRUID = ""
+		self._dieRUID = _GameManager.Ep1BossSplitDieRUID
+		self._dieDuration = _GameManager.Ep1BossSplitDieDuration
+		self._dieSoundRUID = ""
+		-- 존 풀에서 딸려온 특수 거동 제거(보스가 어떤 존에서 죽었든 분열체는 항상 근접형이어야 한다)
+		self._isRangedInk = false
+		self._isRangedSlash = false
+		self._neverAttacks = false
+		self._isFlying = false
+		self._isGiantNepenthes = false
+		self._hasPhase2 = false
+		self._hitEffectRUID = ""
+		self.MonsterSprite = self._standRUID
+		local renderer = self.Entity.SpriteRendererComponent
+		if renderer ~= nil then
+			renderer.SpriteRUID = self._standRUID
+			renderer.Color = Color(1, 1, 1, 1)
+			-- 유저 지정: 분열체는 엘리트 스탯(HP/공격력 +15%)만 쓰고 **금색 아웃라인은 뺀다**.
+			-- MarkElite가 걸어둔 머티리얼을 여기서 되돌린다 — 그래서 이 메서드는 반드시
+			-- MarkElite **뒤에** 불려야 한다(SpawnEp1BossSplits의 호출 순서 참고).
+			renderer:ChangeMaterial("")
+		end
+		-- 크기도 유저 지정으로 1/3 축소. MarkElite가 이미 ×1.15를 곱해둔 뒤라 그 위에 곱해진다.
+		self._scaleMultiplier = self._scaleMultiplier * _GameManager.Ep1BossSplitScaleMultiplier
+		self.Entity.TransformComponent.Scale = Vector3(self._currentScale * self._scaleMultiplier, self._currentScale * self._scaleMultiplier, 1.0)
+		self:SyncDepthOverlaySprite()
+		self:UpdateDepth()
+	end
+
+	-- 분열체 사망 연출 — die 클립(angry)을 재생하면서 알파를 서서히 빼 사라지게 한다(유저 지정).
+	-- 일반 몬스터는 die 클립이 끝나면 그냥 사라지지만, 이 종은 die 전용 클립이 아니라 angry를 빌려
+	-- 쓰는 거라 "그냥 툭 사라지는" 느낌이 나서 페이드를 덧붙였다.
+	@ExecSpace("ServerOnly")
+	method void StartEp1SplitFadeOut()
+		local renderer = self.Entity.SpriteRendererComponent
+		if renderer == nil then return end
+		local total = _GameManager.Ep1BossSplitDieDuration
+		local step = 0.05
+		local elapsed = 0.0
+		if self._ep1SplitFadeTimerId ~= 0 then _TimerService:ClearTimer(self._ep1SplitFadeTimerId) end
+		self._ep1SplitFadeTimerId = _TimerService:SetTimerRepeat(function()
+			if not isvalid(self) or not isvalid(self.Entity) then return end
+			elapsed = elapsed + step
+			local a = 1.0 - (elapsed / total)
+			if a <= 0 then
+				a = 0
+				if self._ep1SplitFadeTimerId ~= 0 then
+					_TimerService:ClearTimer(self._ep1SplitFadeTimerId)
+					self._ep1SplitFadeTimerId = 0
+				end
+			end
+			local r = self.Entity.SpriteRendererComponent
+			if r ~= nil then r.Color = Color(1, 1, 1, a) end
+		end, step)
+	end
+
+	-- 에피소드1 보스 사망 → 분열(2페이즈). 유저 지정: "죽는 연출 나오기 전부터 발사되듯" 나와야 하므로
+	-- 분열체 스폰을 **먼저** 하고 그 다음에 사망 연출을 재생한다.
+	@ExecSpace("ServerOnly")
+	method void DieAndSplitEp1Boss()
+		self._ep1BossSplitDone = true
+		self._dead = true
+		self:HideDepthOverlay()
+		local pos = self.Entity.TransformComponent.Position
+		-- ⚠ _spawnZoneIndex(보스가 **처음 스폰된** 존)를 쓰면 안 된다 — 보스는 플레이어를 따라 존을
+		-- 옮겨다니므로(RelocateBossToCurrentZone) 죽는 시점의 존과 다를 수 있다. 실제로 "존2에서
+		-- 죽었는데 분열체가 존3에서 떴다"는 리포트가 나왔고, 그렇게 다른 존에 뜨면 그 존 몬스터는
+		-- 일시정지(Pause) 대상이라 분열체가 멈춰 있는 것처럼 보이는 2차 증상까지 생긴다.
+		-- 지금 플레이어가 있는 존에 뿌려야 바로 싸울 수 있다.
+		local zone = _MapManager.CurrentMapIndex
+
+		-- 사망 연출을 **먼저** 깔고, 클립 17프레임 시점(Ep1BossDieDuration=1.53초)에 분열이 터진다
+		-- (유저 지정 — 처음엔 "연출 전부터 발사되듯"이었는데, 실제로 보고 나서 "17프레임까지만 쓰고
+		-- 그때 슬라임이 나와야 한다"로 바뀌었다). 그 시점에 본체도 같이 사라진다.
+		-- ⚠ 여기서 PlayPhase1TransformAnimation을 쓰면 안 된다 — 그건 2페이즈로 "이어지는" 전용이라
+		-- 일부러 알파 페이드를 안 한다(사라졌다 다시 나타나는 깜빡임 방지용). 이 보스는 실제로 죽고
+		-- 사라지므로 사운드+페이드아웃까지 해주는 일반 사망 연출을 쓴다.
+		self:PlayDeathAnimation(self._dieRUID, self._dieDuration)
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) or not isvalid(self.Entity) then return end
+			_MonsterSpawner:SpawnEp1BossSplits(zone, pos)
+			self.Entity:Destroy()
+		end, self._dieDuration)
+		log("Ep1Boss: death anim started, split in " .. tostring(self._dieDuration) .. "s (boss wave continues)")
+	end
+
 	@ExecSpace("ServerOnly")
 	method void DieAndRevivePhase1Generic()
 		log("Phase2Monster: phase1 died, reviving as phase2")
@@ -4035,6 +4199,7 @@ script MonsterAI extends Component
 		-- 주석 참고). 세대 번호를 찍어서, 공격 주기가 겹쳐 들어와도 "가장 최신 호출"의 타이머만 실제로
 		-- 되돌리게 한다(위 _transientSpriteGeneration 주석 참고).
 		self._isPlayingTransientSprite = true
+		self._isPlayingAttackSprite = true
 		self._transientSpriteGeneration = self._transientSpriteGeneration + 1
 		local myGeneration = self._transientSpriteGeneration
 		_TimerService:SetTimerOnce(function()
@@ -4045,6 +4210,7 @@ script MonsterAI extends Component
 				renderer.SpriteRUID = standRUID
 			end
 			self._isPlayingTransientSprite = false
+			self._isPlayingAttackSprite = false
 		end, duration)
 	end
 
@@ -4110,3 +4276,4 @@ script MonsterAI extends Component
 	end
 
 end
+
