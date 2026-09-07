@@ -289,6 +289,7 @@ script MonsterSpawner extends Logic
 		self._timer = self.EarlyPhaseSpawnInterval
 		self._elapsedPlayTime = 0
 		self._nextBossTimer = self.FirstBossTime
+		self._ep1BossIndex = 1
 		-- 타이틀 화면에서 "게임 시작"을 누르기 전까지는 웨이브 타이머가 돌면 안 된다 —
 		-- MapManager.BeginGameplay()가 GameManager.StartGame() 시점에 BeginGameplay()를 호출해서 켠다.
 		self._running = false
@@ -415,6 +416,18 @@ script MonsterSpawner extends Logic
 				self:RelocateBossToCurrentZone()
 			end
 		end
+
+		-- 보스가 소환한 부하(스텀피의 박쥐)도 같이 따라온다(유저 지정 2026-09-07: "박쥐도 보스가
+		-- 소환한 거니까 존 옮기면 같이 이동해야 한다"). 보스와 달리 파괴+재소환이 아니라 미니빈과
+		-- 동일한 재부모 방식(RepositionFlyingCenter)이라 체력/성장 상태가 그대로 유지된다.
+		-- 보스가 이미 죽은 뒤에 남은 부하도 계속 따라온다 — "보스가 부른 애들"이라는 성격은 그대로다.
+		if self._minionZoneIndex ~= _MapManager.CurrentMapIndex then
+			local currentZone = _MapManager.CurrentMapIndex
+			if not self:IsNoMonsterZone(currentZone) then
+				self._minionZoneIndex = currentZone
+				self:RelocateBossMinionsToZone(currentZone)
+			end
+		end
 	end
 
 	-- 현재 웨이브에 맞는 몬스터를 스폰한다. 일반 몬스터는 "이미 한 번 방문해서 활성화된" 맵에만 동시에
@@ -521,6 +534,8 @@ script MonsterSpawner extends Logic
 	-- ── 치트: 보스 즉시 소환(개발자 전용) ────────────────────────────────────────────
 	-- 보스는 원래 FirstBossTime(10분) / BossRepeatInterval(10분) 타이머로만 나와서 라이브 확인이
 	-- 오래 걸린다. 에피소드1 보스(가디언 엔젤 슬라임)의 분열 연출을 바로 보려고 만든 진입점이다.
+	-- 보스 로스터가 생긴 뒤로는 "순서 확인"에도 그대로 쓴다 — B로 지금 차례 보스를 부르고, N으로
+	-- 빈사로 만든 뒤 때려 잡으면 순번이 다음으로 넘어가므로, B를 다시 눌러 다음 보스를 볼 수 있다.
 	--
 	-- 사용법 — **게임 안에서 B키**(보스 소환) / **N키**(보스 빈사). CardManager.DebugMode가 true일
 	-- 때만 먹는다(배포 전 false로 내리면 같이 죽는다 — 기존 디버그 키 L/K/P/O와 동일한 게이트).
@@ -538,7 +553,7 @@ script MonsterSpawner extends Logic
 		self._nextBossTimer = -1
 		self:TrySpawnPersistentBoss()
 		if isvalid(self._currentBoss) then
-			log("CHEAT: boss spawned now at zone " .. tostring(self._bossZone))
+			log("CHEAT: boss spawned now at zone " .. tostring(self._bossZone) .. " (ep1 boss #" .. self._ep1BossIndex .. ")")
 		else
 			log_warning("CHEAT: boss spawn failed (몬스터 없는 존이거나 맵을 못 찾음)")
 		end
@@ -561,14 +576,73 @@ script MonsterSpawner extends Logic
 
 	-- 디버그 키(클라이언트)에서 부르는 진입점. 위 Cheat*는 ServerOnly라 클라에서 그냥 부르면
 	-- **조용히 무시**되므로, Server RPC를 한 겹 씌워야 실제로 서버에서 실행된다.
+	-- 치트: **다음 순번 보스**로 넘긴 뒤 즉시 소환(V키). B키는 "지금 차례 보스"만 계속 부르므로,
+	-- 특정 보스를 보려면 그 보스를 실제로 잡아야만 순번이 넘어갔다. 이건 잡지 않고도 연타로
+	-- 1번 → 2번 → … → 다시 1번으로 돌려가며 원하는 보스를 바로 확인할 수 있게 한 진입점이다.
+	@ExecSpace("ServerOnly")
+	method void CheatCycleBossNow()
+		self._ep1BossIndex = self._ep1BossIndex + 1
+		if self._ep1BossIndex > _GameManager:GetEp1BossCount() then self._ep1BossIndex = 1 end
+		log("CHEAT: cycle to ep1 boss #" .. self._ep1BossIndex)
+		self:CheatSpawnBossNow()
+	end
+
 	@ExecSpace("Server")
 	method void CheatRequestSpawnBoss()
 		self:CheatSpawnBossNow()
 	end
 
 	@ExecSpace("Server")
+	method void CheatRequestCycleBoss()
+		self:CheatCycleBossNow()
+	end
+
+	@ExecSpace("Server")
 	method void CheatRequestWeakenBoss()
 		self:CheatWeakenBoss()
+	end
+
+	-- ── 치트: 엘리트 몬스터 즉시 소환 (유저 요청 2026-09-08) ────────────────────────────
+	-- 엘리트는 원래 5웨이브마다 스폰 그룹 중 1마리만 나와서 발밑 오라 같은 연출을 확인하려면
+	-- 한참 기다려야 한다. **게임 안에서 E키** — 보스 치트(B/V/N)와 동일하게 CardManager.DebugMode가
+	-- true일 때만 키가 연결된다. 지금 있는 존에 일반 몬스터를 뽑아서 그중 1마리를 MarkElite로 승급시킨다
+	-- (SpawnBatchOnMap의 allowElite는 확률/웨이브 조건이 걸려 있어 확정 소환에는 안 쓴다).
+	@ExecSpace("ServerOnly")
+	method void CheatSpawnEliteNow()
+		local map = self:GetCurrentMap()
+		if map == nil then
+			log_warning("CHEAT: elite spawn failed (맵을 못 찾음)")
+			return
+		end
+		local mapIndex = _MapManager.CurrentMapIndex
+		if self:IsNoMonsterZone(mapIndex) then
+			log_warning("CHEAT: elite spawn failed (몬스터 없는 존)")
+			return
+		end
+		local spawned = self:SpawnBatchOnMap(map, _GameManager.Wave, false, false, mapIndex, false, 1)
+		local promoted = false
+		for i = 1, #spawned do
+			local e = spawned[i]
+			if isvalid(e) then
+				---@type MonsterAI
+				local ai = e:GetComponent("script.MonsterAI")
+				if ai ~= nil then
+					ai:MarkElite()
+					promoted = true
+					break
+				end
+			end
+		end
+		if promoted then
+			log("CHEAT: elite spawned at zone " .. mapIndex)
+		else
+			log_warning("CHEAT: elite spawn failed (스폰된 몬스터가 없음)")
+		end
+	end
+
+	@ExecSpace("Server")
+	method void CheatRequestSpawnElite()
+		self:CheatSpawnEliteNow()
 	end
 
 	-- ── 에피소드1 보스 분열(2페이즈) ────────────────────────────────────────────────
@@ -620,13 +694,260 @@ script MonsterSpawner extends Logic
 			local y = fromPos.y + (toPos.y - fromPos.y) * t
 			-- 4*h*t*(1-t) — t=0/1에서 0, t=0.5에서 정점 h가 되는 표준 포물선
 			y = y + peak * 4 * t * (1 - t)
-			entity.TransformComponent.Position = Vector3(x, y, fromPos.z)
+			-- ⚠ Position(로컬)이 아니라 WorldPosition — fromPos/toPos가 둘 다 월드 좌표다.
+			-- 병합 존은 자식 컨테이너(Zone02 x=15.5 …)라 로컬로 쓰면 존 오프셋만큼 밀려 옆 존에 떨어진다
+			-- (2026-09-08 유저 리포트 "슬라임 분열하면 옆존으로 날아가서 생성되네").
+			entity.TransformComponent.WorldPosition = Vector3(x, y, fromPos.z)
 		end)
 		_TimerService:SetTimerOnce(function()
 			if not isvalid(entity) then return end
-			entity.TransformComponent.Position = Vector3(toPos.x, toPos.y, toPos.z)
+			entity.TransformComponent.WorldPosition = Vector3(toPos.x, toPos.y, toPos.z)
 			if isvalid(ai) then ai._isLevitating = false end
 		end, dur)
+	end
+
+	-- ── 보스 소환기(스텀피 attack2)로 불려나오는 부하 ──────────────────────────────────
+	-- MonsterAI.DoBossSummon이 attack2 모션 중간에 호출한다. 유저 지정 연출(2026-09-07):
+	-- "소환 연출이 먼저 뜨고, 그게 사라질 때 겹쳐서 자연스럽게 박쥐가 나온다".
+	-- 그래서 연출(알파 1→0)과 부하(알파 0→1)의 재생 구간을 **일부러 겹친다**.
+	-- ── 보스 호위병(1번 블루 머쉬맘의 파란버섯) ────────────────────────────────────────
+	-- 소환 부하(_bossMinions)와 성격이 다르다: 쿨타임으로 계속 나오는 게 아니라 **보스가 뜰 때 한 번**
+	-- 같이 나오고, 보스가 죽으면 **전부 같이 죽는다**(유저 지정 "조폭 두목과 쫄따구").
+	property any _bossEscorts = nil
+
+	-- 보스가 뜰 때(TrySpawnPersistentBoss) 호출 — 로스터에 escort 정의가 있는 보스만 실제로 소환된다.
+	-- 보스 좌우로 countPerSide마리씩 spacing 간격으로 세운다.
+	@ExecSpace("ServerOnly")
+	method void SpawnBossEscorts(integer zoneIndex, Vector3 bossPos)
+		local def = _GameManager:GetEp1BossDef(self._ep1BossIndex)
+		if def == nil or def.escort == nil then return end
+		local map = self:GetZoneEntity(zoneIndex)
+		if map == nil then return end
+		local es = def.escort
+		self._bossEscorts = {}
+		for side = 1, 2 do
+			local dir = 1
+			if side == 2 then dir = -1 end
+			for i = 1, es.countPerSide do
+				local x = bossPos.x + dir * es.spacing * i
+				self:SpawnOneBossEscort(map, zoneIndex, x, bossPos.y, -1)
+			end
+		end
+		log("MonsterSpawner: boss escorts spawned = " .. #self._bossEscorts .. " (" .. es.name .. ")")
+	end
+
+	-- 호위병 1마리. keepHp가 0보다 크면 그 체력으로 되살린다(존 이동 재배치용 — 체력을 유지해야
+	-- 존을 왔다갔다 하며 무한으로 잡는 악용이 안 된다).
+	@ExecSpace("ServerOnly")
+	method void SpawnOneBossEscort(Entity map, integer zoneIndex, number x, number groundY, number keepHp)
+		local def = _GameManager:GetEp1BossDef(self._ep1BossIndex)
+		if def == nil or def.escort == nil then return end
+		local es = def.escort
+		local entity = _SpawnService:SpawnByModelId(self.MonsterModelId, "BossEscort", Vector3(x, groundY, 0), map)
+		if entity == nil then return end
+		---@type MonsterAI
+		local ai = entity:GetComponent("script.MonsterAI")
+		if ai == nil then return end
+		local hp = _GameManager:GetTimeStepHp(_GameManager:GetTimeStep()) * es.hpRatio
+		local speed = _GameManager:GetWaveApproachSpeed(_GameManager.Wave)
+		ai:InitializeBossEscort(zoneIndex, hp, speed, es.stand, es.move, es.hit, es.die, es.dieDur, x, groundY)
+		ai:SetAlienInvaderSounds("", es.hitSfx, es.dieSfx)
+		ai:SetScaleMultiplier(es.scale)
+		if keepHp > 0 then ai.CurrentHp = math.min(keepHp, ai.MaxHp) end
+		if self._bossEscorts == nil then self._bossEscorts = {} end
+		table.insert(self._bossEscorts, ai)
+	end
+
+	-- 보스를 따라 존을 옮긴다. 지상형이라 비행형처럼 사인파 중심만 옮기면 되는 게 아니어서,
+	-- 보스와 동일한 기법(파괴 후 새 존에 재소환)을 쓰되 **체력을 그대로 넘긴다**.
+	@ExecSpace("ServerOnly")
+	method void RelocateBossEscortsToZone(integer zoneIndex, Vector3 bossPos)
+		if self._bossEscorts == nil or #self._bossEscorts == 0 then return end
+		local def = _GameManager:GetEp1BossDef(self._ep1BossIndex)
+		if def == nil or def.escort == nil then return end
+		local map = self:GetZoneEntity(zoneIndex)
+		if map == nil then return end
+		local es = def.escort
+		-- 살아있는 애들의 체력만 먼저 걷어내고 전부 정리한다(죽은 참조는 자연히 빠진다)
+		local savedHps = {}
+		for i = 1, #self._bossEscorts do
+			---@type MonsterAI
+			local ai = self._bossEscorts[i]
+			if isvalid(ai) and isvalid(ai.Entity) and not ai._dead then
+				table.insert(savedHps, ai.CurrentHp)
+				ai.Entity:Destroy()
+			end
+		end
+		self._bossEscorts = {}
+		for i = 1, #savedHps do
+			-- 좌우 번갈아 세운다(1,3,5…는 오른쪽 / 2,4,6…은 왼쪽)
+			local dir = 1
+			if i % 2 == 0 then dir = -1 end
+			local slot = math.floor((i - 1) / 2) + 1
+			local x = bossPos.x + dir * es.spacing * slot
+			self:SpawnOneBossEscort(map, zoneIndex, x, bossPos.y, savedHps[i])
+		end
+		log("MonsterSpawner: boss escorts followed player to zone " .. zoneIndex .. " (" .. #savedHps .. ")")
+	end
+
+	-- 보스가 죽는 순간 MonsterAI.Die가 호출 — 살아있는 호위병을 전부 같이 죽인다(유저 지정).
+	@ExecSpace("ServerOnly")
+	method void KillBossEscorts()
+		if self._bossEscorts == nil then return end
+		local killed = 0
+		for i = 1, #self._bossEscorts do
+			---@type MonsterAI
+			local ai = self._bossEscorts[i]
+			if isvalid(ai) and isvalid(ai.Entity) and not ai._dead then
+				ai:DieAsBossEscort()
+				killed = killed + 1
+			end
+		end
+		self._bossEscorts = {}
+		if killed > 0 then
+			log("MonsterSpawner: boss escorts died with the boss (" .. killed .. ")")
+		end
+	end
+
+	-- 살아있는 소환 부하 목록(MonsterAI 컴포넌트). 존 이동 때 같이 데려가려면 추적이 필요하다.
+	property any _bossMinions = nil
+
+	-- 부하들이 마지막으로 옮겨간 존. OnUpdate가 이 값과 현재 존을 비교해 이동을 감지한다.
+	property integer _minionZoneIndex = -1
+
+	@ExecSpace("ServerOnly")
+	method void SpawnBossMinions(integer zoneIndex, Vector3 originPos, integer count)
+		local map = self:GetZoneEntity(zoneIndex)
+		if map == nil then return end
+		local def = _GameManager:GetEp1BossDef(self._ep1BossIndex)
+		if def == nil or def.minion == nil then return end
+		local fxDur = def.summonFxDur
+		-- 죽은 부하 참조 정리는 **소환 시점에만** 한다. 존 이동 시점에 정리하면, 방금 스폰된 엔티티가
+		-- 0.3초쯤 isvalid=false로 잡히는 실측 타이밍 이슈(미니빈에서 확인된 함정) 때문에 살아있는
+		-- 부하를 목록에서 통째로 날려 영영 못 따라오게 만들 수 있다. 여긴 직전 소환으로부터 최소
+		-- 쿨타임(30초)이 지난 시점이라 안전하다.
+		if self._bossMinions == nil then self._bossMinions = {} end
+		local alive = {}
+		for i = 1, #self._bossMinions do
+			local prev = self._bossMinions[i]
+			if isvalid(prev) and isvalid(prev.Entity) then table.insert(alive, prev) end
+		end
+		self._bossMinions = alive
+		self._minionZoneIndex = zoneIndex
+		for i = 1, count do
+			-- 보스 좌우로 갈라서, 살짝 위쪽(비행형이 나타나는 높이)에 자리를 잡는다
+			local side = 1
+			if i % 2 == 0 then side = -1 end
+			local dx = side * (1.1 + _UtilLogic:RandomDouble() * 1.1)
+			local dy = 0.8 + _UtilLogic:RandomDouble() * 0.9
+			local spawnPos = Vector3(originPos.x + dx, originPos.y + dy, originPos.z)
+			self:PlaySummonFx(map, spawnPos, def.summonFx, fxDur)
+			-- 연출이 반쯤 사라진 시점에 부하가 나타나기 시작해 남은 시간 동안 서서히 진해진다
+			_TimerService:SetTimerOnce(function()
+				self:SpawnOneBossMinion(map, zoneIndex, spawnPos, fxDur * 0.5)
+			end, fxDur * 0.5)
+		end
+		log("MonsterSpawner: boss minions summoned = " .. count .. " (" .. def.minion.name .. ")")
+	end
+
+	-- 플레이어가 존을 옮기면 살아있는 부하를 전부 새 존으로 데려온다(유저 지정). 보스처럼 파괴+재소환하지
+	-- 않고 미니빈과 동일한 재부모 방식(MonsterAI.RepositionFlyingCenter — AttachTo + 존 레지스트리 갱신
+	-- + 로컬 좌표 변환까지 한 번에)이라 체력/상태가 그대로 유지된다.
+	-- ⚠ 여기서는 무효한 참조를 **목록에서 지우지 않는다** — 스폰 직후 잠깐 isvalid=false로 잡히는
+	-- 타이밍 이슈에 걸리면 살아있는 부하를 영영 못 따라오게 만든다(미니빈에서 실측된 함정).
+	-- 정리는 다음 소환 시점(SpawnBossMinions)에 한다.
+	@ExecSpace("ServerOnly")
+	method void RelocateBossMinionsToZone(integer zoneIndex)
+		if self._bossMinions == nil then return end
+		local spawnPos = _MapManager:GetSpawnPositionForIndex(zoneIndex)
+		local moved = 0
+		for i = 1, #self._bossMinions do
+			---@type MonsterAI
+			local ai = self._bossMinions[i]
+			if isvalid(ai) and isvalid(ai.Entity) then
+				-- 한 자리에 겹쳐 뜨지 않게 좌우로 살짝 흩어준다(소환 때 벌리는 폭과 같은 수준)
+				local jitterX = (_UtilLogic:RandomDouble() * 2 - 1) * 2.0
+				local baseY = (ai.FlyingWanderMinY + ai.FlyingWanderMaxY) * 0.5
+				ai:RepositionFlyingCenter(spawnPos.x + jitterX, baseY, zoneIndex)
+				moved = moved + 1
+			end
+		end
+		if moved > 0 then
+			log("MonsterSpawner: boss minions followed player to zone " .. zoneIndex .. " (" .. moved .. ")")
+		end
+	end
+
+	-- 소환 자리에 뜨는 연출 — 유저가 준 RUID가 animationclip이 아니라 **sprite**(정지 그림)라
+	-- 자체 재생시간이 없다. 그래서 알파를 1에서 0으로 직접 빼면서 사라지게 한다.
+	@ExecSpace("ServerOnly")
+	method void PlaySummonFx(Entity map, Vector3 pos, string fxRUID, number duration)
+		if fxRUID == "" then return end
+		local fx = _SpawnService:SpawnByModelId("skilleffect", "SummonFX", pos, map)
+		if fx == nil then return end
+		local renderer = fx.SpriteRendererComponent
+		if renderer ~= nil then renderer.SpriteRUID = fxRUID end
+		local step = 0.05
+		local elapsed = 0.0
+		local timerId = 0
+		timerId = _TimerService:SetTimerRepeat(function()
+			if not isvalid(fx) then
+				if timerId ~= 0 then _TimerService:ClearTimer(timerId) end
+				return
+			end
+			elapsed = elapsed + step
+			local a = 1.0 - (elapsed / duration)
+			if a < 0 then a = 0 end
+			local r = fx.SpriteRendererComponent
+			if r ~= nil then r.Color = Color(1, 1, 1, a) end
+		end, step)
+		_TimerService:SetTimerOnce(function()
+			if timerId ~= 0 then _TimerService:ClearTimer(timerId) end
+			if isvalid(fx) then fx:Destroy() end
+		end, duration)
+	end
+
+	-- 부하 1마리 스폰 — 비행형 전용 초기화(InitializeAlienInvader)를 그대로 재사용하고,
+	-- 로스터의 minion 정의로 외형/사운드/체력을 덮어쓴다. fadeIn 동안 알파 0→1로 나타난다.
+	@ExecSpace("ServerOnly")
+	method void SpawnOneBossMinion(Entity map, integer zoneIndex, Vector3 spawnPos, number fadeIn)
+		if not isvalid(map) then return end
+		local def = _GameManager:GetEp1BossDef(self._ep1BossIndex)
+		if def == nil or def.minion == nil then return end
+		local m = def.minion
+		local entity = _SpawnService:SpawnByModelId(self.MonsterModelId, "BossMinion", spawnPos, map)
+		if entity == nil then return end
+		---@type MonsterAI
+		local ai = entity:GetComponent("script.MonsterAI")
+		if ai == nil then return end
+		local hp = _GameManager:GetTimeStepHp(_GameManager:GetTimeStep()) * m.hpRatio
+		local speed = _GameManager:GetWaveApproachSpeed(_GameManager.Wave)
+		ai:InitializeAlienInvader(zoneIndex, hp, speed, m.stand, m.hit, m.die, m.dieDur, m.attack)
+		ai:SetAttackDuration(m.attackDur)
+		ai:SetAlienInvaderSounds(m.attackSfx, m.hitSfx, m.dieSfx)
+		ai:SetScaleMultiplier(m.scale)
+		-- 존 이동 때 같이 데려가려면 추적해야 한다(RelocateBossMinionsToZone)
+		if self._bossMinions == nil then self._bossMinions = {} end
+		table.insert(self._bossMinions, ai)
+		-- 알파 0에서 시작해 소환 연출이 사라지는 동안 겹쳐서 진해진다(유저 지정 연출)
+		local renderer = entity.SpriteRendererComponent
+		if renderer ~= nil then renderer.Color = Color(1, 1, 1, 0) end
+		local step = 0.05
+		local elapsed = 0.0
+		local timerId = 0
+		timerId = _TimerService:SetTimerRepeat(function()
+			if not isvalid(entity) then
+				if timerId ~= 0 then _TimerService:ClearTimer(timerId) end
+				return
+			end
+			elapsed = elapsed + step
+			local a = elapsed / fadeIn
+			if a >= 1 then
+				a = 1
+				if timerId ~= 0 then _TimerService:ClearTimer(timerId) ; timerId = 0 end
+			end
+			local r = entity.SpriteRendererComponent
+			if r ~= nil then r.Color = Color(1, 1, 1, a) end
+		end, step)
 	end
 
 	-- 분열체 1마리가 죽을 때마다 MonsterAI.Die가 호출 — 마지막 1마리에서 보스 웨이브를 끝낸다.
@@ -648,6 +969,27 @@ script MonsterSpawner extends Logic
 		self._bossZone = -1
 		-- 2026-08-03: 처치 즉시 다음 보스까지 BossRepeatInterval(10분)을 다시 카운트한다(엘리트와 동일 패턴)
 		self._nextBossTimer = self.BossRepeatInterval
+		-- 에피소드1 보스는 정해진 순서대로 나온다 — 한 마리 잡았으니 다음 번호로 넘긴다.
+		-- ⚠ 여기(= 보스 웨이브가 **완전히** 끝난 시점)에서만 올려야 한다. 엔젤 슬라임처럼 분열
+		-- 기믹이 있는 보스는 분열체를 전부 잡아야 OnBossDefeated → ClearCurrentBoss로 들어오므로,
+		-- 분열체를 잡는 도중에 번호가 바뀌어 다음 보스 외형이 섞이는 일이 없다.
+		if _GameManager.SelectedEpisode == 1 then
+			self._ep1BossIndex = self._ep1BossIndex + 1
+			if self._ep1BossIndex > _GameManager:GetEp1BossCount() then self._ep1BossIndex = 1 end
+			log("MonsterSpawner: next ep1 boss index = " .. self._ep1BossIndex)
+		end
+	end
+
+	-- 에피소드1 보스 순번(1부터). "다음에 나올 보스"이자 "지금 떠 있는 보스"의 번호 —
+	-- 보스를 잡는 순간(ClearCurrentBoss)에만 올라가므로, 살아있는 동안은 값이 고정이다.
+	-- (RelocateBossToCurrentZone이 보스를 파괴 후 재소환하면서 InitializeStats를 다시 부르는데,
+	--  그때도 같은 번호를 읽어야 존을 옮겼다고 보스 외형이 바뀌지 않는다.)
+	property integer _ep1BossIndex = 1
+
+	@ExecSpace("ServerOnly")
+	method integer GetEp1BossIndex()
+		-- 지금 차례인 에피소드1 보스 번호를 돌려준다(MonsterAI.InitializeStats가 외형을 고를 때 사용).
+		return self._ep1BossIndex
 	end
 
 	-- _nextBossTimer 만료 시(첫 등장 또는 이전 보스 처치 후 재등장) 호출 — 플레이어가 있는 존에 보스
@@ -664,6 +1006,17 @@ script MonsterSpawner extends Logic
 		if #spawned > 0 then
 			self._currentBoss = spawned[1]
 			self._bossZone = mapIndex
+			-- 호위병을 데리고 나오는 보스(1번 블루 머쉬맘)면 좌우로 같이 세운다.
+			-- escort 정의가 없는 보스는 SpawnBossEscorts가 그냥 리턴한다.
+			self:SpawnBossEscorts(mapIndex, self._currentBoss.TransformComponent.Position)
+			-- 보스 등장 연출(유저 지정 2026-09-08: "보스 나올 때 너무 허전하다, 보스인지도 모르겠다").
+			-- 화면 빨간 깜빡임 + 양옆 경광등이 달린 토스트. 존 이동 재배치(RelocateBossToCurrentZone)는
+			-- 이 경로를 안 타므로 존을 옮겨다녀도 알림이 다시 뜨지 않는다.
+			_UIToast:ShowBossMessage("보스가 등장합니다!")
+			-- 보스 전용 BGM으로 교체(처치 시 GameManager.OnBossDefeated가 원래 맵 곡으로 되돌린다)
+			_MapManager:PlayBossBgm()
+			-- 이 웨이브 동안 슬롯 스킬 드롭을 최대 2개로 제한(분열체/박쥐/호위병까지 전부 합산)
+			_CardManager:BeginBossWaveDropCap()
 		end
 	end
 
@@ -678,11 +1031,23 @@ script MonsterSpawner extends Logic
 		local map = self:GetZoneEntity(zoneIndex)
 		if map == nil then return end
 		
+		-- 이 재소환은 파괴 후 새 엔티티를 만드는 방식이라, 넘겨받지 않은 상태는 전부 초기화된다.
+		-- 체력뿐 아니라 **보스 고유 진행 상태**도 같이 옮겨야 한다 — 안 그러면 존만 옮겨다녀도
+		-- 다일의 피격 성장 스택이 리셋되고(사실상 무적 패턴), 스텀피의 소환 쿨타임도 매번 처음부터
+		-- 다시 시작해 부하가 안 나온다.
 		local savedHp = nil
+		local savedGrowScale = 0
+		local savedGrowAtk = 0
+		local savedSummonTimer = -1
 		if isvalid(self._currentBoss) then
 			---@type MonsterAI
 			local ai = self._currentBoss:GetComponent("script.MonsterAI")
-			if ai ~= nil then savedHp = ai.CurrentHp end
+			if ai ~= nil then
+				savedHp = ai.CurrentHp
+				savedGrowScale = ai._erdasHitGrowthBonus
+				savedGrowAtk = ai._growAtkBonus
+				savedSummonTimer = ai._summonTimer
+			end
 			self._currentBoss:Destroy()
 		end
 		
@@ -699,8 +1064,18 @@ script MonsterSpawner extends Logic
 			local ai = self._currentBoss:GetComponent("script.MonsterAI")
 			if ai ~= nil then
 				ai.CurrentHp = math.min(savedHp, ai.MaxHp)
+				-- 성장 스택 복원(다일) — 스케일은 OnUpdate의 접근 스케일 계산이 이 배율을 곱해 쓰므로
+				-- 값만 되돌리면 다음 프레임부터 커진 크기로 다시 다가온다.
+				ai._erdasHitGrowthBonus = savedGrowScale
+				ai._growAtkBonus = savedGrowAtk
+				-- 소환 쿨타임 복원(스텀피) — 새 보스가 아니라 "따라온 같은 보스"이므로 이어서 센다
+				if savedSummonTimer >= 0 and ai._summonCooldown > 0 then
+					ai._summonTimer = savedSummonTimer
+				end
 			end
 		end
+		-- 호위병도 두목을 따라온다(유저 지정) — 체력을 유지한 채 새 존의 보스 옆으로 다시 세운다
+		self:RelocateBossEscortsToZone(zoneIndex, self._currentBoss.TransformComponent.Position)
 		log("MonsterSpawner: boss followed player to zone " .. zoneIndex)
 	end
 
@@ -1887,6 +2262,12 @@ script MonsterSpawner extends Logic
 		-- 살아서 쫓아오던 보스가 있었다면(ClearAllMonsters가 실제 엔티티는 이미 정리) 참조도 함께 비운다
 		self._currentBoss = nil
 		self._bossZone = -1
+		-- 보스 타이머를 처음부터 다시 세는 것과 짝을 맞춰, 보스 순번도 1번(블루 머쉬맘)부터 다시 시작한다
+		self._ep1BossIndex = 1
+		-- 이전 런에서 소환됐던 부하/호위병 참조도 비운다(엔티티는 ClearAllMonsters가 이미 정리)
+		self._bossMinions = {}
+		self._minionZoneIndex = -1
+		self._bossEscorts = {}
 		self._running = true
 		log("MonsterSpawner: spawning restarted")
 	end
@@ -1948,3 +2329,6 @@ script MonsterSpawner extends Logic
 	end
 
 end
+
+
+

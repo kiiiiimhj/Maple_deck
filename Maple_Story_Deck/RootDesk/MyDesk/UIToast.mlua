@@ -17,14 +17,98 @@ script UIToast extends Logic
 
 	property number offset = 0
 
+	-- ── 보스 등장 알림(유저 지정 2026-09-08) ─────────────────────────────────────────
+	-- "보스 나올 때 너무 허전하다. 이멀전시한 화면 깜빡임 + '보스가 등장합니다!' 토스트,
+	--  텍스트 양옆에 경광등 이미지"
+	-- 아이콘 2개는 토스트 박스(Toast_message)의 좌우 끝에 붙는 자식이고, 평소엔 Enable=false다.
+	-- 경광등 RUID(1c35b8d1…)는 sprite가 아니라 **animationclip**(4프레임 회전 경광등)이라
+	-- SpriteGUIRendererComponent가 그대로 재생한다.
+	property Entity iconLeft = "e1f5553f-2a64-4495-990b-e7855f18c439"
+
+	property Entity iconRight = "d4c8735c-f67c-4c86-8107-05dce9019eaf"
+
+	-- 화면 전체를 덮는 빨간 판. 알파를 0↔peak로 왕복시켜 "비상등" 깜빡임을 만든다.
+	property Entity alertFlash = "1bd461a9-c01b-414e-b3b3-58842ba35e19"
+
+	property number alertFlashTimerId = 0
+
+	property number AlertFlashCycles = 4
+
+	property number AlertFlashCycleTime = 0.42
+
+	property number AlertFlashPeak = 0.45
+
 	@ExecSpace("Client")
 	method void ShowMessage(string message)
+		-- 일반 토스트 — 보스 아이콘은 반드시 꺼서 이전 보스 알림의 잔상이 남지 않게 한다
+		self:SetToastIcons(false)
 		if self.inited == false then
 			self.inited = true
 			self.offset = -self.message.Entity.UITransformComponent.anchoredPosition.y
 		end
 		self.message.Text = message
 		self:StartTween()
+	end
+
+	@ExecSpace("Client")
+	method void ShowBossMessage(string message)
+		-- 보스 등장 알림 — 일반 토스트와 같은 등장 애니메이션을 쓰되 양옆 경광등을 켜고
+		-- 화면 깜빡임(PlayAlertFlash)을 같이 재생한다
+		self:SetToastIcons(true)
+		self:PlayAlertFlash()
+		if self.inited == false then
+			self.inited = true
+			self.offset = -self.message.Entity.UITransformComponent.anchoredPosition.y
+		end
+		self.message.Text = message
+		self:StartTween()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetToastIcons(boolean on)
+		-- 토스트 텍스트 양옆 경광등 아이콘 on/off
+		if isvalid(self.iconLeft) then self.iconLeft.Enable = on end
+		if isvalid(self.iconRight) then self.iconRight.Enable = on end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayAlertFlash()
+		-- 화면 전체가 빨갛게 AlertFlashCycles회 깜빡인다(한 사이클 = 0 → peak → 0 삼각파)
+		if not isvalid(self.alertFlash) then return end
+		local renderer = self.alertFlash.SpriteGUIRendererComponent
+		if renderer == nil then return end
+		if self.alertFlashTimerId > 0 then
+			_TimerService:ClearTimer(self.alertFlashTimerId)
+			self.alertFlashTimerId = 0
+		end
+		self.alertFlash.Enable = true
+		-- 같은 UIGroup 안에서는 나중에 추가된 자식이 위에 그려진다 — 깜빡임 판이 토스트 글자를
+		-- 덮지 않도록 매번 맨 뒤(sibling 0)로 내린다
+		local tf = self.alertFlash.UITransformComponent
+		if tf ~= nil then _UILogic:SetSiblingIndex(tf, 0) end
+		local total = self.AlertFlashCycles * self.AlertFlashCycleTime
+		local time = 0
+		local preTime = _UtilLogic.ElapsedSeconds
+		local tick = function()
+			if not isvalid(self) or not isvalid(self.alertFlash) then return end
+			local delta = _UtilLogic.ElapsedSeconds - preTime
+			preTime = _UtilLogic.ElapsedSeconds
+			time = time + delta
+			if time >= total then
+				renderer.Color = Color(1, 0.1, 0.1, 0)
+				self.alertFlash.Enable = false
+				if self.alertFlashTimerId > 0 then
+					_TimerService:ClearTimer(self.alertFlashTimerId)
+					self.alertFlashTimerId = 0
+				end
+				return
+			end
+			local phase = (time % self.AlertFlashCycleTime) / self.AlertFlashCycleTime
+			local k = phase * 2
+			if k > 1 then k = 2 - k end
+			renderer.Color = Color(1, 0.1, 0.1, self.AlertFlashPeak * k)
+		end
+		self.alertFlashTimerId = _TimerService:SetTimerRepeat(tick, 1/60)
 	end
 
 	method void StartTween()

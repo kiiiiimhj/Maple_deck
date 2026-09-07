@@ -248,6 +248,15 @@ script MapManager extends Logic
 	-- 매번 다시 트는 게 아니라 계속 이어지도록 중복 호출을 걸러내는 용도(TriggerBgmIfFileChanged 전용)
 	property string _lastBgmMapFile = ""
 
+	-- ── 보스 전용 BGM (유저 지정 2026-09-08) ────────────────────────────────────────
+	-- "보스 등장할 때는 이 사운드 틀어주고, 보스 잡히면 다시 원래 사운드로 넘어가면 좋겠다."
+	-- 보스가 살아있는 동안엔 존/맵을 옮겨다녀도 보스곡이 유지된다(보스가 플레이어를 따라오므로).
+	-- 그 사이에도 _lastBgmMapFile은 계속 갱신되므로, 처치 후 ForcePlayBgmForCurrentMap이
+	-- "지금 있는 맵"의 곡을 정확히 되돌린다.
+	property string BossBgmRUID = "c5d336f0bf4049e18d08bf07ddcf3a46"
+
+	property boolean _bossBgmActive = false
+
 	-- SilentMoveToMap 전용 Damping 임시 저장값 (0.001로 낮췄다가 짧게 복구)
 	property Vector2 _savedSilentMoveDamping = Vector2(2.5, 5.0)
 	property boolean _silentMoveDampingSaved = false
@@ -607,9 +616,36 @@ script MapManager extends Logic
 	-- 별도 메서드로 분리했다.
 	@ExecSpace("ServerOnly")
 	method void ForcePlayBgmForCurrentMap()
+		-- 보스 처치/게임 시작/재시작 — 맵 곡이 보스곡보다 우선이므로 보스 BGM 상태를 먼저 내린다.
+		-- ⚠ 지금 맵에 자기 곡이 없을 수도 있다(실측: map04는 SoundComponent 자체가 없다). 그냥 두면
+		-- 보스곡이 영영 안 꺼지므로, 보스곡에서 돌아오는 길이면 곡이 없어도 최소한 정지는 시킨다.
+		local wasBoss = self._bossBgmActive
+		self._bossBgmActive = false
 		local mapName = self:GetMapName(self.CurrentMapIndex)
 		self._lastBgmMapFile = mapName
-		self:NotifyBgmMapChanged(mapName)
+		self:NotifyBgmMapChanged(mapName, wasBoss)
+	end
+
+	-- 보스 등장 — 맵 곡을 보스곡으로 갈아탄다(MonsterSpawner.TrySpawnPersistentBoss에서 호출).
+	-- 이미 보스곡이면 다시 틀지 않는다(같은 곡이 처음부터 재시작되며 툭 끊기는 걸 막는다).
+	@ExecSpace("ServerOnly")
+	method void PlayBossBgm()
+		if self._bossBgmActive then return end
+		if self.BossBgmRUID == "" then return end
+		self._bossBgmActive = true
+		self:NotifyBgmRuid(self.BossBgmRUID)
+	end
+
+	-- 맵의 SoundComponent가 아니라 **지정한 RUID**를 그대로 트는 경로(보스곡 전용).
+	-- ⚠ RUID를 인자로 넘기는 이유: Multicast 본문에서 non-@Sync 프로퍼티(BossBgmRUID)를 읽으면
+	-- 클라에서는 항상 기본값("")이라 아무 소리도 안 난다(이 프로젝트에서 여러 번 겪은 함정).
+	@ExecSpace("Multicast")
+	method void NotifyBgmRuid(string ruid)
+		if not self:IsClient() then return end
+		if ruid == "" then return end
+		_SoundService:StopBGM(true)
+		_SoundOptionLogic:PlayBgm(ruid, 1.0)
+		log("MapManager: BGM -> boss")
 	end
 
 	-- DoMapChange/DoScrollMapChange 전용 — 물리 맵 파일이 실제로 바뀌었을 때만 BGM을 다시 튼다.
@@ -619,19 +655,35 @@ script MapManager extends Logic
 	method void TriggerBgmIfFileChanged(string mapName)
 		if mapName == self._lastBgmMapFile then return end
 		self._lastBgmMapFile = mapName
-		self:NotifyBgmMapChanged(mapName)
+		-- 보스 전투 중에는 맵 곡으로 되돌아가지 않는다 — 보스가 존을 따라오므로 곡도 계속 유지돼야 한다.
+		-- 파일명은 위에서 이미 갱신했으므로, 처치 후 ForcePlayBgmForCurrentMap이 지금 맵 곡을 정확히 튼다.
+		if self._bossBgmActive then return end
+		self:NotifyBgmMapChanged(mapName, false)
 	end
 
 	-- 실제 BGM 재생은 클라이언트 전용(SoundService) — 대상 맵 파일 루트 엔티티에 이미 박혀있는
 	-- SoundComponent.AudioClipRUID를 그대로 재생한다. RUID를 여기 따로 하드코딩하지 않으므로 나중에
 	-- 맵의 BGM을 바꾸면(SoundComponent만 고치면) 이 로직도 자동으로 새 곡을 따라간다.
+	-- stopIfNone: 이 맵에 자기 곡이 없을 때 "그냥 두기"(false, 기존 동작 — 맵 이동 경로) 대신
+	-- "재생 중인 곡을 끄기"(true)를 고른다. 보스곡에서 맵 곡으로 돌아오는 길에만 true다.
 	@ExecSpace("Multicast")
-	method void NotifyBgmMapChanged(string mapFile)
+	method void NotifyBgmMapChanged(string mapFile, boolean stopIfNone)
 		if not self:IsClient() then return end
 		local mapEntity = _EntityService:GetEntityByPath("/maps/" .. mapFile)
-		if mapEntity == nil then return end
+		if mapEntity == nil then
+			if stopIfNone then _SoundService:StopBGM(true) end
+			return
+		end
 		local sound = mapEntity.SoundComponent
-		if sound == nil or sound.AudioClipRUID == "" then return end
+		if sound == nil or sound.AudioClipRUID == "" then
+			-- 자기 곡이 없는 맵(실측: map04). 원래는 이전 곡이 계속 흐르게 두는 게 기존 동작이지만,
+			-- 보스곡에서 돌아오는 길이면 여기서 안 끄면 보스곡이 영영 안 꺼진다.
+			if stopIfNone then
+				_SoundService:StopBGM(true)
+				log("MapManager: BGM -> (none, " .. mapFile .. ")")
+			end
+			return
+		end
 		_SoundService:StopBGM(true)
 		_SoundOptionLogic:PlayBgm(sound.AudioClipRUID, 1.0)
 		log("MapManager: BGM -> " .. mapFile)
@@ -1548,3 +1600,5 @@ script MapManager extends Logic
 	end
 
 end
+
+

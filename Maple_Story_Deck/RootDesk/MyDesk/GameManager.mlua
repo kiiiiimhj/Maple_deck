@@ -603,34 +603,274 @@ script GameManager extends Logic
 	-- 죽으면 끝 — 별도로 거대 네펜데스를 소환/변신시키지 않는다(유저 요청, 2026-08-10 최종 확정).
 	-- 이 프로퍼티들은 존 풀 테이블에 하드코딩된 값과 일치시켜두는 참고용 상수이자 MonsterAI.ReviveAsPhase2가
 	-- 실제로 읽어가는 값이다.
-	-- ── 에피소드1 보스: 가디언 엔젤 슬라임 (유저 지정, 2026-09-06) ──────────────────────
-	-- 예전엔 "그 존의 일반 몬스터가 2.5배로 커진 것"이 보스였는데, 에피소드1만은 전용 외형을 고정으로
-	-- 쓴다. 클립은 뽑기 보스레이드(GachaUI._bossSpecies의 "가디언 엔젤 슬라임")와 같은 리소스팩이다.
-	-- 재생시간은 프로젝트 관례(거대 네펜데스 9프레임=0.95초, 약 0.105초/프레임)로 환산했다.
-	property string Ep1BossStandRUID = "96af297ca7ff4bbc9fc58849ac3ba473"    -- stand, 24프레임
-	property string Ep1BossMoveRUID = "b7085b82b6224790a0bd5c8b2c844778"     -- move, 12프레임
-	-- ⚠ 재생시간은 **추정하지 말고 실측할 것**. 이 팩은 프레임당 0.090초라, 다른 종에서 뽑은
-	-- 관례값(0.105초/프레임)을 쓰면 클립이 한 바퀴 더 돌아 "연출이 두 번 나오는" 것처럼 보인다.
+	-- ── 에피소드1 보스 로스터 (유저 지정 순서, 2026-09-07) ────────────────────────────
+	-- 에피소드1 보스는 "그 존의 일반 몬스터가 2.5배로 커진 것"이 아니라 **전용 외형**을 쓴다.
+	-- 보스가 여러 종이 되면서, 이제 **정해진 순서대로** 한 마리씩 나온다. 지금 몇 번째 차례인지는
+	-- MonsterSpawner가 들고 있고(`GetEp1BossIndex`), 한 마리 잡을 때마다 다음 번호로 넘어간다.
+	-- 마지막 보스까지 잡으면 다시 1번으로 순환한다.
+	--   1번 = 블루 머쉬맘        (등장할 때 파란버섯 호위병 4마리를 좌우로 데리고 나온다.
+	--                            보스가 죽으면 호위병도 전부 같이 죽는다)
+	--   2번 = 가디언 엔젤 슬라임 (사망 시 분열체 4마리 — 아래 Ep1BossSplit* 참고)
+	--   3번 = 스텀피             (원거리형 — 조금 떨어진 데서 서서 때리고, 플레이어 자리에 착탄 연출.
+	--                            30초마다 attack2로 지하실 박쥐 2마리 소환)
+	--   4번 = 다일               (맞을수록 커지고 빨라진다 — growScale*/growAtk*)
+	--
+	-- ⚠ **순서를 바꾸려면 GetEp1BossDef의 테이블 행 순서만 통째로 바꿔라.** 한 보스의 값이 한 행에
+	-- 모여 있으므로 행을 옮기면 그 보스의 모든 값이 같이 따라온다(예전처럼 필드별 테이블로 쪼개면
+	-- 한쪽만 옮겨 어긋난다 — 그래서 일부러 행 단위로 묶어뒀다).
+	--
+	-- ⚠ 재생시간(attackDur / dieDur)은 **추정하지 말고 실측할 것** — 팩마다, 심지어 **같은 팩 안의
+	-- 프레임마다** 간격이 다르다(블루 머쉬맘 attack1 실측 = 0.800/0.200/0.050/0.050/0.750초.
+	-- "프레임수 × 균등간격"으로 환산했으면 0.6초로 잡아 1/3만 재생하고 잘렸을 값이다).
 	-- 측정법: play 중 client 컨텍스트에서
 	--   local c = _ResourceService:LoadAnimationClipAndWait(ruid)
-	--   for _,f in ipairs(c.Frames:ToTable()) do total = total + f.Delay end
-	property string Ep1BossAttackRUID = "5126d2297418481894fc9f22456559c4"   -- attack1, 20프레임
-	property number Ep1BossAttackDuration = 1.8   -- 실측: 20 × 0.090
-	property string Ep1BossHitRUID = "ffbd8c4990c04102a365a5078b72c332"      -- hit1, 1프레임
-	-- ⚠ 사망 연출은 팩의 die1(b9b432c7…)이 아니라 **skill2** 클립이다 — 유저가 이 RUID를 콕 집어
-	-- 지정했다. 나중에 "죽는 모션이 좀 이상한데?" 소리가 나오면 die1로 바꾸면 되는 자리다.
-	property string Ep1BossDieRUID = "22953ddb704e442f8b9e9d5c6419b78f"      -- skill2, 21프레임
-	-- 클립은 21프레임(21 × 0.090 = 1.89초)이지만 **17프레임까지만 쓴다**(유저 지정) —
-	-- 17 × 0.090 = 1.53초. 뒤 4프레임은 안 보여주고 그 시점에 알파가 빠지면서 분열이 터진다.
-	-- 이 값이 실제보다 길면 클립이 한 바퀴 더 돌고 본체가 화면에 남는다(예전 리포트).
-	property number Ep1BossDieDuration = 1.53
-	property string Ep1BossAttackSoundRUID = "fe21c9f0eff348028577e5be813b2853"
-	property string Ep1BossDieSoundRUID = "5b862c8125ff400092c938c96b6bd678"
-	-- 보스 공통 배율(×2.5) 위에 이 종에만 더 곱하는 값. 슬라임 스프라이트 자체가 커서
-	-- (stand 494×365, 사망 클립은 717×531) 공통 배율만 태우면 화면을 다 덮는다 —
-	-- 유저 지정으로 1/10로 줄였다가(0.1), 다시 "한 크기 키워달라"고 해서 60% 올렸다.
-	-- 최종 = 2.5 × 0.16 = 0.4배. 다른 에피소드 보스는 영향 없다.
-	property number Ep1BossScaleMultiplier = 0.16
+	--   local total = 0 ; for _, f in ipairs(c.Frames:ToTable()) do total = total + f.Delay end
+	-- 값이 실제보다 길면 클립이 한 바퀴 더 돌아 "연출이 두 번 나온다"로 보이고, 사망 연출이면
+	-- 본체가 그만큼 화면에 남는다. 짧으면 잘린다.
+	@ExecSpace("ServerOnly")
+	method integer GetEp1BossCount()
+		-- 에피소드1 보스 순번의 총 개수(= 이 수를 넘기면 다시 1번으로 순환).
+		return 4
+	end
+
+	@ExecSpace("ServerOnly")
+	method any GetEp1BossDef(integer index)
+		-- 에피소드1 보스 index번째(1부터)의 외형/사운드/크기/기믹 정의를 한 행으로 반환한다.
+		-- 범위를 벗어난 번호는 1번으로 접는다(스포너가 순환시키지만 방어적으로 한 번 더).
+		local defs = {
+			{
+				-- 1번: 블루 머쉬맘 (mob 팩, 유저 지정 2026-09-07). 특수 기믹 없음.
+				name = "블루 머쉬맘",
+				stand = "19482428daea4bd3adda9e0ab81dce98",   -- stand, 1프레임(정지 포즈)
+				move = "96c51e680c0f4f67bf58ceb3f15f70d9",    -- move, 6프레임
+				attack = "35f1f02f167d4b8992882490c311c955",  -- attack1, 5프레임
+				attackDur = 1.85,                             -- 실측 합계(프레임 간격 불균등)
+				hit = "bd8344a59c0e443a8dbfdc75c2251704",     -- hit1, 1프레임(0.600초)
+				die = "262b25c6c08a4c96a27b5fc788ab2683",     -- die1, 6프레임
+				dieDur = 1.10,                                -- 실측 합계
+				attackSfx = "8b9ade41853e4fd9bff74482368b4160",  -- audio/Attack1
+				-- 이 팩엔 die 사운드가 없다 — audio/Damage를 사망 비명으로 빌려 쓴다. 대신 피격음으로는
+				-- 쓰지 않는다(맞을 때마다 같은 클립이 도배돼서, 엔젤 슬라임과 같은 정책으로 무음).
+				dieSfx = "24520559d16847a0b0ac5468c5b9f75f",     -- audio/Damage
+				-- 보스 공통 배율(×2.5) 위에 더 곱하는 값. 머쉬맘 스프라이트(120×112)는 일반 몬스터와
+				-- 비슷한 크기라 공통 배율만 태우면 화면 절반을 덮는다 — 엔젤 슬라임의 화면상 크기와
+				-- 비슷해지도록 맞췄다(최종 2.5 × 0.6 = 1.5배).
+				scale = 0.6,
+				-- 공격할 때 몬스터 자기 자신 위치에 같이 터지는 연출(팩의 attack1/info/effect — 포자 분출).
+				-- 유저 지정 2026-09-07("같이 터지게"). 푼코/쿠스코가 쓰던 _selfAttackEffect 경로를 그대로 탄다.
+				-- 지연 0인 이유(추측이 아니라 실측 근거): 이 이펙트 클립의 총 재생시간이 **1.850초로
+				-- attack1과 정확히 같다**(15프레임 vs 5프레임인데 합이 동일). 즉 attack1과 처음부터
+				-- 끝까지 같이 돌도록 만들어진 짝이라, 시작을 맞춰 띄우는 게 원본 의도다.
+				selfFx = "58ad917a8d2c49d4af46d0ab31d6b0ae",
+				selfFxDur = 1.85,
+				selfFxDelay = 0,
+				-- 근접형 — 플레이어 코앞까지 붙고, 플레이어 자리에 뜨는 착탄 연출은 없다
+				ranged = false,
+				hitFx = "",
+				hitFxDur = 0,
+				-- 2번째 공격(소환기)이 없는 보스 — summonCooldown이 0이면 소환 로직 자체가 안 돈다
+				attack2 = "",
+				attack2Dur = 0,
+				attack2Sfx = "",
+				summonCooldown = 0,
+				summonCount = 0,
+				summonFx = "",
+				summonFxDur = 0,
+				-- 맞을수록 성장하는 보스가 아니다(전부 0이면 성장 로직이 안 돈다)
+				growScalePerHit = 0,
+				growScaleMax = 0,
+				growAtkPerHit = 0,
+				growAtkMax = 0,
+				-- 등장할 때 좌우로 데리고 나오는 호위병(유저 지정 2026-09-07: "조폭 두목과 쫄따구" 느낌).
+				-- 소환기(summon*)와 달리 **보스가 뜰 때 딱 한 번** 같이 나오고, 보스가 죽으면 전부 같이
+				-- 죽는다. 존을 옮기면 보스와 함께 따라온다(체력 유지).
+				-- 이 팩엔 attack1이 없다 — 기존 정책대로 공격 모션 없는 종은 홉(들이받기)으로 때린다.
+				escort = {
+					name = "파란버섯",
+					countPerSide = 2,                             -- 좌우 2마리씩 = 총 4마리
+					-- 보스로부터 좌우 간격(월드 유닛). 보스는 접근하면서 커지는데(최종 폭 약 2유닛)
+					-- 너무 좁으면 안쪽 2마리가 커진 보스에 가려진다 — 실측 후 1.1 → 1.4로 넓혔다.
+					spacing = 1.4,
+					stand = "37f823d5d9ad4468a6502ba195317ac1",   -- stand, 2프레임
+					move = "cc2e07010a6b4023a2a90bffc0888e06",    -- move, 3프레임
+					hit = "98ad22b370a5491b888d25adde7fb907",     -- hit1, 1프레임
+					die = "1a9a5cc2eb0045bd96b57b3584555a96",     -- die1, 3프레임
+					-- 실측 합계 0.660. "죽었다가 다시 나오는 것처럼 한 바퀴 더 도는" 증상이 보이면
+					-- 0.62 정도로 살짝 낮추면 된다(존15 박쥐에서 겪었던 것과 같은 케이스).
+					dieDur = 0.66,
+					hitSfx = "869aea67272b44b7a2b12e9249432f87",  -- audio/Damage
+					dieSfx = "6783b7baa93d49eba29b4d56332f0a7f",  -- audio/Die
+					-- 그 시점 일반 몬스터 체력 대비 배율. 유저 지정(2026-09-07): 1.0으로 뒀더니 플레이어가
+					-- 몇 초 만에 정리해버려서 "두목 옆 쫄따구" 그림이 남질 않았다 → **2배**.
+					hpRatio = 2.0,
+					scale = 1.0,
+				},
+				hasSplit = false,
+			},
+			{
+				-- 2번: 가디언 엔젤 슬라임 (유저 지정 2026-09-06). 클립은 뽑기 보스레이드
+				-- (GachaUI._bossSpecies의 "가디언 엔젤 슬라임")와 같은 리소스팩이다.
+				name = "가디언 엔젤 슬라임",
+				stand = "96af297ca7ff4bbc9fc58849ac3ba473",   -- stand, 24프레임
+				move = "b7085b82b6224790a0bd5c8b2c844778",    -- move, 12프레임
+				attack = "5126d2297418481894fc9f22456559c4",  -- attack1, 20프레임
+				attackDur = 1.8,                              -- 실측: 20 × 0.090
+				hit = "ffbd8c4990c04102a365a5078b72c332",     -- hit1, 1프레임
+				-- ⚠ 사망 연출은 팩의 die1(b9b432c7…)이 아니라 **skill2** 클립이다 — 유저가 이 RUID를
+				-- 콕 집어 지정했다. "죽는 모션이 좀 이상한데?" 소리가 나오면 die1로 바꾸는 자리.
+				die = "22953ddb704e442f8b9e9d5c6419b78f",     -- skill2, 21프레임
+				-- 클립은 21프레임(1.89초)이지만 **17프레임까지만 쓴다**(유저 지정) — 17 × 0.090 = 1.53초.
+				-- 뒤 4프레임은 안 보여주고 그 시점에 알파가 빠지면서 분열이 터진다.
+				dieDur = 1.53,
+				attackSfx = "fe21c9f0eff348028577e5be813b2853",
+				dieSfx = "5b862c8125ff400092c938c96b6bd678",
+				-- 슬라임 스프라이트가 커서(stand 494×365, 사망 클립 717×531) 공통 배율만 태우면 화면을
+				-- 다 덮는다 — 유저 지정으로 1/10로 줄였다가(0.1) "한 크기 키워달라"로 60% 올렸다.
+				scale = 0.16,
+				-- 이 보스는 공격 이펙트를 따로 안 쓴다(빈 문자열이면 PlaySelfAttackEffect가 그냥 리턴)
+				selfFx = "",
+				selfFxDur = 0,
+				selfFxDelay = 0,
+				ranged = false,
+				hitFx = "",
+				hitFxDur = 0,
+				attack2 = "",
+				attack2Dur = 0,
+				attack2Sfx = "",
+				summonCooldown = 0,
+				summonCount = 0,
+				summonFx = "",
+				summonFxDur = 0,
+				-- 맞을수록 성장하는 보스가 아니다(전부 0이면 성장 로직이 안 돈다)
+				growScalePerHit = 0,
+				growScaleMax = 0,
+				growAtkPerHit = 0,
+				growAtkMax = 0,
+				hasSplit = true,
+			},
+			{
+				-- 3번: 스텀피 (mob 팩, 유저 지정 2026-09-07). **원거리형** — 플레이어에게 붙지 않고
+				-- 조금 떨어진 자리(RangedReachedScale)에서 멈춰 공격하고, 대신 플레이어가 서 있는
+				-- 자리에 착탄 연출(hitFx)이 뜬다(네펜데스류와 동일한 _hitEffectRUID 경로).
+				name = "스텀피",
+				stand = "0b6c2f6faccc44da980ce832ab636bf6",   -- stand, 6프레임
+				move = "36e33516befa4b2db894d0c7f105b97e",    -- move, 6프레임
+				attack = "3a3034172ea14fe0b5e636604e352306",  -- attack1, 24프레임
+				-- 실측 3.420초 — 이 팩 중 가장 긴 공격 모션이다. 공격 주기는 자동으로
+				-- attackDur+0.7 = 약 4.1초가 된다(머쉬맘 2.55초). 너무 굼뜨면 이 값을 줄여
+				-- 클립을 중간에 끊으면 되고(엔젤 슬라임이 21프레임 중 17프레임만 쓰는 것과 같은 방식),
+				-- 그만큼 착탄 연출 타이밍(attackDur × 0.5)도 같이 당겨진다.
+				attackDur = 3.42,
+				hit = "68ca2cd0ecc04b318660b2b3f14e2acd",     -- hit1, 1프레임(0.600초)
+				die = "e1b4fc8f0f0f4991b13728ad30c40039",     -- die1, 12프레임
+				dieDur = 1.80,                                -- 실측 합계
+				attackSfx = "05c2c35cb8d14ad59a0de03e6bd891fc",  -- audio/Attack1
+				-- 이 팩은 머쉬맘과 달리 **전용 die 사운드가 있다**(audio/Die) — 빌려 쓸 필요 없음.
+				dieSfx = "4c3420d74b6e4ef59493d09ec1edc5ca",     -- audio/Die
+				-- 스텀피 원본 179×175. 머쉬맘(120×112, scale 0.6)과 화면상 비슷한 크기가 되도록 맞췄다.
+				-- ⚠ 원거리형은 접근을 1.15(RangedReachedScale)에서 멈춘다 — 근접형(1.5)보다 23% 작게
+				-- 끝나므로 그만큼 배율을 더 준 값이다(0.4로 잡았다가 실측 후 상향).
+				-- 최종 높이 ≈ 175 × (2.5×0.5) × 1.15 ≈ 251px (머쉬맘 112 × 1.5 × 1.5 ≈ 252px).
+				scale = 0.5,
+				-- 자기 몸에서 터지는 연출은 안 쓴다(이 종은 플레이어 자리에 뜨는 착탄 연출을 쓴다)
+				selfFx = "",
+				selfFxDur = 0,
+				selfFxDelay = 0,
+				ranged = true,
+				-- 유저 지정: "화면에 뿌려지는 공격 연출은 attack1/info/hit". 유저가 준 RUID는 그 클립의
+				-- **0번 프레임 sprite**(d1f246f7…)였는데, 여기서는 3프레임짜리 **animationclip**을 쓴다 —
+				-- 같은 이펙트의 움직이는 버전이고, 기존 원거리 종(_hitEffectRUID)도 전부 이 서브클립을
+				-- 쓴다. 정지 그림이 낫다는 판단이면 저 sprite RUID로 한 줄만 바꾸면 된다.
+				hitFx = "504e309cd9214acf94d450ed1c2a60a6",   -- attack1/info/hit, 3프레임
+				hitFxDur = 0.27,                              -- 실측 합계
+				growScalePerHit = 0,
+				growScaleMax = 0,
+				growAtkPerHit = 0,
+				growAtkMax = 0,
+				-- ── 2번째 공격 = 소환기(유저 지정 2026-09-07: "attack2는 원거리 공격이 아니라 소환") ──
+				-- 30초마다 attack2 모션을 쓰면서 지하실 박쥐 2마리를 부른다. 소환 자리에 먼저 연출이
+				-- 뜨고, 그 연출이 사라지는 동안 박쥐가 겹쳐서 서서히 나타난다(유저 지정).
+				attack2 = "c2e78c4ac4924aa28e2892d108d22f73",  -- attack2, 24프레임
+				attack2Dur = 3.42,                             -- 실측 합계
+				attack2Sfx = "01c18b475d034421a49eceb0e8177dab",  -- audio/Attack2
+				summonCooldown = 30,
+				summonCount = 2,
+				-- 소환 연출은 지하실 박쥐 팩의 attack1/info/hit/3 **sprite**(정지 그림) — 유저가 이
+				-- RUID를 콕 집어 지정했다. 스프라이트라 자체 재생시간이 없어서 아래 시간만큼 띄웠다가
+				-- 알파를 빼며 지운다.
+				summonFx = "380f732f0f214368b2aad0bce3826e5e",
+				summonFxDur = 0.7,
+				-- 소환되는 부하 = 지하실 박쥐(비행형). hpRatio는 그 시점 일반 몬스터 체력 대비 배율.
+				minion = {
+					name = "지하실 박쥐",
+					stand = "c0d1dd5966c945b9acb0af29c173faa0",   -- stand, 6프레임
+					attack = "898688a3be7b41e082db00b95e2dbe02",  -- attack1, 11프레임(유저 지정)
+					attackDur = 0.99,                             -- 실측 합계
+					hit = "5bbe31964b654ddfbd36715de53200ba",     -- hit1, 1프레임(0.120초)
+					die = "20259b51459644abb50e0b6a9e32c11c",     -- die1, 9프레임
+					-- 실측은 0.810인데 일부러 조금 짧게 잡았다 — 이 종(존15 박쥐, GetMapDieDuration에서
+					-- 0.75)은 실측값 그대로 쓰면 알파 0 타이머가 걸리기 전에 die1이 한 바퀴 더 돌아
+					-- "죽었다 다시 나오는" 것처럼 보인 전력이 있다.
+					dieDur = 0.78,
+					attackSfx = "66c88e4029ac47e6941c8350c66b507f",  -- audio/Attack1
+					hitSfx = "560f6c4fc6be40629da19c063e8b6501",     -- audio/Damage
+					dieSfx = "f93c6a22784e439e81d42058c610ef13",     -- audio/Die
+					hpRatio = 1.0,
+					scale = 1.0,
+				},
+				hasSplit = false,
+			},
+			{
+				-- 4번: 다일 (mob 팩, 유저 지정 2026-09-07). **맞을수록 커지고 빨라지는** 보스.
+				-- 이 팩엔 attack1이 없다 — 유일한 공격 모션인 skill1을 공격 연출로 쓴다
+				-- (엔젤 슬라임이 die1 대신 skill2를 사망 연출로 쓰는 것과 같은 방식).
+				name = "다일",
+				stand = "002f7f9d3abc49928a922e8eb3038cf1",   -- stand, 9프레임
+				move = "99712d6acafb4374adc0b10ff16dcbca",    -- move, 6프레임
+				attack = "75ec4896515b4423b1d3e26259426b32",  -- skill1, 13프레임(팩에 attack1 없음)
+				attackDur = 1.56,                             -- 실측 합계
+				hit = "794f9746118f4e73bc99f66c68f96286",     -- hit1, 1프레임(0.600초)
+				die = "e133539edc3d486eaa17345a4859661d",     -- die1, 10프레임
+				dieDur = 1.50,                                -- 실측 합계
+				attackSfx = "16d3d57c44c445e59f43fd59ac3abd56",  -- audio/Skill1(공격 모션이 skill1이라 짝이 맞다)
+				dieSfx = "197dac41590b4541accfec6a6bd0c7b6",     -- audio/Die
+				-- 다일 원본 195×152. 다른 보스와 화면상 크기를 맞추면 0.44인데, 유저 지정으로
+				-- **기본 크기를 20% 줄여서** 0.44 × 0.8 = 0.35로 시작한다(맞으면서 커지는 보스라
+				-- 처음부터 크면 최대 성장 시 화면을 덮는다).
+				scale = 0.35,
+				selfFx = "",
+				selfFxDur = 0,
+				selfFxDelay = 0,
+				ranged = false,
+				hitFx = "",
+				hitFxDur = 0,
+				attack2 = "",
+				attack2Dur = 0,
+				attack2Sfx = "",
+				summonCooldown = 0,
+				summonCount = 0,
+				summonFx = "",
+				summonFxDur = 0,
+				-- 유저 지정(2026-09-07). 3단계에 걸쳐 확정됐다:
+				--   1차 "크기 4%/공속 2%, 상한 40%/30%" → 2차 "타당 증가폭 2배(8%/4%)"
+				--   → 3차 "공격속도 상한 0.5로, 크기도 그에 맞게" ← 지금 값
+				-- 공속 상한 0.30 → 0.50(×1.667)에 맞춰 크기 상한도 같은 비율로 0.40 → 0.67로 올렸다
+				-- (원래 크기:공속 = 4:3 비율을 그대로 유지 — 0.50 × 4/3 ≈ 0.67).
+				-- 상한 도달까지: 크기 9대(0.67/0.08) / 공격속도 13대(0.50/0.04).
+				-- 만렙 시 화면상 크기 ≈ 도달스케일 1.5 × 0.875 × 1.67 = 2.19배, 공격 주기 2.26 → 1.51초.
+				-- 크기는 에르다스가 쓰던 성장 배율 경로를 그대로 재사용하고(_erdasHitGrowthBonus —
+				-- OnUpdate의 스케일 대입 두 곳에 이미 물려 있다), 공격속도는 공격 주기를 나눈다.
+				growScalePerHit = 0.08,
+				growScaleMax = 0.67,
+				growAtkPerHit = 0.04,
+				growAtkMax = 0.50,
+				hasSplit = false,
+			},
+		}
+		if index < 1 or index > #defs then index = 1 end
+		return defs[index]
+	end
+
 	-- 분열체 전용 크기 배율(유저 지정: 1/3로 축소). 엘리트 승급 배율(×1.15) 위에 곱해진다.
 	property number Ep1BossSplitScaleMultiplier = 0.3333
 
@@ -966,14 +1206,49 @@ script GameManager extends Logic
 		self.expText.Text = math.floor(newExp) .. " / " .. math.floor(newExpNeeded)
 	end
 
+	-- 보스에게 맞았을 때의 화면 흔들림 세기/시간(유저 지정 2026-09-07: "보스들이 때리면 더 크게").
+	-- 일반 몬스터는 아래 ShakeCameraOnHit의 0.2 / 0.15 그대로.
+	property number BossHitShakeIntensity = 0.65
+
+	property number BossHitShakeDuration = 0.35
+
+	-- 보스 흔들림이 도는 동안의 종료 시각(클라 로컬, 동기화 안 함). 같은 피격에서 HP 동기화 경로의
+	-- 일반 흔들림이 뒤늦게 도착해 강한 흔들림을 약한 것으로 덮어쓰는 걸 막는 가드다 —
+	-- 두 경로(Multicast / @Sync 프로퍼티)는 서버가 같은 프레임에 보내도 도착 순서가 보장되지 않는다.
+	property number _bossShakeUntil = 0
+
 	-- 플레이어 피격 시 화면을 살짝 흔든다
 	@ExecSpace("ClientOnly")
 	method void ShakeCameraOnHit()
 		local cam = _CameraService:GetCurrentCameraComponent()
 		if cam == nil then return end
+		-- 보스 전용 강한 흔들림이 아직 도는 중이면 건너뛴다(약한 흔들림으로 덮어쓰기 방지)
+		if _UtilLogic.ElapsedSeconds < self._bossShakeUntil then return end
 		cam:ShakeCamera(0.2, 0.15)
 		log("ShakeCameraOnHit triggered")
 	end
+
+	-- 보스 공격에 맞았을 때 서버(OnMonsterReached)가 호출 — 일반 피격보다 크고 길게 흔든다.
+	-- 일반 흔들림은 PlayerHp @Sync 도착(OnSyncProperty)이 트리거하는데, 그 경로엔 "누가 때렸는지"가
+	-- 실려오지 않아서 세기를 구분할 수 없다 — 그래서 보스만 별도 Multicast로 명시적으로 보낸다.
+	@ExecSpace("Multicast")
+	method void PlayBossHitShake()
+		-- 보스 피격 전용 강한 화면 흔들림(클라이언트에서만 실행)
+		if self:IsServer() then return end
+		local cam = _CameraService:GetCurrentCameraComponent()
+		if cam == nil then return end
+		self._bossShakeUntil = _UtilLogic.ElapsedSeconds + self.BossHitShakeDuration
+		cam:ShakeCamera(self.BossHitShakeIntensity, self.BossHitShakeDuration)
+		log("BossHitShake triggered")
+	end
+
+	-- 먹물 스플랫(UI 좌표계 연출)이 뜨는 범위. MonsterAI의 RangedHitFx*(월드 좌표계)와 같은 정책을
+	-- UI px로 옮긴 값이다 — 유저 지정 2026-09-07 "화면 중앙보다 위 / X는 양끝만 피하게 / 모든 원거리".
+	property number RangedFxCenterUIY = 195
+
+	property number RangedFxSpreadUIY = 135
+
+	property number RangedFxSpreadUIX = 720
 
 	-- 원거리(먹물) 공격 몬스터가 플레이어에게 도달했을 때 MonsterAI가 호출 — 몬스터 위치 근처 화면 좌표에
 	-- 먹물 스플랫 아이콘을 툭 튀어나오듯 팝시킨 뒤, 잠깐 붙어있다가 알파를 서서히 빼며 사라지게 한다
@@ -983,16 +1258,16 @@ script GameManager extends Logic
 		if self._inkSplatActive then return end
 		self._inkSplatActive = true
 		
-		local rawUI = _UILogic:ScreenToUIPosition(_UILogic:WorldToScreenPosition(worldPos))
-		local offsetX = (_UtilLogic:RandomDouble() * 2 - 1) * 220
-		local offsetY = (_UtilLogic:RandomDouble() * 2 - 1) * 140
-		local splatY = rawUI.y + offsetY
-		-- 유저 지정(2026-08-22): "좌표가 너무 아래일때있어서 하단 30%는 제외" — 캔버스는 1920x1080
-		-- 중앙원점(ui-fundamentals.md 기준, Y 범위 -540~+540)이므로 하단 30%(-540~-540+1080*0.3=-216)를
-		-- 잘라내고, 그 밑으로 떨어지면 화면 하단 30% 경계선(-216)에 고정한다.
-		local screenBottomExcludeY = -216
-		if splatY < screenBottomExcludeY then splatY = screenBottomExcludeY end
-		local splatUI = Vector2(rawUI.x + offsetX, splatY)
+		-- 유저 지정(2026-09-07, "모든 원거리 공통"): 착탄 연출은 **화면 중앙보다 위**에 뜨고, X는
+		-- 양 끝만 피한다. 캔버스는 1920x1080 중앙원점(Y -540~+540, X -960~+960).
+		-- 예전엔 몬스터 위치(worldPos)를 UI로 변환해 그 언저리에 뿌렸는데, 이제 몬스터가 화면 어디에
+		-- 있든 **항상 같은 상단 밴드**(+60 ~ +330)에 뜬다. 이 밴드는 MonsterAI의 월드 좌표 밴드
+		-- (py+1.7 ~ py+3.3)를 실측 환산비(1유닛 = 172.5px, 화면 중앙 = py+1.41)로 옮긴 것과 같은
+		-- 자리다 — 원거리 두 경로(먹물 UI / 일반 월드)의 연출 높이를 맞추기 위함.
+		-- 먹물은 "화면(렌즈)에 튄 자국" 연출이라 몬스터 자리를 안 따라가도 어색하지 않다.
+		local splatX = (_UtilLogic:RandomDouble() * 2 - 1) * self.RangedFxSpreadUIX
+		local splatY = self.RangedFxCenterUIY + (_UtilLogic:RandomDouble() * 2 - 1) * self.RangedFxSpreadUIY
+		local splatUI = Vector2(splatX, splatY)
 		
 		local icon = self.inkSplatIcon
 		icon.Color = Color(1, 1, 1, 1)
@@ -1094,6 +1369,13 @@ script GameManager extends Logic
 		_CardManager:GrantBossCardRewards(worldPos, fallHeight, groundWorldY, dropScale)
 		-- 파워 엘릭서 확정 드롭 (potionType=3 — 체력완전회복 + 전체 스킬 쿨타임 초기화)
 		self:ApplyPotionDrop(3, worldPos, fallHeight, groundWorldY, dropScale)
+		-- 슬롯 스킬 드롭 상한 해제 — 반드시 GrantBossCardRewards **뒤**여야 한다.
+		-- 보스 자신의 확정 보상도 "이 웨이브 최대 2개" 안에 들어가야 하기 때문이다.
+		_CardManager:EndBossWaveDropCap()
+		-- 보스곡 → 지금 있는 맵의 원래 곡으로 복귀(유저 지정 2026-09-08).
+		-- 엔젤 슬라임처럼 분열하는 보스는 분열체까지 전멸해야 여기 도달하므로, 전투가 완전히 끝난
+		-- 시점에만 곡이 바뀐다.
+		_MapManager:ForcePlayBgmForCurrentMap()
 		log("GameManager: Boss defeated (Wave " .. self.Wave .. ")")
 	end
 
@@ -3588,7 +3870,9 @@ script GameManager extends Logic
 	-- 연속으로 때리면 대미지 안들어가게 딜레이 걸었잖아? 쟤는 무시하라는말임". 무리 공격이 착지한
 	-- 뒤에도 _hitImmune은 여느 공격과 동일하게 켰다 꺼서(아래), 그 뒤로 0.8초간 다른 몬스터의 공격을
 	-- 막는 기존 동작 자체는 그대로 유지한다 — 무리 공격이 "들어가는 쪽"만 예외를 받는다.
-	method void OnMonsterReached(number dmgMultiplier, boolean ignoreHitImmune)
+	-- isBoss=true면 피해가 실제로 들어간 뒤 보스 전용 강한 화면 흔들림(PlayBossHitShake)을 같이 보낸다
+	-- (유저 지정 2026-09-07). 무효화/허수아비 리다이렉트처럼 피해가 안 들어간 경로에서는 흔들지 않는다.
+	method void OnMonsterReached(number dmgMultiplier, boolean ignoreHitImmune, boolean isBoss)
 		if self.GameOver then return end
 		if self._hitImmune and not ignoreHitImmune then return end
 		
@@ -3628,6 +3912,8 @@ script GameManager extends Logic
 
 		self.PlayerHp = self.PlayerHp - dmg
 		log("Player hit! HP:" .. self.PlayerHp .. " (Wave " .. self.Wave .. " timeStep:" .. timeStep .. " dmg:" .. dmg .. ")")
+		-- 보스 타격만 더 크게 흔든다 — 일반 피격 흔들림은 클라의 PlayerHp 동기화 경로가 알아서 건다
+		if isBoss then self:PlayBossHitShake() end
 		-- 슈트B 레전더리(HP 20% 이하 즉시 회복)는 피해가 적용된 "뒤"에 판정해야 한다
 		_GearEffectLogic:OnAfterDamaged()
 
@@ -6359,3 +6645,4 @@ script GameManager extends Logic
 	end
 
 end
+

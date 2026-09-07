@@ -131,18 +131,48 @@ script MonsterAI extends Component
 
 	property integer _dotTimerId = 0
 
-	-- 엘리트 상태 (5웨이브마다 스폰 그룹 중 1마리)
+	-- 엘리트 상태 (5웨이브마다 스폰 그룹 중 1마리).
+	-- @Sync인 이유: 엘리트 표식(발밑 오라)을 **클라가 스스로** 켜야 하기 때문이다. MarkElite는 스폰
+	-- 직후에 불리는데, 그 시점엔 클라에 엔티티가 아직 없을 수 있어서 Multicast로 오라를 쏘면
+	-- self.Entity가 유효하지 않아 조용히 실패한다. @Sync로 두면 클라가 엔티티를 만든 뒤
+	-- OnSyncProperty로 값을 받으므로 타이밍 경합이 없다.
+	@Sync
 	property boolean _isElite = false
 
 	property number _scaleMultiplier = 1.0
 
-	property string EliteOutlineMaterialId = "1a012835-dab3-4dcd-821b-9bc826ce696f"  -- RootDesk/MyDesk/Materials/EliteOutline.material
+	-- ── 엘리트 표식: 발밑 오라 (유저 지정 2026-09-08) ─────────────────────────────────
+	-- "테두리 노란색으로 감기는 거 쪼금 짜치는데" → 아웃라인 머티리얼을 걷어내고, 메이플 본가처럼
+	-- 바닥에 원근으로 깔리는 오라 링을 발밑에 붙인다. 원본 스프라이트는 전혀 안 건드린다.
+	-- RUID는 바닥 원근 골드 링(7프레임, 320x280 — 썸네일 육안 확인). 엔티티에 **부착**이라
+	-- 몬스터가 접근하며 커지면 오라도 같이 커지고, 존 이동/파괴 때도 같이 따라간다.
+	property string EliteAuraRUID = "34887ea12dd34598a59c8fb9fb210c13"
 
-	-- 웨이브10 리본돼지 보스인지 여부 — Die()에서 GameManager에 보스 처치를 알리는 데 사용
+	-- 몬스터 엔티티 스케일에 곱해지는 로컬 배율(부착 이펙트라 부모 스케일을 상속한다)
+	property number EliteAuraScale = 0.30
+
+	property number EliteAuraYOffset = 0.0
+
+	-- 클립이 7프레임 루프라 밝기가 오르내린다(맥동). 가장 어두운 프레임에서도 "엘리트구나"가
+	-- 읽혀야 해서 알파는 1.0로 둔다 — 더 은은하게 하고 싶으면 이 값만 낮추면 된다.
+	property number EliteAuraAlpha = 1.0
+
+	-- 클라이언트 로컬 — _EffectService:RemoveEffect에 넘길 시리얼(0이면 재생 중 아님)
+	property integer _eliteAuraSerial = 0
+
+	-- 웨이브10 리본돼지 보스인지 여부 — Die()에서 GameManager에 보스 처치를 알리는 데 사용.
+	-- @Sync인 이유: CardManager.ScanMonsterBoxAt(맵 오브젝트 터치 가드)이 **클라에서** 보스 여부를
+	-- 알아야 터치 판정 상자에 보스 배율(FocusBoxBossScale)을 적용할 수 있다. 쓰기는 전부 서버 쪽
+	-- (InitializeStats 등)이라 동기화 방향(서버→클라)과 어긋나지 않는다.
+	@Sync
 	property boolean _isBoss = false
 	-- 에피소드1 보스 분열(2페이즈) 관련. _ep1BossSplitDone은 보스 쪽 1회 가드,
 	-- _isEp1BossSplit은 튀어나온 분열체 쪽 표식(사망 시 스포너에 생존 수를 알려야 한다)
 	property boolean _ep1BossSplitDone = false
+	-- 이번 보스가 분열 기믹을 가진 종인지(에피소드1 로스터의 hasSplit). 보스 순번마다 다르므로
+	-- InitializeStats가 스폰할 때마다 다시 세운다 — 기믹 없는 보스(블루 머쉬맘)는 false라
+	-- 일반 사망 경로로 바로 흘러간다.
+	property boolean _hasEp1Split = false
 	property boolean _isEp1BossSplit = false
 	property integer _ep1SplitFadeTimerId = 0
 
@@ -318,6 +348,49 @@ script MonsterAI extends Component
 
 	property number _hitEffectDuration = 0.5
 
+	-- 원거리 착탄 연출이 뜨는 범위(모든 원거리 종 공통, 유저 지정 2026-09-07). 전부 **플레이어 기준
+	-- 월드 유닛**이고, 실측 근거는 PlayRangedHitEffect 주석 참고.
+	--   CenterY = 플레이어 발밑에서 위로 이만큼 올린 곳이 밴드의 중심(화면 중앙은 +1.41 지점)
+	--   SpreadY = 그 중심에서 위아래로 흔드는 폭 → 실제 밴드는 py+1.7 ~ py+3.3
+	--   SpreadX = 좌우로 흔드는 폭(가시 반폭 5.56 중 4.2 → 양 끝 24%만 비운다)
+	property number RangedHitFxCenterY = 2.5
+
+	property number RangedHitFxSpreadY = 0.8
+
+	property number RangedHitFxSpreadX = 4.2
+
+	-- ── 보스 2번째 공격 = 소환기(에피소드1 로스터의 attack2/summon* 칸) ──────────────────
+	-- _summonCooldown이 0이면 이 보스는 소환기가 없다(로직 자체가 안 돈다). 도달(_reachedPlayer)한
+	-- 뒤부터 쿨타임을 세고, 만료되면 attack2 모션을 재생하면서 부하를 부른다.
+	property string _attack2RUID = ""
+
+	property number _attack2Duration = 0
+
+	property string _attack2SoundRUID = ""
+
+	property number _summonCooldown = 0
+
+	property integer _summonCount = 0
+
+	property number _summonTimer = 0
+
+	-- ── 맞을수록 성장하는 보스(4번 다일) ─────────────────────────────────────────────
+	-- 전부 0이면 성장 로직이 안 돈다(다른 보스/일반 몬스터). 스택은 TakeDamage 계열 5곳에서
+	-- ApplyBossHitGrowth()로 1씩 쌓인다.
+	--   크기: 에르다스가 쓰던 성장 배율(_erdasHitGrowthBonus)을 **그대로 재사용**한다 —
+	--         OnUpdate의 스케일 대입 두 곳(접근 중/도달 시)에 이미 물려 있어서 새 배선이 필요 없다.
+	--         한 엔티티가 에르다스이면서 동시에 다일일 수는 없으므로 충돌하지 않는다.
+	--   공격속도: _growAtkBonus만큼 공격 주기를 나눈다(GetEffectiveAttackInterval).
+	property number _growScalePerHit = 0
+
+	property number _growScaleMax = 0
+
+	property number _growAtkPerHit = 0
+
+	property number _growAtkMax = 0
+
+	property number _growAtkBonus = 0
+
 	-- PlayRangedHitEffect의 dropScale에 곱해지는 추가 배율(기본 1.0=무영향). Ep2MiniBeanEasterEggLogic
 	-- 전용 값(30% 크게)뿐 아니라, InitializeStats(존 풀 종)에서도 GameManager.GetMapHitEffectScaleMultiplier로
 	-- 채운다 — 유저 지정(2026-08-25): 몽실생크림 20%·예티류 15% 축소.
@@ -343,6 +416,11 @@ script MonsterAI extends Component
 	property string _selfAttackEffectRUID = ""
 
 	property number _selfAttackEffectDuration = 0.5
+
+	-- 공격 시작(attack1 재생 시작) 시점부터 이 연출이 뜨기까지의 지연(초). 0이면 즉시(푼코/쿠스코의
+	-- 기존 동작 그대로). attack1 클립이 "뜸을 들였다가 터지는" 종은 그 터지는 프레임 시각을 넣어야
+	-- 연출이 따로 논다는 느낌이 안 난다(블루 머쉬맘 = 0.80초).
+	property number _selfAttackEffectDelay = 0
 
 	-- 원거리 히트 이펙트를 쓰는 종(네펜데스/다크네펜데스/거대 네펜데스 2페이즈) 전용 공격 쿨타임
 	-- 오버라이드 — 유저 요청: "너무 빠르게 공격하는 감이 있는데 공격하고 0.7초정도는 쉬자". 0이면
@@ -672,10 +750,7 @@ script MonsterAI extends Component
 			-- OnSyncProperty의 "값 변경" 이벤트만 기다리지 않고 여기서 바로 적용한다.
 			-- 맵 이동 직후처럼 동기화 타이밍이 애매한 경우, OnSyncProperty가 안 불려도
 			-- 몬스터가 기본 플레이스홀더 스프라이트로 멈춰있지 않도록 하기 위함.
-			local renderer = self.Entity.SpriteRendererComponent
-			if renderer ~= nil then
-				renderer.SpriteRUID = self.MonsterSprite
-			end
+			self:ApplyBodySprite(self.MonsterSprite)
 			-- "길잃은 루돌프" 전용 터치 연결 — TouchReceiveComponent가 없는 일반 몬스터에서는
 			-- TouchEvent가 애초에 발생하지 않으므로 이 연결은 무해하다(다른 500여종 몬스터엔 영향 없음).
 			self._touchHandler = self.Entity:ConnectEvent(TouchEvent, self.OnLostRudolphClientTouched)
@@ -694,6 +769,21 @@ script MonsterAI extends Component
 		-- 점유자의 _dead가 새 스폰에 남아있는 것으로 추정). 남아있으면 얼음 파편처럼 "방금 스폰된
 		-- 몬스터"를 신뢰하는 로직이 조용히 무력화되므로, 초기화 맨 앞에서 명시적으로 되돌린다.
 		self._dead = false
+		-- 자기 몸에서 터지는 공격 이펙트는 특정 종(에피1 보스 머쉬맘)만 쓴다 — 그 엔티티가 나중에
+		-- 일반 몬스터로 재사용될 때 포자가 딸려오지 않도록 여기서 매번 지운다. 아래 해당 분기에서
+		-- 다시 채워진다(푼코/쿠스코는 InitializeStats를 안 거치는 별도 초기화라 영향 없음).
+		self._selfAttackEffectRUID = ""
+		self._selfAttackEffectDelay = 0
+		-- 소환기도 마찬가지 — 보스였던 엔티티가 일반 몬스터로 재사용될 때 박쥐를 부르면 안 된다
+		self._summonCooldown = 0
+		self._summonCount = 0
+		-- 피격 성장(다일)도 재사용 엔티티에 남아있으면 안 된다 — 스택과 설정 둘 다 지운다
+		self._growScalePerHit = 0
+		self._growScaleMax = 0
+		self._growAtkPerHit = 0
+		self._growAtkMax = 0
+		self._growAtkBonus = 0
+		self._erdasHitGrowthBonus = 0
 		self:SetSpawnZone(zoneIndex)
 		self._isBoss = isBoss
 		self._reachedScaleThreshold = 1.5
@@ -997,36 +1087,84 @@ script MonsterAI extends Component
 			end
 		end
 		
-		-- 에피소드1 보스는 "존 몬스터가 커진 것"이 아니라 전용 외형(가디언 엔젤 슬라임)으로 고정한다
-		-- (유저 지정, 2026-09-06). 존 풀에서 읽어온 값들을 여기서 통째로 덮어쓴다 — 거대 네펜데스
-		-- 1페이즈 덮어쓰기와 같은 방식이다. HP 배율·접근속도·스케일(×2.5)은 위 isBoss 분기가 이미
-		-- 처리했으므로 건드리지 않는다.
+		-- 에피소드1 보스는 "존 몬스터가 커진 것"이 아니라 **정해진 순서대로 나오는 전용 보스**다
+		-- (유저 지정 — 2026-09-06 엔젤 슬라임 단독 → 2026-09-07 로스터화). 존 풀에서 읽어온 값들을
+		-- 여기서 통째로 덮어쓴다 — 거대 네펜데스 1페이즈 덮어쓰기와 같은 방식이다.
+		-- HP 배율·접근속도·스케일(×2.5)은 위 isBoss 분기가 이미 처리했으므로 건드리지 않는다.
+		-- 몇 번째 보스인지는 스포너가 들고 있고(보스를 잡을 때만 증가), 정의는 GameManager 로스터에 있다.
 		if isBoss and _GameManager.SelectedEpisode == 1 then
-			self._standRUID = _GameManager.Ep1BossStandRUID
-			self._moveRUID = _GameManager.Ep1BossMoveRUID
-			self._attackRUID = _GameManager.Ep1BossAttackRUID
-			self._attackDuration = _GameManager.Ep1BossAttackDuration
-			self._attackSoundRUID = _GameManager.Ep1BossAttackSoundRUID
-			self._hitRUID = _GameManager.Ep1BossHitRUID
+			local bossIndex = _MonsterSpawner:GetEp1BossIndex()
+			local def = _GameManager:GetEp1BossDef(bossIndex)
+			self._standRUID = def.stand
+			self._moveRUID = def.move
+			self._attackRUID = def.attack
+			self._attackDuration = def.attackDur
+			self._attackSoundRUID = def.attackSfx
+			self._hitRUID = def.hit
+			-- 피격음은 안 쓴다 — 보스는 맞는 횟수가 많아서 같은 클립이 도배된다
 			self._hitSoundRUID = ""
-			self._dieRUID = _GameManager.Ep1BossDieRUID
-			self._dieDuration = _GameManager.Ep1BossDieDuration
-			self._dieSoundRUID = _GameManager.Ep1BossDieSoundRUID
+			self._dieRUID = def.die
+			self._dieDuration = def.dieDur
+			self._dieSoundRUID = def.dieSfx
+			-- 이 보스가 사망 시 분열하는 종인지(2번 가디언 엔젤 슬라임만 true). Die()가 이 값으로
+			-- 분열 경로 진입을 판정한다 — 엔티티 재사용 대비로 보스마다 **매번** 명시적으로 세운다.
+			self._hasEp1Split = def.hasSplit
 			-- 존 풀에서 딸려온 특수 거동은 전부 끈다 — 원거리/고정형/2페이즈 종이 보스로 뽑혔을 때
-			-- 그 성질이 슬라임에 그대로 묻어오면 안 된다(분열은 별도 경로로 처리한다)
+			-- 그 성질이 보스에 그대로 묻어오면 안 된다(분열은 별도 경로로 처리한다)
 			self._isRangedInk = false
 			self._isRangedSlash = false
 			self._neverAttacks = false
 			self._isGiantNepenthes = false
 			self._hasPhase2 = false
-			self._hitEffectRUID = ""
-			-- attack1이 2.1초로 길어서 기본 간격이면 다음 공격이 연출을 잘라먹는다
-			self._customAttackInterval = self._attackDuration + 0.7
-			-- 슬라임 스프라이트가 원래 커서 보스 공통 배율(×2.5)만 태우면 화면을 덮는다 — 여기서 더 줄인다
-			self._scaleMultiplier = self._scaleMultiplier * _GameManager.Ep1BossScaleMultiplier
-			-- attack1이 1.8초로 길어서 그 사이 피격될 때마다 1프레임 hit1로 튀면 공격 연출이 계속
-			-- 끊겨 보인다(유저 리포트) — 공격 중에는 피격 연출을 건너뛴다(대미지는 정상 적용)
-			self._noHitAnimDuringAttack = true
+			-- 플레이어가 서 있는 자리에 뜨는 착탄 연출(원거리 보스 전용 — 스텀피). 없는 보스는 빈 문자열이라
+			-- PlayRangedHitEffect가 그냥 리턴한다. 존 풀에서 딸려올 수 있는 부가값들도 여기서 기본값으로
+			-- 되돌린다(안 그러면 그 존 종의 축소/투명도/동시출력 설정이 보스에 묻어온다).
+			self._hitEffectRUID = def.hitFx
+			self._hitEffectDuration = def.hitFxDur
+			self._hitEffectScaleMultiplier = 1.0
+			self._hitEffectAlpha = 1.0
+			self._hitEffectMaxConcurrent = 1
+			self._projectileRUID = ""
+			-- 원거리형 보스는 플레이어 코앞까지 붙지 않고 조금 떨어진 데서 멈춰 공격한다
+			-- (기존 원거리 종과 같은 임계값 — 위 isBoss 분기가 세운 1.5를 여기서 낮춘다)
+			if def.ranged then
+				self._reachedScaleThreshold = self.RangedReachedScale
+			end
+			-- 2번째 공격 = 소환기(스텀피). 쿨타임 0이면 없는 보스라 아래 OnUpdate 틱이 아예 안 돈다.
+			-- 유저 지정(2026-09-08): "스텀피 어택2(박쥐 소환)를 맨 처음에 사용하게 해줘, 일반 어택 말고".
+			-- 그래서 타이머를 0으로 시작한다 — 플레이어에게 도달하는 순간의 **첫 행동이 일반 공격이
+			-- 아니라 소환**이 된다(실제 분기는 도달 처리부의 _summonTimer <= 0 체크).
+			-- 존 이동 재배치(RelocateBossToCurrentZone)는 _summonTimer를 저장/복원하므로, 쿨타임이
+			-- 남은 채로 옮겨가면 다시 도달해도 공짜 소환이 나가지 않는다.
+			self._attack2RUID = def.attack2
+			self._attack2Duration = def.attack2Dur
+			self._attack2SoundRUID = def.attack2Sfx
+			self._summonCooldown = def.summonCooldown
+			self._summonCount = def.summonCount
+			self._summonTimer = 0
+			-- 맞을수록 성장(다일). 전부 0인 보스는 ApplyBossHitGrowth가 즉시 리턴한다.
+			self._growScalePerHit = def.growScalePerHit
+			self._growScaleMax = def.growScaleMax
+			self._growAtkPerHit = def.growAtkPerHit
+			self._growAtkMax = def.growAtkMax
+			-- 공격할 때 자기 몸에서 터지는 이펙트(머쉬맘 포자). 없는 보스는 빈 문자열이라 아무것도 안 뜬다
+			self._selfAttackEffectRUID = def.selfFx
+			self._selfAttackEffectDuration = def.selfFxDur
+			self._selfAttackEffectDelay = def.selfFxDelay
+			-- attack1 재생시간이 공격 주기보다 길면 다음 공격이 이전 연출을 잘라먹는다(엔젤 슬라임 1.8초).
+			-- 짧은 종(머쉬맘 0.6초)은 기본 주기를 그대로 쓴다.
+			if self._attackDuration > self.AttackInterval then
+				self._customAttackInterval = self._attackDuration + 0.7
+			else
+				self._customAttackInterval = 0
+			end
+			-- 공격 연출이 긴 종은 그 사이 피격될 때마다 1프레임 hit1로 튀어 공격이 계속 끊겨 보인다
+			-- (유저 리포트 — 엔젤 슬라임 1.8초). 그때만 피격 연출을 건너뛴다(대미지는 정상 적용).
+			self._noHitAnimDuringAttack = self._attackDuration >= 1.0
+			-- 종마다 원본 스프라이트 크기가 크게 달라서(슬라임 494×365 / 머쉬맘 120×112) 보스 공통
+			-- 배율(×2.5)만 태우면 화면상 크기가 제각각이 된다 — 종별 보정 배율을 여기서 더 곱한다
+			self._scaleMultiplier = self._scaleMultiplier * def.scale
+			log("MonsterAI: Ep1 boss #" .. bossIndex .. " = " .. def.name)
 		end
 
 		-- 접근 중엔 move, 이미 도달(_reachedPlayer)했거나 애초에 move 연출이 없는 종(빈 문자열 — 공중형은
@@ -1534,6 +1672,51 @@ script MonsterAI extends Component
 		log("MonsterAI: ground alien invader initialized HP=" .. hp)
 	end
 
+	-- 보스 호위병(1번 블루 머쉬맘의 파란버섯) 전용 초기화 — MonsterSpawner.SpawnBossEscorts가 스폰 직후
+	-- 호출한다. InitializeGroundAlienInvader와 거의 같은 "존 풀을 안 거치는 지상형 커스텀 몬스터"인데,
+	-- 그쪽은 _isRangedInk=true(원거리 취급 — 먹물 연출 + 더 먼 거리에서 정지)라 근접 쫄따구에는 안 맞아서
+	-- 따로 뒀다. attackRUID를 안 받는 이유: 이 팩엔 공격 모션이 없어서, 기존 정책대로 홉(들이받기)으로
+	-- 공격하는 게 맞다(빈 문자열이면 OnReachPlayer가 자동으로 그 경로를 탄다).
+	@ExecSpace("ServerOnly")
+	method void InitializeBossEscort(integer zoneIndex, number hp, number speed, string standRUID, string moveRUID, string hitRUID, string dieRUID, number dieDuration, number spawnX, number groundY)
+		-- 보스 옆에 붙어 나오는 근접 호위병으로 초기화한다(외형/체력은 로스터의 escort 정의에서 온다)
+		self._dead = false
+		self:SetSpawnZone(zoneIndex)
+		self.MaxHp = hp
+		self.CurrentHp = hp
+		self.ApproachSpeed = speed
+		self._standRUID = standRUID
+		self._moveRUID = moveRUID
+		self._hitRUID = hitRUID
+		self._dieRUID = dieRUID
+		self._dieDuration = dieDuration
+		self._attackRUID = ""
+		self._attackDuration = 0.25
+		self._customAttackInterval = 0
+		self._isFlying = false
+		self._isRangedInk = false
+		self._isRangedSlash = false
+		self._neverAttacks = false
+		self._isGiantNepenthes = false
+		self._hasPhase2 = false
+		self._hitEffectRUID = ""
+		self._reachedScaleThreshold = 1.5
+		self.Entity.TransformComponent.Position = Vector3(spawnX, groundY, 0)
+		self.MonsterSprite = (moveRUID ~= "") and moveRUID or standRUID
+		self:ApplyBodySprite(self.MonsterSprite)
+		self.Entity.TransformComponent.Scale = Vector3(self._currentScale * self._scaleMultiplier, self._currentScale * self._scaleMultiplier, 1.0)
+		self:UpdateDepth()
+	end
+
+	-- 보스가 죽을 때 호위병도 같이 죽인다(유저 지정) — 스포너가 살아있는 호위병마다 호출한다.
+	-- 평범하게 Die()를 태우므로 사망 연출/사운드/경험치·골드 보상까지 일반 처치와 완전히 동일하다.
+	@ExecSpace("ServerOnly")
+	method void DieAsBossEscort()
+		-- 두목이 죽었으니 따라 죽는다
+		if self._dead then return end
+		self:Die()
+	end
+
 	-- Ep2MiniBeanEasterEggLogic 전용 — "존을 이동해도 따라오게" 하기 위해 비행 사인파 중심(_flyCenterX/
 	-- _flyBaseY, InitializeStats/InitializeAlienInvader가 스폰 시점에 한 번만 고정하는 값)을 새 존의
 	-- 스폰 위치로 즉시 옮긴다(드리프트 없이 스냅 — SilentMoveToMap처럼 강제 이동은 원래 순간이동이라
@@ -1775,7 +1958,7 @@ script MonsterAI extends Component
 		if not self._isLostRudolph or self._dead then return end
 		if self.IsStanding then
 			self._dead = true
-			self:PlayDeathAnimation(self._dieRUID, self._dieDuration)
+			self:PlayDeathAnimation(self._dieRUID, self._dieDuration, self._dieSoundRUID)
 			self.Entity:Destroy(self._dieDuration + 0.2)
 			_Ep3Map2LostRudolphLogic:OnCaught()
 		else
@@ -1861,8 +2044,8 @@ script MonsterAI extends Component
 		self.MaxHp = self.MaxHp * 1.15
 		self.CurrentHp = self.MaxHp
 		self.Entity.TransformComponent.Scale = Vector3(self._currentScale * self._scaleMultiplier, self._currentScale * self._scaleMultiplier, 1.0)
-		-- 골드 아웃라인 머티리얼 적용 (MaterialId는 @Sync라 서버에서 바꾸면 클라이언트에 자동 반영)
-		self.Entity.SpriteRendererComponent:ChangeMaterial(self.EliteOutlineMaterialId)
+		-- 표식은 아웃라인 머티리얼이 아니라 **발밑 오라**다(유저 지정 2026-09-08). 여기서 따로
+		-- 쏘지 않는다 — _isElite가 @Sync라 클라의 OnSyncProperty가 받아서 스스로 오라를 켠다.
 		log("MonsterAI: promoted to ELITE (HP=" .. math.floor(self.MaxHp) .. ")")
 	end
 
@@ -1903,8 +2086,46 @@ script MonsterAI extends Component
 		end
 	end
 
+	-- 엘리트 발밑 오라를 켠다(클라 전용). 부착 이펙트라 몬스터가 커지면 같이 커지고,
+	-- 몬스터 엔티티가 사라지면 같이 사라진다. 그려지는 순서는 몬스터 본체보다 한 칸 뒤로 보내
+	-- 오라가 몸을 덮지 않게 한다.
+	@ExecSpace("ClientOnly")
+	method void StartEliteAura()
+		-- 발밑 오라 시작(이미 재생 중이면 아무것도 안 한다)
+		if self._eliteAuraSerial ~= 0 then return end
+		if self.EliteAuraRUID == "" then return end
+		if not isvalid(self.Entity) then return end
+		local renderer = self.Entity.SpriteRendererComponent
+		local options = {}
+		if renderer ~= nil then
+			options["SortingLayer"] = renderer.SortingLayer
+			options["OrderInLayer"] = renderer.OrderInLayer - 1
+		end
+		options["Alpha"] = self.EliteAuraAlpha
+		local s = self.EliteAuraScale
+		self._eliteAuraSerial = _EffectService:PlayEffectAttached(
+			self.EliteAuraRUID, self.Entity,
+			Vector3(0, self.EliteAuraYOffset, 0), 0,
+			Vector3(s, s, 1), true, options)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void StopEliteAura()
+		-- 발밑 오라 제거(사망/정리 시)
+		if self._eliteAuraSerial == 0 then return end
+		_EffectService:RemoveEffect(self._eliteAuraSerial)
+		self._eliteAuraSerial = 0
+	end
+
 	@ExecSpace("ClientOnly")
 	method void OnSyncProperty(string name, any value)
+		-- 엘리트 표식(발밑 오라) — 서버가 MarkElite로 _isElite를 켜면 여기로 도착한다.
+		-- _dead 가드보다 **위**에 둔다: 아래 가드는 사망 후 늦게 오는 스프라이트 동기화를 막는 용도라
+		-- 여기까지 막을 이유가 없고, 막히면 오라가 영영 안 켜진다.
+		if name == "_isElite" then
+			if self._isElite then self:StartEliteAura() else self:StopEliteAura() end
+			return
+		end
 		-- MonsterSprite가 동기화되면 SpriteRendererComponent의 RUID를 교체한다.
 		-- 사망 후에는 무시 — Die()가 죽는 스프라이트로 이미 바꿔놨는데, 사망 처리 직후(Entity가
 		-- 파괴 전 유예시간 동안 살아있는 동안) 뒤늦게 도착한 MonsterSprite 동기화가 이걸 다시
@@ -1913,6 +2134,7 @@ script MonsterAI extends Component
 		if name == "MonsterSprite" and self.MonsterSprite ~= "" then
 			local renderer = self.Entity.SpriteRendererComponent
 			if renderer ~= nil then
+				-- (아래 if 안에서 ApplyBodySprite로 본체+그림자를 같이 교체한다 — 위상 어긋남 방지)
 				-- 버그 수정(2026-08-27, 유저 리포트: "웨어울프/라이칸스로프/스노우맨 공격 연출이 안 보이고
 				-- 점프만 보임") — OnUpdate가 처음 도달(_reachedPlayer=true)하는 그 프레임에 self.MonsterSprite를
 				-- stand로 바꾼 바로 다음 줄에서 OnReachPlayer()를 호출해 PlayAttackAnimation(Multicast)도
@@ -1930,7 +2152,7 @@ script MonsterAI extends Component
 				-- (_isPlayingTransientSprite, 동기화 대상 아님)를 직접 세팅/해제하게 하고 여기서는 그 플래그만
 				-- 확인한다.
 				if not self._isPlayingTransientSprite then
-					renderer.SpriteRUID = self.MonsterSprite
+					self:ApplyBodySprite(self.MonsterSprite)
 				end
 			else
 				log_warning("MonsterAI: SpriteRendererComponent nil")
@@ -1944,7 +2166,18 @@ script MonsterAI extends Component
 		if _GameManager.GameOver then return end
 		if self._isPushingBack then return end
 		if self._paused then return end
-		
+
+		-- 보스 소환기 쿨타임(스텀피의 attack2). 쿨타임이 0인 보스/일반 몬스터는 이 블록을 그냥 지나간다.
+		-- 도달(_reachedPlayer)한 뒤부터만 센다 — 접근 중에 부하가 튀어나오면 보스가 어디 있는지 모르겠다.
+		-- 스턴/빙결 중엔 세지 않는다(멈춰 있는데 소환만 나가면 이상하다).
+		if self._summonCooldown > 0 and self._reachedPlayer and not self._isStunned and not self._isHardFrozen then
+			self._summonTimer = self._summonTimer - delta
+			if self._summonTimer <= 0 then
+				self._summonTimer = self._summonCooldown
+				self:DoBossSummon()
+			end
+		end
+
 		if self._isBonusBoss then
 			self:UpdateWander(delta)
 			-- 비행형과 동일한 원인의 버그 — 보너스 보스도 이 분기에서 바로 return해서 지상 전용 로직(콤보
@@ -2031,7 +2264,7 @@ script MonsterAI extends Component
 			self._attackTimer = self._attackTimer - delta
 			if self._attackTimer <= 0 then
 				self:OnReachPlayer()
-				self._attackTimer = (self._customAttackInterval > 0) and self._customAttackInterval or self.AttackInterval
+				self._attackTimer = self:GetEffectiveAttackInterval()
 			end
 			return
 		end
@@ -2069,12 +2302,20 @@ script MonsterAI extends Component
 			self.Entity.TransformComponent.Scale = Vector3(reachedScale, reachedScale, 1.0)
 			self:UpdateDepth()
 			self._reachedPlayer = true
-			self._attackTimer = (self._customAttackInterval > 0) and self._customAttackInterval or self.AttackInterval
+			self._attackTimer = self:GetEffectiveAttackInterval()
 			-- 도달했으니 걷는 포즈(move)에서 정지 포즈(stand)로 되돌린다 — move가 아예 없던 종(moveRUID=="")은
 			-- 이미 MonsterSprite가 stand였으므로 그대로 다시 대입해도 무해하다.
 			self.MonsterSprite = self._standRUID
 			self:SyncDepthOverlaySprite()
-			self:OnReachPlayer()
+			-- 소환기를 가진 보스(스텀피)는 도달 직후 **첫 행동을 소환으로** 쓴다(유저 지정 2026-09-08:
+			-- "어택2를 맨 처음에 사용하게 해줘, 일반 어택 말고"). 소환 타이머가 이미 돌고 있으면
+			-- (= 존 이동으로 재배치된 뒤 다시 도달한 경우) 평소대로 일반 공격을 한다.
+			if self._summonCooldown > 0 and self._summonTimer <= 0 then
+				self._summonTimer = self._summonCooldown
+				self:DoBossSummon()
+			else
+				self:OnReachPlayer()
+			end
 		else
 			local approachScale = self._currentScale * self._scaleMultiplier * (1.0 + self._erdasHitGrowthBonus)
 			self.Entity.TransformComponent.Scale = Vector3(approachScale, approachScale, 1.0)
@@ -2199,6 +2440,40 @@ script MonsterAI extends Component
 		self.Entity.TransformComponent.Scale = Vector3(scale, scale, 1.0)
 	end
 
+	-- 맞을수록 성장하는 보스(4번 다일) 전용 — TakeDamage 계열 5곳 전부에서 에르다스 성장과 나란히
+	-- 호출된다. 유저 지정(2026-09-07): "1개 맞을 때마다 크기 4%, 공격속도 2%. 최대 공격속도 30%,
+	-- 크기 40%". 둘 다 **선형 누적 + 상한 클램프**라 크기는 10대, 공격속도는 15대에서 멈춘다.
+	@ExecSpace("ServerOnly")
+	method void ApplyBossHitGrowth()
+		-- 피격 1회당 크기/공격속도 성장 스택을 1 올린다(상한에 닿으면 그 이상 안 오른다)
+		if self._growScalePerHit <= 0 and self._growAtkPerHit <= 0 then return end
+		if self._growScalePerHit > 0 and self._erdasHitGrowthBonus < self._growScaleMax then
+			self._erdasHitGrowthBonus = math.min(self._growScaleMax, self._erdasHitGrowthBonus + self._growScalePerHit)
+			-- 도달한 뒤에는 OnUpdate가 매 프레임 Scale을 다시 대입하지 않으므로 여기서 즉시 반영한다
+			-- (에르다스 성장과 같은 이유 — ApplyErdasHitGrowth 주석 참고).
+			local scale = self._currentScale * self._scaleMultiplier * (1.0 + self._erdasHitGrowthBonus)
+			self.Entity.TransformComponent.Scale = Vector3(scale, scale, 1.0)
+		end
+		if self._growAtkPerHit > 0 and self._growAtkBonus < self._growAtkMax then
+			self._growAtkBonus = math.min(self._growAtkMax, self._growAtkBonus + self._growAtkPerHit)
+			-- 이미 흘러가고 있는 현재 주기까지 줄여준다 — 안 그러면 다음 공격부터나 빨라져서
+			-- "때렸는데 반응이 없다"로 보인다(남은 시간을 새 배율에 맞춰 비례 축소).
+			local newInterval = self:GetEffectiveAttackInterval()
+			if self._attackTimer > newInterval then self._attackTimer = newInterval end
+		end
+	end
+
+	-- 공격 주기 — 성장 보너스(다일)가 있으면 그만큼 나눠서 짧게 만든다. 보너스가 0인 종은
+	-- 예전과 완전히 같은 값을 돌려준다.
+	@ExecSpace("ServerOnly")
+	method number GetEffectiveAttackInterval()
+		-- 이 몬스터가 지금 써야 할 공격 간격(초)
+		local base = self.AttackInterval
+		if self._customAttackInterval > 0 then base = self._customAttackInterval end
+		if self._growAtkBonus <= 0 then return base end
+		return base / (1.0 + self._growAtkBonus)
+	end
+
 	-- 돌진형 종의 wind-up이 끝나는 순간 1회 호출 — 스폰 위치로 정확히 되돌리고(떨림 오프셋 제거),
 	-- 몬스터 뒤(아래쪽)에 먼지 이펙트를 1회 재생한 뒤 ApproachSpeed를 크게 부스트한다. 이후 프레임부터는
 	-- OnUpdate 하단의 일반 스케일 접근 로직이 부스트된 속도로 그대로 이어받는다.
@@ -2321,7 +2596,9 @@ script MonsterAI extends Component
 	-- .model의 "DepthOverlay" 자식 엔티티(같은 스프라이트를 검게 덧씌운 깊이감 연출용)의
 	-- SpriteRendererComponent를 찾아 캐시해둔다. Color/SpriteRUID는 전부 @Sync 네이티브 필드라
 	-- 서버에서 이 캐시를 통해 값만 바꾸면 클라이언트에 자동 반영된다(ApplySlow와 동일한 방식).
-	@ExecSpace("ServerOnly")
+	-- ⚠ ExecSpace를 일부러 안 붙였다(= 부르는 쪽에서 실행) — 알파/PlayRate는 서버가 쓰지만,
+	-- 스프라이트 교체는 **클라이언트**가 본체와 같은 프레임에 같이 해야 하기 때문이다(ApplyBodySprite).
+	-- _depthOverlayRenderer는 @Sync가 아니라 서버/클라가 각자 자기 캐시를 갖는다.
 	method SpriteRendererComponent GetDepthOverlayRenderer()
 		if self._depthOverlayRenderer == nil then
 			local overlayEntity = self.Entity:GetChildByName("DepthOverlay")
@@ -2332,12 +2609,37 @@ script MonsterAI extends Component
 		return self._depthOverlayRenderer
 	end
 
+	-- 본체 스프라이트와 깊이 오버레이(그림자)를 **같은 쪽에서, 같은 프레임에** 같이 갈아끼운다.
+	--
+	-- ⚠ 이 메서드가 생긴 이유(유저 리포트 2026-09-07: "그림자가 뒤늦게 따라와 몬스터랑 똑같이
+	-- 안 움직인다"): 본체와 오버레이는 **서로 다른 SpriteRendererComponent 인스턴스**라 각자
+	-- 독립적으로 애니메이션을 재생한다. RUID를 세팅하는 순간 그 클립이 0프레임부터 재시작되는데,
+	-- 예전엔 본체는 **클라이언트**가(MonsterSprite @Sync 도착 시 OnSyncProperty에서), 오버레이는
+	-- **서버**가(네이티브 필드 동기화로) 각각 세팅했다 — 두 경로는 도착 시점이 다르므로 같은 move
+	-- 클립인데도 프레임 위상이 어긋난 채로 계속 돌았다. 걷는 모션이 몸통과 그림자에서 서로 다른
+	-- 프레임으로 보이니 "그림자가 늦게 따라온다"로 보인 것. 두 렌더러를 한 줄에서 같이 세팅하면
+	-- 항상 같은 프레임에 재시작해 위상이 딱 맞는다.
+	--
+	-- 그래서 **본체 SpriteRUID를 쓰는 곳은 전부 이 메서드를 거쳐야 한다**(직접 대입 금지).
+	method void ApplyBodySprite(string ruid)
+		-- 본체 + 깊이 오버레이 스프라이트를 동시에 교체(위 주석의 위상 어긋남 방지)
+		if ruid == "" then return end
+		local renderer = self.Entity.SpriteRendererComponent
+		if renderer ~= nil then renderer.SpriteRUID = ruid end
+		local overlay = self:GetDepthOverlayRenderer()
+		if overlay ~= nil then overlay.SpriteRUID = ruid end
+	end
+
 	-- 오버레이가 실제 이 몬스터의 현재 외형(MonsterSprite)을 그대로 따라가도록 RUID를 동기화한다.
 	-- 외형이 바뀌는 모든 지점(InitializeStats/InitializeBonusBoss)에서 호출해야 한다.
+	--
+	-- ⚠ 서버는 **아직 한 번도 안 채워진 경우에만** 채운다. 매번 서버에서 덮어쓰면 위 ApplyBodySprite가
+	-- 맞춰둔 위상을 서버 동기화가 뒤늦게 도착해 오버레이만 재시작시켜 다시 어긋난다.
+	-- 실제 외형 교체는 전부 ApplyBodySprite(본체와 동시)가 맡는다.
 	@ExecSpace("ServerOnly")
 	method void SyncDepthOverlaySprite()
 		local overlay = self:GetDepthOverlayRenderer()
-		if overlay ~= nil then
+		if overlay ~= nil and overlay.SpriteRUID == "" then
 			overlay.SpriteRUID = self.MonsterSprite
 		end
 	end
@@ -2418,7 +2720,7 @@ script MonsterAI extends Component
 			-- 바로 사망 연출로 넘어간다.
 			local willDie = self._bonusBossKillable and (self.CurrentHp - damage) <= 0
 			self:PlayDamageSkin(damage, false)
-			if not willDie then self:PlayHitAnimation(self._hitRUID, self.MonsterSprite) end
+			if not willDie then self:PlayHitAnimation(self._hitRUID, self.MonsterSprite, self._hitSoundRUID) end
 			self:OnBonusBossHit()
 			if self._bonusBossKillable then
 				self.CurrentHp = self.CurrentHp - damage
@@ -2432,9 +2734,10 @@ script MonsterAI extends Component
 		end
 		self.CurrentHp = self.CurrentHp - damage
 		if self._isErdas then self:ApplyErdasHitGrowth() end
+		self:ApplyBossHitGrowth()
 		log("Monster HP: " .. self.CurrentHp .. "/" .. self.MaxHp)
 		self:PlayDamageSkin(damage, false)
-		self:PlayHitAnimation(self._hitRUID, self.MonsterSprite)
+		self:PlayHitAnimation(self._hitRUID, self.MonsterSprite, self._hitSoundRUID)
 		self:FlashHideDepthOverlay(self.HitFlashDuration)
 		if self.CurrentHp <= 0 then
 			self:Die()
@@ -2442,16 +2745,21 @@ script MonsterAI extends Component
 	end
 
 	@ExecSpace("Multicast")
-	method void PlayHitAnimation(string hitRUID, string standRUID)
+	-- ⚠ sfxRUID를 **인자로 받는다**(2026-09-07 수정). 예전엔 self._hitSoundRUID를 여기서 직접 읽었는데,
+	-- 이 메서드는 Multicast(클라 실행)이고 그 프로퍼티는 @Sync가 아니라서 **클라에서는 항상 빈 문자열**
+	-- 이었다 → 피격음이 아예 안 났다(실측: 서버 atkSfx=05c2c35c… / 같은 엔티티 클라 atkSfx=[]).
+	-- _attackRUID/_hitRUID가 클라에서 ""로 읽히는 것과 완전히 같은 함정이다(상단 주석 참고).
+	-- RPC 인자는 그대로 전달되므로 인자로 받으면 실제로 소리가 난다.
+	method void PlayHitAnimation(string hitRUID, string standRUID, string sfxRUID)
 		if self:IsServer() then return end
 		if self._dead then return end
 		-- 공격 연출 중에는 피격 포즈로 갈아끼우지 않는다(유저 지정 — 대미지는 그대로 들어간다).
 		-- 사운드도 같이 건너뛴다: 스프라이트를 안 바꾸는데 피격음만 나면 어색하다.
 		if self._noHitAnimDuringAttack and self._isPlayingAttackSprite then return end
-		if self._hitSoundRUID ~= "" then _SoundOptionLogic:PlaySfx(self._hitSoundRUID, 1.0) end
+		if sfxRUID ~= "" then _SoundOptionLogic:PlaySfx(sfxRUID, 1.0) end
 		local renderer = self.Entity.SpriteRendererComponent
 		if renderer == nil or hitRUID == "" then return end
-		renderer.SpriteRUID = hitRUID
+		self:ApplyBodySprite(hitRUID)
 		-- OnSyncProperty(MonsterSprite)가 이 재생 중에 되돌리지 못하도록 표시(MonsterAI 상단
 		-- _isPlayingTransientSprite 주석 참고). 세대 번호로 겹치는 호출 중 최신 것만 실제로 되돌린다
 		-- (위 _transientSpriteGeneration 주석 참고).
@@ -2473,7 +2781,7 @@ script MonsterAI extends Component
 			end
 			-- hit1 상태일 때만 stand로 복원 — die1로 전환된 뒤라면 그대로 둔다
 			if renderer.SpriteRUID == hitRUID then
-				renderer.SpriteRUID = standRUID
+				self:ApplyBodySprite(standRUID)
 			end
 			self._isPlayingTransientSprite = false
 		end, self.HitFlashDuration)
@@ -2515,7 +2823,7 @@ script MonsterAI extends Component
 			-- 버그 수정(2026-08-26) — TakeDamage와 동일 이유(킬링 블로우 히트+사망 연출 겹침 방지)
 			local willDie = self._bonusBossKillable and (self.CurrentHp - damage) <= 0
 			self:PlayDamageSkinWithOffset(damage, false, offset)
-			if not willDie then self:PlayHitAnimation(self._hitRUID, self.MonsterSprite) end
+			if not willDie then self:PlayHitAnimation(self._hitRUID, self.MonsterSprite, self._hitSoundRUID) end
 			self:OnBonusBossHit()
 			if self._bonusBossKillable then
 				self.CurrentHp = self.CurrentHp - damage
@@ -2528,9 +2836,10 @@ script MonsterAI extends Component
 		end
 		self.CurrentHp = self.CurrentHp - damage
 		if self._isErdas then self:ApplyErdasHitGrowth() end
+		self:ApplyBossHitGrowth()
 		log("Monster HP: " .. self.CurrentHp .. "/" .. self.MaxHp)
 		self:PlayDamageSkinWithOffset(damage, false, offset)
-		self:PlayHitAnimation(self._hitRUID, self.MonsterSprite)
+		self:PlayHitAnimation(self._hitRUID, self.MonsterSprite, self._hitSoundRUID)
 		self:FlashHideDepthOverlay(self.HitFlashDuration)
 		if self.CurrentHp <= 0 then
 			self:Die()
@@ -2553,7 +2862,7 @@ script MonsterAI extends Component
 			-- 버그 수정(2026-08-26) — TakeDamage와 동일 이유(킬링 블로우 히트+사망 연출 겹침 방지)
 			local willDie = self._bonusBossKillable and (self.CurrentHp - damage) <= 0
 			self:PlayDamageSkinWithOffset(damage, true, offset)
-			if not willDie then self:PlayHitAnimation(self._hitRUID, self.MonsterSprite) end
+			if not willDie then self:PlayHitAnimation(self._hitRUID, self.MonsterSprite, self._hitSoundRUID) end
 			self:OnBonusBossHit()
 			if self._bonusBossKillable then
 				self.CurrentHp = self.CurrentHp - damage
@@ -2566,9 +2875,10 @@ script MonsterAI extends Component
 		end
 		self.CurrentHp = self.CurrentHp - damage
 		if self._isErdas then self:ApplyErdasHitGrowth() end
+		self:ApplyBossHitGrowth()
 		log("Monster HP (CRIT): " .. self.CurrentHp .. "/" .. self.MaxHp)
 		self:PlayDamageSkinWithOffset(damage, true, offset)
-		self:PlayHitAnimation(self._hitRUID, self.MonsterSprite)
+		self:PlayHitAnimation(self._hitRUID, self.MonsterSprite, self._hitSoundRUID)
 		self:FlashHideDepthOverlay(self.HitFlashDuration)
 		if self.CurrentHp <= 0 then
 			self:Die()
@@ -2592,7 +2902,7 @@ script MonsterAI extends Component
 			-- 버그 수정(2026-08-26) — TakeDamage와 동일 이유(킬링 블로우 히트+사망 연출 겹침 방지)
 			local willDie = self._bonusBossKillable and (self.CurrentHp - damage) <= 0
 			self:PlayDamageSkin(damage, true)
-			if not willDie then self:PlayHitAnimation(self._hitRUID, self.MonsterSprite) end
+			if not willDie then self:PlayHitAnimation(self._hitRUID, self.MonsterSprite, self._hitSoundRUID) end
 			self:OnBonusBossHit()
 			if self._bonusBossKillable then
 				self.CurrentHp = self.CurrentHp - damage
@@ -2606,9 +2916,10 @@ script MonsterAI extends Component
 		end
 		self.CurrentHp = self.CurrentHp - damage
 		if self._isErdas then self:ApplyErdasHitGrowth() end
+		self:ApplyBossHitGrowth()
 		log("Monster HP (CRIT): " .. self.CurrentHp .. "/" .. self.MaxHp)
 		self:PlayDamageSkin(damage, true)
-		self:PlayHitAnimation(self._hitRUID, self.MonsterSprite)
+		self:PlayHitAnimation(self._hitRUID, self.MonsterSprite, self._hitSoundRUID)
 		self:FlashHideDepthOverlay(self.HitFlashDuration)
 		if self.CurrentHp <= 0 then
 			self:Die()
@@ -2630,7 +2941,7 @@ script MonsterAI extends Component
 			-- 버그 수정(2026-08-26) — TakeDamage와 동일 이유(킬링 블로우 히트+사망 연출 겹침 방지)
 			local willDie = self._bonusBossKillable and (self.CurrentHp - damage) <= 0
 			self:PlayDamageSkin(damage, isCrit)
-			if not willDie then self:PlayHitAnimation(self._hitRUID, self.MonsterSprite) end
+			if not willDie then self:PlayHitAnimation(self._hitRUID, self.MonsterSprite, self._hitSoundRUID) end
 			self:OnBonusBossHit()
 			if self._bonusBossKillable then
 				self.CurrentHp = self.CurrentHp - damage
@@ -2643,9 +2954,10 @@ script MonsterAI extends Component
 		end
 		self.CurrentHp = self.CurrentHp - damage
 		if self._isErdas then self:ApplyErdasHitGrowth() end
+		self:ApplyBossHitGrowth()
 		log("Monster HP (delayed-death): " .. self.CurrentHp .. "/" .. self.MaxHp)
 		self:PlayDamageSkin(damage, isCrit)
-		self:PlayHitAnimation(self._hitRUID, self.MonsterSprite)
+		self:PlayHitAnimation(self._hitRUID, self.MonsterSprite, self._hitSoundRUID)
 		self:FlashHideDepthOverlay(self.HitFlashDuration)
 		if self.CurrentHp <= 0 then
 			_TimerService:SetTimerOnce(function()
@@ -3282,11 +3594,13 @@ script MonsterAI extends Component
 			self:DieAndRevivePhase1Generic()
 			return
 		end
-		-- 에피소드1 보스(가디언 엔젤 슬라임)의 2페이즈 = 분열. 여기서 진짜 죽지 않고(보상/다음 보스
-		-- 타이머를 아직 돌리지 않는다) 분열체를 뿜어낸 뒤 사망 연출만 재생하고 사라진다. 보스 웨이브는
-		-- 분열체를 전부 잡아야 끝난다 — MonsterSpawner.OnEp1SplitKilled가 마지막 1마리를 확인하면
-		-- 그때 OnBossDefeated를 부른다.
-		if self._isBoss and _GameManager.SelectedEpisode == 1 and not self._ep1BossSplitDone then
+		-- 에피소드1 보스 중 **분열 기믹을 가진 종**(현재 2번 가디언 엔젤 슬라임)의 2페이즈 = 분열.
+		-- 여기서 진짜 죽지 않고(보상/다음 보스 타이머를 아직 돌리지 않는다) 분열체를 뿜어낸 뒤 사망
+		-- 연출만 재생하고 사라진다. 보스 웨이브는 분열체를 전부 잡아야 끝난다 —
+		-- MonsterSpawner.OnEp1SplitKilled가 마지막 1마리를 확인하면 그때 OnBossDefeated를 부른다.
+		-- 기믹 없는 보스(1번 블루 머쉬맘)는 _hasEp1Split=false라 이 분기를 그냥 지나쳐 일반 사망
+		-- 처리로 간다 — 그 경로에서 OnBossDefeated가 곧바로 호출된다(아래 보스 분기 참고).
+		if self._isBoss and self._hasEp1Split and _GameManager.SelectedEpisode == 1 and not self._ep1BossSplitDone then
 			self:DieAndSplitEp1Boss()
 			return
 		end
@@ -3494,6 +3808,9 @@ script MonsterAI extends Component
 		end
 		if self._isBoss then
 			_GameManager:OnBossDefeated(self.Entity.TransformComponent.WorldPosition, fallHeight, groundWorldY, dropScale)
+			-- 두목이 죽으면 호위병(1번 블루 머쉬맘의 파란버섯)도 전부 같이 죽는다(유저 지정).
+			-- 호위병이 없는 보스면 스포너가 그냥 리턴한다. 보상은 일반 처치와 동일하게 들어간다.
+			_MonsterSpawner:KillBossEscorts()
 		end
 		if self._isCauldron then
 			-- 유저 지정: "포션을 뱉으면 알파가 빠지면서 자연스럽게 사라짐" — die1 재생과 동시에 알파를
@@ -3508,7 +3825,7 @@ script MonsterAI extends Component
 				end)
 			end
 		end
-		self:PlayDeathAnimation(self._dieRUID, self._dieDuration)
+		self:PlayDeathAnimation(self._dieRUID, self._dieDuration, self._dieSoundRUID)
 		self.Entity:Destroy(self._dieDuration + 0.2)
 	end
 
@@ -3569,9 +3886,10 @@ script MonsterAI extends Component
 		self._neverAttacks = false
 		self._attackTimer = self._customAttackInterval
 		self.MonsterSprite = self._standRUID
+		-- 본체+그림자를 같이 교체(ApplyBodySprite 주석 — 따로 세팅하면 위상이 어긋난다)
+		self:ApplyBodySprite(self._standRUID)
 		local renderer = self.Entity.SpriteRendererComponent
 		if renderer ~= nil then
-			renderer.SpriteRUID = self._standRUID
 			renderer.Color = Color(1, 1, 1, 1)
 		end
 		self:SyncDepthOverlaySprite()
@@ -3608,9 +3926,10 @@ script MonsterAI extends Component
 		self._hasPhase2 = false
 		self._hitEffectRUID = ""
 		self.MonsterSprite = self._standRUID
+		-- 본체+그림자를 같이 교체(ApplyBodySprite 주석 — 따로 세팅하면 위상이 어긋난다)
+		self:ApplyBodySprite(self._standRUID)
 		local renderer = self.Entity.SpriteRendererComponent
 		if renderer ~= nil then
-			renderer.SpriteRUID = self._standRUID
 			renderer.Color = Color(1, 1, 1, 1)
 			-- 유저 지정: 분열체는 엘리트 스탯(HP/공격력 +15%)만 쓰고 **금색 아웃라인은 뺀다**.
 			-- MarkElite가 걸어둔 머티리얼을 여기서 되돌린다 — 그래서 이 메서드는 반드시
@@ -3658,7 +3977,13 @@ script MonsterAI extends Component
 		self._ep1BossSplitDone = true
 		self._dead = true
 		self:HideDepthOverlay()
-		local pos = self.Entity.TransformComponent.Position
+		-- ⚠ 반드시 WorldPosition이어야 한다(2026-09-08 버그 수정, 유저 리포트 "슬라임 분열하면 옆존으로
+		-- 날아가서 생성되네"). 병합 존(존2/3, 존5/6, 존8~10 …)은 맵 루트의 **자식 컨테이너**(Zone02가
+		-- x=15.5, Zone03이 x=31.0에 놓여 있음)라서, 그 안의 보스 Position(로컬)은 0 근처인데
+		-- MonsterSpawner.GetSpawnPosition은 오프셋이 포함된 맵 루트(월드) 좌표를 돌려준다(실측:
+		-- 존2 샘플 10.7~12.6, 존3 샘플 26~36). 로컬 출발점 + 월드 착지점을 섞으면 착지 X가 딱
+		-- 존 오프셋(15.5)만큼 밀려 옆 존에 떨어졌다. 존1은 오프셋이 0이라 이 버그가 안 보였다.
+		local pos = self.Entity.TransformComponent.WorldPosition
 		-- ⚠ _spawnZoneIndex(보스가 **처음 스폰된** 존)를 쓰면 안 된다 — 보스는 플레이어를 따라 존을
 		-- 옮겨다니므로(RelocateBossToCurrentZone) 죽는 시점의 존과 다를 수 있다. 실제로 "존2에서
 		-- 죽었는데 분열체가 존3에서 떴다"는 리포트가 나왔고, 그렇게 다른 존에 뜨면 그 존 몬스터는
@@ -3672,7 +3997,7 @@ script MonsterAI extends Component
 		-- ⚠ 여기서 PlayPhase1TransformAnimation을 쓰면 안 된다 — 그건 2페이즈로 "이어지는" 전용이라
 		-- 일부러 알파 페이드를 안 한다(사라졌다 다시 나타나는 깜빡임 방지용). 이 보스는 실제로 죽고
 		-- 사라지므로 사운드+페이드아웃까지 해주는 일반 사망 연출을 쓴다.
-		self:PlayDeathAnimation(self._dieRUID, self._dieDuration)
+		self:PlayDeathAnimation(self._dieRUID, self._dieDuration, self._dieSoundRUID)
 		_TimerService:SetTimerOnce(function()
 			if not isvalid(self) or not isvalid(self.Entity) then return end
 			_MonsterSpawner:SpawnEp1BossSplits(zone, pos)
@@ -3725,9 +4050,10 @@ script MonsterAI extends Component
 			phase2Sprite = self._moveRUID
 		end
 		self.MonsterSprite = phase2Sprite
+		-- 본체+그림자를 같이 교체(ApplyBodySprite 주석 — 따로 세팅하면 위상이 어긋난다)
+		self:ApplyBodySprite(phase2Sprite)
 		local renderer = self.Entity.SpriteRendererComponent
 		if renderer ~= nil then
-			renderer.SpriteRUID = phase2Sprite
 			renderer.Color = Color(1, 1, 1, 1)
 		end
 		self:SyncDepthOverlaySprite()
@@ -3735,9 +4061,14 @@ script MonsterAI extends Component
 	end
 
 	@ExecSpace("Multicast")
-	method void PlayDeathAnimation(string dieRUID, number dieDuration)
+	-- ⚠ sfxRUID를 **인자로 받는다** — 이유는 PlayHitAnimation 주석 참고(Multicast + 비@Sync 프로퍼티
+	-- 조합이라 예전엔 클라에서 빈 문자열로 읽혀 사망음이 안 났다).
+	method void PlayDeathAnimation(string dieRUID, number dieDuration, string sfxRUID)
 		if self:IsServer() then return end
-		if self._dieSoundRUID ~= "" then _SoundOptionLogic:PlaySfx(self._dieSoundRUID, 1.0) end
+		if sfxRUID ~= "" then _SoundOptionLogic:PlaySfx(sfxRUID, 1.0) end
+		-- 엘리트 발밑 오라는 죽는 순간 끈다. 안 끄면 사망 연출(스프라이트 페이드아웃) 내내
+		-- 오라만 계속 돌아서 "시체 밑에서 빛나는" 그림이 된다.
+		self:StopEliteAura()
 		local renderer = self.Entity.SpriteRendererComponent
 		if renderer == nil then return end
 		-- 상태이상 색상 제거 + die1 스프라이트로 전환해 메이플 원본 죽는 연출 재생
@@ -3918,7 +4249,7 @@ script MonsterAI extends Component
 					local hitDelay = self._attackDuration * 0.5 + self.SlashEffectDuration
 					_TimerService:SetTimerOnce(function()
 						if not isvalid(self) or self._dead then return end
-						_GameManager:OnMonsterReached(dmgMultiplier, self._isSwarmMember or self._ignoresHitImmune)
+						_GameManager:OnMonsterReached(dmgMultiplier, self._isSwarmMember or self._ignoresHitImmune, self._isBoss)
 					end, hitDelay)
 				else
 					-- 무리 공격(_isSwarmMember)은 TryClaimGroupAttack으로 이미 무리 내부에서 1회로 제한해뒀는데,
@@ -3927,7 +4258,7 @@ script MonsterAI extends Component
 					-- 때리면 대미지 안들어가게 딜레이 걸었잖아? 쟤는 무시하라는말임"). 무리 공격은 이 무적
 					-- 프레임을 무시하고 항상 들어가게 한다 — 다른 몬스터끼리의 무적 프레임 상호작용은 그대로 유지.
 					-- _ignoresHitImmune(Tired Knight)도 동일한 경로로 무적 프레임을 무시한다.
-					_GameManager:OnMonsterReached(dmgMultiplier, self._isSwarmMember or self._ignoresHitImmune)
+					_GameManager:OnMonsterReached(dmgMultiplier, self._isSwarmMember or self._ignoresHitImmune, self._isBoss)
 				end
 			end
 		end
@@ -3942,7 +4273,7 @@ script MonsterAI extends Component
 		-- 뛰었다 착지하는 홉 모션을 공유한다(원래 존14/15 이블아이/커즈아이 전용이었던 걸 전 몬스터로 확장).
 		if self._isFlying then
 			if self._attackRUID ~= "" then
-				self:PlayAttackAnimation(self._attackRUID, self.MonsterSprite, self._attackDuration)
+				self:PlayAttackAnimation(self._attackRUID, self.MonsterSprite, self._attackDuration, self._attackSoundRUID)
 			end
 			if not self._skipAttackLunge then
 				self:PlayLungeAnimation(1.0, 0)
@@ -3954,7 +4285,7 @@ script MonsterAI extends Component
 			-- 호출해도 안전하다.
 			self:PlaySelfAttackEffect()
 		elseif self._attackRUID ~= "" then
-			self:PlayAttackAnimation(self._attackRUID, self.MonsterSprite, self._attackDuration)
+			self:PlayAttackAnimation(self._attackRUID, self.MonsterSprite, self._attackDuration, self._attackSoundRUID)
 			self:FlashHideDepthOverlay(self._attackDuration)
 			-- 정책 변경(2026-08-27, 유저 지정: "앞으로 어택모션있는애들은 공격할때 점프하는거 있잖아
 			-- 그거 빼 몬스터만들때 그 모션 없는애들만 점프하는 걸로 만들어(기존 달팽이처럼)") —
@@ -3976,6 +4307,10 @@ script MonsterAI extends Component
 			-- 요청: 문어(먹물)와 같은 방식으로, 공격이 플레이어에게 닿는 위치에 종별 전용 이펙트를 띄운다.
 			-- 빈 문자열이면 내부에서 그냥 아무것도 안 함.
 			self:PlayRangedHitEffect()
+			-- 자기 자신 위치에 뜨는 공격 이펙트(블루 머쉬맘의 포자 분출 등). 예전엔 비행형 분기에만
+			-- 있어서 지상형은 못 썼는데, 지상형 attack1 종도 쓸 수 있게 여기서도 부른다 —
+			-- _selfAttackEffectRUID가 빈 문자열인 대부분의 종은 내부에서 그냥 아무것도 안 한다.
+			self:PlaySelfAttackEffect()
 		elseif self._isRangedInk then
 			self:PlayInkAttack()
 			self:PlayAttackHop()
@@ -4113,19 +4448,19 @@ script MonsterAI extends Component
 			local py = _CardManager:GetPlayerCenterY()
 			local z = self.Entity.TransformComponent.WorldPosition.z
 			local dropScale = _CardManager:GetEffectScaleRatio(self) * self._hitEffectScaleMultiplier
-			-- 문어(PlayInkSplat)처럼 화면 전체 범위에서 무작위 위치에 뜨도록 스프레드를 넓혔다(유저
-			-- 요청: "연출 위치 좀 랜덤으로 화면내에(먹물처럼)"). PC 카메라 가시범위(±6.4, ±3.6) 대비
-			-- 화면 밖으로 새지 않을 정도로 여유를 둔 값 — ink splat의 UI px 스프레드(±220,±140)를
-			-- 월드 단위로 환산한 비율과 동일하다.
-			local offsetX = (_UtilLogic:RandomDouble() * 2 - 1) * 1.5
-			local offsetY = (_UtilLogic:RandomDouble() * 2 - 1) * 0.9
-			local fxY = py + offsetY
-			-- 유저 지정(2026-08-22, PlayInkSplat 하단 30% 제외와 동일한 요청 — "네펜데스랑 골든 어쩌구
-			-- 걔네도") — PC 카메라 가시범위(세로 ±3.6, 전체 7.2) 기준 화면 하단 30%(2.16)를 제외한다.
-			-- py(GetPlayerCenterY, 카메라가 대체로 플레이어를 따라가므로 화면 중심 Y의 근사치)를 기준으로
-			-- 하단 경계는 py - 3.6 + 2.16 = py - 1.44.
-			local worldBottomExcludeY = py - 1.44
-			if fxY < worldBottomExcludeY then fxY = worldBottomExcludeY end
+			-- 착탄 연출이 뜨는 범위(유저 지정 2026-09-07: "더 위로 — 화면 중앙보다 위였으면 좋겠어.
+			-- X는 너무 양끝만 피하면 된다. 모든 원거리 공통"). 아래 숫자는 추정이 아니라 **실측**이다 —
+			-- play 중 `_UILogic:WorldToScreenPosition`으로 월드↔화면 매핑을 직접 재서 얻은 값:
+			--   · 1 월드 유닛 = 172.5 화면 px
+			--   · 플레이어 발밑(py)은 **화면 중앙보다 1.41유닛 아래**(UI y = -243)다.
+			--     → "화면 중앙"은 py + 1.41이지, py가 아니다(예전 주석의 "py ≈ 화면 중심"은 틀렸다).
+			--   · 가시 범위는 플레이어 기준 X ±5.56 / Y -1.72 ~ +4.54 유닛.
+			-- 그래서 Y 밴드는 화면 중앙(py+1.41)보다 확실히 위인 py+1.7 ~ py+3.3으로 잡았고,
+			-- 이펙트 반높이(약 0.93유닛)를 더해도 화면 위로 안 삐져나간다(3.3+0.93 = 4.23 < 4.54).
+			-- X는 ±4.2유닛 — 가시 반폭 5.56의 76%라 "양끝만 피하고" 나머지는 넓게 쓴다.
+			local offsetX = (_UtilLogic:RandomDouble() * 2 - 1) * self.RangedHitFxSpreadX
+			local offsetY = (_UtilLogic:RandomDouble() * 2 - 1) * self.RangedHitFxSpreadY
+			local fxY = py + self.RangedHitFxCenterY + offsetY
 			local fxPos = Vector3(px + offsetX, fxY, z - 0.2)
 			-- 실제 스폰/중복 방지는 GameManager가 전담한다(문어 PlayInkSplat과 동일한 전역 가드 —
 			-- 유저 요청: "문어처럼", 여러 마리가 동시에 쏴도 화면엔 한 번에 하나만 뜨게 함).
@@ -4140,12 +4475,31 @@ script MonsterAI extends Component
 	@ExecSpace("ServerOnly")
 	method void PlaySelfAttackEffect()
 		if self._selfAttackEffectRUID == "" then return end
+		local delay = self._selfAttackEffectDelay
+		if delay <= 0 then
+			self:SpawnSelfAttackEffectNow()
+			return
+		end
+		-- 지연 재생(블루 머쉬맘처럼 attack1이 뜸을 들였다가 터지는 종). 지연 도중에 몬스터가 죽거나
+		-- 사라졌으면 그냥 안 띄운다 — 죽은 자리에 포자만 남는 것을 막는다.
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) or not isvalid(self.Entity) then return end
+			if self._dead then return end
+			self:SpawnSelfAttackEffectNow()
+		end, delay)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SpawnSelfAttackEffectNow()
+		-- PlaySelfAttackEffect의 실제 스폰부 — 몬스터 자기 자신의 WorldPosition에 이펙트를 띄우고
+		-- 재생시간 뒤에 스스로 사라지게 한다(지연 유무와 무관하게 이 한 곳만 거친다).
+		if self._selfAttackEffectRUID == "" then return end
 		local map = self.Entity.CurrentMap
 		if map == nil then return end
 		local pos = self.Entity.TransformComponent.WorldPosition
 		local dropScale = _CardManager:GetEffectScaleRatio(self)
 		local fxPos = Vector3(pos.x, pos.y, pos.z - 0.1)
-		
+
 		local fx = _SpawnService:SpawnByModelId("skilleffect", "SelfAttackFX", fxPos, map)
 		if fx == nil then return end
 		local renderer = fx.SpriteRendererComponent
@@ -4188,13 +4542,15 @@ script MonsterAI extends Component
 	end
 
 	@ExecSpace("Multicast")
-	method void PlayAttackAnimation(string attackRUID, string standRUID, number duration)
+	-- ⚠ sfxRUID를 **인자로 받는다** — 이유는 PlayHitAnimation 주석 참고(Multicast + 비@Sync 프로퍼티
+	-- 조합이라 예전엔 클라에서 빈 문자열로 읽혀 공격음이 안 났다). PlayAttack2Animation도 같은 형태다.
+	method void PlayAttackAnimation(string attackRUID, string standRUID, number duration, string sfxRUID)
 		if self:IsServer() then return end
 		if self._dead then return end
-		if self._attackSoundRUID ~= "" then _SoundOptionLogic:PlaySfx(self._attackSoundRUID, 1.0) end
+		if sfxRUID ~= "" then _SoundOptionLogic:PlaySfx(sfxRUID, 1.0) end
 		local renderer = self.Entity.SpriteRendererComponent
 		if renderer == nil or attackRUID == "" then return end
-		renderer.SpriteRUID = attackRUID
+		self:ApplyBodySprite(attackRUID)
 		-- OnSyncProperty(MonsterSprite)가 이 재생 중에 되돌리지 못하도록 표시(위 _isPlayingTransientSprite
 		-- 주석 참고). 세대 번호를 찍어서, 공격 주기가 겹쳐 들어와도 "가장 최신 호출"의 타이머만 실제로
 		-- 되돌리게 한다(위 _transientSpriteGeneration 주석 참고).
@@ -4207,7 +4563,58 @@ script MonsterAI extends Component
 			if self._transientSpriteGeneration ~= myGeneration then return end
 			-- attack1 상태일 때만 stand로 복원 — hit1/die1로 이미 전환된 뒤라면 그대로 둔다
 			if renderer.SpriteRUID == attackRUID then
-				renderer.SpriteRUID = standRUID
+				self:ApplyBodySprite(standRUID)
+			end
+			self._isPlayingTransientSprite = false
+			self._isPlayingAttackSprite = false
+		end, duration)
+	end
+
+	-- 보스 소환기(스텀피 attack2) — 쿨타임이 만료될 때 OnUpdate가 호출한다. attack2 모션을 재생하고,
+	-- 모션 절반 지점(= "손을 뻗는" 시점)에 부하를 부른다. 실제 소환 연출/스폰은 MonsterSpawner가 맡는다.
+	@ExecSpace("ServerOnly")
+	method void DoBossSummon()
+		-- attack2 모션 + 전용 사운드를 재생하고, 모션 중간에 부하 소환을 예약한다
+		if self._dead then return end
+		if self._summonCount <= 0 then return end
+		local zone = _MapManager.CurrentMapIndex
+		local pos = self.Entity.TransformComponent.Position
+		if self._attack2RUID ~= "" then
+			-- 사운드 RUID를 **인자로 넘긴다** — _attack2SoundRUID는 @Sync가 아니라서 클라이언트에서는
+			-- 항상 빈 문자열로 읽힌다(같은 함정을 _attackRUID/_hitRUID에서 이미 겪었다. 상단
+			-- _isPlayingTransientSprite 주석 참고). RPC 인자는 그대로 전달되므로 소리가 실제로 난다.
+			self:PlayAttack2Animation(self._attack2RUID, self.MonsterSprite, self._attack2Duration, self._attack2SoundRUID)
+			self:FlashHideDepthOverlay(self._attack2Duration)
+		end
+		local delay = self._attack2Duration * 0.5
+		if delay <= 0 then delay = 0.1 end
+		local count = self._summonCount
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) or not isvalid(self.Entity) or self._dead then return end
+			_MonsterSpawner:SpawnBossMinions(zone, pos, count)
+		end, delay)
+		log("MonsterAI: boss summon triggered (count=" .. count .. ", next in " .. self._summonCooldown .. "s)")
+	end
+
+	-- PlayAttackAnimation과 같은 구조이지만 **사운드 RUID를 인자로 받는다**(위 DoBossSummon 주석 참고).
+	@ExecSpace("Multicast")
+	method void PlayAttack2Animation(string attack2RUID, string standRUID, number duration, string sfxRUID)
+		-- 보스 2번째 공격(소환기) 모션 재생 — 클라이언트에서만 실행된다
+		if self:IsServer() then return end
+		if self._dead then return end
+		if sfxRUID ~= "" then _SoundOptionLogic:PlaySfx(sfxRUID, 1.0) end
+		local renderer = self.Entity.SpriteRendererComponent
+		if renderer == nil or attack2RUID == "" then return end
+		self:ApplyBodySprite(attack2RUID)
+		self._isPlayingTransientSprite = true
+		self._isPlayingAttackSprite = true
+		self._transientSpriteGeneration = self._transientSpriteGeneration + 1
+		local myGeneration = self._transientSpriteGeneration
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) then return end
+			if self._transientSpriteGeneration ~= myGeneration then return end
+			if renderer.SpriteRUID == attack2RUID then
+				self:ApplyBodySprite(standRUID)
 			end
 			self._isPlayingTransientSprite = false
 			self._isPlayingAttackSprite = false
@@ -4276,4 +4683,10 @@ script MonsterAI extends Component
 	end
 
 end
+
+
+
+
+
+
 
