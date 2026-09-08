@@ -871,6 +871,1076 @@ script GameManager extends Logic
 		return defs[index]
 	end
 
+	-- ── 에피소드1 엘리트 로스터 (유저 지정, 2026-09-08) ──────────────────────────────
+	-- 예전 엘리트는 "그 존의 일반 몬스터 1마리를 승급시킨 것"이라 외형이 존마다 제각각이었다.
+	-- 이제 보스 로스터와 동일하게 **전용 외형 4종**으로 고정한다(스탯은 그대로 MarkElite의 ×1.15).
+	--   1번 = 버섯 샹들리에    (지상 근접)
+	--   2번 = 오징어 노예간수  (원거리 — 조금 떨어진 데서 서서 때리고, 플레이어 자리에 착탄 연출)
+	--   3번 = 푸른 샘의 정령   (지상 근접)
+	--   4번 = 블랙 나이트      (비행 — attack1 모션으로 때리되 유저 지정 타격 이미지를 원거리처럼 띄운다)
+	--
+	-- 등장 순서는 **가방(shuffled bag) 방식**이다 — MonsterSpawner.DrawEliteIndex가 전담한다(에피 무관 공용).
+	-- 첫 엘리트는 무조건 1번(버섯 샹들리에)이고, 그 뒤로는 아직 안 나온 종 중에서만 무작위로 뽑는다.
+	-- 4종이 전부 한 번씩 나오면 가방을 다시 4종으로 채워 전체 무작위로 돌아간다.
+	--
+	-- ⚠ **순서를 바꾸려면 아래 테이블 행 순서만 통째로 바꿔라** — 보스 로스터와 같은 이유로
+	-- 한 종의 값이 한 행에 모여 있다. 단, "첫 엘리트 = 1번"은 인덱스 1 고정이므로 1행이 곧 첫 등장 종이다.
+	--
+	-- ⚠ attackDur/dieDur/hitFxDur은 추정이 아니라 **실측값**이다(2026-09-08, play 중 client 컨텍스트에서
+	--   local c = _ResourceService:LoadAnimationClipAndWait(ruid)
+	--   local total = 0 ; for _, f in ipairs(c.Frames:ToTable()) do total = total + f.Delay end
+	-- 로 직접 잰 프레임 delay 합계):
+	--   버섯 샹들리에 attack1 16f/1.920 die1 14f/1.680
+	--   오징어 노예간수 attack1 12f/1.440 die1 15f/1.350 hit 4f/0.600
+	--   푸른 샘의 정령 attack1 21f/2.520 die1 15f/1.830
+	--   블랙 나이트    attack1 24f/3.360 die1  7f/1.200
+	@ExecSpace("ServerOnly")
+	method integer GetEp1EliteCount()
+		-- 에피소드1 엘리트 종의 총 개수(= 가방을 다시 채울 때 들어가는 종 수).
+		return 4
+	end
+
+	@ExecSpace("ServerOnly")
+	method any GetEp1EliteDef(integer index)
+		-- 에피소드1 엘리트 index번째(1부터)의 외형/사운드/크기/거동 정의를 한 행으로 반환한다.
+		-- 범위를 벗어난 번호는 1번으로 접는다(스포너가 가방으로 관리하지만 방어적으로 한 번 더).
+		local defs = {
+			{
+				-- 1번: 버섯 샹들리에 (resource_pack "mob/3300100.img"). 첫 엘리트 고정 — 유저 지정.
+				name = "버섯 샹들리에",
+				stand = "9cf209c91b424956b14e801c6698cf5b",
+				move = "be70606da9bc41da9067b70c6cfbd00f",
+				attack = "63c14432ae8b4a33ba4299b278373bee",
+				attackDur = 1.92,
+				hit = "9b68e2aadf1e4af8b651cba4c5aca83b",
+				die = "4ecca28a3dde4a2fa67bf21791e9f690",
+				dieDur = 1.68,
+				attackSfx = "36c773b1e4924948baa5fea21b2d51e5",
+				hitSfx = "ccb582524dfe41cca177b25937b7e675",
+				dieSfx = "4e6f72baeb654faa8aab5416114ac4e1",
+				-- 원본 104×84 — 일반 몬스터와 비슷한 크기. 유저 지정(2026-09-08) "엘리트 크기 15%씩 다 늘려줘"
+				-- 로 기준 1.0 → 1.15(최종 엘리트 공통 ×1.15 × 1.15)
+				scale = 1.15,
+				flying = false,
+				ranged = false,
+				hitFx = "",
+				hitFx2 = "",
+				hitFxDur = 0,
+				hitFxDelay = 0,
+				flyAttackInterval = 0,
+			},
+			{
+				-- 2번: 오징어 노예간수 (resource_pack "mob/3300108.img"). 유저 지정 "원거리" —
+				-- 기존 원거리 종과 동일하게 조금 떨어진 자리(RangedReachedScale)에서 멈춰 attack1을
+				-- 재생하고, 플레이어가 서 있는 자리에 팩의 attack1/info/hit 클립을 착탄 연출로 띄운다.
+				name = "오징어 노예간수",
+				stand = "0597262707f8408f88de9ef96c57e7c8",
+				move = "84e01e5bde504430b31a245fbdd776f3",
+				attack = "efc2fbd6022e481b8b3bfe880c566b73",
+				attackDur = 1.44,
+				hit = "205950b877fc49279cd652546d935e88",
+				die = "fe6a03bbd61b46509a0eb52af52c4166",
+				dieDur = 1.35,
+				attackSfx = "f4aba16ad2f0494b8c98514be3f1b2c5",
+				hitSfx = "77f5d84f00e841a8a6873e33999c9687",
+				dieSfx = "912181ef97e04ab1bacfb67b6c839251",
+				-- 원본 107×96. 유저 지정 15% 증가(1.0 → 1.15)
+				scale = 1.15,
+				flying = false,
+				ranged = true,
+				hitFx = "388ff58e2d7e4d82933f8e5cafa78e6b",  -- attack1/info/hit, 4프레임
+				hitFx2 = "",
+				-- ⚠ 0.60(=클립 실측 길이 4×0.150)으로 두면 파괴 시점과 1바퀴 완료가 정확히 겹쳐
+				-- 2바퀴째 첫 프레임이 한 순간 보인다 = 유저가 리포트한 "연출이 루프된다"(2026-09-08).
+				-- 마지막 4번째 프레임(0.450~0.600 구간) 재생 도중에 지우도록 살짝 줄인다.
+				hitFxDur = 0.55,
+				-- 유저 지정(2026-09-08): "공격 모션 8프레임에 타격 연출이 나가야 함".
+				-- attack1 실측 = 12프레임 전부 0.120초 균등(총 1.440초)이므로 8번째 프레임이 시작되는
+				-- 시점 = 앞 7프레임 합 = 7 × 0.120 = 0.840초.
+				hitFxDelay = 0.84,
+				flyAttackInterval = 0,
+			},
+			{
+				-- 3번: 푸른 샘의 정령 (resource_pack "mob/3501108.img"). 지상 근접.
+				name = "푸른 샘의 정령",
+				stand = "882af790938d427591cef1fce348e53e",
+				move = "3a4775167ab94ba8a997b3253dcaa925",
+				attack = "8529c03d07c048a7bee0f6769ed2bb41",
+				attackDur = 2.52,
+				hit = "747412fef02d4795a6395574aa3760ca",
+				die = "e31322669bf1479897959dd00256ebbd",
+				dieDur = 1.83,
+				attackSfx = "7d9a2946bbb54d078e96911a78de397f",
+				hitSfx = "4d3709b634404e39ad27544c912cd1f8",
+				dieSfx = "eac4de6c1f2c4f71b27868612682af96",
+				-- 원본 108×144(세로로 긴 편). 유저 지정 15% 증가(1.0 → 1.15)
+				scale = 1.15,
+				flying = false,
+				ranged = false,
+				hitFx = "",
+				hitFx2 = "",
+				hitFxDur = 0,
+				hitFxDelay = 0,
+				flyAttackInterval = 0,
+			},
+			{
+				-- 4번: 블랙 나이트 (resource_pack "mob/9500673.img"). 유저 지정:
+				-- "비행, 어택1로 공격하고 화면에 원거리처럼 타격 이미지 보이게".
+				-- → flying=true(배회는 비행형 사인파) + attack(attack1 모션 재생) +
+				--   hitFx(플레이어 자리에 뜨는 착탄 연출, 유저가 직접 준 RUID).
+				-- hitFx는 animationclip이 아니라 **sprite**(정지 그림, 100×108 — 이 팩의
+				-- attack1/info/hit/0)라 자체 재생시간이 없다 — hitFxDur은 화면에 머무는 시간이며
+				-- 다른 원거리 종의 기본값(0.5초)을 그대로 쓴다.
+				name = "블랙 나이트",
+				stand = "64b593069c9f429a9407d2f057ff392e",
+				-- 비행형은 접근 이동이 없어 move 클립을 쓰지 않는다(항상 stand로 떠 있다)
+				move = "",
+				attack = "9e1ea028230c4ec9947005bd3753e659",
+				attackDur = 3.36,
+				hit = "00764132adb74eb8906c8f04f1a40942",
+				die = "58ea0028340a408286d0d217aecda2e2",
+				dieDur = 1.20,
+				attackSfx = "adf8b1eede764f229c0773a7b9e8e8e9",
+				hitSfx = "07050581cb9041c693904e5d3f626419",
+				dieSfx = "e4c33a5a53244ea2825e41ecd901b653",
+				-- 원본 65×92로 다른 3종(104~108폭)보다 눈에 띄게 좁다 — 화면상 존재감을 맞추려고
+				-- 여기만 추가 배율(1.3)을 준 뒤, 유저 지정 15% 증가를 곱했다(1.3 × 1.15 = 1.495)
+				scale = 1.495,
+				flying = true,
+				ranged = false,
+				-- 착탄 연출은 이 팩에서 **정지 스프라이트 2장**(attack1/info/hit/0 → /1)으로 쪼개져 있다.
+				-- 유저 지정(2026-09-08) "0,1 둘 다 재생" — hitFxDur의 절반씩 순차로 보여준다(0.25초씩).
+				hitFx = "18ec4ebc8bdd48c69297180f7c573775",   -- attack1/info/hit/0
+				hitFx2 = "663a541fac2e4c41bd38143384d0bb15",  -- attack1/info/hit/1
+				hitFxDur = 0.50,
+				-- 유저 지정(2026-09-08): "타격 연출 9프레임에 나와야 함".
+				-- ⚠ attack1 프레임 간격은 **균등하지 않다**(실측: 1~12프레임 0.130초 / 13~24프레임 0.150초,
+				-- 총 24프레임 3.360초). 9번째 프레임이 시작되는 시점 = 앞 8프레임 합 = 8 × 0.130 = 1.040초.
+				-- (균등이라 가정하고 3.36÷24로 환산했으면 1.12초로 틀렸을 값이다.)
+				hitFxDelay = 1.04,
+				-- 비행형은 도달 판정 없이 FlyAttackInterval(1.5초)마다 계속 때리는데, 이 종의 attack1은
+				-- 실측 3.36초로 그보다 훨씬 길다 — 그대로 두면 이전 연출이 끝나기 전에 다음 공격이 겹쳐
+				-- 들어와 attack1이 영원히 중간에서 다시 시작한다(웨어울프/마노에서 겪은 것과 같은 케이스).
+				-- 지상형이 쓰는 것과 같은 공식(재생시간 + 0.7초 휴식)으로 이 개체만 주기를 늘린다.
+				flyAttackInterval = 4.06,
+			},
+		}
+		if index < 1 or index > #defs then index = 1 end
+		return defs[index]
+	end
+
+	-- ── 에피소드2 엘리트 로스터 (유저 지정, 2026-09-08) ────────────────────────────
+	-- 에피1 엘리트와 **완전히 같은 def 스키마**라 가방(shuffled bag)·승급·좌표 재배치 인프라가
+	-- 코드 수정 없이 그대로 돌아간다. 유저 지정: 4종 전부 "어택 + 화면 타격 연출" 둘 다 있어야 한다
+	-- (에피1은 2종만 착탄 연출이 있었다).
+	--   1번 = 도둑 까마귀          (지상 근접)
+	--   2번 = 목마른 유령          (비행)
+	--   3번 = 가고일 나이트        (비행)
+	--   4번 = 심연의 마스터 레쉬   (지상 근접)
+	--
+	-- ⚠ 재생시간은 전부 **실측**(2026-09-08, LoadAnimationClipAndWait의 프레임 delay 합):
+	--   도둑 까마귀   attack1 27f/3.240(균등 0.120) die1 14f/1.890(0.150×7 + 0.120×7) 착탄 6f/0.720
+	--   목마른 유령   attack1 14f/1.680(균등 0.120) die1 14f/1.680 착탄 6f/0.720
+	--   가고일 나이트 attack1 17f/2.700(0.150×12 + 0.180×5) die1 15f/2.700 착탄 4f/0.480
+	--   심연의 레쉬   attack1 15f/1.350(균등 0.090) die1 11f/0.990 착탄은 정지 스프라이트 7장(수동 이어붙이기)
+	--
+	-- ⚠ scale은 에피1 엘리트의 화면 폭(버섯 샹들리에 104px × 엘리트공통 1.15 × def 1.15 ≈ 137px)에
+	-- 맞춘 값이다: def.scale = 137.5 ÷ (원본 폭 × 1.15). 최종 배율 = 엘리트 공통 ×1.15 × 이 값.
+	--
+	-- ⚠ 팩마다 없는 리소스가 있어 아래 예외를 뒀다:
+	--   · 가고일 나이트: stand/move가 없고 **fly** 클립만 있다 → stand에 fly를 넣고 move는 빈 문자열.
+	--     오디오도 _audio/Damage 하나뿐이라 공격음은 없고, 사망음은 Damage를 빌려 쓴다
+	--     (블루 머쉬맘·엘리쟈와 같은 정책).
+	--   · 심연의 마스터 레쉬: 합쳐진 attack1/info/hit 클립이 없고 **정지 스프라이트 7장**뿐이다
+	--     → hitFxFrames로 수동 이어붙이기(프레임당 0.090초 — 이 팩 attack1과 같은 간격).
+	@ExecSpace("ServerOnly")
+	method integer GetEp2EliteCount()
+		-- 에피소드2 엘리트 종의 총 개수(= 가방을 다시 채울 때 들어가는 종 수).
+		return 4
+	end
+
+	@ExecSpace("ServerOnly")
+	method any GetEp2EliteDef(integer index)
+		-- 에피소드2 엘리트 index번째(1부터)의 외형/사운드/크기/거동 정의를 한 행으로 반환한다.
+		local defs = {
+			{
+				-- 1번: 도둑 까마귀 (resource_pack "mob/9001013.img"). 지상 근접.
+				name = "도둑 까마귀",
+				stand = "d2ca89aebaa641bba3f4d29c75abeec7",
+				move = "5c2c8ca152a04e578d30830ff3b4d9d8",
+				attack = "5c56fef68a454e6089af87bd2f102850",
+				attackDur = 3.24,
+				hit = "9cb6b105102940919378e361dd6abd87",
+				die = "0b831c5baa814723ba5790b31b8d7898",
+				dieDur = 1.89,
+				attackSfx = "8e1382f8937845fbaeb0c078b343145c",
+				hitSfx = "70b4c565e9884c52892b68725303b92f",
+				dieSfx = "12584ba117c14ce38756c44048e3bbe1",
+				-- 원본 112×116 → 137.5 ÷ (112 × 1.15) ≈ 1.067에서 유저 지정 **15% 축소**(2026-09-08)
+				-- → 1.067 × 0.85 ≈ 0.907
+				scale = 0.907,
+				flying = false,
+				ranged = false,
+				-- attack1/info/hit(6f/0.720 실측). 0.72 그대로 두면 소멸과 루프 복귀가 겹쳐 깜빡인다
+				-- (오징어 노예간수에서 겪은 함정) — 마지막 프레임 재생 도중에 지우도록 살짝 줄인다.
+				hitFx = "b9ec8900ec6844a1acdb5efac8ca2833",
+				hitFx2 = "",
+				hitFxDur = 0.68,
+				-- 0 = 기존 공식(attackDur × 0.5 = 1.62초). 특정 프레임에 맞추려면 초를 직접 적는다.
+				hitFxDelay = 0,
+				hitFxFrames = nil,
+				hitFxFrameDelay = 0,
+				flyAttackInterval = 0,
+			},
+			{
+				-- 2번: 목마른 유령 (resource_pack "mob/9500580.img"). 유저 지정 "비행".
+				-- ⚠ 이 팩은 이름이 둘("목마른 유령" / "달콤 초코크림")이고 그림은 **초코크림 유령**이다
+				-- (썸네일 육안 확인 2026-09-08). "목마른 유령"으로 검색되는 팩은 이것 하나뿐이다.
+				name = "목마른 유령",
+				stand = "aca2381fee22480db9be87fa9fd10409",
+				-- 비행형은 접근 이동이 없어 move 클립을 쓰지 않는다(항상 stand로 떠 있다)
+				move = "",
+				attack = "b883820e46e2419ea5583c7ebb651944",
+				attackDur = 1.68,
+				hit = "6ab8fd6a06be40e78537b7f87ad5356a",
+				die = "1d8ba252bc704c77b2093f29c9687793",
+				dieDur = 1.68,
+				attackSfx = "fcbd94b35ea447618a90f5a165735f13",
+				hitSfx = "922eb5ecf54f4d62ab4d93964a17c798",
+				dieSfx = "f0f9f988d5bd44eaabcce64f8cd66b63",
+				-- 원본 181×190(로스터에서 가장 큰 편) → 137.5 ÷ (181 × 1.15) ≈ 0.66
+				scale = 0.66,
+				flying = true,
+				ranged = false,
+				hitFx = "0a91445d7e6f4dd4aefcfa287920625b",
+				hitFx2 = "",
+				hitFxDur = 0.68,
+				hitFxDelay = 0,
+				hitFxFrames = nil,
+				hitFxFrameDelay = 0,
+				-- 비행형 공용 주기(1.5초)보다 attack1(1.68초)이 길다 — 지상형과 같은 공식으로 늘린다
+				flyAttackInterval = 2.38,
+			},
+			{
+				-- 3번: 가고일 나이트 (resource_pack "mob/9300620.img"). 유저 지정 "비행".
+				name = "가고일 나이트",
+				-- ⚠ 이 팩엔 stand/move가 없다 — 떠 있는 자세인 **fly** 클립을 stand로 쓴다
+				stand = "4dd5e61470fe41b2bdabb69bb4f7efaa",
+				move = "",
+				attack = "a2bdcb070feb4abe81fdab509f2b3815",
+				attackDur = 2.70,
+				hit = "d14ca6adb55840d0959b4b3c2dc30ac6",
+				die = "fa37b5e1f2ff402fb91b84f7d4a2bca6",
+				dieDur = 2.70,
+				-- ⚠ 이 팩의 오디오는 _audio/Damage 하나뿐이다 — 공격음은 없고(빈 문자열),
+				-- 사망음은 Damage를 비명으로 빌려 쓴다(블루 머쉬맘·엘리쟈와 같은 정책).
+				attackSfx = "",
+				hitSfx = "31b1ef54bf8b4856b622f888849b18cd",
+				dieSfx = "31b1ef54bf8b4856b622f888849b18cd",
+				-- 원본 131×101 → 137.5 ÷ (131 × 1.15) ≈ 0.912에서 유저 지정 **15% 확대**(2026-09-08)
+				-- → 0.912 × 1.15 ≈ 1.049
+				scale = 1.049,
+				flying = true,
+				ranged = false,
+				-- attack1/info/hit(4f/0.480 실측). 이 팩 착탄은 보라색 베기 자국 몇 줄로 **연하다**.
+				hitFx = "7cd371e5acce46079ac46c9281d6362a",
+				hitFx2 = "",
+				hitFxDur = 0.44,
+				hitFxDelay = 0,
+				hitFxFrames = nil,
+				hitFxFrameDelay = 0,
+				-- attack1 2.70초 > 비행 공용 주기 1.5초 — 지상형과 같은 공식으로 늘린다
+				flyAttackInterval = 3.40,
+			},
+			{
+				-- 4번: 심연의 마스터 레쉬 (resource_pack "mob/9834302.img"). 지상 근접.
+				name = "심연의 마스터 레쉬",
+				stand = "049cbe28245a4280afb6c5117d000ddc",
+				move = "adb4deae4fa74e54bdc86db50d74d9a9",
+				attack = "b8e0764973dd476aacf23a203982f41f",
+				attackDur = 1.35,
+				hit = "e58fe03f2e7143519ac5c5af878eeb70",
+				die = "0b8fa50f73b046678c935965ac0f56fe",
+				dieDur = 0.99,
+				attackSfx = "54af4ee6df2948d1b8d591d36fd7fc78",
+				hitSfx = "70c856bb6bd94750b0220219e80207d3",
+				dieSfx = "4122b76fef50470cb2a6431904daa09c",
+				-- 원본 212×176(로스터 최대) → 137.5 ÷ (212 × 1.15) ≈ 0.564
+				scale = 0.564,
+				flying = false,
+				ranged = false,
+				-- ⚠ 이 팩엔 합쳐진 attack1/info/hit 클립이 **없고** 정지 스프라이트 7장뿐이다
+				-- (attack1/info/hit/0~6, 초록 별폭발). 그래서 hitFx 대신 hitFxFrames로 수동 이어붙인다 —
+				-- MonsterAI.PlayRangedHitEffect가 프레임 목록이 있으면 그쪽 경로로 넘긴다.
+				hitFx = "",
+				hitFx2 = "",
+				-- 7장 × 0.090초(이 팩 attack1과 같은 프레임 간격) = 0.630초
+				hitFxDur = 0.63,
+				hitFxDelay = 0,
+				hitFxFrames = {
+					"43c95cde3d29477aa90455f783438976",  -- hit/0 100×84
+					"46bbead986cb4389987b91f96c62efeb",  -- hit/1 240×240
+					"981f089514c44f8baabb3f847108e2bd",  -- hit/2 240×240
+					"cd0c28234d0e490c8a94a4abade77c00",  -- hit/3 240×240
+					"ab316f477ab0424b887bf4955f8c1d66",  -- hit/4 228×228
+					"f51e5f7372dc45109da540a6dd039ee4",  -- hit/5 200×200
+					"e343aed743294b9587d36b2daacf90ab",  -- hit/6 172×164
+				},
+				hitFxFrameDelay = 0.09,
+				flyAttackInterval = 0,
+			},
+		}
+		if index < 1 or index > #defs then index = 1 end
+		return defs[index]
+	end
+
+	-- ── 엘리트 로스터 라우터 (에피소드 무관) ──────────────────────────────────────
+	-- 보스 라우터(HasBossRoster/GetBossCount/GetBossDef)와 완전히 같은 구조다. 엘리트 인프라
+	-- (가방 뽑기 / 승급 / 좌표 재배치 / 외형 덮어쓰기)는 전부 이 세 메서드만 거치므로,
+	-- 새 에피소드 로스터를 붙일 때 여기 한 줄만 추가하면 된다.
+	@ExecSpace("ServerOnly")
+	method boolean HasEliteRoster()
+		-- 지금 에피소드에 전용 엘리트 로스터가 있나(없으면 예전처럼 "그 존 몬스터 1마리 승급"만 한다)
+		return self.SelectedEpisode == 1 or self.SelectedEpisode == 2
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer GetEliteCount()
+		-- 지금 에피소드의 엘리트 종 수
+		if self.SelectedEpisode == 2 then return self:GetEp2EliteCount() end
+		return self:GetEp1EliteCount()
+	end
+
+	@ExecSpace("ServerOnly")
+	method any GetEliteDef(integer index)
+		-- 지금 에피소드의 index번째 엘리트 정의
+		if self.SelectedEpisode == 2 then return self:GetEp2EliteDef(index) end
+		return self:GetEp1EliteDef(index)
+	end
+
+	-- ── 에피소드2 보스 로스터 (유저 지정, 2026-09-08) ──────────────────────────────
+	-- 에피1과 **완전히 같은 def 스키마**를 쓴다 — 그래서 호위(escort)/피격성장(growScale·growAtk)/
+	-- 순번 순환 같은 기존 보스 인프라가 코드 수정 없이 그대로 돌아간다. 에피2에서만 필요한 거동
+	-- (비행 / 동반 보스 / 지그재그 / 공격마다 공속증가 / 공격 후 대시)은 아래 신규 필드로 추가했고,
+	-- 에피1 def에는 그 필드가 없으므로 MonsterAI 쪽에서 nil을 기본값으로 접어 읽는다.
+	--   1번 = 픽시맘 + 파파픽시 (둘 다 **비행**, 한 차례에 같이 등장 — partner 필드)
+	--   2번 = 엘리쟈             (근접, 지그재그 + 공격할 때마다 공속↑ + 공격 후 잔상 대시
+	--                            + HP 50% 이하에서 다크 엘리쟈로 변신 — 변신 중 무적, 이후 공속 고정 2배)
+	--   3번 = 의식에 휘말린 망치병 (근접, 맞을 때마다 크기 +10%·공속↑ — 상한 +80%)
+	--   4번 = 크세르크세스        (좌우 2마리씩 호위 4마리 대동 — 블루 머쉬맘 방식.
+	--                            호위는 본체와 **다른 종**인 "사랑에 빠진 크세르크세스")
+	--
+	-- ⚠ 재생시간은 전부 **실측**(2026-09-08, LoadAnimationClipAndWait의 프레임 delay 합):
+	--   픽시맘 attack1 21f/2.730 die1 7f/1.080 · 파파픽시 attack1 33f/4.290 die1 7f/1.080
+	--   엘리쟈 attack1 30f/3.600 die1 12f/1.800 · 망치병 attack1 18f/2.160 die1 24f/2.880
+	--   크세르크세스 attack1 35f/4.200 die1 43f/5.970 · 다크 엘리쟈 attack1 30f/3.600 die1 14f/1.680
+	--   픽시 공용 착탄 4f/0.520 · 엘리쟈 변신 연출 4f/0.480
+	--
+	-- ⚠ scale은 에피1 보스들의 화면상 폭(≈175px = 머쉬맘 120×1.5 / 다일 195×0.875)에 맞춘 값이다.
+	-- 최종 배율 = 보스 공통 ×2.5 × 이 값.
+	@ExecSpace("ServerOnly")
+	method integer GetEp2BossCount()
+		-- 에피소드2 보스 순번의 총 개수(= 이 수를 넘기면 다시 1번으로 순환).
+		return 4
+	end
+
+	@ExecSpace("ServerOnly")
+	method any GetEp2BossDef(integer index)
+		-- 에피소드2 보스 index번째(1부터)의 외형/사운드/크기/기믹 정의를 한 행으로 반환한다.
+		local defs = {
+			{
+				-- 1번: 픽시맘 (mob/9300472.img) — 파트너인 파파픽시와 **같이** 등장하는 비행 보스.
+				-- 유저 지정: "둘 다 비행형", "체력 0.75 / 공격력도 (2마리니까)", "첫 등장 시 동시에
+				-- 공격하지 말고 0.5초 텀을 두고 따로".
+				name = "픽시맘",
+				stand = "952974bf5a384b5fb8ae8bf1848f02a9",
+				move = "00192552f65b4a0487721550152a700b",
+				attack = "b17991c80eb84f58b5fd700a9ccf90ab",
+				attackDur = 2.73,
+				hit = "1229a11beef94be0801c4477020542a4",
+				die = "668e5a24f04b4ce6b5426715fd4b8f8a",
+				dieDur = 1.08,
+				attackSfx = "dfdb42ea2af84241baa1e44f8473a797",
+				dieSfx = "0ed6566aef22430a9c6d3285f651b1c0",
+				-- 원본 184×160 → 175/184 ÷ 2.5 ≈ 0.38. 2마리가 같이 뜨므로 화면이 붐비지 않게 조금 더 줄였다.
+				scale = 0.34,
+				selfFx = "",
+				selfFxDur = 0,
+				selfFxDelay = 0,
+				ranged = false,
+				-- 유저 지정 RUID(픽시맘·파파픽시 공용 착탄 연출, 4f/0.520 실측)
+				hitFx = "1441d2292eea4dd39238b0606368bc2c",
+				hitFxDur = 0.52,
+				-- 유저 지정 "히트프레임 15일 때" — attack1 앞 14프레임이 0.130초 균등이라 14 × 0.130 = 1.820초
+				hitFxDelay = 1.82,
+				attack2 = "",
+				attack2Dur = 0,
+				attack2Sfx = "",
+				summonCooldown = 0,
+				summonCount = 0,
+				summonFx = "",
+				summonFxDur = 0,
+				growScalePerHit = 0,
+				growScaleMax = 0,
+				growAtkPerHit = 0,
+				growAtkMax = 0,
+				escort = nil,
+				hasSplit = false,
+				-- ── 에피2 신규 필드 ──
+				flying = true,
+				hpMultiplier = 0.75,
+				atkMultiplier = 0.75,
+				zigzag = false,
+				atkGrowPerAttack = 0,
+				atkGrowMax = 0,
+				dashAfterAttack = false,
+				-- 같이 등장하는 동반 보스. 파트너는 본체가 뜬 뒤 partnerAttackDelay초 늦게 첫 공격을 시작한다.
+				partnerAttackDelay = 0.5,
+				partner = {
+					name = "파파픽시",
+					stand = "b86fe397c76642988d4a5f6ef3f3ee40",
+					move = "2a540ac83f884074968fd1bf31aa6914",
+					attack = "0d40b03cad1e48e5be50ccebb3f6caa0",
+					attackDur = 4.29,
+					hit = "01d47ddeb32b43aeb5bc15e91732698e",
+					die = "dfc2415dabcd44768fe485897ed859a8",
+					dieDur = 1.08,
+					attackSfx = "1ca4b123394748d384d34359ab93f1b6",
+					dieSfx = "cbab46e10b1343aabe6d52411b10c3ed",
+					-- 원본 184×165 — 픽시맘과 거의 같은 크기라 같은 배율
+					scale = 0.34,
+					hitFx = "1441d2292eea4dd39238b0606368bc2c",
+					hitFxDur = 0.52,
+					hitFxDelay = 1.82,
+				},
+			},
+			{
+				-- 2번: 엘리쟈 (mob/8220000.img, '조종당하는 엘리쟈').
+				-- 유저 지정: "재규어처럼 지그재그 이동", "공격할 때마다 공격속도 5% 증가 최대 60%",
+				-- "공격하고 잔상이 생기듯이 휙~ 좌우로 이동".
+				name = "엘리쟈",
+				stand = "d458879e2e2949f2bb2e915ff67fbc64",
+				move = "e4e1fb8384994d8890b786f7b9df93a3",
+				attack = "8c933520034f4a3a8fb4163495ab714e",
+				attackDur = 3.60,
+				hit = "5ee4cd91882446e99905bea46f26e8e6",
+				die = "1ebdf7b4f5b64af3a385a18551a410fe",
+				dieDur = 1.80,
+				attackSfx = "f0b9aa38b71241db8d6ec117d0add0cf",
+				-- ⚠ 이 팩엔 audio/Die가 없다 — 블루 머쉬맘과 같은 정책으로 audio/Damage를 사망 비명으로 빌려 쓴다
+				dieSfx = "24f9a3efb46b4ab7adfce22c336d7d01",
+				-- 원본 161×124 → 175/161 ÷ 2.5 ≈ 0.435
+				scale = 0.435,
+				selfFx = "",
+				selfFxDur = 0,
+				selfFxDelay = 0,
+				ranged = false,
+				hitFx = "",
+				hitFxDur = 0,
+				hitFxDelay = 0,
+				attack2 = "",
+				attack2Dur = 0,
+				attack2Sfx = "",
+				summonCooldown = 0,
+				summonCount = 0,
+				summonFx = "",
+				summonFxDur = 0,
+				-- 피격 성장은 없다(엘리쟈는 **공격**할 때 빨라지는 쪽 — 아래 atkGrow* 참고)
+				growScalePerHit = 0,
+				growScaleMax = 0,
+				growAtkPerHit = 0,
+				growAtkMax = 0,
+				escort = nil,
+				hasSplit = false,
+				flying = false,
+				hpMultiplier = 1.0,
+				atkMultiplier = 1.0,
+				zigzag = true,
+				atkGrowPerAttack = 0.05,
+				atkGrowMax = 0.60,
+				dashAfterAttack = true,
+				partnerAttackDelay = 0,
+				partner = nil,
+				-- ── 페이즈2 변신 (유저 지정 2026-09-08) ────────────────────────────────
+				-- "체력 50% 이하가 되면 아이들 상태로 변하고 변신(이때 대미지 안 들어감),
+				--  <RUID> 이 연출이 엘리쟈를 덮고, 다크 엘리쟈의 루트로 변한다. 변하고는 그냥 고정으로
+				--  공격속도 2배."
+				-- 기존 _hasPhase2(HP 0에서 부활하는 예티/네펜데스 계열)와는 **다른 경로**다 —
+				-- 이쪽은 죽지 않고 HP 비율에서 한 번만 모습을 바꾼다.
+				phase2HpRatio = 0.5,
+				-- 변신 연출: 다크 엘리쟈 팩의 attack1/info/hit(실측 4f/0.480). 원본이 82×83으로 작아서
+				-- 엘리쟈 화면 폭(≈175px)을 덮으려면 확대가 필요하다 → 175/82 ≈ 2.1배.
+				phase2Fx = "0af392e096f444c7b6f29a6b9de757a6",
+				phase2FxDur = 0.48,
+				phase2FxScale = 2.1,
+				-- 연출 전에 아이들(stand)로 잠깐 굳는 시간. 이 구간부터 무적이 걸린다.
+				phase2IdleDur = 0.3,
+				-- 변신 후 공격속도 배수(고정). 성장(atkGrow*)은 변신과 동시에 꺼진다.
+				phase2AtkSpeedMult = 2.0,
+				-- 변신 후 외형(다크 엘리쟈 팩)
+				phase2 = {
+					name = "다크 엘리쟈",
+					stand = "0757bf61ab194e23960de8dedb9caf27",
+					move = "09ccc7e7efb04b61b96558578b18db33",
+					attack = "86848fa9d2774ab6b20ed670e182e06b",
+					attackDur = 3.60,
+					hit = "148b12c731ae4c32aed1f99c6e7edacf",
+					die = "f74a85e9ac2846a7b697a7747b2606ad",
+					dieDur = 1.68,
+					attackSfx = "acb3346586b644bd93c5137a6621670c",
+					dieSfx = "f937b9ae65054e81895d9555e92b1616",
+					-- 원본 176×168 → 175/176 ÷ 2.5 ≈ 0.40 (엘리쟈와 화면상 크기가 비슷해진다)
+					scale = 0.40,
+					-- 유저 지정(2026-09-08): "다크 엘리쟈 공격하고 화면에 <RUID> 이거 뜨면 더 좋을듯".
+					-- 변신 연출(phase2Fx)과 **같은 클립**을 착탄 연출로도 쓴다 — 변신 → 그 기운을 계속
+					-- 두르고 때리는 그림. 1페이즈(엘리쟈)엔 hitFx가 없으므로 변신 전엔 안 뜬다.
+					-- 실측 4프레임 0.480초 → 0.44로 잡아 루프 재시작 직전에 지운다.
+					hitFx = "0af392e096f444c7b6f29a6b9de757a6",
+					hitFxDur = 0.44,
+					-- 0 = 기존 공식(attackDur × 0.5 = 1.80초)
+					hitFxDelay = 0,
+				},
+			},
+			{
+				-- 3번: 의식에 휘말린 망치병 (mob/8644410.img).
+				-- 유저 지정: "맞을 때마다 크기가 증가하고 공격속도 5%씩 증가, 최대 60%".
+				-- 크기 증가폭은 유저 지정(2026-09-08): 피격 **한 방에 +10%**, 상한 +80%.
+				name = "의식에 휘말린 망치병",
+				stand = "42c0d2e56d6742c7a205167e6687c371",
+				move = "1492720e458249f0bdbb82f6c98228bf",
+				attack = "5c355fd5c76c45339d5ff56bda9112b2",
+				attackDur = 2.16,
+				hit = "e2a384b034b547d381c1b9180e362a1e",
+				die = "0188ee78bebb46fe8be7ef247e2046e7",
+				dieDur = 2.88,
+				attackSfx = "19e0ca779a49428bac582f7523cf8503",
+				dieSfx = "87ee9f641769488e92c87c01aa21372a",
+				-- 원본 252×245로 이 로스터에서 가장 크다 → 175/252 ÷ 2.5 ≈ 0.278.
+				-- 다일과 같은 이유(맞으면서 커지는 보스라 처음부터 크면 만렙에 화면을 덮음)로 20% 더 줄였다.
+				scale = 0.222,
+				selfFx = "",
+				selfFxDur = 0,
+				selfFxDelay = 0,
+				ranged = false,
+				hitFx = "",
+				hitFxDur = 0,
+				hitFxDelay = 0,
+				attack2 = "",
+				attack2Dur = 0,
+				attack2Sfx = "",
+				summonCooldown = 0,
+				summonCount = 0,
+				summonFx = "",
+				summonFxDur = 0,
+				-- 피격 성장(에피1 다일이 쓰던 경로를 그대로 재사용한다).
+				-- 유저 지정 갱신(2026-09-08): "한 방에 10%씩 크게, 상한은 같고" — 처음엔 다일 비율로
+				-- 6.7%였는데 10%로 올렸다. 상한 80%는 그대로라 8대만 맞으면 최대 크기에 도달한다.
+				growScalePerHit = 0.10,
+				growScaleMax = 0.80,
+				growAtkPerHit = 0.05,
+				growAtkMax = 0.60,
+				escort = nil,
+				hasSplit = false,
+				flying = false,
+				hpMultiplier = 1.0,
+				atkMultiplier = 1.0,
+				zigzag = false,
+				atkGrowPerAttack = 0,
+				atkGrowMax = 0,
+				dashAfterAttack = false,
+				partnerAttackDelay = 0,
+				partner = nil,
+			},
+			{
+				-- 4번: 크세르크세스 (유저 제공 팩 "크세르크세스").
+				-- ⚠ 유저 정정(2026-09-08): **가운데(본체)는 "크세르크세스"**, 좌우 호위 4마리만
+				-- "사랑에 빠진 크세르크세스"다 — 처음엔 둘 다 "사랑에 빠진" 팩으로 넣었었다.
+				-- 호위 방식 자체는 그대로(블루 머쉬맘처럼 좌우 2마리씩, 보스가 죽으면 같이 죽음).
+				name = "크세르크세스",
+				stand = "a311145b16c74d15a19686adb2c318ea",
+				move = "fe48518c185e49739f8c32c71692f9b1",
+				-- 유저 지정(2026-09-08): 공격 연출을 이 클립으로 교체. 실측 42프레임 5.400초(균등 0.120)
+				-- — 기존 433243cf…(4.20초)보다 1.2초 길다. 공격 주기는 attackDur+0.7 규칙을 그대로
+				-- 따르므로 6.10초가 된다(로스터에서 가장 느린 공격 주기).
+				attack = "070bcf50421e457ba33d9d539cd8a1b7",
+				attackDur = 5.40,
+				hit = "70f42038a51c41c6879102502d2a6450",
+				die = "7a391705f0074a3aa11e82981ae13748",
+				-- ⚠ 실측 50프레임 5.970초 — 이 로스터에서 가장 긴 사망 연출이다
+				dieDur = 5.97,
+				attackSfx = "f0d619693ac94e08bb3f64a9a7f088c8",
+				dieSfx = "295ee52ea9cd4b60878c60e29a9f0630",
+				-- 원본 200×269(호위보다 훨씬 크다) → 175/200 ÷ 2.5 = 0.35
+				scale = 0.35,
+				selfFx = "",
+				selfFxDur = 0,
+				selfFxDelay = 0,
+				ranged = false,
+				-- 유저 지정(2026-09-08): 근접 보스지만 공격할 때 **화면(플레이어 자리)에** 이 연출을 띄운다
+				-- — 블랙 나이트/오징어 노예간수와 같은 방식(지상 attack1 종도 PlayRangedHitEffect를 탄다).
+				-- 실측 5프레임 0.450초(균등 0.090) → 0.42로 잡아 루프 재시작 직전에 지운다
+				-- (0.45 딱 맞추면 소멸과 루프 복귀가 겹쳐 깜빡인다 — 오징어 간수에서 겪은 함정).
+				hitFx = "818a73844264428d93baebad62e55e7a",
+				hitFxDur = 0.42,
+				-- 0 = 기존 공식(attackDur × 0.5 = 2.70초). 특정 프레임에 맞추려면 여기에 초를 직접 적는다.
+				hitFxDelay = 0,
+				attack2 = "",
+				attack2Dur = 0,
+				attack2Sfx = "",
+				summonCooldown = 0,
+				summonCount = 0,
+				summonFx = "",
+				summonFxDur = 0,
+				growScalePerHit = 0,
+				growScaleMax = 0,
+				growAtkPerHit = 0,
+				growAtkMax = 0,
+				-- 블루 머쉬맘의 파란버섯과 완전히 같은 구조 — 보스가 뜰 때 좌우 2마리씩 같이 나오고,
+				-- 보스가 죽으면 전부 같이 죽는다. 여기서는 호위도 보스와 **같은 종**이라 클립을 그대로 쓴다.
+				escort = {
+					-- 호위는 "사랑에 빠진 크세르크세스"(mob 팩) — 본체(크세르크세스)와 다른 종이다
+					name = "사랑에 빠진 크세르크세스",
+					countPerSide = 2,
+					spacing = 1.4,
+					stand = "9d5829d27e464b72b61c320295eadc37",
+					move = "d3689f6e27e24582be6c1228768a5681",
+					hit = "5b87df72d1784081b5446642fc4457d1",
+					die = "fa53799ac25b4745b15772cb34e63935",
+					dieDur = 2.04,
+					hitSfx = "95c33479ec3f46778ca3340e1434722c",   -- audio/Damage
+					dieSfx = "211efe5f96194c4b94717ebe859a6c4c",   -- audio/Die
+					hpRatio = 2.0,
+					-- 본체(최종 2.5 × 0.46 = 1.15배)보다 확실히 작게 — 두목/쫄따구 구분이 되도록
+					scale = 0.8,
+				},
+				hasSplit = false,
+				flying = false,
+				hpMultiplier = 1.0,
+				atkMultiplier = 1.0,
+				zigzag = false,
+				atkGrowPerAttack = 0,
+				atkGrowMax = 0,
+				dashAfterAttack = false,
+				partnerAttackDelay = 0,
+				partner = nil,
+			},
+		}
+		if index < 1 or index > #defs then index = 1 end
+		return defs[index]
+	end
+
+	-- ── 에피소드3 보스 로스터 (유저 지정, 2026-09-08) ──────────────────────────────
+	-- 에피1·2와 **같은 def 스키마**를 그대로 쓴다. 에피3에서만 필요한 거동은 아래 신규 필드로 붙였고,
+	-- 에피1·2 def엔 그 키가 없어 MonsterAI가 nil을 기본값으로 접어 읽는다.
+	--   1번 = 설산의 마녀        (근접, **attack2로 때린다** + skill2로 얼어붙은 레프 보병 2기 소환 / 쿨 20초.
+	--                             등장하자마자 첫 행동이 소환)
+	--   2번 = 골드예티와 페페킹  (근접, 베어울프 2마리 **돌진형** 호위 대동)
+	--   3번 = 구미호             (원거리, HP 50% 이하에서 삼미호 4마리 소환 — 바닥 마법진 연출)
+	--   4번 = 하이레프 리더      (비행, attack1↔attack2 **번갈아** 사용. attack2 차례에 얼어붙은 레프 법사
+--                             1기 소환 — 소환 쿨 6초, 부하도 비행형, 리더가 죽으면 부하도 같이 제거)
+	--   5번 = 익스트림 빅풋      (근접, 맞을수록 크기·공속 증가 + attack1~3 **돌아가며** 사용)
+	--
+	-- ⚠ 재생시간은 전부 **실측**(2026-09-08, LoadAnimationClipAndWait의 프레임 delay 합):
+	--   마녀 attack2 26f/3.900 skill2 22f/4.020 die1 13f/1.560 · 보병 attack1 15f/1.350 die1 21f/1.890
+	--   예티 attack1 21f/2.520 die1 23f/3.450 착탄 5f/0.300 · 베어울프 attack1 15f/2.040 die1 7f/1.050
+	--   구미호 attack1 26f/3.120 die1 8f/1.500 착탄 4f/0.480 · 삼미호 attack1 14f/1.790 die1 6f/0.720
+	--   리더 attack1 16f/1.440 attack2 19f/1.710 die1 29f/2.610 · 법사 attack1 30f/1.800 die1 22f/1.320
+	--   빅풋 attack1 18f/1.890 attack2 23f/1.740 attack3 25f/2.580 die1 28f/2.520
+	--
+	-- ⚠ scale은 에피1·2와 같은 기준(화면 폭 ≈175px)이다: def.scale = 70 ÷ 원본 폭
+	--   (최종 배율 = 보스 공통 ×2.5 × 이 값). 호위·부하는 ×2.5를 안 타는 절대 배율이라 120 ÷ 원본 폭.
+	@ExecSpace("ServerOnly")
+	method integer GetEp3BossCount()
+		-- 에피소드3 보스 순번의 총 개수
+		return 5
+	end
+
+	@ExecSpace("ServerOnly")
+	method any GetEp3BossDef(integer index)
+		-- 에피소드3 보스 index번째(1부터)의 외형/사운드/크기/기믹 정의를 한 행으로 반환한다.
+		local defs = {
+			{
+				-- 1번: 설산의 마녀 (mob/6090001.img).
+				-- 유저 지정: "근접(어택2 사용), 히트는 <RUID>, 스킬2 사용해 얼어붙은 보병 2명 소환
+				--            쿨타임 20초, 등장하면 먼저 소환부터".
+				-- → attack에 **attack2 클립**을 넣고(유저가 지정한 공격 모션), 소환기(attack2 슬롯)에는
+				--   **skill2 클립**을 넣는다. 소환 우선은 기존 스텀피 경로가 이미 그렇게 동작한다
+				--   (_summonTimer = 0으로 시작 → 도달 순간 첫 행동이 소환).
+				name = "설산의 마녀",
+				stand = "4b50438f59154f41aba918b2d28bb8d2",
+				move = "8816e805196a4f09aca79f27de12ade8",
+				attack = "3fdc356c027b4266862efc746fab77e7",   -- attack2 (유저 지정)
+				attackDur = 3.90,
+				hit = "79d70b581e22411abbd0f142c038b7ad",
+				die = "ba9ce08382224dd9ad9e3a97428d4cdd",
+				dieDur = 1.56,
+				attackSfx = "7e20c0872d4d45d0a525d5fc746d6688",  -- _audio/Attack2
+				dieSfx = "b8000451037c4bffa65426e767cb8e09",
+				-- 원본 144×160 → 70 ÷ 144 ≈ 0.486
+				scale = 0.486,
+				selfFx = "",
+				selfFxDur = 0,
+				selfFxDelay = 0,
+				ranged = false,
+				-- 유저 지정 RUID(이 팩의 attack3/info/hit, 실측 4f/0.480). 0.48 그대로면 소멸과 루프
+				-- 복귀가 겹쳐 깜빡인다 → 0.44로 살짝 줄인다.
+				hitFx = "0719861214fa45578488a1083f49df5a",
+				hitFxDur = 0.44,
+				hitFxDelay = 0,
+				-- 소환기 = skill2 클립(유저 지정 "스킬2 사용"). 쿨타임 20초.
+				attack2 = "e6a4eca546a24e2fba3d7ae58c692b33",
+				attack2Dur = 4.02,
+				attack2Sfx = "1eca6e2b0ec74315972bf0df43b2e56b",  -- _audio/Skill2
+				summonCooldown = 20.0,
+				summonCount = 2,
+				-- 소환 자리 바닥 연출 — 엘리트 발밑 오라와 같은 마법진(EliteAuraRUID)을 쓴다
+				summonFx = "34887ea12dd34598a59c8fb9fb210c13",
+				summonFxDur = 0.9,
+				growScalePerHit = 0,
+				growScaleMax = 0,
+				growAtkPerHit = 0,
+				growAtkMax = 0,
+				escort = nil,
+				hasSplit = false,
+				flying = false,
+				hpMultiplier = 1.0,
+				atkMultiplier = 1.0,
+				zigzag = false,
+				atkGrowPerAttack = 0,
+				atkGrowMax = 0,
+				dashAfterAttack = false,
+				partnerAttackDelay = 0,
+				partner = nil,
+				-- 소환 부하: 얼어붙은 레프 보병 (mob/8645404.img) — **지상형**이다.
+				-- 기존 부하(스텀피의 박쥐)는 비행형이라 minionFlying으로 갈라 준다.
+				minionFlying = false,
+				minion = {
+					name = "얼어붙은 레프 보병",
+					stand = "f52d095a1ef44fde8afd7a9562602f10",
+					move = "7cc0e79e626d489aa1ac679766445167",
+					attack = "895d634bcad24368b8bb346e32e73072",
+					attackDur = 1.35,
+					hit = "649385d6c0204eeea70a317455d1ec78",
+					die = "69bc456198774052b016ed347c5ed0a1",
+					dieDur = 1.89,
+					attackSfx = "9350f02ad2204ac9ba2645d59a04f4a4",
+					hitSfx = "fef9aa8955c4419bbb36a3e0daf577d6",
+					dieSfx = "a04392e3c42648639411d560f4c57e1b",
+					hpRatio = 2.0,
+					-- 원본 186×182 → 120 ÷ 186 ≈ 0.65
+					scale = 0.65,
+					ranged = false,
+				},
+			},
+			{
+				-- 2번: 골드예티와 페페킹 (mob/3300006.img).
+				-- 유저 지정: "근접, 베어울프(돌진형) 2마리랑 같이 등장".
+				-- → 블루 머쉬맘/크세르크세스와 같은 escort 경로. countPerSide=1이라 좌우 1마리씩 = 총 2마리.
+				name = "골드예티와 페페킹",
+				stand = "76c74120a12e451690cbb0014b16de9f",
+				move = "1a644e4f945b44ae8db6cfb146459d5c",
+				attack = "72149d1c1ce34feda728ddca1ad8e095",
+				attackDur = 2.52,
+				hit = "eac25d6a518645c19ad749008b80ebf8",
+				die = "13bb0c9a9316495e86955faeecb0a2de",
+				dieDur = 3.45,
+				attackSfx = "1f64727976944bc79662d1a9d66e9b7e",
+				dieSfx = "a619044576b94b72856a90dce25e9c3b",
+				-- 원본 128×164 → 70 ÷ 128 ≈ 0.547
+				scale = 0.547,
+				selfFx = "",
+				selfFxDur = 0,
+				selfFxDelay = 0,
+				ranged = false,
+				-- 이 팩의 attack1/info/hit(실측 5f/0.300)
+				hitFx = "671240fcc4ab4b6a90530cc58a281867",
+				hitFxDur = 0.27,
+				hitFxDelay = 0,
+				attack2 = "",
+				attack2Dur = 0,
+				attack2Sfx = "",
+				summonCooldown = 0,
+				summonCount = 0,
+				summonFx = "",
+				summonFxDur = 0,
+				growScalePerHit = 0,
+				growScaleMax = 0,
+				growAtkPerHit = 0,
+				growAtkMax = 0,
+				escort = {
+					-- 베어울프 (mob/8210003.img). 유저 지정 "돌진형" — escortCharge로 켠다.
+					name = "베어울프",
+					countPerSide = 1,
+					spacing = 1.6,
+					stand = "25d8b0a52a764fb99f83e46b73bdf843",
+					move = "c2d90895fc7c4e7b89fa5f3997ff03c9",
+					hit = "65c38947d07549fda3bcc31be2917fa3",
+					die = "0d40d355bbbd4a388e44f3bce5814c41",
+					dieDur = 1.05,
+					-- ⚠ 이 팩엔 _audio/Die가 없다 — Damage를 사망 비명으로 빌려 쓴다(기존 정책)
+					hitSfx = "63734e1142a242c4a1e2906f8b2198da",
+					dieSfx = "63734e1142a242c4a1e2906f8b2198da",
+					hpRatio = 2.0,
+					-- 원본 182×157 → 120 ÷ 182 ≈ 0.66
+					scale = 0.66,
+					charge = true,
+				},
+				hasSplit = false,
+				flying = false,
+				hpMultiplier = 1.0,
+				atkMultiplier = 1.0,
+				zigzag = false,
+				atkGrowPerAttack = 0,
+				atkGrowMax = 0,
+				dashAfterAttack = false,
+				partnerAttackDelay = 0,
+				partner = nil,
+				minionFlying = false,
+				minion = nil,
+			},
+			{
+				-- 3번: 구미호 (mob/7220001.img).
+				-- 유저 지정: "원거리, 체력 20% 이하되면 삼미호 4마리 소환, 엘리트 소환 마법진 비슷한 게
+				--            바닥에서 나오고 생성되면 멋질듯".
+				-- → hpSummonRatio/hpSummonCount(신규)로 **한 번만** 터지는 HP 임계 소환. 소환 연출은
+				--   엘리트 발밑 오라와 같은 마법진(EliteAuraRUID)을 바닥에서 재생한다.
+				name = "구미호",
+				stand = "959ea412aeac4065bdb2c58e8be26d91",
+				move = "730a07e8f4b7415d820a39deb22c3f9e",
+				attack = "84dcb999264745eabe9fcc1cd895dff0",
+				attackDur = 3.12,
+				hit = "a735d722d25149f7a36325e4085ea03a",
+				die = "8f69efaf07514bd7a5fe9c37f3bb5c94",
+				dieDur = 1.50,
+				attackSfx = "342d5f33e44d4be3810396ec179037e2",
+				dieSfx = "9b1c7aefcef04fcb955d468e77c43fe5",
+				-- 원본 179×141 → 70 ÷ 179 ≈ 0.391
+				scale = 0.391,
+				selfFx = "",
+				selfFxDur = 0,
+				selfFxDelay = 0,
+				-- 유저 지정 "원거리" — 코앞까지 붙지 않고 떨어진 자리에서 공격한다
+				ranged = true,
+				-- 이 팩의 attack1/info/hit(실측 4f/0.480)
+				hitFx = "98e332e2bcc94df0bc6c80fd7d203877",
+				hitFxDur = 0.44,
+				hitFxDelay = 0,
+				attack2 = "",
+				attack2Dur = 0,
+				attack2Sfx = "",
+				-- 쿨타임 소환은 없다(HP 임계 1회 소환만) — summonCooldown 0이면 그 틱이 아예 안 돈다
+				summonCooldown = 0,
+				summonCount = 0,
+				summonFx = "34887ea12dd34598a59c8fb9fb210c13",
+				summonFxDur = 0.9,
+				growScalePerHit = 0,
+				growScaleMax = 0,
+				growAtkPerHit = 0,
+				growAtkMax = 0,
+				escort = nil,
+				hasSplit = false,
+				flying = false,
+				hpMultiplier = 1.0,
+				atkMultiplier = 1.0,
+				zigzag = false,
+				atkGrowPerAttack = 0,
+				atkGrowMax = 0,
+				dashAfterAttack = false,
+				partnerAttackDelay = 0,
+				partner = nil,
+				-- HP 임계 소환(신규) — 딱 한 번만 터진다.
+				-- 유저 지정 정정(2026-09-08): 20% → **50% 이하**에서 터지게 변경
+				hpSummonRatio = 0.5,
+				hpSummonCount = 4,
+				minionFlying = false,
+				minion = {
+					-- 삼미호 (mob/5100004.img)
+					name = "삼미호",
+					stand = "b87a500e22c94cd3a885f09b49fced3c",
+					move = "9de517a21b984cd18c5d3c0c9b11aed2",
+					attack = "49c1c6297e2b404b860cc486d95574b6",
+					attackDur = 1.79,
+					hit = "6db5a17308ab48828291a995cbfd334b",
+					die = "3fd1dc4fa74b4ab08167ae259c922f5e",
+					dieDur = 0.72,
+					attackSfx = "552551013c6940b3af0549bd89d2713f",
+					hitSfx = "844ff3eae2834cc6bc5a43b8a0355b3b",
+					dieSfx = "209d0b6fc4ac44a3ad0b48a3f5e29b2b",
+					hpRatio = 1.5,
+					-- 원본 91×72(작다) → 120 ÷ 91 ≈ 1.32
+					scale = 1.32,
+					ranged = false,
+				},
+			},
+			{
+				-- 4번: 하이레프 리더 (mob/8645408.img).
+				-- 유저 지정: "공중, 어택1·2 다 사용 번갈아가면서, 어택2는 얼어붙은 레프 법사 1명 소환
+				--            (지상형, 원거리)".
+				-- → attackVariants로 attack1↔attack2를 번갈아 쓰고, 2번 슬롯에 isSummon=true를 줘서
+				--   그 차례에만 부하가 나온다(쿨타임 소환 경로가 아니다 — summonCooldown은 0).
+				name = "하이레프 리더",
+				stand = "3fa8c6107124412f932952c208157a2c",
+				-- 비행형은 접근 이동이 없어 move를 쓰지 않는다
+				move = "",
+				attack = "5fcf0946c18a4e84ba4103998bbf3513",
+				attackDur = 1.44,
+				hit = "b2700ad91b1b42deafd61ec7ee4c90e6",
+				die = "d8ef1efb3ff84ab9939bdb3598b28dd7",
+				dieDur = 2.61,
+				attackSfx = "d8383cb8a89445f4b45c2ec1d6ee48a5",
+				dieSfx = "2be9349c805b459d8ccc9ff4534fe0a7",
+				-- 원본 412×419(로스터 최대급) → 70 ÷ 412 ≈ 0.170에서 유저 지정 **30% 확대**(2026-09-08)
+				-- → 0.170 × 1.3 ≈ 0.221
+				scale = 0.221,
+				selfFx = "",
+				selfFxDur = 0,
+				selfFxDelay = 0,
+				ranged = false,
+				hitFx = "",
+				hitFxDur = 0,
+				hitFxDelay = 0,
+				attack2 = "",
+				attack2Dur = 0,
+				attack2Sfx = "",
+				summonCooldown = 0,
+				summonCount = 0,
+				summonFx = "34887ea12dd34598a59c8fb9fb210c13",
+				summonFxDur = 0.9,
+				growScalePerHit = 0,
+				growScaleMax = 0,
+				growAtkPerHit = 0,
+				growAtkMax = 0,
+				escort = nil,
+				hasSplit = false,
+				flying = true,
+				hpMultiplier = 1.0,
+				atkMultiplier = 1.0,
+				zigzag = false,
+				atkGrowPerAttack = 0,
+				atkGrowMax = 0,
+				dashAfterAttack = false,
+				partnerAttackDelay = 0,
+				partner = nil,
+				-- 공격 슬롯을 번갈아 쓴다(신규). summonCount는 isSummon 슬롯이 쓸 소환 마릿수다.
+				attackVariants = {
+					{ ruid = "5fcf0946c18a4e84ba4103998bbf3513", dur = 1.44, sfx = "d8383cb8a89445f4b45c2ec1d6ee48a5", isSummon = false },
+					{ ruid = "454a0040aebf4b15b55c4ae9f9a22eb2", dur = 1.71, sfx = "4d91506943c84ac7a436f4cb4d1f6b35", isSummon = true, summonCount = 1 },
+				},
+				-- 유저 지정(2026-09-08): "소환수 쿨타임 6초". attack2 차례가 와도 직전 소환에서 6초가
+				-- 안 지났으면 그 차례는 그냥 공격만 하고 넘어간다(공격 순환 자체는 그대로 attack1↔attack2).
+				attackVariantSummonCooldown = 6.0,
+				-- 유저 지정: "하이레프 리더 죽으면 소환수도 다 제거". 호위병(escort)이 두목과 같이
+				-- 죽는 것과 같은 방식이다. 이 키가 없는 보스(마녀/구미호)의 부하는 예전처럼 남는다.
+				minionDieWithBoss = true,
+				-- ⚠ 유저 지정 재정정(2026-09-08): 비행형으로 바꿨다가 **다시 지상형**으로 되돌림.
+				-- 비행형이면 허공에 떠 있는 그림이 되어서 — 대신 소환 좌표를 보스 Y가 아니라
+				-- **존 바닥 발판**에서 다시 잡는다(SpawnBossMinions 참고). 리더가 비행형이라 예전엔
+				-- 보스 Y를 그대로 써서 지상형 부하도 공중에 떠 있었다.
+				minionFlying = false,
+				minion = {
+					-- 얼어붙은 레프 법사 (mob/8645405.img) — 지상형, 원거리
+					name = "얼어붙은 레프 법사",
+					stand = "32c45acd045c4038adb05a3a9af4fe3f",
+					move = "10936dedf57547f891246b6ba50a5946",
+					attack = "5814e0d06e42448b978b5c5574fdfa08",
+					attackDur = 1.80,
+					hit = "0d585014c4e140ea8a91cbf2b2fc0577",
+					die = "b9ba4f1bcd014882b1c605ccd240412c",
+					dieDur = 1.32,
+					attackSfx = "fab79742f562430b857121f6718d6654",
+					hitSfx = "68b577c0e1dc43228e59a24c4e18da4f",
+					dieSfx = "39d3a6e99a8949c18167d5d7ffb4401c",
+					hpRatio = 2.0,
+					-- 원본 142×172 → 120 ÷ 142 ≈ 0.85
+					scale = 0.85,
+					ranged = true,
+				},
+			},
+			{
+				-- 5번: 익스트림 빅풋 (mob/9801509.img).
+				-- 유저 지정: "근거리, 맞으면 크기·공속 증가, 어택1~3 다 사용 돌아가면서".
+				-- → 피격 성장은 에피1 다일/에피2 망치병과 같은 growScale·growAtk 경로 재사용,
+				--   공격 순환은 attackVariants(3슬롯, 소환 없음).
+				name = "익스트림 빅풋",
+				stand = "b22baa415a664534bf06fe25188d96d8",
+				move = "2e4afb862df34b93b9b157f88e7b7817",
+				attack = "0cbe35a70ac84fa2a3095a4659c3e93e",
+				attackDur = 1.89,
+				hit = "fdd812541b8c436187c59762630b364a",
+				die = "6fd5ae9e5873482b9b5a7861bac60749",
+				dieDur = 2.52,
+				attackSfx = "8e8f2f3b120a4d5da3af2fbd8f97cda9",
+				dieSfx = "36d97bcad5f74c6e87ae70c61a7c1c9c",
+				-- 원본 457×419(로스터 최대) → 70 ÷ 457 ≈ 0.153
+				scale = 0.153,
+				selfFx = "",
+				selfFxDur = 0,
+				selfFxDelay = 0,
+				ranged = false,
+				hitFx = "",
+				hitFxDur = 0,
+				hitFxDelay = 0,
+				attack2 = "",
+				attack2Dur = 0,
+				attack2Sfx = "",
+				summonCooldown = 0,
+				summonCount = 0,
+				summonFx = "",
+				summonFxDur = 0,
+				-- 맞을수록 성장(에피2 망치병과 같은 값 — 한 방에 크기 +10%/공속 +5%, 상한 +80%/+60%)
+				growScalePerHit = 0.10,
+				growScaleMax = 0.80,
+				growAtkPerHit = 0.05,
+				growAtkMax = 0.60,
+				escort = nil,
+				hasSplit = false,
+				flying = false,
+				hpMultiplier = 1.0,
+				atkMultiplier = 1.0,
+				zigzag = false,
+				atkGrowPerAttack = 0,
+				atkGrowMax = 0,
+				dashAfterAttack = false,
+				partnerAttackDelay = 0,
+				partner = nil,
+				attackVariants = {
+					{ ruid = "0cbe35a70ac84fa2a3095a4659c3e93e", dur = 1.89, sfx = "8e8f2f3b120a4d5da3af2fbd8f97cda9", isSummon = false },
+					{ ruid = "4bf855c9693942448915075f53122975", dur = 1.74, sfx = "f7f36e9dfc274075a22b2912b08cb8ea", isSummon = false },
+					{ ruid = "d4d111d459a84cc68dbe0d8ceb352a91", dur = 2.58, sfx = "f485dc309fe34d62be2450da8495619c", isSummon = false },
+				},
+				minionFlying = false,
+				minion = nil,
+			},
+		}
+		if index < 1 or index > #defs then index = 1 end
+		return defs[index]
+	end
+
+	-- ── 에피소드별 보스 로스터 라우터 ────────────────────────────────────────────────
+	-- 보스 인프라(순번 순환 / 호위 / 재배치 / 분열)는 전부 이 두 메서드만 거치게 해서,
+	-- 새 에피소드 로스터를 추가할 때 인프라 쪽을 안 건드려도 되게 했다.
+	@ExecSpace("ServerOnly")
+	method boolean HasBossRoster()
+		-- 지금 에피소드가 "전용 외형 보스 로스터"를 쓰는가. false면 예전처럼 그 존 몬스터가 커진 보스가 나온다.
+		return self.SelectedEpisode == 1 or self.SelectedEpisode == 2 or self.SelectedEpisode == 3
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer GetBossCount()
+		-- 지금 에피소드 보스 순번의 총 개수
+		if self.SelectedEpisode == 3 then return self:GetEp3BossCount() end
+		if self.SelectedEpisode == 2 then return self:GetEp2BossCount() end
+		return self:GetEp1BossCount()
+	end
+
+	@ExecSpace("ServerOnly")
+	method any GetBossDef(integer index)
+		-- 지금 에피소드의 index번째 보스 정의
+		if self.SelectedEpisode == 3 then return self:GetEp3BossDef(index) end
+		if self.SelectedEpisode == 2 then return self:GetEp2BossDef(index) end
+		return self:GetEp1BossDef(index)
+	end
+
 	-- 분열체 전용 크기 배율(유저 지정: 1/3로 축소). 엘리트 승급 배율(×1.15) 위에 곱해진다.
 	property number Ep1BossSplitScaleMultiplier = 0.3333
 
@@ -1302,8 +2372,11 @@ script GameManager extends Logic
 	-- CardManager.GetEffectScaleRatio(깊이감 보정)에 MonsterAI._hitEffectScaleMultiplier(종별 추가
 	-- 배율, GetMapHitEffectScaleMultiplier 참고 — 유저 지정 2026-08-25: 몽실생크림 20%·예티류 15%
 	-- 축소)까지 이미 곱해져서 들어온다. alpha는 종별 투명도(예티류만 15% 감소, 기본 1.0=무영향).
+	-- effectRUID2: 착탄 연출이 **정지 스프라이트 2장**으로 쪼개져 있는 팩(블랙 나이트의
+	-- attack1/info/hit/0 → /1) 전용 — 빈 문자열이면 기존처럼 1장만 띄운다. 두 장을 각각
+	-- duration의 절반씩 보여줘서 원본의 2프레임 시퀀스를 재현한다(유저 지정 2026-09-08: "0,1 둘다 재생").
 	@ExecSpace("ServerOnly")
-	method void PlayRangedHitEffect(Vector3 worldPos, string effectRUID, number duration, Entity map, number scaleRatio, integer maxConcurrent, number alpha)
+	method void PlayRangedHitEffect(Vector3 worldPos, string effectRUID, number duration, Entity map, number scaleRatio, integer maxConcurrent, number alpha, string effectRUID2)
 		local activeCount = self._rangedHitEffectActiveCounts[effectRUID] or 0
 		if activeCount >= maxConcurrent then return end
 		if effectRUID == "" or map == nil then return end
@@ -1318,12 +2391,62 @@ script GameManager extends Logic
 			-- 유저 요청으로 기존 1.5배에서 한 번 더 1.5배(총 2.25배)로 키웠다
 			local scale = scaleRatio * 1.5 * 1.5
 			fx.TransformComponent.Scale = Vector3(scale, scale, 1)
+			-- 2장짜리 착탄 연출이면 절반 시점에 두 번째 그림으로 갈아끼운다(같은 엔티티라 위치가 안 튄다)
+			if effectRUID2 ~= "" then
+				_TimerService:SetTimerOnce(function()
+					if not isvalid(fx) then return end
+					local r2 = fx.SpriteRendererComponent
+					if r2 ~= nil then r2.SpriteRUID = effectRUID2 end
+				end, duration * 0.5)
+			end
 			fx:Destroy(duration)
 		end
 		_TimerService:SetTimerOnce(function()
 			if isvalid(self) then
 				local cur = self._rangedHitEffectActiveCounts[effectRUID] or 0
 				self._rangedHitEffectActiveCounts[effectRUID] = math.max(0, cur - 1)
+			end
+		end, duration)
+	end
+
+	-- 위 PlayRangedHitEffect와 같은 자리/같은 중복 가드를 쓰되, 착탄 그림이 **정지 스프라이트 여러 장**
+	-- 으로만 제공되는 팩(심연의 마스터 레쉬 — attack1/info/hit/0~6)을 위해 프레임을 수동으로 이어붙인다.
+	-- 합쳐진 animationclip이 있는 종은 그냥 PlayRangedHitEffect를 쓴다(이쪽이 훨씬 싸다).
+	-- 블랙 나이트가 쓰는 2장짜리(effectRUID2)의 N장 일반화 버전이다.
+	@ExecSpace("ServerOnly")
+	method void PlayRangedHitEffectFrames(Vector3 worldPos, any frames, number frameDelay, Entity map, number scaleRatio, integer maxConcurrent, number alpha)
+		if frames == nil or #frames == 0 or map == nil then return end
+		local key = frames[1]
+		local activeCount = self._rangedHitEffectActiveCounts[key] or 0
+		if activeCount >= maxConcurrent then return end
+		self._rangedHitEffectActiveCounts[key] = activeCount + 1
+		local duration = frameDelay * #frames
+		local fx = _SpawnService:SpawnByModelId("skilleffect", "RangedHitFXSeq", worldPos, map)
+		if fx ~= nil then
+			local renderer = fx.SpriteRendererComponent
+			if renderer ~= nil then
+				renderer.SpriteRUID = frames[1]
+				renderer.Color = Color(1, 1, 1, alpha)
+			end
+			-- 배율은 클립 경로(PlayRangedHitEffect)와 **똑같이** 맞춘다 — 두 경로를 섞어 쓰는 종이
+			-- 생겼을 때 크기가 튀지 않도록.
+			local scale = scaleRatio * 1.5 * 1.5
+			fx.TransformComponent.Scale = Vector3(scale, scale, 1)
+			-- 2번째 프레임부터 프레임 간격마다 순차로 갈아끼운다(같은 엔티티라 위치가 안 튄다)
+			for i = 2, #frames do
+				local ruid = frames[i]
+				_TimerService:SetTimerOnce(function()
+					if not isvalid(fx) then return end
+					local r = fx.SpriteRendererComponent
+					if r ~= nil then r.SpriteRUID = ruid end
+				end, frameDelay * (i - 1))
+			end
+			fx:Destroy(duration)
+		end
+		_TimerService:SetTimerOnce(function()
+			if isvalid(self) then
+				local cur = self._rangedHitEffectActiveCounts[key] or 0
+				self._rangedHitEffectActiveCounts[key] = math.max(0, cur - 1)
 			end
 		end, duration)
 	end
