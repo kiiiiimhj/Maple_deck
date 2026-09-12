@@ -18802,6 +18802,13 @@ script CardManager extends Logic
 	@ExecSpace("ServerOnly")
 	method void OnUpdate(number delta)
 		if _GameManager.GameOver then return end
+		-- 튜토리얼 카드 선택 단계에서는 플레이어 자동 공격/쿨다운/포션까지 전부 멈춘다
+		-- (_GameManager.TutorialPaused 선언부 주석 참고)
+		if _GameManager.TutorialPaused then return end
+		-- 에임 단계가 열리기 전(Step 0 대기 중)에도 기본 공격을 쏘지 않는다 — 유저 지정 2026-09-11:
+		-- "처음에 공격을(기본) 안 해야 할 것 같아, 몬스터를 잡아버리네". 첫 웨이브를 한 마리도
+		-- 잡지 않은 상태에서 에임 안내가 떠야 한다(안 막으면 안내 전에 다 죽여서 화면이 빈다)
+		if _TutorialLogic:IsWaitingForAim() then return end
 		-- 월드 시작 첫 프레임들에서는 다른 Logic(MonsterSpawner)의 전역 참조가 아직 등록되기 전일 수 있다
 		-- (Logic끼리는 초기화 순서가 보장되지 않음) — 그 사이 FindTarget이 _MonsterSpawner를 인덱싱하면
 		-- [LEA-2007] AttemptToIndex 에러가 난다. 등록될 때까지 이번 프레임은 건너뛴다.
@@ -19550,6 +19557,9 @@ script CardManager extends Logic
 		if best == nil then return end
 		self._focusTarget = best
 		self:PlayFocusMark(best)
+		-- 첫 플레이 튜토리얼의 에임 단계를 실습으로 통과한 지점(TutorialLogic이 단계를 확인하므로
+		-- 여기선 무조건 알린다). 튜토리얼이 아니면 내부에서 바로 빠져나온다
+		_TutorialLogic:NotifyFocusTargetSet()
 		log("CardManager: focus target set (boss=" .. tostring(best._isBoss) .. " scale=" .. string.format("%.2f", best._currentScale or 0) .. ")")
 	end
 
@@ -19629,6 +19639,137 @@ script CardManager extends Logic
 			fx.TransformComponent.Scale = Vector3(s, s, 1)
 		end)
 		fx:Destroy(self.FocusMarkDuration)
+	end
+
+	-- 현재 존에서 가장 가까운(= 스케일이 가장 큰) 살아있는 몬스터의 스케일. 없으면 0.
+	-- 첫 플레이 튜토리얼이 "몬스터가 누를 만큼 다가왔는지"를 판단할 때 쓴다(TutorialLogic.OnUpdate).
+	@ExecSpace("ServerOnly")
+	method number GetLargestMonsterScale()
+		local map = self:GetCurrentMap()
+		if map == nil then return 0 end
+		local monsters = self:GetMonstersInCurrentZone(map)
+		local best = 0
+		for _, mob in ipairs(monsters) do
+			---@type MonsterAI
+			local m = mob
+			if isvalid(m) and not m._dead then
+				local s = m._currentScale or 0
+				if s > best then best = s end
+			end
+		end
+		return best
+	end
+
+	-- ── 튜토리얼 에임 단계용 "월드 딤" ──────────────────────────────────────────────
+	-- 유저 지정(2026-09-11): "몬스터는 딤드 위에 있어야지". UI 딤(TutorialGuideUI.dimEntity)은
+	-- 화면 맨 앞에 깔리므로 몬스터까지 같이 어두워진다 — 그래서 이 단계만 **월드 엔티티 딤**을 쓴다.
+	-- 몬스터 본체는 SortingLayer="MapLayer0" / OrderInLayer=2(그림자 1)이므로, 같은 레이어의
+	-- OrderInLayer=0 + 깊이 Z를 뒤로 밀어두면 배경 위 · 몬스터 아래에 정확히 끼어든다.
+	--
+	-- 모델은 "persistenteffect" — skilleffect 계열과 달리 SkillEffectAI 자동 소멸이 없어서
+	-- 호출부가 수명을 직접 관리한다(처음에 skilleffect로 시도했다가 바로 사라져서 실패했다).
+	property any _tutorialAimDim = nil
+
+	-- ⚠ UI용 솔리드 스프라이트(4fea64a3...)는 **월드 SpriteRenderer에서 렌더되지 않는다**(실측:
+	-- 엔티티/레이어/스케일이 전부 정상인데 화면에 아무것도 안 나옴). 그래서 월드에서 실제로
+	-- 그려지는 background 카테고리의 큰 스프라이트(1056x1032)를 검정으로 칠해서 쓴다.
+	property string TutorialDimRUID = "8f351cd85fc74d84a6a7928db6c3c63b"
+
+	-- 1056px ≈ 6.1월드유닛(1유닛=172.5px)이라 3배면 약 18유닛 — 화면 가로(약 11유닛)를 넉넉히 덮는다
+	property number TutorialDimScale = 3
+
+	property number TutorialDimAlpha = 0.75
+
+	property integer TutorialDimOrderInLayer = 0
+
+	-- 깊이도 몬스터보다 뒤로 밀어둔다. MonsterAI.UpdateDepth는 Z = 1.5 - _currentScale을 쓰므로
+	-- 가장 멀리 있는 몬스터(스케일 0.3 → Z 1.2)보다 살짝 뒤인 1.3이면 전부 딤 위에 온다.
+	-- ⚠ 너무 멀리(예: 5) 두면 아예 안 그려진다
+	property number TutorialDimZ = 1.3
+
+	@ExecSpace("ServerOnly")
+	method void ShowTutorialAimDim()
+		-- 카메라가 플레이어를 따라다니므로 플레이어 위치에 깔면 화면 한가운데에 온다.
+		-- 이 단계는 게임이 멈춰 있어서 플레이어도 안 움직인다 — 따라다니게 할 필요가 없다
+		self:HideTutorialAimDim()
+
+		local map = self:GetCurrentMap()
+		if map == nil then return end
+
+		local center = nil
+		for _, userEntity in pairs(_UserService.UserEntities) do
+			if isvalid(userEntity) then center = userEntity.TransformComponent.WorldPosition end
+		end
+		if center == nil then return end
+
+		local e = _SpawnService:SpawnByModelId("persistenteffect", "TutorialAimDim",
+			Vector3(center.x, center.y, self.TutorialDimZ), map)
+		if e == nil then return end
+
+		local r = e.SpriteRendererComponent
+		if r ~= nil then
+			r.SpriteRUID = self.TutorialDimRUID
+			r.SortingLayer = "MapLayer0"
+			r.OrderInLayer = self.TutorialDimOrderInLayer
+			r.Color = Color(0, 0, 0, self.TutorialDimAlpha)
+		end
+		e.TransformComponent.Scale = Vector3(self.TutorialDimScale, self.TutorialDimScale, 1)
+		self._tutorialAimDim = e
+		log("CardManager: tutorial aim dim spawned")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void HideTutorialAimDim()
+		-- 수명을 호출부가 관리하는 모델이므로 반드시 직접 지운다(안 지우면 화면에 영구히 남는다)
+		if self._tutorialAimDim ~= nil then
+			if isvalid(self._tutorialAimDim) then self._tutorialAimDim:Destroy() end
+			self._tutorialAimDim = nil
+		end
+	end
+
+	-- 현재 존에 살아있는 몬스터 수. 튜토리얼 에임 단계가 "첫 웨이브가 모였는지" 볼 때 쓴다
+	@ExecSpace("ServerOnly")
+	method integer GetAliveMonsterCount()
+		local map = self:GetCurrentMap()
+		if map == nil then return 0 end
+		local monsters = self:GetMonstersInCurrentZone(map)
+		local count = 0
+		for _, mob in ipairs(monsters) do
+			---@type MonsterAI
+			local m = mob
+			if isvalid(m) and not m._dead then count = count + 1 end
+		end
+		return count
+	end
+
+	-- 첫 플레이 튜토리얼 에임 단계 전용 — 현재 존의 몬스터를 minScale까지 끌어올린다.
+	-- 스폰 직후 몬스터는 스케일 0.3(맨 뒤)이라 화면에서 너무 작아 터치가 어렵다(유저 지정 2026-09-11:
+	-- "맨 뒤에서 나오는 거 말고 중간쯤 크기로"). 스케일이 곧 깊이라서 키우면 화면 중간으로 걸어
+	-- 나온 모습이 되고, 터치 판정 상자도 같은 스케일을 쓰므로 그만큼 누르기 쉬워진다.
+	--
+	-- ⚠ 반드시 _GameManager.TutorialPaused가 켜진 뒤에 부를 것 — MonsterAI.OnUpdate가 살아 있으면
+	-- 다음 프레임에 _currentScale 기준으로 Transform.Scale을 다시 써서 원복된다.
+	-- (반대로 정지가 풀리면 알아서 이 값에서 이어지므로 따로 복원할 필요가 없다)
+	@ExecSpace("ServerOnly")
+	method integer GrowMonstersForTutorialAim(number minScale)
+		local map = self:GetCurrentMap()
+		if map == nil then return 0 end
+		local monsters = self:GetMonstersInCurrentZone(map)
+		local count = 0
+		for _, mob in ipairs(monsters) do
+			---@type MonsterAI
+			local m = mob
+			if isvalid(m) and not m._dead and isvalid(m.Entity) then
+				if (m._currentScale or 0) < minScale then
+					m._currentScale = minScale
+					local s = minScale * m._scaleMultiplier
+					m.Entity.TransformComponent.Scale = Vector3(s, s, 1.0)
+					m:UpdateDepth()
+					count = count + 1
+				end
+			end
+		end
+		return count
 	end
 
 	-- 살아있는 몬스터를 화면에 가까이 온 순서(스케일 큰 순)로 최대 count명 반환.
@@ -21336,9 +21477,98 @@ script CardManager extends Logic
 
 	-- ── 레벨업 선택 ──────────────────────────────────────────────
 
+	-- 첫 플레이 튜토리얼에서 손가락이 가리키는 1번 카드로 고정할 스킬(유저 지정 2026-09-11:
+	-- "첫 액티브 스킬은 썬더볼트"). 4 = 썬더 볼트. 이 카드가 풀에 없는 예외 상황
+	-- (이미 해금됐거나 빈 슬롯이 없음)에서는 아무 슬롯형 액티브로 폴백한다
+	property integer TutorialFirstCard = 4
+
+	@ExecSpace("ServerOnly")
+	method boolean IsTutorialActiveCard(integer cardIdx)
+		-- 아르카나의 "슬롯을 차지하는 액티브 스킬" 해금 카드 목록.
+		-- GenerateLevelUpChoices에서 hasEmptySlot 게이트가 걸린 항목과 동일하다
+		-- (콜드빔3 / 썬더볼트4 / 에너지볼트9 / 아이스커터11 / 페페12 / 썬더커터13 / 아쿠아트랩14 / 15).
+		-- 첫 플레이는 아르카나 고정이라 이 목록만 본다 — 다른 캐릭터로 튜토리얼을 열게 되면
+		-- 그 캐릭터의 슬롯형 액티브 번호대(실피드 101~108 등)를 여기에 같이 넣어야 한다
+		if cardIdx == 3 or cardIdx == 4 or cardIdx == 9 then return true end
+		if cardIdx == 11 or cardIdx == 12 or cardIdx == 13 then return true end
+		if cardIdx == 14 or cardIdx == 15 then return true end
+		return false
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ForceTutorialActiveChoice(table chosen, table pool)
+		-- 손가락이 가리키는 **첫 번째 카드(Card6 = 1번 선택지)** 자리를 TutorialFirstCard(썬더 볼트)로
+		-- 고정한다(유저 지정 2026-09-11). 첫 플레이의 첫 스킬이 매번 달라지면 튜토리얼 경험이
+		-- 들쭉날쭉해지므로 고정하는 쪽이 낫다.
+		--   1순위: 이미 뽑힌 3장 안에 그 카드가 있으면 자리만 바꾼다(나머지 두 장을 그대로 보존).
+		--   2순위: 풀에 있으면 끌어와 1번 자리를 교체한다(위에서 못 찾았으니 2/3번과 중복될 수 없다).
+		--   3순위: 그 카드가 아예 없는 예외 상황이면 아무 슬롯형 액티브로 폴백한다.
+		if #chosen < 1 then return end
+		if chosen[1].card == self.TutorialFirstCard then return end
+
+		for i = 1, #chosen do
+			if chosen[i].card == self.TutorialFirstCard then
+				local swap = chosen[1]
+				chosen[1] = chosen[i]
+				chosen[i] = swap
+				return
+			end
+		end
+
+		for _, entry in ipairs(pool) do
+			if entry.card == self.TutorialFirstCard then
+				chosen[1] = entry
+				return
+			end
+		end
+
+		-- 폴백 — 지정 카드를 못 찾았을 때라도 1번은 반드시 액티브여야 한다
+		if self:IsTutorialActiveCard(chosen[1].card) then return end
+
+		for i = 1, #chosen do
+			if self:IsTutorialActiveCard(chosen[i].card) then
+				local swap = chosen[1]
+				chosen[1] = chosen[i]
+				chosen[i] = swap
+				return
+			end
+		end
+
+		for _, entry in ipairs(pool) do
+			if self:IsTutorialActiveCard(entry.card) then
+				local clash = false
+				if #chosen >= 2 and entry.card == chosen[2].card then clash = true end
+				if #chosen >= 3 and entry.card == chosen[3].card then clash = true end
+				if not clash then
+					chosen[1] = entry
+					return
+				end
+			end
+		end
+	end
+
+	-- 미뤄둔 레벨업이 있으면 한 번 꺼내 카드를 띄운다(튜토리얼 에임 단계가 끝난 직후 호출).
+	-- 이미 카드가 떠 있으면 아무것도 하지 않는다 — 그 카드를 고르면 아래 SelectLevelUpChoice가 이어받는다
+	@ExecSpace("ServerOnly")
+	method void FlushPendingLevelUps()
+		if self._pendingLevelUps <= 0 then return end
+		if self._choiceCard1 ~= 0 then return end
+
+		self._pendingLevelUps = self._pendingLevelUps - 1
+		self:GenerateLevelUpChoices()
+	end
+
 	@ExecSpace("ServerOnly")
 	method void GenerateLevelUpChoices()
 		if self._choiceCard1 ~= 0 then
+			self._pendingLevelUps = self._pendingLevelUps + 1
+			return
+		end
+
+		-- 첫 플레이 튜토리얼의 에임 단계가 끝나기 전엔 카드를 띄우지 않고 쌓아둔다.
+		-- 안 그러면 레벨업이 빨리 터지는 판에서 에임 안내를 건너뛰고 카드 단계로 직행한다(실측).
+		-- 쌓아둔 건 TutorialLogic.ResumeFromAim이 FlushPendingLevelUps로 꺼내준다
+		if _TutorialLogic:IsWaitingForAim() then
 			self._pendingLevelUps = self._pendingLevelUps + 1
 			return
 		end
@@ -22276,6 +22506,13 @@ script CardManager extends Logic
 			table.insert(chosen, { card = basicCard, type = basicType })
 		end
 
+		-- 첫 플레이 튜토리얼에서는 손가락이 가리키는 첫 번째 카드(Card6 = 1번 선택지)가 반드시
+		-- "슬롯형 액티브 스킬"이어야 한다(유저 지정 2026-09-11). 패시브나 포션이 걸리면
+		-- "카드를 눌러 스킬을 배워보세요"라는 안내와 실제로 배우는 것이 어긋난다
+		if _TutorialLogic:IsActive() then
+			self:ForceTutorialActiveChoice(chosen, pool)
+		end
+
 		self._choiceCard1 = chosen[1].card ; self._choiceType1 = chosen[1].type
 		self._choiceCard2 = chosen[2].card ; self._choiceType2 = chosen[2].type
 		self._choiceCard3 = chosen[3].card ; self._choiceType3 = chosen[3].type
@@ -22284,6 +22521,10 @@ script CardManager extends Logic
 			self._choiceCard1, self._choiceType1,
 			self._choiceCard2, self._choiceType2,
 			self._choiceCard3, self._choiceType3)
+
+		-- 첫 플레이 튜토리얼이 진행 중이면 여기가 "레벨업 후" 지점이다 — 게임을 멈추고 딤 + 손가락
+		-- 유도를 띄운다(TutorialLogic이 내부에서 진행 중인지 다시 확인하므로 여기선 무조건 알린다)
+		_TutorialLogic:NotifyChoicesShown()
 	end
 
 	-- 카드 6~12(레벨업 선택지 3장)의 짧은 효과 태그 — "광역,스턴" 스타일로 한 줄에 훑어볼 수 있게
@@ -23254,6 +23495,11 @@ script CardManager extends Logic
 		self:ApplyCardUpgrade(cardIdx, upgradeType)
 		self._choiceCard1 = 0 ; self._choiceCard2 = 0 ; self._choiceCard3 = 0
 		self:HideLevelUpChoices()
+
+		-- 튜토리얼의 마지막 단계 — 정지를 풀고 마무리 문구를 띄운다. 아래 _pendingLevelUps 재생성보다
+		-- 먼저 불러야, 연속 레벨업으로 카드가 다시 떠도 NotifyChoicesShown이 이미 끝난 튜토리얼을
+		-- 다시 잡지 않는다(Active가 여기서 false로 내려간다)
+		_TutorialLogic:NotifyCardChosen()
 
 		if self._pendingLevelUps > 0 then
 			self._pendingLevelUps = self._pendingLevelUps - 1
@@ -25569,19 +25815,34 @@ script CardManager extends Logic
 
 	-- ── 엘리트 몬스터 드롭 ───────────────────────────────────────
 
-	-- 엘리트 드롭 개수 1~2개 (1개 70% / 2개 30%).
-	-- 2026-09-01 유저 지정으로 상한을 3개 → 2개로 낮췄다(기존: 1개 70% / 2개 20% / 3개 10%).
-	-- 3개였던 10% 구간을 2개 쪽으로 합쳤다.
+	-- 엘리트 드롭 개수 1~2개 (1개 90% / 2개 10%).
+	-- 2026-09-12 유저 지정: "엘리트는 스킬 최대 1~2개(2개 확률 10%)" — 70/30 → 90/10.
+	-- (2026-09-01엔 3개 상한을 2개로 낮췄었다: 1개 70% / 2개 20% / 3개 10% → 70/30)
 	method integer RollDropCount()
 		local r = _UtilLogic:RandomDouble()
-		if r < 0.70 then return 1
+		if r < 0.90 then return 1
 		else return 2
 		end
 	end
 
-	-- 엘리트/보스가 공유하는 "슬롯에 배치된 액티브 카드" 강화 후보 풀. 카드3/4/9/11/12/13/14/15는
-	-- Lv1~5 고정 트랙이라 상한(<5) 체크가 있어야 무제한으로 중복 추가되지 않는다
+	-- 엘리트/보스/이스터에그가 공유하는 "슬롯에 배치된 액티브 카드" 강화 후보 풀.
+	-- 2026-09-12: 아래 Raw 목록(해금 + 레벨 상한 미달)에서 **지금 실제로 슬롯에 꽂혀 있는 카드만** 남긴다.
+	-- 조합하면 조합 카드가 기본 카드의 슬롯을 넘겨받는데 기본 카드 레벨은 그대로라, 필터가 없으면
+	-- 슬롯에 없는 기본 카드가 뽑혀 GrantCardUpgradesFromPool의 "슬롯 없음 → 연출 없이 즉시 적용"
+	-- 분기로 빠졌다 — 유저 눈에는 "엘리트 잡았는데 스킬 1개도 안 나옴"(유저 리포트 2026-09-12).
 	method table BuildActiveUpgradePool()
+		local raw = self:BuildActiveUpgradePoolRaw()
+		local pool = {}
+		for _, cardIdx in ipairs(raw) do
+			if self:GetSlotForCard(cardIdx) > 0 then table.insert(pool, cardIdx) end
+		end
+		return pool
+	end
+
+	-- 캐릭터별 후보 목록(해금 여부 + 레벨 상한만 본다 — 슬롯 필터는 위 BuildActiveUpgradePool).
+	-- 카드3/4/9/11/12/13/14/15는 Lv1~5 고정 트랙이라 상한(<5) 체크가 있어야 무제한으로 중복 추가되지 않는다.
+	-- 조합 카드는 Lv1~3 트랙이라 상한 <3.
+	method table BuildActiveUpgradePoolRaw()
 		local pool = {}
 		-- 실피드는 아르카나 카드가 아예 안 틱되므로(캐릭터별 스킬 분리) 별도 풀을 쓴다
 		if _GameManager.SelectedCharacter == 1 then
@@ -25593,6 +25854,14 @@ script CardManager extends Logic
 			if self:IsCardUnlocked(106) and self.RetreatShotLevel < 5 then table.insert(pool, 106) end
 			if self:IsCardUnlocked(107) and self.UncounterArrowLevel < 5 then table.insert(pool, 107) end
 			if self:IsCardUnlocked(108) and self.FleshMirageLevel < 5 then table.insert(pool, 108) end
+			-- 실피드 조합 카드(2026-09-12 추가)
+			if self:IsCardUnlocked(114) and self.ArrowIllusionLevel < 3 then table.insert(pool, 114) end
+			if self:IsCardUnlocked(115) and self.EvolveLevel < 3 then table.insert(pool, 115) end
+			if self:IsCardUnlocked(116) and self.StormPoemLevel < 3 then table.insert(pool, 116) end
+			if self:IsCardUnlocked(117) and self.EnhancedArrowBlowLevel < 3 then table.insert(pool, 117) end
+			if self:IsCardUnlocked(118) and self.ArrowFletterLevel < 3 then table.insert(pool, 118) end
+			if self:IsCardUnlocked(119) and self.UncounterArrowVLevel < 3 then table.insert(pool, 119) end
+			if self:IsCardUnlocked(120) and self.FlashBomberLevel < 3 then table.insert(pool, 120) end
 			return pool
 		end
 		-- 레이온도 아르카나 카드가 안 틱되므로 별도 풀을 쓴다 — 이 분기가 없으면 아래 아르카나 카드
@@ -25600,7 +25869,8 @@ script CardManager extends Logic
 		-- 계속 빈 풀이었던 걸 발견/수정 — 이 함수를 재사용하는 엘리트 처치/상자 이스터에그/얄미운
 		-- 미니무르/보너스 보스(발록) 전부에서 레이온 스킬이 한 번도 안 나오고 있었다. 유저 지적:
 		-- "상자 누르면 아이템 나오는 이스터에그에 스킬 안들어간거 같은데?" — 조합 결과 카드(160,
-		-- 165~170)는 상점과 동일한 정책으로 계속 제외한다.
+		-- 165~170)는 상점과 동일한 정책으로 제외했었는데, 2026-09-12 유저 지정으로 드롭 후보에는 포함한다
+		-- (상점은 여전히 제외).
 		if _GameManager.SelectedCharacter == 2 then
 			if self:IsCardUnlocked(152) and self.SlashLevel < 5 then table.insert(pool, 152) end
 			if self:IsCardUnlocked(153) and self.BrandishLevel < 5 then table.insert(pool, 153) end
@@ -25610,6 +25880,14 @@ script CardManager extends Logic
 			if self:IsCardUnlocked(157) and self.RagingBlowLevel < 5 then table.insert(pool, 157) end
 			if self:IsCardUnlocked(158) and self.LeapAttackLevel < 5 then table.insert(pool, 158) end
 			if self:IsCardUnlocked(159) and self.ScarringSwordLevel < 5 then table.insert(pool, 159) end
+			-- 레이온 조합 카드(2026-09-12 추가)
+			if self:IsCardUnlocked(160) and self.BraveSlashLevel < 3 then table.insert(pool, 160) end
+			if self:IsCardUnlocked(165) and self.SpiritBladeLevel < 3 then table.insert(pool, 165) end
+			if self:IsCardUnlocked(166) and self.BurningRushLevel < 3 then table.insert(pool, 166) end
+			if self:IsCardUnlocked(167) and self.SlashStormLevel < 3 then table.insert(pool, 167) end
+			if self:IsCardUnlocked(168) and self.SolarBladeLevel < 3 then table.insert(pool, 168) end
+			if self:IsCardUnlocked(169) and self.ScarringBladeLevel < 3 then table.insert(pool, 169) end
+			if self:IsCardUnlocked(170) and self.FuriousBlowLevel < 3 then table.insert(pool, 170) end
 			return pool
 		end
 		-- 쉐이드도 아르카나 카드가 안 틱되므로 별도 풀을 쓴다(레이온과 동일한 이유 — 위 2026-08-02 주석 참고).
@@ -25643,6 +25921,14 @@ script CardManager extends Logic
 			if self:IsCardUnlocked(177) and self.MesoExplosionLevel < 5 then table.insert(pool, 177) end
 			if self:IsCardUnlocked(178) and self.ShadowPartnerLevel < 5 then table.insert(pool, 178) end
 			if self:IsCardUnlocked(179) and self.DarkFlareLevel < 5 then table.insert(pool, 179) end
+			-- 쉐이드 조합 카드(2026-09-12 추가)
+			if self:IsCardUnlocked(185) and self.AssassinateLevel < 3 then table.insert(pool, 185) end
+			if self:IsCardUnlocked(186) and self.SonicBlowLevel < 3 then table.insert(pool, 186) end
+			if self:IsCardUnlocked(187) and self.SmokeRampageLevel < 3 then table.insert(pool, 187) end
+			if self:IsCardUnlocked(188) and self.AzureEdgeLevel < 3 then table.insert(pool, 188) end
+			if self:IsCardUnlocked(189) and self.MesoDetonationLevel < 3 then table.insert(pool, 189) end
+			if self:IsCardUnlocked(190) and self.DualShadowPartnerLevel < 3 then table.insert(pool, 190) end
+			if self:IsCardUnlocked(191) and self.AbyssalFlareLevel < 3 then table.insert(pool, 191) end
 			return pool
 		end
 		if self:IsCardUnlocked(2) then table.insert(pool, 2) end
@@ -25655,6 +25941,14 @@ script CardManager extends Logic
 		if self:IsCardUnlocked(13) and self.ThunderCutterLevel < 5 then table.insert(pool, 13) end
 		if self:IsCardUnlocked(14) and self.AquaTrapLevel < 5 then table.insert(pool, 14) end
 		if self:IsCardUnlocked(15) and self.HailStoneLevel < 5 then table.insert(pool, 15) end
+		-- 아르카나 조합 카드(2026-09-12 추가)
+		if self:IsCardUnlocked(16) and self.ThunderStormLevel < 3 then table.insert(pool, 16) end
+		if self:IsCardUnlocked(17) and self.IceStrikeLevel < 3 then table.insert(pool, 17) end
+		if self:IsCardUnlocked(19) and self.ChainLightningLevel < 3 then table.insert(pool, 19) end
+		if self:IsCardUnlocked(20) and self.DoubleCutterLevel < 3 then table.insert(pool, 20) end
+		if self:IsCardUnlocked(21) and self.GrandPepeLevel < 3 then table.insert(pool, 21) end
+		if self:IsCardUnlocked(23) and self.HailBurstLevel < 3 then table.insert(pool, 23) end
+		if self:IsCardUnlocked(24) and self.AquaSurgeLevel < 3 then table.insert(pool, 24) end
 		return pool
 	end
 
@@ -25740,6 +26034,30 @@ script CardManager extends Logic
 		elseif cardIdx == 189 then return "mesodetonation_up"
 		elseif cardIdx == 190 then return "dualshadowpartner_up"
 		elseif cardIdx == 191 then return "abyssalflare_up"
+		-- 2026-09-12: 조합 카드도 엘리트/보스 드롭 후보에 들어가면서 추가(유저 지정 "조합카드도 있으면 좋을듯").
+		-- 222(블러드 스로우)는 원래 린 풀에 있었는데 여기 문자열이 없어 dmg/cd로 떨어져 강화가 안 되던 것도 같이 수정.
+		elseif cardIdx == 16 then return "thunderstorm_up"
+		elseif cardIdx == 17 then return "icestrike_up"
+		elseif cardIdx == 19 then return "chainlightning_up"
+		elseif cardIdx == 20 then return "doublecutter_up"
+		elseif cardIdx == 21 then return "grandpepe_up"
+		elseif cardIdx == 23 then return "hailburst_up"
+		elseif cardIdx == 24 then return "aquasurge_up"
+		elseif cardIdx == 114 then return "arrowillusion_up"
+		elseif cardIdx == 115 then return "evolve_up"
+		elseif cardIdx == 116 then return "stormpoem_up"
+		elseif cardIdx == 117 then return "enhancedarrowblow_up"
+		elseif cardIdx == 118 then return "arrowfletter_up"
+		elseif cardIdx == 119 then return "uncounterarrowv_up"
+		elseif cardIdx == 120 then return "flashbomber_up"
+		elseif cardIdx == 160 then return "braveslash_up"
+		elseif cardIdx == 165 then return "spiritblade_up"
+		elseif cardIdx == 166 then return "burningrush_up"
+		elseif cardIdx == 167 then return "slashstorm_up"
+		elseif cardIdx == 168 then return "solarblade_up"
+		elseif cardIdx == 169 then return "scarringblade_up"
+		elseif cardIdx == 170 then return "furiousblow_up"
+		elseif cardIdx == 222 then return "bloodthrow_up"
 		end
 		return (_UtilLogic:RandomDouble() < 0.5) and "dmg" or "cd"
 	end
@@ -25751,6 +26069,13 @@ script CardManager extends Logic
 	-- 슬롯이 겹치지 않도록 dropIdx에 더해주는 오프셋
 	@ExecSpace("ServerOnly")
 	method void GrantCardUpgradesFromPool(table pool, Vector3 worldPos, number fallHeight, number groundWorldY, number dropScale, integer dropCount, integer dropIdxOffset)
+		-- 기존 호출부(보스 보상/상자/이스터에그 등)는 전부 보스 웨이브 상한 대상 — 예전 동작 그대로
+		self:GrantCardUpgradesFromPoolEx(pool, worldPos, fallHeight, groundWorldY, dropScale, dropCount, dropIdxOffset, true)
+	end
+
+	-- applyBossCap=false면 보스 웨이브 슬롯 드롭 상한을 세지도 막지도 않는다(일반 엘리트 전용 — OnEliteKilled 참고)
+	@ExecSpace("ServerOnly")
+	method void GrantCardUpgradesFromPoolEx(table pool, Vector3 worldPos, number fallHeight, number groundWorldY, number dropScale, integer dropCount, integer dropIdxOffset, boolean applyBossCap)
 		for i = 1, dropCount do
 			local cardIdx = pool[_UtilLogic:RandomIntegerRange(1, #pool)]
 			local upgradeType = self:GetEliteUpgradeType(cardIdx)
@@ -25760,13 +26085,15 @@ script CardManager extends Logic
 			-- 어찌됐든 슬롯 스킬은 최대 2개만"). 엘리트로 표시된 분열체 4마리, 소환 박쥐, 호위병,
 			-- 보스 자신의 확정 보상이 전부 이 한 함수를 거치므로 여기 한 곳에서 세면 전부 막힌다.
 			-- 슬롯 없는 패시브(slotIdx == 0)는 "슬롯 스킬"이 아니므로 세지 않는다.
-			if slotIdx > 0 and self._bossWaveDropCapOn
+			if applyBossCap and slotIdx > 0 and self._bossWaveDropCapOn
 				and self._bossWaveSlotDrops >= self.BossWaveSlotDropCap then
+				log("CardManager: drop card=" .. cardIdx .. " blocked by boss wave cap")
 				continue
 			end
-			if slotIdx > 0 and self._bossWaveDropCapOn then
+			if applyBossCap and slotIdx > 0 and self._bossWaveDropCapOn then
 				self._bossWaveSlotDrops = self._bossWaveSlotDrops + 1
 			end
+			log("CardManager: drop card=" .. cardIdx .. " slot=" .. slotIdx .. " type=" .. tostring(upgradeType))
 
 			if slotIdx > 0 then
 				-- 아이콘이 3개 독립적으로 운용되므로 stagger 없이 동시에 드롭한다
@@ -25832,14 +26159,19 @@ script CardManager extends Logic
 	end
 
 	@ExecSpace("ServerOnly")
-	method void OnEliteKilled(Vector3 worldPos, number fallHeight, number groundWorldY, number dropScale)
-		-- 슬롯에 배치된 카드(2~5, 9, 11...) 중에서 무작위로 1~3개를 강화. 강화할 카드가 없으면 골드 100 지급
+	method void OnEliteKilled(Vector3 worldPos, number fallHeight, number groundWorldY, number dropScale, boolean isBossSummoned)
+		-- 슬롯에 배치된 카드 중에서 무작위로 1~2개(RollDropCount)를 강화. 강화할 카드가 없으면 골드 100 지급.
+		-- isBossSummoned: 보스가 소환한 엘리트급(엔젤슬라임 분열체)만 true — 보스 웨이브 슬롯 드롭 상한에 들어간다.
+		-- 일반 엘리트(레벨5·3분 시계)는 보스와 겹쳐 죽어도 상한과 무관하게 항상 드롭한다(유저 지정 2026-09-12:
+		-- "엘리트랑 보스 소환 엘리트는 별개로 나눠야").
 		local pool = self:BuildActiveUpgradePool()
+		local dropCount = self:RollDropCount()
+		log("CardManager: elite drop pool=" .. #pool .. " count=" .. dropCount .. " bossSummoned=" .. tostring(isBossSummoned) .. " bossCapOn=" .. tostring(self._bossWaveDropCapOn))
 		if #pool == 0 then
 			_GameManager:AddGold(100)
 			return
 		end
-		self:GrantCardUpgradesFromPool(pool, worldPos, fallHeight, groundWorldY, dropScale, self:RollDropCount(), 0)
+		self:GrantCardUpgradesFromPoolEx(pool, worldPos, fallHeight, groundWorldY, dropScale, dropCount, 0, isBossSummoned)
 	end
 
 	-- 타락한 켄타우로스(ep2_map4 MapObject_205, MonsterAI._isCorruptedCentaur) 처치 — 유저 지정:
@@ -26148,6 +26480,8 @@ script CardManager extends Logic
 	end
 
 end
+
+
 
 
 

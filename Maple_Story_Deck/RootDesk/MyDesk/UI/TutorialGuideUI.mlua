@@ -1,0 +1,340 @@
+@Logic
+script TutorialGuideUI extends Logic
+
+	-- 첫 플레이 온보딩 튜토리얼의 화면 연출 담당(클라이언트 전용).
+	-- 진행 단계는 서버(TutorialLogic)가 정하고 Multicast로 내려주며, 여기서는 그리기만 한다.
+	--
+	--   Step1  상단 배너만 노출 — "몬스터를 잡아서 레벨을 올려보세요!"
+	--   Step2  딤 + 배너 + 손가락. 레벨업 카드 3장(Card6~8)과 미리보기 툴팁만 딤 위로 올려서 살린다
+	--   Step3  딤/손가락 해제 후 마무리 배너, Step3Seconds 뒤 자동으로 사라짐
+	--
+	-- ⚠ 딤이 카드를 가리지 않게 하는 건 _UILogic:SetSiblingIndex다. .ui 파일에 형제 순서를 박아두면
+	--   다른 HUD 요소 순서까지 흔들리므로(ToastGroup 사고 참고) 런타임에만 올린다. 한 번 올라간
+	--   카드/툴팁은 되돌리지 않는다 — 둘 다 평소엔 꺼져 있는 오버레이라 맨 앞에 있어도 무해하고,
+	--   되돌리면 오히려 툴팁이 카드 뒤로 가는 순서 사고가 난다.
+
+	property Entity dimEntity = "912c0579-4e58-4f26-bf8e-a4381830a99a"
+
+	property Entity bannerEntity = "5b182aaa-4d27-4b79-8098-c94529cc0379"
+
+	property TextGUIRendererComponent bannerText = "e03f8f8e-c70f-4038-9a91-4a79ffaf2663"
+
+	property Entity fingerEntity = "b57218f3-b1b6-477b-9a0a-2aa0f4cb7c85"
+
+	-- 레벨업 선택 카드 3장 + 홀드 미리보기 툴팁(CardManager 소유) — 딤 위로 올릴 대상
+	property Entity choiceCard1 = "dca81800-b071-410b-b2cb-d33ec977488a"
+
+	property Entity choiceCard2 = "a8324fff-1c67-492e-a60f-ee76c786a2e3"
+
+	property Entity choiceCard3 = "2a1cbc75-3a0a-46fe-a2a4-e5f24a707167"
+
+	property Entity cardTooltip = "4615be3c-8628-4e55-ab57-ef285284d988"
+
+	property string StepAimText = "몬스터를 누르면 그 몬스터를 먼저 공격합니다!"
+
+	property string Step1Text = "몬스터를 잡아서 레벨을 올려보세요!"
+
+	property string Step2Text = "카드를 눌러 스킬을 배워보세요!"
+
+	-- ⚠ 이 문구를 더 길게 고칠 거면 .ui의 TutorialBanner(폭 1400) / Label(폭 1340)도 같이 키울 것.
+	-- 34pt 기준 한 글자가 약 25px이라 1340px ≈ 53자까지가 한 줄로 들어간다
+	property string Step3Text = "레벨업하며 다양한 스킬을 조합하고 몰려오는 몬스터를 물리치세요!\n맵 곳곳에 숨겨진 이스터에그도 놓치지 마세요!"
+
+	-- 마무리 배너가 화면에 남아 있는 시간(초)
+	property number Step3Seconds = 4.0
+
+	property integer _step3TimerId = 0
+
+	-- ⚠ 손가락 위치 수동 조정 모드(유저 요청 2026-09-11: "내가 손가락은 직접 움직일 테니").
+	-- true면 아래 FingerRestPos를 무시하고 **.ui에 저장된 TutorialFinger의 위치**를 그대로 기준으로
+	-- 삼는다 — 즉 Maker 에디터에서 TutorialFinger를 끌어다 놓은 자리가 곧 손가락 자리가 된다.
+	-- 그래서 지금은 .ui 쪽 TutorialFinger가 enable=true로 저장돼 있다(에디터에서 보이고 잡히도록).
+	-- 위치를 확정하면 (1) 이 값을 false로, (2) .ui의 enable을 false로 되돌릴 것.
+	property boolean ManualFingerPlacement = true
+
+	-- 손가락 "콕콕" — 쉬는 자리에서 카드 쪽으로 찍었다가 돌아오는 왕복.
+	-- 첫 번째 카드(Card6)는 화면 우측 x 660~790 / y -100~65 구간이고, 가이드는 그 **왼쪽 바깥**에서
+	-- 오른쪽(카드 쪽)을 가리킨다. ManualFingerPlacement=false일 때만 이 값이 쓰인다
+	property Vector2 FingerRestPos = Vector2(600, -60)
+
+	-- 찍는 방향/거리. 왼쪽에서 카드를 향해 찌르므로 오른쪽 위로 움직인다
+	property Vector2 FingerTapOffset = Vector2(22, 20)
+
+	property number FingerTapPeriod = 0.7
+
+	-- 실제로 왕복의 기준이 되는 자리. ManualFingerPlacement면 .ui에 저장된 위치를 OnBeginPlay에서
+	-- 한 번 읽어 여기에 담는다(애니메이션이 좌표를 덮어쓰기 전에 읽어야 하므로 반드시 시작 시점에)
+	property Vector2 _fingerBasePos = Vector2(0, 0)
+
+	property number _fingerTime = 0
+
+	property boolean _fingerActive = false
+
+	-- 손가락이 무엇을 가리키는가: 0 = 꺼짐, 1 = 몬스터 추적(에임 단계), 2 = 카드 고정(카드 단계)
+	property integer _fingerMode = 0
+
+	-- ── 에임 단계: 손가락이 살아있는 몬스터를 따라다닌다 ─────────────────────────────
+	-- 손끝이 스프라이트 중심에서 얼마나 떨어져 있는지(UI px). 추적할 때 이 값만큼 빼서 배치해야
+	-- **손끝**이 몬스터 위에 오고 손바닥이 몬스터를 가리지 않는다. 카드 단계는 유저가 직접 맞춘
+	-- 고정 좌표를 쓰므로 이 값과 무관하다
+	property Vector2 FingerTipOffset = Vector2(86, 40)
+
+	-- 몬스터 엔티티 좌표는 **발밑**이고 스프라이트는 그 위로 그려진다(FocusMarkYOffset과 같은 이유).
+	-- 몸통쯤을 가리키도록 월드 기준으로 이만큼 올린다
+	property number AimTargetWorldYOffset = 0.5
+
+	-- ★ 에임 단계 손가락 위치 미세 보정(UI px) — **여기만 고치면 된다**.
+	--   y를 더 **작게**(음수로 크게) = 아래로,  y를 더 **크게** = 위로
+	--   x를 더 크게 = 오른쪽,                   x를 더 작게 = 왼쪽
+	-- 몬스터 추적 좌표(FindAimAnchor)를 계산한 뒤 마지막에 그대로 더해주는 값이라,
+	-- 이 숫자만 바꾸고 refresh하면 바로 반영된다(카드 단계 손가락은 .ui 쪽 TutorialFinger 위치를 쓰므로 무관).
+	property Vector2 FingerAimNudge = Vector2(0, -64)
+
+	-- 몬스터가 화면 가장자리에 걸쳐 있으면 손가락이 화면 밖으로 나가므로 안쪽으로 가둔다
+	property number AimClampX = 860
+
+	property number AimClampY = 460
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		-- 손가락의 기준 자리를 먼저 확정한다. 수동 배치 모드면 .ui에 저장된(=Maker에서 끌어다 놓은)
+		-- 좌표를 그대로 읽는다 — 아래 HideAll/애니메이션이 좌표를 덮어쓰기 전에 읽어야 한다
+		if self.ManualFingerPlacement and isvalid(self.fingerEntity) then
+			self._fingerBasePos = self.fingerEntity.UITransformComponent.anchoredPosition
+		else
+			self._fingerBasePos = self.FingerRestPos
+		end
+
+		-- 세 요소 모두 꺼진 상태로 시작한다(손가락은 에디터 편집용으로 .ui에 켜져 있으므로 여기서 끈다)
+		self:HideAll()
+		log("TutorialGuideUI: ready (finger base = " .. self._fingerBasePos.x .. ", " .. self._fingerBasePos.y .. ")")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void TryStartFirstPlay()
+		-- TitleUI가 인게임 진입 연출이 끝난 직후 호출한다. 이미 본 유저면 아무 일도 하지 않는다
+		if _TutorialLogic:HasSeenTutorial() then return end
+		if _TutorialLogic:IsActive() then return end
+
+		_TutorialLogic:RequestBegin()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ShowStepAim()
+		-- 에임 안내. 이 시점에 서버가 게임 전체를 멈춰놨으므로 몬스터는 제자리에 서 있다.
+		-- 손가락이 가장 가까운 몬스터를 가리키며 콕콕 찍고, 플레이어가 그 몬스터를 누르면
+		-- 서버(CardManager.RequestFocusTarget → TutorialLogic.NotifyFocusTargetSet)가 정지를 푼다.
+		--
+		-- ⚠ 이 단계의 딤은 UI가 아니라 **월드 딤**이다(CardManager.ShowTutorialAimDim) —
+		-- 유저 지정 "몬스터는 딤드 위에 있어야지". UI 딤은 화면 맨 앞이라 몬스터까지 어두워지므로
+		-- 여기서는 아예 끄고, 몬스터보다 뒤에 깔리는 월드 엔티티를 서버가 대신 띄운다.
+		-- 덕분에 화면 터치도 가로채이지 않아서 몬스터를 바로 누를 수 있다.
+		self:ClearStep3Timer()
+		self.dimEntity:SetEnable(false)
+		self:ShowBanner(self.StepAimText)
+
+		self._fingerTime = 0
+		self._fingerMode = 1
+		self._fingerActive = true
+		_UILogic:SetSiblingIndex(self.fingerEntity.UITransformComponent, 1000000)
+		-- 실제 노출은 OnUpdate가 결정한다 — 가리킬 몬스터가 없으면 꺼둔 채로 기다린다
+		self.fingerEntity:SetEnable(false)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ShowStep1()
+		-- 안내 배너만. 정지가 풀려 게임이 다시 굴러가고 플레이어는 평소처럼 싸운다
+		self:ClearStep3Timer()
+		self._fingerMode = 0
+		self._fingerActive = false
+		self.fingerEntity:SetEnable(false)
+		self.dimEntity:SetEnable(false)
+		self:ShowBanner(self.Step1Text)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ShowStep2()
+		-- 딤을 깔고 카드 3장 + 툴팁만 그 위로 올린 뒤, 손가락으로 카드를 찍는다.
+		-- 이 단계의 딤은 터치를 막아야 한다 — 카드 말고는 아무것도 못 누르게 하는 게 목적
+		self:ClearStep3Timer()
+		self:SetDimBlocksTouch(true)
+		self.dimEntity:SetEnable(true)
+		_UILogic:SetSiblingIndex(self.dimEntity.UITransformComponent, 1000000)
+		-- 아래 호출 순서가 곧 최종 그리기 순서다(SetSiblingIndex는 매번 맨 뒤로 보낸다)
+		_UILogic:SetSiblingIndex(self.choiceCard1.UITransformComponent, 1000000)
+		_UILogic:SetSiblingIndex(self.choiceCard2.UITransformComponent, 1000000)
+		_UILogic:SetSiblingIndex(self.choiceCard3.UITransformComponent, 1000000)
+		_UILogic:SetSiblingIndex(self.cardTooltip.UITransformComponent, 1000000)
+
+		self:ShowBanner(self.Step2Text)
+
+		self._fingerTime = 0
+		self._fingerMode = 2
+		self._fingerActive = true
+		self.fingerEntity:SetEnable(true)
+		self.fingerEntity.UITransformComponent.anchoredPosition = self._fingerBasePos
+		_UILogic:SetSiblingIndex(self.fingerEntity.UITransformComponent, 1000000)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ShowStep3()
+		-- 정지가 풀리는 시점. 딤/손가락을 걷고 마무리 문구만 잠깐 남긴다
+		self._fingerMode = 0
+		self._fingerActive = false
+		self.fingerEntity:SetEnable(false)
+		self.dimEntity:SetEnable(false)
+		self:ShowBanner(self.Step3Text)
+
+		self:ClearStep3Timer()
+		self._step3TimerId = _TimerService:SetTimerOnce(function()
+			if not isvalid(self) then return end
+			self._step3TimerId = 0
+			self:HideAll()
+		end, self.Step3Seconds)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ShowBanner(string message)
+		-- 배너는 단계가 바뀔 때마다 문구만 갈아끼운다. 딤보다 항상 앞에 있어야 읽힌다
+		self.bannerText.Text = message
+		self.bannerEntity:SetEnable(true)
+		_UILogic:SetSiblingIndex(self.bannerEntity.UITransformComponent, 1000000)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void HideAll()
+		-- 튜토리얼 종료(또는 게임오버) — 세 요소를 전부 끈다
+		self:ClearStep3Timer()
+		self._fingerMode = 0
+		self._fingerActive = false
+		self.dimEntity:SetEnable(false)
+		self.bannerEntity:SetEnable(false)
+		self.fingerEntity:SetEnable(false)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetDimBlocksTouch(boolean blocks)
+		-- 딤이 터치를 가로챌지 여부. 에임 단계는 false(몬스터를 눌러야 하므로),
+		-- 카드 단계는 true(카드 말고는 못 누르게)
+		local sprite = self.dimEntity.SpriteGUIRendererComponent
+		if sprite == nil then return end
+		sprite.RaycastTarget = blocks
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ClearStep3Timer()
+		-- 마무리 배너 자동 닫기 타이머 정리(단계가 겹칠 때 이전 타이머가 새 배너를 지우는 걸 막는다)
+		if self._step3TimerId ~= 0 then
+			_TimerService:ClearTimer(self._step3TimerId)
+			self._step3TimerId = 0
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUpdate(number delta)
+		-- 손가락 왕복. 게임오버가 나면 튜토리얼 연출을 통째로 걷는다(정지 해제는 서버 안전장치가 담당)
+		if _GameManager.GameOver then
+			if self._fingerActive or self.bannerEntity.Enable then
+				self:HideAll()
+			end
+			return
+		end
+
+		if not self._fingerActive then return end
+		if not isvalid(self.fingerEntity) then return end
+
+		self._fingerTime = self._fingerTime + delta
+		if self._fingerTime >= self.FingerTapPeriod then
+			self._fingerTime = self._fingerTime - self.FingerTapPeriod
+		end
+
+		-- 0~0.35 구간에서 빠르게 찍고, 나머지 구간에서 천천히 돌아온다("콕" 하는 느낌)
+		local half = self.FingerTapPeriod * 0.35
+		local t = 0
+		if self._fingerTime < half then
+			t = self._fingerTime / half
+		else
+			t = 1 - (self._fingerTime - half) / (self.FingerTapPeriod - half)
+		end
+		-- 부드럽게 (ease-in-out)
+		local eased = t * t * (3 - 2 * t)
+
+		-- 에임 단계에서는 기준 자리 자체가 매 프레임 몬스터를 따라간다
+		local pos = self._fingerBasePos
+		if self._fingerMode == 1 then
+			local aim = self:FindAimAnchor()
+			if aim == nil then
+				-- 가리킬 몬스터가 아직 없다 — 손가락을 숨기고 다음 프레임에 다시 찾는다
+				if self.fingerEntity.Enable then self.fingerEntity:SetEnable(false) end
+				return
+			end
+			if not self.fingerEntity.Enable then self.fingerEntity:SetEnable(true) end
+			pos = aim
+		end
+
+		local off = self.FingerTapOffset
+		self.fingerEntity.UITransformComponent.anchoredPosition =
+			Vector2(pos.x + off.x * eased, pos.y + off.y * eased)
+	end
+
+	-- 손가락이 붙을 자리(UI 좌표)를 돌려준다. 가리킬 몬스터가 없으면 nil.
+	-- 손"끝"이 몬스터 위에 오도록 FingerTipOffset만큼 빼서 스프라이트 중심 자리를 계산한다.
+	@ExecSpace("ClientOnly")
+	method any FindAimAnchor()
+		local mob = self:FindNearestMonsterEntity()
+		if mob == nil then return nil end
+
+		local wp = mob.TransformComponent.WorldPosition
+		local targetUI = _UILogic:ScreenToUIPosition(
+			_UILogic:WorldToScreenPosition(Vector2(wp.x, wp.y + self.AimTargetWorldYOffset)))
+
+		local x = targetUI.x - self.FingerTipOffset.x + self.FingerAimNudge.x
+		local y = targetUI.y - self.FingerTipOffset.y + self.FingerAimNudge.y
+		-- 몬스터가 화면 끝에 걸쳐 있어도 손가락은 화면 안에 남긴다
+		x = math.max(-self.AimClampX, math.min(self.AimClampX, x))
+		y = math.max(-self.AimClampY, math.min(self.AimClampY, y))
+		return Vector2(x, y)
+	end
+
+	-- 현재 맵에서 가장 "앞에 있는"(스케일이 큰 = 가까운) 살아있는 몬스터 엔티티를 찾는다.
+	-- CardManager.GetClosestTargets가 쓰는 것과 같은 기준이라 실제 공격 대상과 어긋나지 않는다.
+	-- 병합 존은 맵 루트의 자식 컨테이너라 한 단계 더 내려가야 한다(ScanMonsterBoxAt과 동일).
+	@ExecSpace("ClientOnly")
+	method any FindNearestMonsterEntity()
+		local player = _UserService.LocalPlayer
+		if player == nil then return nil end
+		local map = player.CurrentMap
+		if map == nil then return nil end
+		return self:ScanNearestMonster(map, nil, -1, 0)
+	end
+
+	@ExecSpace("ClientOnly")
+	method any ScanNearestMonster(Entity parent, any best, number bestScale, integer depth)
+		-- parent의 자식들을 훑어 스케일이 가장 큰 살아있는 몬스터를 고른다
+		local children = parent.Children:ToTable()
+		for i = 1, #children do
+			local c = children[i]
+			if isvalid(c) then
+				---@type MonsterAI
+				local ai = c:GetComponent("script.MonsterAI")
+				if ai ~= nil then
+					if not ai._dead and c.TransformComponent ~= nil then
+						local s = c.TransformComponent.Scale.x
+						if s > bestScale then
+							best = c
+							bestScale = s
+						end
+					end
+				elseif depth < 1 then
+					local sub = self:ScanNearestMonster(c, best, bestScale, depth + 1)
+					if sub ~= nil and sub ~= best then
+						best = sub
+						bestScale = sub.TransformComponent.Scale.x
+					end
+				end
+			end
+		end
+		return best
+	end
+
+end

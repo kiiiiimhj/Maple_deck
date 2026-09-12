@@ -78,9 +78,11 @@ script GameManager extends Logic
 	-- 시간 기반 보스/엘리트 난이도 배율(2026-08-03) — 둘 다 "그 시점 일반 몬스터 체력/공격력"에 곱해서
 	-- 산정한다(더 이상 고정된 웨이브 번호에 못 박히지 않음). 엘리트는 MarkElite()에 이미 자체 배율
 	-- (1.15)이 있어 별도 프로퍼티 없이 그대로 둠 — 이 둘은 보스 전용.
-	property number BossHpMultiplier = 7.0
+	-- 2026-09-12 유저 지정 "보스 체력 2배" → 7.0 → 14.0 (첫 보스는 MonsterSpawner.FirstBossHp 고정값이 따로 있다)
+	property number BossHpMultiplier = 14.0
 
-	property number BossAttackMultiplier = 2.0
+	-- 2026-09-12 유저 지정 2.0 → 1.5
+	property number BossAttackMultiplier = 1.5
 
 	-- 게임 상태
 	@Sync
@@ -91,7 +93,10 @@ script GameManager extends Logic
 	@Sync
 	property integer ContinueCount = 0
 
-	property any _continueCostTable = { 900, 1500, 2400, 3600 }
+	-- 이어하기 비용(다이아). 유저 지정 2026-09-10: 1회 50 / 2회 100 / 3회 150 / 4회부터는 계속 200.
+	-- GetContinueCost 가 표 길이를 넘는 인덱스를 마지막 칸으로 잡아주므로 4번째 값이 그대로 반복된다.
+	-- 예전엔 코인(TotalCoins) 900/1500/2400/3600 이었는데, 결제 재화를 다이아로 바꾸면서 같이 조정했다
+	property any _continueCostTable = { 50, 100, 150, 200 }
 
 	@Sync
 	property boolean GameStarted = false
@@ -135,6 +140,17 @@ script GameManager extends Logic
 
 	@Sync
 	property number TimeAttackRemaining = 0
+
+	-- 첫 플레이 튜토리얼의 "카드 선택" 단계에서만 켜지는 전역 일시정지(TutorialLogic이 소유).
+	-- 유저 지정(2026-09-10): "카드 선택 시에는 몬스터 이동 X, 타이머 등 나머지 기능은 다 멈춰야 함" —
+	-- 단, 튜토리얼 때만이고 평소 레벨업은 지금처럼 실시간으로 진행된다.
+	-- 이 플래그 하나를 아래 네 곳의 OnUpdate 최상단에서 함께 본다:
+	--   GameManager(타임어택 카운트다운/허리케인/절망의칼날) · MonsterSpawner(스폰·경과시간) ·
+	--   CardManager(플레이어 자동 공격·쿨다운) · MonsterAI(몬스터 이동·공격)
+	-- 새 런이 시작될 때마다 반드시 false로 되돌린다(StartGame/Restart) — 정지가 남아 게임이
+	-- 멈춘 채로 시작되는 사고를 막기 위한 것
+	@Sync
+	property boolean TutorialPaused = false
 
 	@Sync
 	property boolean _timeAttackOvertimeActive = false
@@ -594,10 +610,21 @@ script GameManager extends Logic
 	-- 지나면 강해지는 게 맞지만(웨이브=킬레이트 기준이면 안 됨), 연속으로 계속 오르면 너무 가팔라진다.
 	-- 2026-08-05(2차): 유저가 다시 재지정 — "0~2분까지만 100, 나머지 160/220/300/400/500, 그 뒤로 복리".
 	-- 2분 단위 경계 지정이 없어서 균등 2분 간격(0~2/2~4/4~6/6~8/8~10/10~12)으로 가정했다 — 다르면
-	-- 알려달라고 안내. 12분(마지막 지정 경계) 이후는 마지막 값(500) 기준 ×1.15 복리로 계속 가팔라짐.
+	-- 알려달라고 안내. 12분(마지막 지정 경계) 이후는 마지막 값(420, 2026-09-12 이전 500) 기준 ×1.15 복리로 계속 가팔라짐.
 	property any _hpStepBoundarySeconds = { 120, 240, 360, 480, 600, 720 }  -- 각 계단이 "끝나는" 시각(초) — 2/4/6/8/10/12분
 
-	property any _hpStepValues = { 100, 160, 220, 300, 400, 500 }
+	-- 2026-09-12 유저 지정(A안): 6~12분 3칸 완화 300/400/500 → 260/330/420. 자동 생존 테스트 2판이 빌드와
+	-- 무관하게 전부 6분 전후부터 HP가 깎여 무너져서(처치 속도가 스폰을 못 따라감) 이 구간만 낮췄다.
+	property any _hpStepValues = { 100, 160, 220, 260, 330, 420 }
+
+	-- ── 몬스터 공격력 전용 시간 계단 (2026-09-11 유저 지정) ──────────────────────────
+	-- 체력(_hpStepBoundarySeconds, 2분 격자)과 **경계를 분리**했다. 유저가 "공격력만" 새 커브로
+	-- 바꾸길 원했는데, 같은 경계를 공유하면 경계를 1분 격자로 당기는 순간 몬스터 체력까지 2배 가까이
+	-- 앞당겨져 버리기 때문(2~3분 HP 100 → 220). 체력 커브는 손대지 않는다.
+	--
+	-- 초반은 1분 단위로 촘촘하게 오르고 뒤로 갈수록 계단 폭이 넓어진다:
+	--   0~1 / 1~2 / 2~3 / 3~5 / 5~7 / 7~9 / 9~12 / 12~15 / 15~20 / 20~25분, 그 뒤 5분 간격
+	property any _atkStepBoundarySeconds = { 60, 120, 180, 300, 420, 540, 720, 900, 1200, 1500 }
 
 	-- 거대 네펜데스 2페이즈(부활 후 — 원거리 공격, 실제 사망) 고정 스탯. 네펜데스/다크네펜데스는 그냥
 	-- 죽으면 끝 — 별도로 거대 네펜데스를 소환/변신시키지 않는다(유저 요청, 2026-08-10 최종 확정).
@@ -1194,6 +1221,139 @@ script GameManager extends Logic
 		return defs[index]
 	end
 
+	-- ── 에피소드3 엘리트 로스터 (유저 지정, 2026-09-12) ──────────────────────────────
+	-- 에피1·2와 **같은 def 스키마** + 선택 키 2개(charge / chargeWindup — 없으면 nil이라 기존 종은 무관).
+	--   1. 호브 헥터 (mob/9300276.img) — 유저 지정 "돌진형". 첫 엘리트 = 이 종 고정(가방 규칙).
+	--   2. 정예 핀호브 (mob/9300278.img) — 지상 근접.
+	--   3. 흉폭한 호브 (mob/9300280.img) — 지상 근접.
+	--   4. 헹키 (mob/7130004.img) — 유저 지정 "원거리".
+	-- (컴뱃 호브 mob/9300279는 유저 지정으로 제외.)
+	-- 재생시간은 전부 클라 LoadAnimationClipAndWait로 프레임 Delay를 합산한 실측값(2026-09-12).
+	-- scale은 137.5 ÷ (원본 **긴 변** × 1.15) — 이 로스터엔 세로로 긴 종(핀호브 84×107, 헹키 89×101)이 있어
+	-- 폭 기준으로 잡으면 한 종만 1.4배로 커진다. 넷 다 원본이 100px 안팎이라 긴 변 기준이 화면 크기를 고르게 맞춘다.
+	@ExecSpace("ServerOnly")
+	method integer GetEp3EliteCount()
+		-- 에피소드3 엘리트 종의 총 개수(= 가방을 다시 채울 때 들어가는 종 수).
+		return 4
+	end
+
+	@ExecSpace("ServerOnly")
+	method any GetEp3EliteDef(integer index)
+		-- 에피소드3 엘리트 index번째(1부터)의 외형/사운드/크기/거동 정의를 한 행으로 반환한다.
+		local defs = {
+			{
+				-- 1번: 호브 헥터 (resource_pack "mob/9300276.img"). 유저 지정 "돌진형" —
+				-- 스폰 자리에서 chargeWindup초 떨다가 먼지를 일으키며 돌진한다(MonsterAI.MarkAsChargeEscort 경로).
+				name = "호브 헥터",
+				stand = "4c165df3e47b472a896ff80632cc0210",
+				move = "41401fac966e4641b8eb8d60f2a7aa16",
+				attack = "4716eceb5d554e3b98ff975d69716236",
+				attackDur = 1.50,
+				hit = "660479e901844d5ab2affb5f9a5c7d91",
+				die = "b9f47a7a9e884d69853ca9dec5dcfeb3",
+				dieDur = 0.75,
+				attackSfx = "c67d055641d849f0b262f88596dcb41f",
+				hitSfx = "5037324ed5a948ffaa5ffe334544f07e",
+				dieSfx = "2faa7a1989fc406b9877709b8f903292",
+				-- 원본 127×52 → 137.5 ÷ (127 × 1.15) ≈ 0.941
+				scale = 0.941,
+				flying = false,
+				ranged = false,
+				charge = true,
+				chargeWindup = 2.0,
+				-- attack1/info/hit(5f/0.500 실측) — 마지막 프레임 도중에 지우도록 살짝 줄인다
+				hitFx = "abcc1f46e83b4fb7b8111de523559334",
+				hitFx2 = "",
+				hitFxDur = 0.46,
+				hitFxDelay = 0,
+				hitFxFrames = nil,
+				hitFxFrameDelay = 0,
+				flyAttackInterval = 0,
+			},
+			{
+				-- 2번: 정예 핀호브 (resource_pack "mob/9300278.img"). 지상 근접.
+				name = "정예 핀호브",
+				stand = "a3c0664a84bd4a62bb4c91097fc17ce4",
+				move = "03e5c739df5d44aba7875da19cd191e0",
+				attack = "0db505591d0a4cf4ad737d4c328830b6",
+				attackDur = 1.74,
+				hit = "47fe8dc1f980468f9a68da32e62eb6ca",
+				die = "61db6c28df4d4de79605549a713da2a4",
+				dieDur = 0.90,
+				attackSfx = "7f68ba2dce7c49c48a477c9888edbe09",
+				hitSfx = "9914a9e4ec7c48418ea1a2a5b2ba8003",
+				dieSfx = "da9a99d02d1d45129b83e56933134570",
+				-- 원본 84×107 → 137.5 ÷ (107 × 1.15) ≈ 1.117
+				scale = 1.117,
+				flying = false,
+				ranged = false,
+				-- attack1/info/hit(3f/0.270 실측)
+				hitFx = "b2ef68eaada3484194b75a214fbb797e",
+				hitFx2 = "",
+				hitFxDur = 0.24,
+				hitFxDelay = 0,
+				hitFxFrames = nil,
+				hitFxFrameDelay = 0,
+				flyAttackInterval = 0,
+			},
+			{
+				-- 3번: 흉폭한 호브 (resource_pack "mob/9300280.img"). 지상 근접(철퇴).
+				name = "흉폭한 호브",
+				stand = "0485a16f807f42b584a2be7ef2bf45da",
+				move = "3a5744c176f741a48e7b7a28b95e9747",
+				attack = "5651cef198794873a09b320afae2fe4b",
+				attackDur = 2.55,
+				hit = "4bedd7e69fa64698bed8f9c8831a2299",
+				die = "6de1f06398a14a3c90201949471c26a6",
+				dieDur = 1.80,
+				attackSfx = "bfd9f68aa140488d8382effe22be790c",
+				hitSfx = "ed5c522efff444599c47367b31e0befe",
+				dieSfx = "568186642d68458382cf09a1b48340b6",
+				-- 원본 120×112 → 137.5 ÷ (120 × 1.15) ≈ 0.996
+				scale = 0.996,
+				flying = false,
+				ranged = false,
+				-- attack1/info/hit(3f/0.270 실측)
+				hitFx = "ee6e5476d10442cba27cbb2ff1f76408",
+				hitFx2 = "",
+				hitFxDur = 0.24,
+				hitFxDelay = 0,
+				hitFxFrames = nil,
+				hitFxFrameDelay = 0,
+				flyAttackInterval = 0,
+			},
+			{
+				-- 4번: 헹키 (resource_pack "mob/7130004.img", 이름 "헹키"/"심연의 헹키"). 유저 지정 "원거리" —
+				-- 오징어 노예간수와 같은 경로: 조금 떨어진 데서 멈춰 attack1 + 플레이어 자리 착탄 연출.
+				name = "헹키",
+				stand = "4bc588cffccd4d12980938aa96bd4a17",
+				move = "bb6dd90947a94e5fb76adb131267b876",
+				attack = "1d98754677ce4776b88c634acf6b6f53",
+				attackDur = 2.34,
+				hit = "437d392d4aa04e14902d6947979deb5b",
+				die = "d2f48606b97e4b6b84733276cb89d1c7",
+				dieDur = 1.34,
+				attackSfx = "b0ab75378212460ab93bee2487759687",
+				hitSfx = "c2efc82810654a93922b4de7be007203",
+				dieSfx = "86772003148a480a84ce5a0e93b33267",
+				-- 원본 89×101 → 137.5 ÷ (101 × 1.15) ≈ 1.184
+				scale = 1.184,
+				flying = false,
+				ranged = true,
+				-- attack1/info/hit(2f/0.260 실측)
+				hitFx = "79ef4cc6937a4a239c7e94c3b18a8d8e",
+				hitFx2 = "",
+				hitFxDur = 0.23,
+				hitFxDelay = 0,
+				hitFxFrames = nil,
+				hitFxFrameDelay = 0,
+				flyAttackInterval = 0,
+			},
+		}
+		if index < 1 or index > #defs then index = 1 end
+		return defs[index]
+	end
+
 	-- ── 엘리트 로스터 라우터 (에피소드 무관) ──────────────────────────────────────
 	-- 보스 라우터(HasBossRoster/GetBossCount/GetBossDef)와 완전히 같은 구조다. 엘리트 인프라
 	-- (가방 뽑기 / 승급 / 좌표 재배치 / 외형 덮어쓰기)는 전부 이 세 메서드만 거치므로,
@@ -1201,13 +1361,14 @@ script GameManager extends Logic
 	@ExecSpace("ServerOnly")
 	method boolean HasEliteRoster()
 		-- 지금 에피소드에 전용 엘리트 로스터가 있나(없으면 예전처럼 "그 존 몬스터 1마리 승급"만 한다)
-		return self.SelectedEpisode == 1 or self.SelectedEpisode == 2
+		return self.SelectedEpisode == 1 or self.SelectedEpisode == 2 or self.SelectedEpisode == 3
 	end
 
 	@ExecSpace("ServerOnly")
 	method integer GetEliteCount()
 		-- 지금 에피소드의 엘리트 종 수
 		if self.SelectedEpisode == 2 then return self:GetEp2EliteCount() end
+		if self.SelectedEpisode == 3 then return self:GetEp3EliteCount() end
 		return self:GetEp1EliteCount()
 	end
 
@@ -1215,6 +1376,7 @@ script GameManager extends Logic
 	method any GetEliteDef(integer index)
 		-- 지금 에피소드의 index번째 엘리트 정의
 		if self.SelectedEpisode == 2 then return self:GetEp2EliteDef(index) end
+		if self.SelectedEpisode == 3 then return self:GetEp3EliteDef(index) end
 		return self:GetEp1EliteDef(index)
 	end
 
@@ -2017,6 +2179,9 @@ script GameManager extends Logic
 
 	@ExecSpace("ServerOnly")
 	method void OnUpdate(number delta)
+		-- 튜토리얼 카드 선택 단계에서는 이 아래 전부(허리케인/글로벌 프리즈/타임어택 카운트다운/
+		-- 절망의 칼날)를 통째로 멈춘다 — TutorialPaused 선언부 주석 참고
+		if self.TutorialPaused then return end
 		-- 존마다 독립적인 허리케인이 동시에 여러 개 활성화될 수 있으므로 전부 갱신한다.
 		if self._hurricaneEntities ~= nil then
 			local activeZones = {}
@@ -2527,14 +2692,21 @@ script GameManager extends Logic
 	-- 웨이브별 몬스터 공격력 반환 (Wave 10 보스, 11부터는 9번째 값 기준으로 계속 성장 — 무한 웨이브)
 	@ExecSpace("ServerOnly")
 	method integer GetWaveAttack(integer wave)
-		-- 달팽이→파란달팽이→스포아→빨간달팽이→슬라임→돼지→주니어부기→스텀프→옥토퍼스→리본돼지(보스)
-		-- Card1 쿨타임 0.8s 기준 1회 공격당 대미지 (플레이어 HP=100)
-		local attacks = {3, 3, 5, 7, 10, 12, 14, 16, 18, 20}
+		-- ⚠ 인자 이름이 wave지만 실제로 들어오는 건 **공격력 시간 계단 + 1**이다
+		-- (GetAtkTimeStep, 2026-08-03에 처치 기반 웨이브 → 시간 기반으로 바뀌면서 이름만 남았다).
+		--
+		-- 2026-09-12 유저 지정 커브(3차 하향, 레벨업 HP 증가 삭제와 짝) —
+		-- 0~1분 4 / 1~2분 5 / 2~3분 6 / 3~5분 6 / 5~7분 7 / 7~9분 8 / 9~12분 9 /
+		-- 12~15분 10 / 15~20분 11 / 20~25분 12. 계단 경계는 _atkStepBoundarySeconds.
+		-- (이전: 4/5/7/9/11/13/15/17/19/22 — 레벨업 HP +7이 있던 시절 값)
+		local attacks = {4, 5, 6, 6, 7, 8, 9, 10, 11, 12}
 		local base = 0
-		if wave <= 10 then
+		if wave <= #attacks then
 			base = attacks[wave]
 		else
-			base = math.floor(attacks[9] + 3 * (wave - 9))
+			-- 표를 넘어가면(25분 이후, 5분마다 한 계단) 마지막 값 기준으로 계단마다 +1 —
+			-- 표 자체가 +1 등차라 같은 기울기로 이어간다(#attacks 사용: 표 길이를 바꿔도 안 어긋남)
+			base = math.floor(attacks[#attacks] + 1 * (wave - #attacks))
 		end
 		-- 공격력도 체력과 같은 에피소드 배율을 쓴다(2026-09-02 유저 지정: "체력 늘어난 만큼").
 		-- 체력만 올리면 몬스터가 단단하기만 하고 위협적이지는 않아서 난이도 체감이 안 맞는다.
@@ -2543,6 +2715,7 @@ script GameManager extends Logic
 
 	@ExecSpace("ServerOnly")
 	method integer GetTimeStep()
+		-- 몬스터 **체력** 계단(2분 격자). 공격력은 GetAtkTimeStep을 따로 쓴다
 		local elapsed = _MonsterSpawner._elapsedPlayTime
 		for i = 1, #self._hpStepBoundarySeconds do
 			if elapsed < self._hpStepBoundarySeconds[i] then return i - 1 end
@@ -2551,7 +2724,19 @@ script GameManager extends Logic
 		return #self._hpStepBoundarySeconds + math.floor((elapsed - lastBoundary) / 300.0)
 	end
 
-	-- 계단별 몬스터 체력 — 0~5단계(0~12분)는 유저 지정 고정값, 6단계부터(12분 이후)는 마지막 값(500)
+	-- 몬스터 **공격력** 계단. 체력과 경계가 다르다(_atkStepBoundarySeconds 주석 참고).
+	-- 표 밖(마지막 경계 이후)은 체력과 동일하게 5분마다 한 계단씩 올라간다.
+	@ExecSpace("ServerOnly")
+	method integer GetAtkTimeStep()
+		local elapsed = _MonsterSpawner._elapsedPlayTime
+		for i = 1, #self._atkStepBoundarySeconds do
+			if elapsed < self._atkStepBoundarySeconds[i] then return i - 1 end
+		end
+		local lastBoundary = self._atkStepBoundarySeconds[#self._atkStepBoundarySeconds]
+		return #self._atkStepBoundarySeconds + math.floor((elapsed - lastBoundary) / 300.0)
+	end
+
+	-- 계단별 몬스터 체력 — 0~5단계(0~12분)는 유저 지정 고정값, 6단계부터(12분 이후)는 마지막 값(420, 2026-09-12 이전 500)
 	-- 기준 ×1.15 복리로 계단이 진행될수록 절대 증가폭이 점점 커진다(완만→가파름).
 	@ExecSpace("ServerOnly")
 	method integer GetTimeStepHp(integer step)
@@ -4194,6 +4379,9 @@ script GameManager extends Logic
 	-- 남기며 빠르게 돌진해 접근한다(MonsterAI._isCharge 상태머신 참고).
 	@ExecSpace("ServerOnly")
 	method boolean GetMapIsCharge(integer mapIndex, integer idx)
+		-- 에피1 맵8(와일드보어/아이언호그) — 유저 지정(2026-09-12) 아이언호그 돌진형. 종 번호는 RUID로 확인
+		-- (8번 풀 2번째 = eadfe080… "아이언 호그", mob/4090000.img). wind-up은 기본값 2초.
+		if mapIndex == 8 and idx == 2 then return true end  -- 아이언호그
 		if mapIndex == 66 and idx == 3 then return true end  -- 맘무트
 		if mapIndex == 68 and idx == 2 then return true end  -- 골든맘무트
 		if mapIndex == 70 and (idx == 1 or idx == 2) then return true end  -- 트라고스/골든맘무트
@@ -4845,6 +5033,10 @@ script GameManager extends Logic
 	-- 축소, 재규어 10% 축소.
 	@ExecSpace("ServerOnly")
 	method number GetMapScaleMultiplier(integer mapIndex, integer idx)
+		-- 초록 달팽이(존1 1번째 종) — 유저 지정 2026-09-11: "초록달팽이 크기 15%만 늘리자".
+		-- 게임에서 가장 먼저 만나는 몬스터라 원래 크기로는 화면에서 너무 작다(첫 플레이 튜토리얼의
+		-- 에임 안내에서 눌러야 하는 대상이기도 하다)
+		if mapIndex == 1 and idx == 1 then return 1.15 end  -- 초록 달팽이
 		if mapIndex == 20 and idx == 2 then return 1.0 end  -- 페어리
 		if mapIndex == 22 and idx == 1 then return 1.0 end  -- 로얄 페어리
 		if mapIndex >= 19 and mapIndex <= 22 then return 0.68 end  -- 골렘류
@@ -5009,9 +5201,10 @@ script GameManager extends Logic
 		end
 		
 		self._hitImmune = true
-		-- 2026-08-03: 몬스터 공격력은 처치 기반 Wave 대신 시간 단계(GetTimeStep, 0부터 시작)를 쓴다.
+		-- 2026-08-03: 몬스터 공격력은 처치 기반 Wave 대신 시간 단계를 쓴다.
+		-- 2026-09-11: 공격력은 체력과 계단 경계가 달라져서 GetAtkTimeStep(1분→2분→3분→5분 격자)을 쓴다.
 		-- GetWaveAttack의 attacks 테이블은 1부터 시작하는 기존 인덱싱을 그대로 쓰므로 +1 보정한다.
-		local timeStep = self:GetTimeStep()
+		local timeStep = self:GetAtkTimeStep()
 		local dmg = math.floor(self:GetWaveAttack(timeStep + 1) * dmgMultiplier)
 		local armorReduction = _CardManager:GetMagicArmorReduction()
 		if armorReduction > 0 then dmg = math.floor(dmg * (1.0 - armorReduction)) end
@@ -5102,8 +5295,8 @@ script GameManager extends Logic
 		self.Exp = math.max(0, self.Exp - self.ExpNeeded)
 		self.ExpNeeded = self:GetExpNeededForLevel(self.Level)
 		self.Wave = self.Wave + 1
-		self.PlayerMaxHp = self.PlayerMaxHp + 15
-		self.PlayerHp = math.min(self.PlayerHp + 15, self.PlayerMaxHp)
+		-- 2026-09-12 유저 지정: 레벨업 시 최대 HP 증가 삭제(뱀파이어 서바이버식 — 레벨업은 카드 선택만).
+		-- 최대 HP는 장비/유물/패시브로만 오른다. 예전엔 +15 → +5 → +7이었다
 		-- 맵4+ 잠금 기준이 보스 처치 대신 레벨5(2026-08-04: 유저 요청으로 10→5 완화)라, 맵 이동 없이
 		-- 그 자리에서 레벨업만으로 5를 찍을 수도 있다 — NotifyBossDefeated(true)를 그대로 재사용해
 		-- 맵3에 있는 클라이언트의 자물쇠를 즉시 갱신한다(파라미터 이름과 달리 실제로는 "맵4+ 잠금
@@ -5275,6 +5468,8 @@ script GameManager extends Logic
 		self.SelectedEpisode = episode
 		self.TimeAttackMode = timeAttack
 		self.TimeAttackRemaining = timeAttack and self.TimeAttackDuration or 0
+		-- 튜토리얼 정지가 남은 채로 새 런이 시작되면 게임이 멈춘 채로 시작된다 — 항상 풀고 들어간다
+		self.TutorialPaused = false
 		-- 타이틀 화면에서 처음 한 번만 실제 웨이브 스폰을 활성화한다. 그 전까지 OnBeginPlay에서
 		-- 곧바로 스폰을 켜두면, 유저가 타이틀 화면을 보는 동안에도 몬스터가 쌓이게 된다.
 		if self.GameStarted then
@@ -5329,12 +5524,15 @@ script GameManager extends Logic
 		return self._continueCostTable[idx]
 	end
 
-	-- 클라이언트의 "이어하기" 버튼 요청 — 비용(코인)을 지불해야 이어할 수 있다
+	-- 클라이언트의 "이어하기" 버튼 요청 — 비용(다이아)을 지불해야 이어할 수 있다.
+	-- 유저 지정 2026-09-10: 결제 재화를 런 골드/코인이 아니라 유료 재화인 다이아로 바꿨다.
+	-- 잔액이 모자라면 여기서 조용히 거절하고, 클라이언트(GameOverUI)가 그 전에 미리 판정해
+	-- 간이 다이아 상점(DiaShopUI)을 대신 띄운다 — 여기 도달하는 건 동시성으로 잔액이 어긋난 경우뿐
 	@ExecSpace("Server")
 	method void RequestContinue()
 		local cost = self:GetContinueCost()
-		if not self:SpendCoins(cost) then
-			log("RequestContinue: not enough coins (cost=" .. cost .. ", have=" .. self.TotalCoins .. ")")
+		if not self:SpendDiamond(cost) then
+			log("RequestContinue: not enough diamond (cost=" .. cost .. ", have=" .. self.Diamond .. ")")
 			return
 		end
 		self.ContinueCount = self.ContinueCount + 1
@@ -5361,6 +5559,8 @@ script GameManager extends Logic
 		self._hitImmune = false
 		self.TimeAttackMode = timeAttack
 		self.TimeAttackRemaining = timeAttack and self.TimeAttackDuration or 0
+		-- 다시하기로 새 런을 시작할 때도 튜토리얼 정지는 반드시 풀고 들어간다(StartGame과 동일)
+		self.TutorialPaused = false
 		self._timeAttackOvertimeDeath = false
 		self._gaveUp = false
 		self:ClearDespairBlade()
@@ -5389,6 +5589,8 @@ script GameManager extends Logic
 		_Map24TreasureChestLogic:ResetForNewRun()
 		-- 에피1 존2 마노 이스터에그(trap-44)도 새 런에서 다시 소환 가능하게 초기화
 		_Ep1Zone2ManoLogic:ResetForNewRun()
+		-- 에피1 터치 이스터에그 8종(포션/슬롯 스킬/몬스터 소환, 2026-09-13)도 동일한 정책으로 초기화
+		_Ep1TouchEasterEggLogic:ResetForNewRun()
 		-- 에피2 map1 보유 스킬 이스터에그(object-3428_19)도 동일한 정책으로 초기화
 		_Ep2Map1SkillEasterEggLogic:ResetForNewRun()
 		-- 에피2 map1 선물 NPC(object-3428_84)도 동일한 정책으로 초기화(다시 2번 도전 + 잡템 재추첨)
@@ -5470,6 +5672,13 @@ script GameManager extends Logic
 		_MonsterSpawner:ResetEliteTracking()
 		-- 지쳐버린 기사(Tired Knight) 존별 스폰 여부도 초기화 — 새 런에서 존마다 다시 1마리씩 등장한다
 		_MonsterSpawner:ResetTiredKnightTracking()
+		-- 맵10 보너스 스테이지(발록) — _map10Visited가 남아 새 런에서도 "재방문"(30%)으로 판정되던
+		-- 버그 수정(유저 리포트 2026-09-11: "다시하기하면 보너스 보스가 안 보이네")
+		_MonsterSpawner:ResetBonusStage()
+		-- 빠른 이동 스트릭(몬스터 강화/절망의 칼날 소환 트리거)도 런 단위 상태라 같이 초기화
+		_MapManager:ResetRushTracking()
+		-- 허수아비/허리케인/전역 빙결/유물 저체력 무적 등 런 지속 효과 정리
+		self:ResetRunEffects()
 		-- StartGame과 같은 이유로 스폰 재개도 입장 로딩 시간만큼 미룬다(GameOverUI의 "다시하기"도
 		-- 로딩 화면을 띄운다) — 검은 화면 뒤에서 몹이 이미 달려오고 있으면 안 된다
 		_TimerService:SetTimerOnce(function()
@@ -7351,6 +7560,41 @@ script GameManager extends Logic
 	end
 
 	-- 런 재시작("다시하기"/"처음부터") 시 절망의 칼날과 타임어택 오버타임 상태를 완전히 정리한다.
+	-- 처음부터 다시하기 전용 — 런 중에만 의미가 있는 "지속 효과"를 전부 걷어낸다.
+	-- ⚠ ClearAllMonsters는 MonsterAI가 붙은 엔티티만 지우므로 허수아비/허리케인처럼 별도 모델로
+	-- 스폰된 것들은 그대로 살아남는다(유저 지적 "난이도 등 모든 게 처음처럼 리셋되는지 확인 필요").
+	-- 허수아비가 남으면 새 런 시작부터 몬스터 공격을 대신 맞아주고, 허리케인은 화면에 떠 있는 채로
+	-- 계속 판정이 돈다. 전역 빙결/유물 저체력 무적도 런 상태라 같이 초기화한다.
+	@ExecSpace("ServerOnly")
+	method void ResetRunEffects()
+		if self._scarecrowEntities ~= nil then
+			for zoneIdx, entity in pairs(self._scarecrowEntities) do
+				if isvalid(entity) then entity:Destroy() end
+			end
+		end
+		self._scarecrowEntities = {}
+		self._scarecrowTimerIds = {}
+
+		if self._hurricaneEntities ~= nil then
+			for zoneIdx, entity in pairs(self._hurricaneEntities) do
+				if isvalid(entity) then entity:Destroy() end
+			end
+		end
+		self._hurricaneEntities = {}
+		self._hurricaneTargets = {}
+		self._hurricaneEndTimerIds = {}
+		self._hurricaneHitCooldownsByZone = {}
+
+		self._globalFreezeActive = false
+		self._globalFreezeRemaining = 0
+
+		-- 유물 팬더 허수아비(저체력 무적)는 다시 장전된 상태로 새 런을 시작해야 한다
+		self._relicInvulnArmed = true
+		self._relicInvulnUntil = 0
+
+		log("GameManager: run effects reset (scarecrow/hurricane/freeze/relic invuln)")
+	end
+
 	@ExecSpace("ServerOnly")
 	method void ClearDespairBlade()
 		if isvalid(self._despairBladeEntity) then self._despairBladeEntity:Destroy() end

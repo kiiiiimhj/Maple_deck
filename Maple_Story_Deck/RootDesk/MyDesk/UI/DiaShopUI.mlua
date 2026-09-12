@@ -1,0 +1,286 @@
+@Logic
+script DiaShopUI extends Logic
+
+	-- 인게임 게임오버 팝업에서 "이어하기"를 눌렀는데 다이아가 모자랄 때 뜨는 간이 다이아 상점.
+	-- 로비 상점(ShopUI)은 탭/스킨/배경아트까지 딸린 전체 화면이라 인게임에 그대로 못 띄운다 —
+	-- 그래서 검은 커튼(딤드) + 다이아 상품 리스트(+스크롤)만 GameOverGroup 안에 따로 만들었다.
+	-- 상품표는 ShopPurchaseLogic 한 곳에서만 읽는다(로비 상점과 같은 원본).
+
+	-- UI 바인딩 (클라이언트 전용) — 전부 ui/GameOverGroup.ui 의 DiaShop 서브트리
+	property Entity diaShopRoot = "8416f8ba-1381-47a7-8fbb-6eadee61b3dc"
+	-- 보유 다이아 표시는 팝업 안에 따로 두지 않고, 로비(TitleGroup) 우상단 배지를 그대로 복제해
+	-- 같은 화면 위치에 띄운다(유저 지정 2026-09-10). 배지 루트가 우상단 앵커라 DiaShop 아래에
+	-- 붙여도 로비와 동일한 자리에 앉고, 팝업이 닫히면 같이 사라진다.
+	-- 로비 배지는 TextComponent가 아니라 TextGUIRendererComponent를 쓴다 — 복제본도 그대로다.
+	property TextGUIRendererComponent diamondBadgeText = "a58e7be6-a8ae-4a76-91d9-f31826234de5"
+	property ButtonComponent btnClose = "be92dab4-b5ff-48b2-8172-244344bdc7e2"
+	property Entity scrollTouchArea = "542a06e6-98b5-42e3-914b-5f53e02c5ea5"
+	property ScrollLayoutGroupComponent productScroll = "6987de8e-8440-410b-aad1-3c7594fb0de6"
+	property SliderComponent scrollBar = "984fbae2-a193-4dad-b61d-066f66545498"
+	property Entity noticeBanner = "3c3da1fe-8742-4618-a782-4ebe349bf703"
+	property TextComponent noticeText = "54b01987-11b7-4cb0-8163-6f766e8b48cc"
+
+	-- 카드 배치 상수. ui/GameOverGroup.ui 의 DiaShop/Panel/ScrollArea 는 로비 상점의
+	-- ScrollArea 를 그대로 복제한 것이라 값도 같다(카드 391 / 간격 28 / 좌우 여백 23+23 / 뷰포트 1300).
+	-- .ui 에서 카드 규격을 바꾸면 여기도 같이 고쳐야 드래그 감도가 안 어긋난다.
+	property number CardWidthPx = 391
+	property number CardSpacingPx = 28
+	property number ListPaddingPx = 46
+	property number ViewportWidthPx = 1300
+	property number NoticeHoldSeconds = 2.5
+
+	-- 내부 상태
+	property number _scrollableRangePx = 1651
+	property number _maxScrollNorm = 1
+	property boolean _syncingScrollBar = false
+	property boolean _isOpen = false
+	property integer _noticeTimerId = 0
+	property table _cardHandlers = {}
+	property any _closeHandler = nil
+	property any _dragHandler = nil
+	property any _scrollBarHandler = nil
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		-- 팝업은 항상 닫힌 상태로 시작한다(게임오버 팝업 안에 들어있지만 별도로 토글된다)
+		self.diaShopRoot.Enable = false
+		self.noticeBanner.Enable = false
+		self._closeHandler = self.btnClose.Entity:ConnectEvent(ButtonClickEvent, self.OnCloseClicked)
+		self._dragHandler = self.scrollTouchArea:ConnectEvent(UITouchDragEvent, self.OnScrollDrag)
+		self._scrollBarHandler = self.scrollBar.Entity:ConnectEvent(SliderValueChangedEvent, self.OnScrollBarChanged)
+		log("DiaShopUI started")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUpdate(number delta)
+		-- 상점이 열려 있는 동안만 보유 다이아를 따라간다(결제가 끝나면 @Sync 로 값이 내려온다).
+		-- GameManager.Diamond 는 남의 @Sync 속성이라 OnSyncProperty 가 안 오므로 폴링한다
+		if not self._isOpen then return end
+		self:RefreshOwned()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Open()
+		-- 게임오버 팝업의 "이어하기"에서 다이아가 모자랄 때 호출된다
+		self:ApplyProducts()
+		self:ConnectCards()
+		self:RecalcScrollMetrics()
+		self:RefreshOwned()
+		self.noticeBanner.Enable = false
+		self.productScroll:SetScrollNormalizedPosition(UITransformAxis.Horizontal, 0)
+		self:SyncScrollBar(0)
+		self.diaShopRoot.Enable = true
+		self._isOpen = true
+		log("DiaShopUI: opened (diamond=" .. tostring(_GameManager.Diamond) .. ")")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Close()
+		-- 팝업을 닫는다. 게임오버 팝업이 새로 열릴 때도 항상 닫힌 상태로 맞추려고 불린다
+		self.diaShopRoot.Enable = false
+		self._isOpen = false
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean IsOpen()
+		-- 외부(GameOverUI)에서 상태를 물어볼 때 쓰는 접근자 — 다른 Logic 의 property 직접 읽기는 금지
+		return self._isOpen
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnCloseClicked()
+		log("DiaShopUI: close clicked")
+		self:Close()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshOwned()
+		-- 우상단 보유 다이아 배지(로비와 동일 규격). 로비 쪽은 TitleUI.NotifyDiamondChanged가
+		-- 갱신하지만 그건 로비 배지 전용이라, 이 복제본은 여기서 따로 채워준다.
+		-- 표기도 로비와 똑같이 콤마 없는 원본 숫자로 맞춘다(TitleUI도 tostring 그대로 쓴다) —
+		-- 같은 배지가 로비에선 "6500", 상점에선 "6,500"으로 갈리지 않게.
+		self.diamondBadgeText.Text = tostring(_GameManager.Diamond)
+	end
+
+	@ExecSpace("ClientOnly")
+	method string FormatNumber(integer n)
+		-- 천 단위 콤마 (GameOverUI.FormatNumber 와 같은 구현)
+		local s = tostring(n)
+		local formatted = s
+		local count = 0
+		formatted, count = s:reverse():gsub("(%d%d%d)", "%1,")
+		formatted = formatted:reverse()
+		if formatted:sub(1, 1) == "," then formatted = formatted:sub(2) end
+		return formatted
+	end
+
+	method table GetVisibleProducts()
+		-- 로비 상점과 같은 규칙: 스타터 패키지(PASS)를 이미 산 유저에게는 그 항목을 빼고 뒤를 당긴다.
+		-- 보유 여부는 ShopUI 가 서버에서 받아 들고 있으므로 접근자로 물어본다
+		local products = _ShopPurchaseLogic:GetProducts()
+		if not _ShopUI:IsStarterOwned() then return products end
+		local out = {}
+		for i = 2, #products do table.insert(out, products[i]) end
+		return out
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ApplyProducts()
+		-- 카드에 상품표 내용을 깐다. ScrollLayoutGroup 은 런타임에 재배치를 안 하므로(실측)
+		-- "카드를 빼는" 게 아니라 "내용을 당겨 쓰고 남는 뒤쪽 슬롯을 끄는" 방식이다 — 로비 상점과 동일
+		local products = self:GetVisibleProducts()
+		local list = self.productScroll.Entity
+
+		for i = #products, 6 do
+			local extra = list:GetChildByName("ProductCard_" .. tostring(i))
+			if isvalid(extra) then extra.Enable = false end
+		end
+
+		for i = 1, #products do
+			local p = products[i]
+			local card = list:GetChildByName("ProductCard_" .. tostring(i - 1))
+			if isvalid(card) then
+				card.Enable = true
+
+				local cardSprite = card.SpriteGUIRendererComponent
+				if cardSprite ~= nil and p.bg ~= nil then cardSprite.ImageRUID = p.bg end
+
+				local icon = card:GetChildByName("Icon")
+				if isvalid(icon) and p.icon ~= nil then
+					local iconSprite = icon.SpriteGUIRendererComponent
+					if iconSprite ~= nil then iconSprite.ImageRUID = p.icon end
+				end
+
+				local nameText = card:GetChildByName("NameText")
+				if isvalid(nameText) then nameText.TextGUIRendererComponent.Text = p.name end
+
+				local descText = card:GetChildByName("DescText")
+				if isvalid(descText) then descText.TextGUIRendererComponent.Text = p.desc end
+
+				local priceBox = card:GetChildByName("PriceBox")
+				if isvalid(priceBox) then
+					local priceText = priceBox:GetChildByName("PriceText")
+					if isvalid(priceText) then priceText.TextGUIRendererComponent.Text = p.price end
+				end
+
+				local iconSub = card:GetChildByName("IconSub")
+				if isvalid(iconSub) then iconSub.Enable = p.showSub end
+
+				-- 배지는 없는 상품이 들어올 수 있으니 반드시 켜고 끄기까지 한다
+				local badge = card:GetChildByName("BonusBadge")
+				if isvalid(badge) then
+					badge.Enable = (p.badge ~= nil)
+					if p.badge ~= nil then
+						local badgeText = badge:GetChildByName("BadgeText")
+						if isvalid(badgeText) then badgeText.TextGUIRendererComponent.Text = p.badge end
+					end
+				end
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ConnectCards()
+		-- 카드마다 몇 번 상품인지 클로저로 잡아 연결한다. 열 때마다 다시 연결하므로 먼저 끊는다
+		for _, rec in ipairs(self._cardHandlers) do
+			if isvalid(rec.entity) then rec.entity:DisconnectEvent(ButtonClickEvent, rec.eventHandler) end
+		end
+		self._cardHandlers = {}
+
+		local products = self:GetVisibleProducts()
+		local list = self.productScroll.Entity
+		for i = 1, #products do
+			local capturedIndex = i
+			local card = list:GetChildByName("ProductCard_" .. tostring(i - 1))
+			if isvalid(card) then
+				local h = card:ConnectEvent(ButtonClickEvent, function() self:OnProductClicked(capturedIndex) end)
+				table.insert(self._cardHandlers, { entity = card, eventHandler = h })
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnProductClicked(integer index)
+		-- 인덱스는 GetVisibleProducts 기준이다(스타터를 산 뒤에는 1번이 다이아 300).
+		-- 결제창은 MSW 월드상점이 띄우고, 실제 지급은 서버의 ShopPurchaseLogic 콜백이 한다
+		local products = self:GetVisibleProducts()
+		local p = products[index]
+		if p == nil then return end
+
+		if not _ShopUI:AreProductsRegistered() then
+			self:ShowNotice("상품 준비 중입니다")
+			log("DiaShopUI: purchase blocked, products not registered (id=" .. p.id .. ")")
+			return
+		end
+
+		log("DiaShopUI: PromptPurchase " .. p.id)
+		_WorldShopService:PromptPurchase(p.id)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ShowNotice(string message)
+		self.noticeText.Text = message
+		self.noticeBanner.Enable = true
+		if self._noticeTimerId ~= 0 then _TimerService:ClearTimer(self._noticeTimerId) end
+		self._noticeTimerId = _TimerService:SetTimerOnce(function()
+			self.noticeBanner.Enable = false
+			self._noticeTimerId = 0
+		end, self.NoticeHoldSeconds)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RecalcScrollMetrics()
+		-- 정규화 0~1 은 언제나 .ui 에 박힌 7칸 전체 폭 기준이라 분모(_scrollableRangePx)는 줄이지 않고,
+		-- 갈 수 있는 최대 정규화 값만 보이는 장수에 맞춘다(로비 상점과 같은 이유)
+		local totalCards = #_ShopPurchaseLogic:GetProducts()
+		local visible = #self:GetVisibleProducts()
+
+		local fullContent = self.CardWidthPx * totalCards + self.CardSpacingPx * (totalCards - 1) + self.ListPaddingPx
+		local fullRange = fullContent - self.ViewportWidthPx
+		if fullRange < 1 then fullRange = 1 end
+		self._scrollableRangePx = fullRange
+
+		local visContent = self.CardWidthPx * visible + self.CardSpacingPx * (visible - 1) + self.ListPaddingPx
+		local visRange = visContent - self.ViewportWidthPx
+		if visRange < 0 then visRange = 0 end
+		self._maxScrollNorm = math.min(1, visRange / fullRange)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnScrollDrag(UITouchDragEvent event)
+		local current = self.productScroll:GetScrollNormalizedPosition(UITransformAxis.Horizontal)
+		local delta = -event.TouchDelta.x / self._scrollableRangePx
+		local newValue = math.max(0, math.min(self._maxScrollNorm, current + delta))
+		self.productScroll:SetScrollNormalizedPosition(UITransformAxis.Horizontal, newValue)
+		self:SyncScrollBar(newValue)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SyncScrollBar(number normalizedValue)
+		-- 이 대입 자체가 SliderValueChangedEvent 를 다시 쏘므로 되돌아온 이벤트를 무시하도록 플래그를 세운다
+		self._syncingScrollBar = true
+		self.scrollBar.Value = normalizedValue
+		self._syncingScrollBar = false
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnScrollBarChanged(SliderValueChangedEvent event)
+		if self._syncingScrollBar then return end
+		local v = math.max(0, math.min(self._maxScrollNorm, event.Value))
+		self.productScroll:SetScrollNormalizedPosition(UITransformAxis.Horizontal, v)
+		if v ~= event.Value then self:SyncScrollBar(v) end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		if self._closeHandler then self.btnClose.Entity:DisconnectEvent(ButtonClickEvent, self._closeHandler) end
+		if self._dragHandler then self.scrollTouchArea:DisconnectEvent(UITouchDragEvent, self._dragHandler) end
+		if self._scrollBarHandler then self.scrollBar.Entity:DisconnectEvent(SliderValueChangedEvent, self._scrollBarHandler) end
+		for _, rec in ipairs(self._cardHandlers) do
+			if isvalid(rec.entity) then rec.entity:DisconnectEvent(ButtonClickEvent, rec.eventHandler) end
+		end
+		self._cardHandlers = {}
+		if self._noticeTimerId ~= 0 then _TimerService:ClearTimer(self._noticeTimerId) end
+	end
+
+end

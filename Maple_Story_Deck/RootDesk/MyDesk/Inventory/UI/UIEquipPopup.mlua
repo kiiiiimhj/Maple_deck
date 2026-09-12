@@ -74,7 +74,9 @@ script UIEquipPopup extends Component
 
 	property ButtonComponent ComposeButton = "4adeaac0-8c50-4897-b301-d0671ac948a9"
 
-	property ButtonComponent GradeUpButton = "5480e133-4451-41c6-b4a8-599c9cffa272"
+	-- 원래 "등급 상향" 자리표시 버튼이었는데 판매 버튼으로 용도를 바꿨다(유저 지정 2026-09-10).
+	-- 엔티티 이름/라벨도 SellButton / "판매"로 같이 바꿔뒀다(UUID는 그대로라 바인딩은 유지)
+	property ButtonComponent SellButton = "5480e133-4451-41c6-b4a8-599c9cffa272"
 
 	property ButtonComponent ButtonDelete = "c9ff01cc-a0db-48d7-b75d-2adf8b7428de"
 
@@ -134,7 +136,7 @@ script UIEquipPopup extends Component
 		self.ButtonLevelUp.Entity:ConnectEvent(ButtonClickEvent, function() self:OnLevelUpButtonClicked(false) end)
 		self.ButtonBatchLevelUp.Entity:ConnectEvent(ButtonClickEvent, function() self:OnLevelUpButtonClicked(true) end)
 		self.ComposeButton.Entity:ConnectEvent(ButtonClickEvent, function() self:OnComposeButtonClicked() end)
-		self.GradeUpButton.Entity:ConnectEvent(ButtonClickEvent, function() self:OnPlaceholderButtonClicked("등급 상향") end)
+		self.SellButton.Entity:ConnectEvent(ButtonClickEvent, function() self:OnSellButtonClicked() end)
 	end
 
 	@ExecSpace("ClientOnly")
@@ -221,6 +223,10 @@ script UIEquipPopup extends Component
 
 		local mainKeyword = itemStruct:IsAttached() and "장착 해제" or "장착"
 		self.ButtonEquipLabel.Text = mainKeyword
+
+		-- 장착 중이거나 잠긴 장비는 팔 수 없다 — 인벤토리 그리드와 같은 규칙(GearSellLogic.CanSell).
+		-- 회색 처리는 ButtonComponent의 DisabledColor가 자동으로 입혀준다
+		self.SellButton.Enable = _GearSellLogic:CanSell(itemStruct)
 
 		self.Entity.Enable = true
 		-- EquipPopup은 인벤토리 메인 패널(Inventory/Panel)과 형제 관계라 형제 순서상 뒤에 그려지는
@@ -408,6 +414,21 @@ script UIEquipPopup extends Component
 	@ExecSpace("ClientOnly")
 	method void OnPlaceholderButtonClicked(string label)
 		log("UIEquipPopup: " .. label .. " 버튼 클릭 — 준비중(디자인 확정 전)")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnSellButtonClicked()
+		-- 이 장비 한 개를 판다. 확인창은 인벤토리가 들고 있는 것(판매 모드와 같은 창)을 그대로 쓰고,
+		-- "예"를 누르면 UIInventory가 이 팝업을 닫아 그리드로 돌려보낸다(유저 지정)
+		if self.Entity.Enable == false or self.ItemStruct == nil then
+			return
+		end
+
+		if self.Inventory == nil then
+			return
+		end
+
+		self.Inventory:OpenSellConfirmForItem(self.ItemStruct)
 	end
 
 	-- 레벨업 / 일괄 레벨업. 실제 재료·골드 검증과 차감은 전부 서버(PkgPlayerInventory.LevelUpGear)가 하고,

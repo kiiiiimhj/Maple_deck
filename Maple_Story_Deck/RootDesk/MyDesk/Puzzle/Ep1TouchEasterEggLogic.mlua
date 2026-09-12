@@ -1,0 +1,113 @@
+@Logic
+script Ep1TouchEasterEggLogic extends Logic
+
+	-- 에피1 터치 이스터에그 묶음(유저 지정 2026-09-13) — 맵 오브젝트마다 Ep1TouchEasterEggTrigger를 붙이고
+	-- 트리거의 프로퍼티(EggKey/RewardType/Chance/RequiredTouches/SummonCount)로 오브젝트별 보상을 정한다.
+	--   map04 존6 object-1602_10 / map04 존5 object-1602_1 / map19 존28 object-955_16 /
+	--   map20 존31 object-184_6 / map18 존26 object-3684_4 → 두 번 터치 시 30% 빨간 포션
+	--   map07 존8 object-46 / map17 존20 object-2206_1          → 두 번 터치 시 30% 슬롯 스킬 1개
+	--   map20 존33 object-2668_1                                → 두 번 터치 시 그 존에 몬스터 5마리(확정)
+	-- 런 정책은 다른 이스터에그와 같다: 필요한 횟수만큼 누르면 **한 번만** 굴리고(꽝이어도) 그 런에선 끝.
+	-- "다시하기"/"새로 시작"에서 ResetForNewRun()으로 다시 도전 가능("이어하기"는 건드리지 않음).
+
+	-- EggKey → 지금까지 누른 횟수 / 이번 런에 이미 굴렸는지
+	property any _touchCounts = {}
+	property any _used = {}
+
+	-- GameManager.ApplyPotionDrop의 potionType — 1 = 빨간 포션(2 = 하얀 포션, 3 = 파워 엘릭서)
+	property integer RedPotionType = 1
+
+	-- Ep1TouchEasterEggTrigger.RequestTouch()가 호출 — 터치된 오브젝트 엔티티와 트리거 설정값을 그대로 받는다
+	-- (Logic에 UUID를 property로 박아두면 맵 미로드 시점에 nil이 되는 문제 회피, 다른 이스터에그와 동일 이유)
+	@ExecSpace("ServerOnly")
+	method void OnObjectTouched(Entity touchedObject, string eggKey, string rewardType, number chance, integer requiredTouches, integer summonCount)
+		if eggKey == "" then return end
+		if self._used[eggKey] == true then return end
+		local count = self._touchCounts[eggKey]
+		if count == nil then count = 0 end
+		count = count + 1
+		self._touchCounts[eggKey] = count
+		log("Ep1TouchEasterEgg: " .. eggKey .. " touch " .. count .. "/" .. requiredTouches)
+		if count < requiredTouches then return end
+
+		self._used[eggKey] = true
+		local roll = _UtilLogic:RandomDouble()
+		if roll >= chance then
+			log(string.format("Ep1TouchEasterEgg: %s miss (roll=%.2f chance=%.2f)", eggKey, roll, chance))
+			return
+		end
+
+		local worldPos = Vector3(0, 0, 0)
+		if isvalid(touchedObject) and touchedObject.TransformComponent ~= nil then
+			worldPos = touchedObject.TransformComponent.WorldPosition
+		end
+
+		if rewardType == "potion" then
+			_GameManager:ApplyPotionDrop(self.RedPotionType, worldPos, 0, worldPos.y, 1.0)
+			log("Ep1TouchEasterEgg: " .. eggKey .. " hit -> red potion")
+		elseif rewardType == "skill" then
+			local pool = _CardManager:BuildActiveUpgradePool()
+			if #pool > 0 then
+				_CardManager:GrantCardUpgradesFromPool(pool, worldPos, 0, worldPos.y, 1.0, 1, 0)
+				log("Ep1TouchEasterEgg: " .. eggKey .. " hit -> 1 slot skill upgrade (pool=" .. #pool .. ")")
+			else
+				-- 강화할 슬롯 스킬이 하나도 없으면(런 극초반) 빈손 대신 빨간 포션 — Ep3Map1SkillCover와 같은 폴백
+				_GameManager:ApplyPotionDrop(self.RedPotionType, worldPos, 0, worldPos.y, 1.0)
+				log("Ep1TouchEasterEgg: " .. eggKey .. " hit -> no upgradeable skill, red potion instead")
+			end
+		elseif rewardType == "summon" then
+			self:SpawnZoneMonsters(summonCount)
+		else
+			log_warning("Ep1TouchEasterEgg: unknown rewardType '" .. rewardType .. "' on " .. eggKey)
+		end
+	end
+
+	-- 지금 플레이어가 있는 존(= 방금 누른 오브젝트가 보이는 존)에 그 존 풀의 일반 몬스터를 count마리 스폰한다.
+	-- 위치 스캐터는 Ep2Map4CentaurLogic과 같다(GetSpawnPosition + IsPositionCrowded로 겹침 방지).
+	@ExecSpace("ServerOnly")
+	method void SpawnZoneMonsters(integer count)
+		local map = _MonsterSpawner:GetCurrentMap()
+		if map == nil then
+			log_warning("Ep1TouchEasterEgg: summon skipped (no current map)")
+			return
+		end
+		local mapIndex = _MapManager.CurrentMapIndex
+		if _MonsterSpawner:IsNoMonsterZone(mapIndex) then
+			log("Ep1TouchEasterEgg: summon skipped (no-monster zone " .. mapIndex .. ")")
+			return
+		end
+		local wave = _GameManager.Wave
+		local spawnedXs = {}
+		local spawned = 0
+		for i = 1, count do
+			local speciesIdx = _MonsterSpawner:RollSpeciesForMap(mapIndex)
+			local pos = _MonsterSpawner:GetSpawnPosition(mapIndex, false, speciesIdx, map)
+			local attempts = 0
+			while attempts < 4 and _MonsterSpawner:IsPositionCrowded(map, pos.x, spawnedXs) do
+				pos = _MonsterSpawner:GetSpawnPosition(mapIndex, false, speciesIdx, map)
+				attempts = attempts + 1
+			end
+			table.insert(spawnedXs, pos.x)
+			local entity = _SpawnService:SpawnByModelId(_MonsterSpawner.MonsterModelId, "Monster", _MonsterSpawner:ToLocalSpawnPos(map, pos), map)
+			if entity == nil then
+				log_error("Ep1TouchEasterEgg: summon SpawnByModelId failed")
+			else
+				---@type MonsterAI
+				local ai = entity:GetComponent("script.MonsterAI")
+				if ai ~= nil then
+					ai:InitializeStats(mapIndex, wave, false, speciesIdx)
+					spawned = spawned + 1
+				end
+			end
+		end
+		log("Ep1TouchEasterEgg: summoned " .. spawned .. "/" .. count .. " monsters on zone " .. mapIndex)
+	end
+
+	-- GameManager.RestartGame()이 호출 — 새 런에서는 모든 오브젝트를 다시 두 번 눌러 재도전할 수 있다
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		self._touchCounts = {}
+		self._used = {}
+	end
+
+end

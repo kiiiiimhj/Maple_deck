@@ -203,6 +203,17 @@ script ShopUI extends Logic
 		end
 	end
 
+	method boolean IsStarterOwned()
+		-- 인게임 간이 다이아 상점(DiaShopUI)이 같은 "스타터 산 사람은 카드에서 뺀다" 규칙을 쓰려고
+		-- 물어본다. 다른 Logic 의 property 를 직접 읽으면 nil 이 나오므로 접근자로 연다
+		return self._starterOwned
+	end
+
+	method boolean AreProductsRegistered()
+		-- DiaShopUI 도 등록 안 된 productId 로 결제창을 띄우면 안 되므로 같은 안전장치를 공유한다
+		return self.ProductsRegistered
+	end
+
 	method table GetVisibleProducts()
 		-- 화면에 실제로 깔 상품 목록. 스타터팩을 이미 산 유저에게는 그 항목을 빼고 뒤를 당긴다
 		-- (덮개로 자리를 계속 차지하지 않게 — 유저 지정). 원본 표는 건드리지 않고 새 테이블을 만든다.
@@ -307,8 +318,13 @@ script ShopUI extends Logic
 
 	@ExecSpace("ClientOnly")
 	method void OnProductClicked(integer index)
-		-- 카드 클릭 → 실제 결제창은 MSW의 월드상점이 띄워준다. 지급은 서버의 ShopPurchaseLogic 콜백이 담당
-		local products = _ShopPurchaseLogic:GetProducts()
+		-- 카드 클릭 → 실제 결제창은 MSW의 월드상점이 띄워준다. 지급은 서버의 ShopPurchaseLogic 콜백이 담당.
+		--
+		-- ⚠ index는 ConnectCards가 **GetVisibleProducts 기준**으로 잡아 넘긴 값이다. 여기서 원본 표
+		-- (_ShopPurchaseLogic:GetProducts())로 조회하면 스타터팩을 산 뒤 카드가 한 칸씩 당겨졌을 때
+		-- 화면에 보이는 카드와 다른 상품이 결제된다(예: "다이아 600" 카드를 눌렀는데 결제창은 "다이아 300").
+		-- 인덱스를 만든 쪽과 조회하는 쪽의 기준을 반드시 같게 유지할 것 — 2026-09-10 버그 수정.
+		local products = self:GetVisibleProducts()
 		local p = products[index]
 		if p == nil then return end
 
@@ -318,9 +334,10 @@ script ShopUI extends Logic
 			return
 		end
 
-		-- 방어용. 스타터팩을 이미 샀으면 카드 자체가 비활성이라 여기까지 올 일이 없고, 설령
-		-- 올라와도 PASS라 결제창에서 엔진이 막는다 — 그래도 오류 문구 대신 이유를 보여준다
-		if index == 1 and self._starterOwned then
+		-- 방어용. 스타터팩을 이미 샀으면 GetVisibleProducts에서 빠지므로 여기 걸릴 일이 거의 없지만,
+		-- 서버의 보유 응답이 늦게 와서 카드가 아직 남아 있는 순간에는 여기서 막는다.
+		-- (예전엔 "index == 1"로 판정했는데, 당겨쓰기 후에는 1번이 스타터가 아니라서 엉뚱한 상품을 막았다)
+		if self._starterOwned and p.id == _ShopPurchaseLogic:GetStarterProductId() then
 			self:ShowNotice("이미 구매한 상품입니다")
 			log("ShopUI: starter purchase blocked, already owned")
 			return

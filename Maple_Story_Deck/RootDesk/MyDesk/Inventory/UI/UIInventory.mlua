@@ -27,6 +27,42 @@ script UIInventory extends Component
 	-- 났다(유저가 반복 리포트). 팝업이 열려있는 동안은 이 버튼 자체를 꺼서 원천 차단한다
 	property ButtonComponent ButtonClose = nil
 
+	-- ── 장비 판매 모드 ─────────────────────────────────────────────────────
+	-- 유저 지정(2026-09-10): 판매용 인벤토리를 따로 만들지 않고 기존 그리드를 그대로 쓰되,
+	-- "판매" 버튼을 누른 뒤에는 슬롯 클릭이 장비 정보 팝업 대신 체크 선택으로 동작한다.
+	-- 버튼은 같은 자리에서 "판매" ↔ "판매하기"로 글자만 바뀐다.
+	property ButtonComponent ButtonSell = nil
+
+	property TextGUIRendererComponent TextSellLabel = nil
+
+	-- 판매 모드에서만 판매하기 버튼 왼쪽에 나타나는 취소 버튼. 일반 모드에서는 엔티티째 숨긴다
+	property Entity ButtonSellCancel = nil
+
+	property Entity SellConfirm = nil
+
+	property TextGUIRendererComponent SellConfirmSubText = nil
+
+	property boolean IsSellMode = false
+
+	-- 선택된 장비 GUID 집합(guid -> true). 탭을 옮겨도 유지된다 — 탭별로 나눠 고른 뒤 한 번에 팔 수 있게
+	property table SellSelectedGUIDs = {}
+
+	-- 확인창에서 "예"를 눌렀을 때 실제로 팔 GUID 목록. 확인창은 두 경로가 공유한다:
+	--  (1) 판매 모드에서 여러 개 골라 "판매하기"  (2) 장비 정보 팝업의 "판매" 버튼(한 개)
+	property table _pendingSellGUIDs = {}
+
+	-- (2)번 경로면 true — 판매 후 장비 정보 팝업을 닫고 인벤토리 그리드로 돌아간다
+	property boolean _sellFromEquipPopup = false
+
+	-- 확인창은 판매/인벤 확장이 같이 쓴다. "예"를 눌렀을 때 무엇을 할지 구분하는 값
+	--   "sell"   — _pendingSellGUIDs 를 판다
+	--   "expand" — _pendingExpandTab 탭을 5칸 확장한다
+	property string _confirmKind = "sell"
+
+	property integer _pendingExpandTab = 0
+
+	property TextGUIRendererComponent ConfirmTitleText = nil
+
 	@ExecSpace("ClientOnly")
 	method void OnBeginPlay()
 		self.EquipPopup = self.Entity:GetChildByName("EquipPopup").UIEquipPopup
@@ -78,7 +114,25 @@ script UIInventory extends Component
 		
 		local capacityTextHolder = inventoryPanel:GetChildByName("Capacity")
 		self.TextCapacity = capacityTextHolder:GetChildByName("Text").TextComponent
-		
+
+		-- 판매 버튼(장비 개수 오른쪽)과 판매 확인 팝업 연결
+		local buttonSell = inventoryPanel:GetChildByName("ButtonSell")
+		self.ButtonSell = buttonSell.ButtonComponent
+		self.TextSellLabel = buttonSell.TextGUIRendererComponent
+		buttonSell:ConnectEvent(ButtonClickEvent, function() self:OnSellButtonClicked() end)
+
+		self.ButtonSellCancel = inventoryPanel:GetChildByName("ButtonSellCancel")
+		self.ButtonSellCancel.Enable = false
+		self.ButtonSellCancel:ConnectEvent(ButtonClickEvent, function() self:ExitSellMode() end)
+
+		self.SellConfirm = self.Entity:GetChildByName("SellConfirm")
+		self.SellConfirm.Enable = false
+		local confirmPanel = self.SellConfirm:GetChildByName("Panel")
+		self.ConfirmTitleText = confirmPanel:GetChildByName("Message").TextGUIRendererComponent
+		self.SellConfirmSubText = confirmPanel:GetChildByName("SubMessage").TextGUIRendererComponent
+		confirmPanel:GetChildByName("BtnYes"):ConnectEvent(ButtonClickEvent, function() self:OnSellConfirmYes() end)
+		confirmPanel:GetChildByName("BtnNo"):ConnectEvent(ButtonClickEvent, function() self:CloseSellConfirm() end)
+
 		-- 유저 요청: 정렬(Item Id/만료시간 순 전환) 버튼은 필요 없다고 해서 제거했다 — SortEnum은
 		-- ItemId 고정값(1)으로 남겨둬서 UIInventoryGrid의 정렬 자체는 그대로 동작한다.
 		self.SortEnum = 1
@@ -100,6 +154,8 @@ script UIInventory extends Component
 		self.EquipPopup.Entity.Enable = false
 		self.ComposePopup.Entity.Enable = false
 		self.UsePopup.Entity.Enable = false
+		-- 판매 모드도 항상 꺼진 상태로 시작한다(그리드는 아래에서 어차피 새로 그린다)
+		self:ResetSellState()
 
 		local playerJob = _UserService.LocalPlayer.PlayerJob
 		local playerInventory = _UserService.LocalPlayer.PkgPlayerInventory
@@ -131,7 +187,8 @@ script UIInventory extends Component
 		self.TextName.Text = jobData.Name
 		self.TextLevel.Text = tostring(playerJob:GetJobLevel(jobData.Id))
 		
-		self.TextCapacity.Text = string.format("%d / %d", _Util:TableLen(playerInventory.Items), playerInventory.InventoryCapacity)
+		-- 정원 표시는 탭별 정원을 아는 RefreshCapacityText 한 곳에서만 만든다
+		self:RefreshCapacityText()
 
 		-- GridViewComponent는 비활성 상태(Enable=false)이거나 이번 프레임에 막 활성화된
 		-- 엔티티에서는 레이아웃(RectTransform 크기)이 아직 계산 전이라 Refresh()가 셀을
@@ -149,7 +206,290 @@ script UIInventory extends Component
 	method void Close()
 		_UserService.LocalPlayer.PkgPlayerInventory:RemoveAllNewItemsFromList()
 
+		-- 판매 모드를 켜둔 채 닫았다가 다시 열면 그대로 남아있으면 안 된다.
+		-- 여기서는 그리드를 다시 그릴 필요가 없으므로(닫히는 중) 상태만 되돌린다
+		self:ResetSellState()
+
 		self.Entity.Enable = false
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ResetSellState()
+		-- 판매 모드/선택/확인창을 초기 상태로 되돌린다. 그리드 다시 그리기는 호출한 쪽 책임이다
+		self.IsSellMode = false
+		self.SellSelectedGUIDs = {}
+		self._pendingSellGUIDs = {}
+		self._sellFromEquipPopup = false
+		if isvalid(self.SellConfirm) then
+			self.SellConfirm.Enable = false
+		end
+		self:RefreshSellButton()
+	end
+
+	-- ── 장비 판매 ─────────────────────────────────────────────────────────
+
+	@ExecSpace("ClientOnly")
+	method void OnSellButtonClicked()
+		-- 같은 버튼이 두 가지 일을 한다: 일반 모드에서는 판매 모드 진입, 판매 모드에서는 확인창 열기
+		if self.IsSellMode then
+			self:OpenSellConfirm()
+		else
+			self:EnterSellMode()
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void EnterSellMode()
+		-- 슬롯 클릭이 장비 정보 팝업 대신 체크 선택으로 바뀐다. 그리드를 새로 만들지 않고
+		-- 기존 셀에 체크마크(SelectedCheckText)만 얹는 방식이라 다시 그리기만 하면 된다
+		self.IsSellMode = true
+		self.SellSelectedGUIDs = {}
+		self:RefreshSellButton()
+		-- ⚠ Update(_, false)는 force 없이 Refresh해서 **이미 그려진 셀을 건너뛴다**(RefreshItemByGUID
+		-- 주석 참고) — 그러면 판매 모드로 바뀌어도 딤/체크가 하나도 안 그려진다(실측). 모드 전환은
+		-- 화면 전체 표시 규칙이 바뀌는 경우라 resetPos=true로 강제 재생성한다(force는 resetPos와 같은 값)
+		self.InventoryTabHolder:Update(true, true)
+		log("UIInventory: sell mode entered")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ExitSellMode()
+		-- 판매 완료 / 인벤토리 닫기·다시 열기에서 호출. 이미 일반 모드면 그리드를 건드리지 않는다
+		if self.IsSellMode == false then
+			return
+		end
+
+		self:ResetSellState()
+		-- 진입과 같은 이유로 강제 재생성 — 남아있는 딤/체크마크를 확실히 지운다
+		self.InventoryTabHolder:Update(true, true)
+		log("UIInventory: sell mode exited")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshSellButton()
+		-- 일반 모드에서는 항상 누를 수 있고, 판매 모드에서는 하나라도 골라야 눌린다.
+		-- 비활성 상태의 회색 처리는 ButtonComponent의 DisabledColor가 자동으로 입혀준다
+		if self.IsSellMode then
+			self.TextSellLabel.Text = "판매하기"
+			self.ButtonSell.Enable = self:GetSellSelectedCount() > 0
+		else
+			self.TextSellLabel.Text = "판매"
+			self.ButtonSell.Enable = true
+		end
+
+		-- 취소 버튼은 판매 모드일 때만 보인다
+		if isvalid(self.ButtonSellCancel) then
+			self.ButtonSellCancel.Enable = self.IsSellMode
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean IsSellSelected(string guid)
+		-- 그리드 셀이 체크마크를 켤지 물어볼 때 쓴다
+		return self.SellSelectedGUIDs[guid] == true
+	end
+
+	@ExecSpace("ClientOnly")
+	method integer GetSellSelectedCount()
+		local count = 0
+		for guid, selected in pairs(self.SellSelectedGUIDs) do
+			if selected then
+				count = count + 1
+			end
+		end
+		return count
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ToggleSellSelection(any itemStruct)
+		-- 판매 모드에서 슬롯을 눌렀을 때. 팔 수 없는 아이템(장착 중/잠금/장비 아님)은 무시한다 —
+		-- 그런 슬롯은 애초에 딤 처리돼 있어 눌러도 아무 일이 없는 게 자연스럽다
+		if not _GearSellLogic:CanSell(itemStruct) then
+			return
+		end
+
+		local guid = itemStruct.GUID
+		if self.SellSelectedGUIDs[guid] then
+			self.SellSelectedGUIDs[guid] = nil
+		else
+			self.SellSelectedGUIDs[guid] = true
+		end
+
+		-- 누른 셀 하나만 다시 그린다(전체 Refresh는 화면이 깜빡임 — RefreshItemByGUID 주석 참고)
+		self.InventoryGrid:RefreshItemByGUID(guid)
+		self:RefreshSellButton()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OpenSellConfirm()
+		-- 판매 모드의 "판매하기" — 지금 체크된 장비 전부
+		local guids = {}
+		for guid, selected in pairs(self.SellSelectedGUIDs) do
+			if selected then
+				table.insert(guids, guid)
+			end
+		end
+
+		self:ShowSellConfirm(guids, false)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OpenSellConfirmForItem(any itemStruct)
+		-- 장비 정보 팝업(UIEquipPopup)의 "판매" 버튼 — 그 장비 한 개만
+		if not _GearSellLogic:CanSell(itemStruct) then
+			return
+		end
+
+		self:ShowSellConfirm({ itemStruct.GUID }, true)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ShowSellConfirm(table guids, boolean fromEquipPopup)
+		-- 두 판매 경로가 같은 확인창을 공유한다. 팔 목록을 넘겨받아 문구를 만들고 대기 상태로 둔다
+		if guids == nil or #guids <= 0 then
+			return
+		end
+
+		local playerInventory = _UserService.LocalPlayer.PkgPlayerInventory
+		local total = 0
+		for i, guid in ipairs(guids) do
+			total = total + _GearSellLogic:GetSellPriceOf(playerInventory.Items[guid])
+		end
+
+		self._confirmKind = "sell"
+		self._pendingSellGUIDs = guids
+		self._sellFromEquipPopup = fromEquipPopup
+		self.ConfirmTitleText.Text = "정말 판매하시겠습니까?"
+		self.SellConfirmSubText.Text = string.format(
+			"선택한 장비 %d개를 판매하고 %s골드를 받습니다.\n판매한 장비는 되돌릴 수 없습니다.",
+			#guids, self:FormatGold(total))
+		self.SellConfirm.Enable = true
+		-- 장비 정보 팝업은 열릴 때 SetSiblingIndex로 맨 앞에 올라오므로, 그 위에 뜨려면 확인창도
+		-- 같은 방식으로 한 번 더 앞으로 올려야 한다(displayOrder만으로는 가려진다)
+		_UILogic:SetSiblingIndex(self.SellConfirm.UITransformComponent, 1000001)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshCapacityText()
+		-- 하단 "N / M" 표시. 정원이 탭별로 갈라졌으므로 지금 보고 있는 탭 기준으로 쓴다
+		-- (All은 세 탭 정원의 합계). UIInventoryTabHolder.Update가 갱신 때마다 불러준다
+		local tabEnum = self:GetCurrentTabEnum()
+		local capacity = _InventoryExpandLogic:GetCapacity(tabEnum)
+
+		local count = 0
+		if self.InventoryTabHolder ~= nil and self.InventoryTabHolder.ItemStructsByEnum[tabEnum] ~= nil then
+			count = #self.InventoryTabHolder.ItemStructsByEnum[tabEnum]
+		else
+			count = _Util:TableLen(_UserService.LocalPlayer.PkgPlayerInventory.Items)
+		end
+
+		self.TextCapacity.Text = string.format("%d / %d", count, capacity)
+	end
+
+	@ExecSpace("ClientOnly")
+	method integer GetCurrentTabEnum()
+		-- 지금 보고 있는 탭(1=All / 2=무기 / 3=방어구 / 4=기타). 아직 준비 전이면 All로 본다
+		if self.InventoryTabHolder == nil then
+			return _InventoryExpandLogic.TabAll
+		end
+
+		return self.InventoryTabHolder.TabEnum
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OpenExpandConfirm(integer tabEnum)
+		-- 그리드 맨 끝 "+" 칸을 눌렀을 때. 다이아가 모자라면 확인창 대신 안내만 띄운다
+		if not _InventoryExpandLogic:IsExpandableTab(tabEnum) then
+			return
+		end
+
+		local cost = _InventoryExpandLogic:GetExpandCost(tabEnum)
+		local tabName = _InventoryExpandLogic:GetTabDisplayName(tabEnum)
+		if _GameManager.Diamond < cost then
+			self.ConfirmTitleText.Text = "다이아가 부족합니다"
+			self.SellConfirmSubText.Text = string.format(
+				"%s 칸을 5칸 늘리려면 다이아 %s개가 필요합니다.\n현재 보유: %s개",
+				tabName, self:FormatGold(cost), self:FormatGold(_GameManager.Diamond))
+			self._confirmKind = "none"
+			self.SellConfirm.Enable = true
+			_UILogic:SetSiblingIndex(self.SellConfirm.UITransformComponent, 1000001)
+			return
+		end
+
+		self._confirmKind = "expand"
+		self._pendingExpandTab = tabEnum
+		self.ConfirmTitleText.Text = "인벤토리를 확장하시겠습니까?"
+		self.SellConfirmSubText.Text = string.format(
+			"다이아 %s개를 사용해 %s 칸을 5칸 늘립니다.\n확장한 칸은 되돌릴 수 없습니다.",
+			self:FormatGold(cost), tabName)
+		self.SellConfirm.Enable = true
+		_UILogic:SetSiblingIndex(self.SellConfirm.UITransformComponent, 1000001)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void CloseSellConfirm()
+		-- "아니오"는 확인창만 닫는다 — 판매 모드와 선택 상태는 그대로 유지된다
+		self.SellConfirm.Enable = false
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnSellConfirmYes()
+		-- 실제 삭제/지급은 서버(GearSellLogic)가 다시 검증하고 처리한다. 삭제되면 InvenItemRemovedEvent가
+		-- 돌아와 그리드와 보유 개수가 자동으로 갱신되므로 여기서 목록을 직접 손대지는 않는다
+		local kind = self._confirmKind
+		local guids = self._pendingSellGUIDs
+		local fromEquipPopup = self._sellFromEquipPopup
+		local expandTab = self._pendingExpandTab
+		self:CloseSellConfirm()
+		self._pendingSellGUIDs = {}
+		self._sellFromEquipPopup = false
+		self._pendingExpandTab = 0
+		self._confirmKind = "none"
+
+		-- 인벤 확장 — 다이아 차감/저장은 서버(InventoryExpandLogic)가 하고, 늘어난 정원은 @Sync로
+		-- 내려온다. 화면은 그 값이 도착한 뒤에 다시 그려야 해서 살짝 기다렸다 갱신한다
+		if kind == "expand" then
+			log("UIInventory: expand requested (tab=" .. expandTab .. ")")
+			_InventoryExpandLogic:RequestExpand(expandTab)
+			wait(0.4)
+			self.InventoryTabHolder:Update(true, false)
+			self:RefreshCapacityText()
+			return
+		end
+
+		if kind ~= "sell" then
+			return
+		end
+
+		if guids == nil or #guids <= 0 then
+			return
+		end
+
+		log("UIInventory: sell requested (" .. #guids .. " gear, fromEquipPopup=" .. tostring(fromEquipPopup) .. ")")
+		_GearSellLogic:RequestSellGears(guids)
+
+		if fromEquipPopup then
+			-- 장비 정보 팝업에서 판 경우 — 팝업을 닫아 인벤토리 그리드로 돌아간다(유저 지정)
+			if self.EquipPopup ~= nil then
+				self.EquipPopup:Close()
+			end
+		else
+			self:ExitSellMode()
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method string FormatGold(integer amount)
+		-- 천 단위 콤마. 확인창 금액 표기에만 쓴다
+		local s = tostring(amount)
+		local formatted = s
+		local count = 0
+		formatted, count = s:reverse():gsub("(%d%d%d)", "%1,")
+		formatted = formatted:reverse()
+		if formatted:sub(1, 1) == "," then
+			formatted = formatted:sub(2)
+		end
+		return formatted
 	end
 
 	@ExecSpace("ClientOnly")
@@ -206,7 +546,8 @@ script UIInventory extends Component
 		
 		self.InventoryTabHolder:Update(true, false)
 		local playerInventory = _UserService.LocalPlayer.PkgPlayerInventory
-		self.TextCapacity.Text = string.format("%d / %d", _Util:TableLen(playerInventory.Items), playerInventory.InventoryCapacity)
+		-- 정원 표시는 탭별 정원을 아는 RefreshCapacityText 한 곳에서만 만든다
+		self:RefreshCapacityText()
 	end
 
 	@ExecSpace("ClientOnly")
@@ -240,7 +581,8 @@ script UIInventory extends Component
 		
 		self.InventoryTabHolder:Update(true, false)
 		local playerInventory = _UserService.LocalPlayer.PkgPlayerInventory
-		self.TextCapacity.Text = string.format("%d / %d", _Util:TableLen(playerInventory.Items), playerInventory.InventoryCapacity)
+		-- 정원 표시는 탭별 정원을 아는 RefreshCapacityText 한 곳에서만 만든다
+		self:RefreshCapacityText()
 	end
 
 end

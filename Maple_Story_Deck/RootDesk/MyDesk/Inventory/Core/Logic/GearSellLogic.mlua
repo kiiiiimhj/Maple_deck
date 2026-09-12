@@ -1,0 +1,126 @@
+@Logic
+script GearSellLogic extends Logic
+
+	-- 장비 판매(로비 장비 인벤토리 하단 "판매" 버튼). 대금은 로비 누적 재화(GameManager.TotalCoins,
+	-- 게임 안에서 "골드"로 부르는 그 값 — 장비 강화 비용과 같은 지갑)로 들어간다.
+	--
+	-- 가격 정책(유저 지정 2026-09-10): **등급만** 반영한다. 품질(F~S)과 강화 레벨은 반영하지 않는다.
+	-- 최저가는 노말 1,000골드.
+	--
+	-- 인플레이션 방지 — 판매가는 "그 등급을 만드는 데 든 드롭 수"보다 훨씬 싸게 잡았다.
+	-- 등급 하나를 올리려면 같은 등급 재료 3개가 더 필요하므로 제작 원가는 노말 기준 4배씩 불어난다:
+	--   매직 ≈ 노말 10개 / 레어 ≈ 40개 / 에픽 ≈ 160개 / 유니크 ≈ 640개 / 레전더리 ≈ 2,560개.
+	-- 아래 가격은 그 원가의 8~30% 수준이라, 상위 등급을 만들어 파는 게 언제나 손해다
+	-- (= 판매로 돈을 버는 루트가 성립하지 않고, 남는 장비 처분 용도로만 의미가 있다).
+	property integer PriceNone = 1000
+
+	property integer PriceMagic = 3000
+
+	property integer PriceRare = 10000
+
+	property integer PriceEpic = 30000
+
+	property integer PriceUnique = 80000
+
+	property integer PriceLegendary = 200000
+
+	method integer GetSellPrice(integer gradeEnum)
+		-- 등급별 고정 판매가. 표에 없는 등급이면 최저가로 막는다
+		if gradeEnum == _GearGradeEnum.Legendary then return self.PriceLegendary end
+		if gradeEnum == _GearGradeEnum.Unique then return self.PriceUnique end
+		if gradeEnum == _GearGradeEnum.Epic then return self.PriceEpic end
+		if gradeEnum == _GearGradeEnum.Rare then return self.PriceRare end
+		if gradeEnum == _GearGradeEnum.Magic then return self.PriceMagic end
+		return self.PriceNone
+	end
+
+	method boolean CanSell(any itemStruct)
+		-- 팔 수 있는 아이템인지 판정. 클라이언트(선택 가능 여부/딤 표시)와 서버(최종 검증)가
+		-- 같은 함수를 쓰도록 한 곳에만 둔다 — 한쪽만 고치면 "선택은 되는데 안 팔리는" 상태가 된다
+		if itemStruct == nil then
+			return false
+		end
+
+		-- 장비가 아닌 아이템(강화 주문서 등)은 판매 대상이 아니다
+		if itemStruct:GetGearStruct() == nil then
+			return false
+		end
+
+		-- 잠금 걸린 장비는 실수 방지용이므로 판매도 막는다
+		if itemStruct.Lock then
+			return false
+		end
+
+		-- 장착 중인 장비는 팔 수 없다(합성 재료 규칙과 동일)
+		if itemStruct:IsAttached() then
+			return false
+		end
+
+		return true
+	end
+
+	method integer GetSellPriceOf(any itemStruct)
+		-- 아이템 하나의 판매가. 팔 수 없는 아이템이면 0
+		if not self:CanSell(itemStruct) then
+			return 0
+		end
+
+		return self:GetSellPrice(itemStruct:GetGearStruct().Grade)
+	end
+
+	@ExecSpace("Server")
+	method void RequestSellGears(table guids)
+		-- 클라이언트가 고른 GUID 목록을 서버가 전수 재검증한 뒤 삭제하고 대금을 지급한다.
+		-- 검증에 걸린 항목은 조용히 건너뛴다 — 클라 화면이 한 프레임 뒤처져 있거나(방금 장착 등)
+		-- 위조된 목록이 올라와도 서버 판정만 신뢰하면 되기 때문이다
+		if guids == nil then
+			return
+		end
+
+		local userEntity = _UserService:GetUserEntityByUserId(senderUserId)
+		if not isvalid(userEntity) then
+			return
+		end
+
+		local inventory = userEntity.PkgPlayerInventory
+		if inventory == nil then
+			return
+		end
+
+		local totalGold = 0
+		local soldCount = 0
+		for i, guid in ipairs(guids) do
+			---@type ItemStruct
+			local itemStruct = inventory.Items[guid]
+			if self:CanSell(itemStruct) then
+				local price = self:GetSellPrice(itemStruct:GetGearStruct().Grade)
+
+				local deleteParam = ItemDeleteParamStruct()
+				deleteParam.ItemGUID = guid
+				deleteParam.ItemCount = 1
+
+				-- ⚠ resultStruct는 삭제 호출마다 새로 만들어야 한다. 재사용하면 두 번째부터
+				-- SyncRemovedItemsToClient가 이미 지워진 GUID에서 조기 return 해버려서 클라 그리드에
+				-- 유령 아이템이 남는다(PkgPlayerInventory.ComposeItem 재료 삭제 주석과 같은 이유)
+				local resultStruct = ItemDeleteResultStruct()
+				local errorCode = _ItemFactoryLogic:TryDeleteItem(senderUserId, deleteParam, resultStruct)
+				if errorCode == _ErrorCodeEnum.Success then
+					totalGold = totalGold + price
+					soldCount = soldCount + 1
+				else
+					log_error("GearSellLogic: delete failed guid=" .. guid .. " code=" .. tostring(errorCode))
+				end
+			end
+		end
+
+		if soldCount == 0 then
+			log("GearSellLogic: nothing sold (user=" .. senderUserId .. ")")
+			return
+		end
+
+		inventory.IsSaveDB = true
+		_GameManager:AddCoins(totalGold)
+		log("GearSellLogic: sold " .. soldCount .. " gear(s) for " .. totalGold .. " gold (user=" .. senderUserId .. ")")
+	end
+
+end

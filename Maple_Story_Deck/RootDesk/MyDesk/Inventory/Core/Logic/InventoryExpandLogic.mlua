@@ -1,0 +1,145 @@
+@Logic
+script InventoryExpandLogic extends Logic
+
+	-- 인벤토리 칸 확장(유저 지정 2026-09-10). 정원은 **탭별로 따로** 관리한다 —
+	-- 무기 / 방어구 / 기타 각각 기본 100칸이고, 확장할 때마다 그 탭만 5칸씩 늘어난다.
+	-- All 탭은 세 탭의 합계를 보여주는 뷰라 자체 정원도 없고 확장 버튼도 없다.
+	--
+	-- 탭 번호는 UIInventoryTabHolder.TabNames 순서를 그대로 쓴다: 1=All / 2=Weapon / 3=Armor / 4=etc
+
+	property integer TabAll = 1
+
+	property integer TabWeapon = 2
+
+	property integer TabArmor = 3
+
+	property integer TabEtc = 4
+
+	property integer BaseCapacity = 100
+
+	property integer SlotsPerExpand = 5
+
+	-- 확장 비용(다이아): 1회 100 → 2회 150 → 3회 200 … 50씩 오르다가 500에서 고정(유저 지정).
+	-- 탭마다 확장 횟수를 따로 세므로 비용도 탭별로 따로 올라간다
+	property integer CostBase = 100
+
+	property integer CostStep = 50
+
+	property integer CostMax = 500
+
+	-- 탭별 확장 횟수(0부터). 서버가 DataStorage에서 불러와 채우고 클라에는 @Sync로 내려간다
+	@Sync
+	property integer WeaponExpandCount = 0
+
+	@Sync
+	property integer ArmorExpandCount = 0
+
+	@Sync
+	property integer EtcExpandCount = 0
+
+	property any _storage = nil
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		-- 코인/다이아와 같은 전역 저장소를 쓰되 키만 따로 둔다(저장소를 새로 파지 않는다)
+		self._storage = _DataStorageService:GetGlobalDataStorage("PlayerCoins")
+		self.WeaponExpandCount = self:LoadCount("InvExpandWeapon")
+		self.ArmorExpandCount = self:LoadCount("InvExpandArmor")
+		self.EtcExpandCount = self:LoadCount("InvExpandEtc")
+		log("InventoryExpandLogic started (weapon=" .. self.WeaponExpandCount
+			.. " armor=" .. self.ArmorExpandCount .. " etc=" .. self.EtcExpandCount .. ")")
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer LoadCount(string key)
+		-- 저장된 확장 횟수. 값이 없거나 읽기에 실패하면 0(미확장)으로 본다
+		local errorCode, raw = self._storage:GetAndWait(key)
+		if errorCode ~= 0 or raw == nil or raw == "" then
+			return 0
+		end
+
+		local loaded = tonumber(raw)
+		if loaded == nil then
+			return 0
+		end
+
+		return loaded
+	end
+
+	method integer GetExpandCount(integer tabEnum)
+		-- 그 탭이 지금까지 확장한 횟수. 확장 대상이 아닌 탭(All)이면 0
+		if tabEnum == self.TabWeapon then return self.WeaponExpandCount end
+		if tabEnum == self.TabArmor then return self.ArmorExpandCount end
+		if tabEnum == self.TabEtc then return self.EtcExpandCount end
+		return 0
+	end
+
+	method boolean IsExpandableTab(integer tabEnum)
+		-- All은 세 탭을 합쳐 보여주는 뷰라 확장 버튼(+)을 붙이지 않는다
+		return tabEnum == self.TabWeapon or tabEnum == self.TabArmor or tabEnum == self.TabEtc
+	end
+
+	method integer GetCapacity(integer tabEnum)
+		-- 그 탭의 현재 정원. All은 세 탭 정원의 합
+		if tabEnum == self.TabAll then
+			return self:GetCapacity(self.TabWeapon) + self:GetCapacity(self.TabArmor) + self:GetCapacity(self.TabEtc)
+		end
+
+		if not self:IsExpandableTab(tabEnum) then
+			return self.BaseCapacity
+		end
+
+		return self.BaseCapacity + self:GetExpandCount(tabEnum) * self.SlotsPerExpand
+	end
+
+	method integer GetExpandCost(integer tabEnum)
+		-- 이번에 확장할 때 드는 다이아. 500에서 상한에 걸린 뒤로는 계속 500
+		local cost = self.CostBase + self:GetExpandCount(tabEnum) * self.CostStep
+		if cost > self.CostMax then
+			return self.CostMax
+		end
+
+		return cost
+	end
+
+	method string GetTabDisplayName(integer tabEnum)
+		-- 확인창 문구에 쓰는 한글 탭 이름
+		if tabEnum == self.TabWeapon then return "무기" end
+		if tabEnum == self.TabArmor then return "방어구" end
+		if tabEnum == self.TabEtc then return "기타" end
+		return "인벤토리"
+	end
+
+	@ExecSpace("Server")
+	method void RequestExpand(integer tabEnum)
+		-- 확장 요청. 다이아 차감과 저장은 전부 여기(서버)에서만 하고, 결과는 @Sync로 클라에 내려간다
+		if not self:IsExpandableTab(tabEnum) then
+			return
+		end
+
+		local cost = self:GetExpandCost(tabEnum)
+		if not _GameManager:SpendDiamond(cost) then
+			log("InventoryExpandLogic: not enough diamond (cost=" .. cost .. ", have=" .. _GameManager.Diamond .. ")")
+			return
+		end
+
+		local key = ""
+		if tabEnum == self.TabWeapon then
+			self.WeaponExpandCount = self.WeaponExpandCount + 1
+			key = "InvExpandWeapon"
+		elseif tabEnum == self.TabArmor then
+			self.ArmorExpandCount = self.ArmorExpandCount + 1
+			key = "InvExpandArmor"
+		else
+			self.EtcExpandCount = self.EtcExpandCount + 1
+			key = "InvExpandEtc"
+		end
+
+		-- 확장은 아주 드문 조작이라(연타 대상이 아님) 지연 flush 없이 그 자리에서 저장한다
+		self._storage:SetAndWait(key, tostring(self:GetExpandCount(tabEnum)))
+
+		log("InventoryExpandLogic: expanded " .. self:GetTabDisplayName(tabEnum)
+			.. " -> capacity " .. self:GetCapacity(tabEnum) .. " (paid " .. cost .. " diamond)")
+	end
+
+end

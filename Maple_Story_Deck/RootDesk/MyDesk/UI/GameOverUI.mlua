@@ -21,6 +21,12 @@ script GameOverUI extends Logic
 	-- 버튼 이미지와 완전히 분리된 라벨 텍스트(유저가 이미지/텍스트 위치를 독립적으로 조정할 수 있게)
 	property TextComponent restartLabelText = "4f56cf6f-f92d-4b00-bb27-acaf0570b0df"
 	property TextComponent continueLabelText = "60406bc4-8f21-491f-9520-02e43ea5a010"
+	-- 이어하기 비용은 "재화 900" 같은 글자가 아니라 다이아 아이콘 + 숫자로 보여준다(유저 지정 2026-09-10).
+	-- 아이콘은 .ui(BtnContinue/CostRow/DiaIcon)에 박혀 있고, 숫자만 여기서 갱신한다
+	property TextComponent continueCostText = "cf55f73b-4be3-4502-9ace-487f3d730b5c"
+	-- 잔액이 모자랄 때 숫자를 붉게 물들여 "왜 못 누르는지"가 아니라 "얼마가 모자란지"를 보여준다
+	property Color CostEnoughColor = Color(1, 1, 1, 1)
+	property Color CostShortColor = Color(1, 0.42, 0.38, 1)
 	-- 타임어택 20분 오버타임(절망의 칼날) 도중 죽었을 때만 노출되는 전용 "다시하기" — 이어하기/
 	-- 다시하기 버튼 사이(중앙)에 위치. 그 순간엔 원래 두 버튼을 숨기고 이것만 보여준다.
 	property ButtonComponent btnRestartOvertime = "e4d263f1-004c-49b3-b97b-cab030ab1b1c"
@@ -61,6 +67,8 @@ script GameOverUI extends Logic
 			if isOver then
 				self:ShowGameOver()
 			else
+				-- 이어하기가 성사돼 판이 이어질 때 — 간이 다이아 상점이 열린 채였다면 같이 닫는다
+				_DiaShopUI:Close()
 				self.gameOverGroup.Enable = false
 			end
 		end
@@ -76,6 +84,8 @@ script GameOverUI extends Logic
 		self:RefreshScore()
 		self:RefreshContinueButton()
 		self:RefreshOvertimeButtons()
+		-- 게임오버 팝업은 언제나 상점이 닫힌 상태로 시작한다(지난 판에 열어둔 채 끝났을 수 있다)
+		_DiaShopUI:Close()
 		self.gameOverGroup.Enable = true
 		self.itemList.ScrollLayoutGroupComponent:SetScrollNormalizedPosition(UITransformAxis.Horizontal, 0)
 		self:SyncScrollBar(0)
@@ -126,20 +136,40 @@ script GameOverUI extends Logic
 	method void RefreshContinueButton()
 		local cost = _GameManager:GetContinueCost()
 		if isvalid(self.continueLabelText) then
-			self.continueLabelText.Text = "이어하기\n재화 " .. self:FormatNumber(cost)
+			self.continueLabelText.Text = "이어하기"
+		end
+		local canAfford = _GameManager.Diamond >= cost
+		if isvalid(self.continueCostText) then
+			self.continueCostText.Text = self:FormatNumber(cost)
+			if canAfford then
+				self.continueCostText.FontColor = self.CostEnoughColor
+			else
+				self.continueCostText.FontColor = self.CostShortColor
+			end
 		end
 		-- 예전엔 플랫 색상 버튼이라 어포더빌리티에 따라 sprite.Color를 직접 짙게 튜닝했는데, 지금은
 		-- 이미지 자체가 녹색 그래픽이라 그 위에 짙은 남색 틴트를 곱하면 나무 배경과 구분이 안 될 만큼
-		-- 어두워진다(유저 실측 확인 — "버튼이 사라짐"). sprite.Color는 항상 원본 그대로(흰색) 두고,
-		-- 재화 부족 상태는 ButtonComponent 자체의 DisabledColor(Enable=false일 때 자동 적용)에 맡긴다.
-		local canAfford = _GameManager.TotalCoins >= cost
-		self.btnContinue.Enable = canAfford
+		-- 어두워진다(유저 실측 확인 — "버튼이 사라짐"). sprite.Color는 항상 원본 그대로(흰색) 둔다.
+		--
+		-- 예전엔 다이아가 모자라면 버튼 자체를 Enable=false로 껐는데, 이제는 그 상태에서 눌러야
+		-- 간이 다이아 상점이 떠야 하므로(유저 지정 2026-09-10) 버튼은 항상 켜 둔다.
+		-- 부족하다는 신호는 위에서 비용 숫자를 붉게 칠하는 것으로 대신한다.
+		self.btnContinue.Enable = true
 		local sprite = self.btnContinue.Entity.SpriteGUIRendererComponent
 		sprite.Color = Color(1, 1, 1, 1)
 	end
 
 	@ExecSpace("ClientOnly")
 	method void OnContinueClicked()
+		-- 다이아가 모자라면 이어하기를 요청하는 대신 간이 다이아 상점을 띄운다(유저 지정 2026-09-10).
+		-- 로비 상점 탭을 통째로 띄울 수 없어서 딤드 + 다이아 상품 리스트만 따로 만든 팝업이다.
+		local cost = _GameManager:GetContinueCost()
+		if _GameManager.Diamond < cost then
+			log("GameOverUI: Continue blocked (diamond=" .. tostring(_GameManager.Diamond) .. " < " .. tostring(cost) .. "), opening dia shop")
+			_DiaShopUI:Open()
+			return
+		end
+
 		-- 실제 차감/검증은 서버(GameManager.RequestContinue)에서 한다. 성공하면 GameOver가 false로
 		-- 바뀌고 OnUpdate 폴링이 패널을 자동으로 닫는다 — 여기서 직접 닫지 않는다(실패 시 계속 보여야 함)
 		log("GameOverUI: Continue clicked")
@@ -151,6 +181,7 @@ script GameOverUI extends Logic
 		-- 이어하기/다시하기 없이 그냥 로비(타이틀 화면)로 돌아간다. 런 상태(웨이브/레벨/골드)는
 		-- 건드리지 않고 그대로 둔다 — 나중에 로비에서 "게임 시작"을 다시 누르면 그때 TitleUI가 새로 시작할지 판단한다
 		log("GameOverUI: Close(X) clicked, returning to lobby")
+		_DiaShopUI:Close()
 		self.gameOverGroup.Enable = false
 		_TitleUI:ShowLobby()
 	end

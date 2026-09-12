@@ -13,6 +13,29 @@ script UIInventoryGrid extends Component
 
 	property UIUsePopup UsePopup = nil
 
+	-- 판매 모드에서 선택된 슬롯에 찍히는 체크마크("V") 색. 딤이 깔린 위에서도 잘 보이는 밝은 연두
+	property Color SellCheckColor = Color(0.42, 1, 0.51, 1)
+
+	-- 목록 맨 끝에 붙는 확장("+") 슬롯의 인덱스. 0이면 이번 탭엔 확장 슬롯이 없다(All 탭)
+	property integer PlusSlotIndex = 0
+
+	-- 확장 칸에 그릴 "+" 아이콘(유저 지정 이미지, 초록 원형 플러스). 아이템 아이콘 자리(IconItem)에 얹는다
+	property string PlusSlotRUID = "2d1ae5f5bf7f4fc9b7b4b10abb56b856"
+
+	-- "+" 아이콘 크기/위치(유저 지정 2026-09-10): 아이템 아이콘(80x80)보다 60% 작은 32x32에서
+	-- 다시 20% 키워 38.4x38.4. 위치는 슬롯(115x115) 정중앙 —
+	-- 아이템 아이콘은 원래 중앙보다 8px 아래에 놓여 있다
+	property Vector2 PlusIconSize = Vector2(38.4, 38.4)
+
+	property Vector2 PlusIconPos = Vector2(0, 0)
+
+	-- 아이템을 그릴 때 되돌려야 하는 IconItem 원래 값(UIItemSlot.model 기본값 실측).
+	-- GridView가 셀을 재활용하므로 "+" 칸이었던 셀에 아이템이 들어오면 크기/위치가 그대로 남는다 —
+	-- QualityBg를 주문서 심볼로 재활용할 때와 같은 이유로 매번 복구한다
+	property Vector2 ItemIconSize = Vector2(80, 80)
+
+	property Vector2 ItemIconPos = Vector2(0, -8)
+
 	@ExecSpace("ClientOnly")
 	method void OnInitialize()
 		self.GridView = self.Entity.GridViewComponent
@@ -22,9 +45,10 @@ script UIInventoryGrid extends Component
 
 	@ExecSpace("ClientOnly")
 	method void SetGridViewItem(Entity baseEntity)
+		-- TotalCount는 여기서 고정하지 않는다 — 탭마다 정원이 다르고 보유 수도 계속 바뀌므로
+		-- 매 Update()에서 다시 계산한다(아래 주석 참고)
 		self.GridCellBaseEntity = baseEntity
 		self.GridView.ItemEntity = baseEntity
-		self.GridView.TotalCount = _UserService.LocalPlayer.PkgPlayerInventory.InventoryCapacity
 	end
 
 	-- resetPos: 탭 전환/최초 오픈처럼 목록 자체가 바뀌는 경우에만 true. 장착/해제처럼 같은 탭 안에서
@@ -40,6 +64,23 @@ script UIInventoryGrid extends Component
 		table.sort(itemStructs, _InventorySortEnum:GetSortFunc(self.Inventory.SortEnum))
 		self.SortedItemStructs = itemStructs
 
+		-- ⚠ 예전엔 TotalCount를 SetGridViewItem에서 InventoryCapacity(100)로 딱 한 번만 박아뒀다.
+		-- 그래서 (1) 탭별 정원이 달라져도 항상 100칸만 그렸고 (2) 보유 아이템이 정원을 넘으면
+		-- 넘친 만큼이 **아예 안 보였다**(유저 리포트: "All에 150개인데 100개만 보임").
+		-- 이제 "그 탭 정원"과 "실제 보유 수" 중 큰 쪽으로 잡아서, 정원을 넘겨 들고 있어도 전부 보인다.
+		local tabEnum = self.Inventory:GetCurrentTabEnum()
+		local capacity = _InventoryExpandLogic:GetCapacity(tabEnum)
+		local shown = math.max(capacity, #itemStructs)
+
+		-- 확장 가능한 탭(무기/방어구/기타)이면 맨 끝에 "+" 칸을 한 칸 더 붙인다
+		if _InventoryExpandLogic:IsExpandableTab(tabEnum) then
+			self.PlusSlotIndex = shown + 1
+			shown = shown + 1
+		else
+			self.PlusSlotIndex = 0
+		end
+
+		self.GridView.TotalCount = shown
 		self.GridView:Refresh(resetPos, resetPos)
 	end
 
@@ -61,8 +102,67 @@ script UIInventoryGrid extends Component
 
 	@ExecSpace("ClientOnly")
 	method void OnRefresh(integer index, Entity entity)
+		local slot = entity.UIItemSlot
+
+		-- 맨 끝 "+" 칸 — 아이템이 아니라 확장 버튼이다
+		if self.PlusSlotIndex > 0 and index == self.PlusSlotIndex then
+			entity.UIInventoryGridCell.IsPlusSlot = true
+			slot:Clear()
+			-- Clear()가 버튼을 꺼버리므로 다시 켠다(빈 칸은 못 누르지만 이 칸은 눌려야 한다)
+			entity.ButtonComponent.Enable = true
+			-- 아이템 아이콘 자리에 "+" 스프라이트를 얹는다. 셀이 재활용돼 아이템이 들어올 때는
+			-- UIItemSlot.Set()이 ImageRUID를 그 아이템 것으로 덮어쓰므로 따로 되돌릴 필요가 없다
+			slot.IconItem.ImageRUID = DataRef(self.PlusSlotRUID)
+			slot.IconItem.Enable = true
+
+			local plusTr = slot.IconItem.Entity.UITransformComponent
+			plusTr.RectSize = self.PlusIconSize
+			plusTr.anchoredPosition = self.PlusIconPos
+			return
+		end
+
+		entity.UIInventoryGridCell.IsPlusSlot = false
+
+		-- 이 셀이 직전에 "+" 칸이었을 수 있으므로 아이콘 크기/위치를 아이템 기준으로 되돌린다
+		local iconTr = slot.IconItem.Entity.UITransformComponent
+		iconTr.RectSize = self.ItemIconSize
+		iconTr.anchoredPosition = self.ItemIconPos
+
 		local itemStruct = self.SortedItemStructs[index]
-		entity.UIItemSlot:Set(itemStruct)
+		slot:Set(itemStruct)
+
+		-- 판매 모드 표시: 선택한 장비는 체크마크 + 딤, 팔 수 없는 아이템(장착 중/잠금/장비 아님)은
+		-- 딤만 씌워 눌러도 소용없다는 걸 보여준다.
+		--
+		-- ⚠ 체크마크(SelectedCheckText)는 UIItemSlot.model에서 **엔티티 자체가 꺼진 채로** 들어있다.
+		-- TextComponent의 Enable만 켜면 화면에 아무것도 안 나온다(실측) — RedDot 배지와 같은 이유로
+		-- 반드시 엔티티까지 같이 토글해야 한다.
+		local isSelected = false
+		if itemStruct ~= nil and self.Inventory ~= nil and self.Inventory.IsSellMode then
+			isSelected = self.Inventory:IsSellSelected(itemStruct.GUID)
+		end
+
+		slot.SelectedCheckText.Entity.Enable = isSelected
+		slot.SelectedCheckText.Enable = isSelected
+		if isSelected then
+			-- ⚠ .model에 저장된 FontColor가 스폰 시점에 적용되지 않아 알파 0(완전 투명)으로 들어온다
+			-- (UIItemSlot의 QualityText와 같은 TextComponent Values 한계 — 실측). 켤 때마다 직접 칠한다
+			slot.SelectedCheckText.FontColor = self.SellCheckColor
+		end
+
+		if itemStruct ~= nil and self.Inventory ~= nil and self.Inventory.IsSellMode then
+			slot.ImageDim.Enable = isSelected or not _GearSellLogic:CanSell(itemStruct)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnPlusSlotClicked()
+		-- "+" 칸 클릭 — 확장 확인창은 인벤토리(UIInventory)가 들고 있는 공용 확인창을 쓴다
+		if self.Inventory == nil then
+			return
+		end
+
+		self.Inventory:OpenExpandConfirm(self.Inventory:GetCurrentTabEnum())
 	end
 
 	@ExecSpace("ClientOnly")

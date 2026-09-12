@@ -1,0 +1,70 @@
+@Component
+script Ep1TouchEasterEggTrigger extends Component
+
+	-- 에피1 터치 이스터에그 오브젝트(Ep1TouchEasterEggLogic 주석의 8개)에 부착. 눌리면 항상 흔들리는 연출
+	-- (Ep3Map3ItemEasterEggTrigger와 같은 ZRotation 사인파)을 재생하고, 서버에 자기 설정값을 넘겨
+	-- 판정받는다 — 아직 횟수가 모자라거나 꽝/이미 사용이면 서버가 조용히 무시한다.
+	-- 오브젝트마다 .map에서 값을 넣는다:
+	--   EggKey          런 상태를 구분하는 고유 키(맵+오브젝트 이름)
+	--   RewardType      "potion"(빨간 포션) / "skill"(슬롯 스킬 1개) / "summon"(그 존에 몬스터 소환)
+	--   Chance          당첨 확률(0.3 = 30%, 소환은 1.0 = 확정)
+	--   RequiredTouches 몇 번 눌러야 굴리는지
+	--   SummonCount     소환 마리 수(summon일 때만)
+	property string EggKey = ""
+	property string RewardType = "potion"
+	property number Chance = 0.3
+	property integer RequiredTouches = 2
+	property integer SummonCount = 5
+
+	property any _touchHandler = nil
+	property any _shakeTween = nil
+	property number ShakeDuration = 0.35
+	property number ShakeAngle = 10
+
+	method void OnBeginPlay()
+		if self:IsClient() then
+			self._touchHandler = self.Entity:ConnectEvent(TouchEvent, self.OnTouched)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnTouched(TouchEvent event)
+		-- 몬스터 위에 겹친 오브젝트는 눌리면 안 된다 — 이 자리에 몬스터 스프라이트가 있으면 터치를 몬스터에게 양보
+		if _CardManager:IsMonsterUnderTouch(event.TouchPoint) then return end
+		-- 게임오버 팝업/타이틀(로비) 화면이 떠 있는 동안은 뒤에 있는 월드 오브젝트가 눌리면 안 된다
+		if _GameManager.GameOver then return end
+		if _TitleUI.titleGroup.Enable then return end
+		self:PlayShake()
+		self:RequestTouch()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayShake()
+		if self._shakeTween ~= nil then
+			self._shakeTween:Stop()
+			self._shakeTween = nil
+		end
+		local transform = self.Entity.TransformComponent
+		self._shakeTween = _TweenLogic:PlayTween(0.0, 1.0, self.ShakeDuration, EaseType.Linear, function(t)
+			if not isvalid(self) or not isvalid(self.Entity) then return end
+			local angle = self.ShakeAngle * math.sin(t * math.pi * 3) * (1.0 - t)
+			transform.ZRotation = angle
+			if t >= 1.0 then
+				transform.ZRotation = 0
+				self._shakeTween = nil
+			end
+		end)
+	end
+
+	@ExecSpace("Server")
+	method void RequestTouch()
+		_Ep1TouchEasterEggLogic:OnObjectTouched(self.Entity, self.EggKey, self.RewardType, self.Chance, self.RequiredTouches, self.SummonCount)
+	end
+
+	method void OnEndPlay()
+		if self:IsClient() and self._touchHandler ~= nil then
+			self.Entity:DisconnectEvent(TouchEvent, self._touchHandler)
+		end
+	end
+
+end

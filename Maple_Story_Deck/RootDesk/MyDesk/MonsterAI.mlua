@@ -931,7 +931,13 @@ script MonsterAI extends Component
 		-- 계단씩만 오른다. 보스는 그 값에 BossHpMultiplier를 곱한다.
 		local hp
 		if isBoss then
-			hp = _GameManager:GetTimeStepHp(_GameManager:GetTimeStep()) * _GameManager.BossHpMultiplier
+			-- 첫 보스는 고정 체력(MonsterSpawner.FirstBossHp, 2026-09-12 유저 지정 2500) — 0이면 기존 공식
+			local firstBossHp = _MonsterSpawner:GetFirstBossHpOverride()
+			if firstBossHp > 0 then
+				hp = firstBossHp
+			else
+				hp = _GameManager:GetTimeStepHp(_GameManager:GetTimeStep()) * _GameManager.BossHpMultiplier
+			end
 		else
 			hp = _GameManager:GetTimeStepHp(_GameManager:GetTimeStep())
 		end
@@ -2245,7 +2251,8 @@ script MonsterAI extends Component
 		
 		local dropScale = _CardManager:GetEffectScaleRatio(self)
 		if _UtilLogic:RandomDouble() < self.MiniMooreDropChance then
-			_CardManager:OnEliteKilled(worldPos, fallHeight, groundWorldY, dropScale)
+			-- 보스 소환체가 아니므로 보스 웨이브 슬롯 드롭 상한 대상 아님(마지막 인자 false)
+			_CardManager:OnEliteKilled(worldPos, fallHeight, groundWorldY, dropScale, false)
 			log("MonsterAI: mini moore dropped a skill")
 		else
 			_GameManager:ForceDropLootItem(worldPos, fallHeight, groundWorldY, dropScale)
@@ -2401,6 +2408,14 @@ script MonsterAI extends Component
 				self._reachedPlayer = false
 				self._attackTimer = 0
 			end
+		end
+
+		-- 돌진형 엘리트(에피3 호브 헥터) — 위에서 존 풀의 돌진 성질은 꺼뒀고, def가 요구할 때만 다시 켠다.
+		-- 호위병(베어울프)과 같은 MarkAsChargeEscort 경로 — 스포너가 좌표 재배치를 끝낸 뒤라 현재
+		-- Position이 곧 떨림 중심이다. 에피1·2 def엔 charge 키가 없어 nil → 기존 동작 그대로.
+		if def.charge == true and not self._isFlying and not self._reachedPlayer then
+			self:MarkAsChargeEscort(def.chargeWindup)
+			log("MonsterAI: elite charge species windup=" .. tostring(def.chargeWindup))
 		end
 
 		-- 접근 중엔 move, 이미 도달했거나 move가 없는 종(비행형)은 stand로 시작한다
@@ -2587,6 +2602,9 @@ script MonsterAI extends Component
 	method void OnUpdate(number delta)
 		if self._dead then return end
 		if _GameManager.GameOver then return end
+		-- 첫 플레이 튜토리얼의 카드 선택 단계 — 존과 무관하게 모든 몬스터가 그 자리에 멈춘다.
+		-- _paused(존 이탈용)와 달리 _neverPauses 몬스터도 예외 없이 멈춘다
+		if _GameManager.TutorialPaused then return end
 		if self._isPushingBack then return end
 		if self._paused then return end
 		-- HP 임계 변신 중(엘리쟈)엔 이동/공격/지그재그/대시를 전부 멈춘다 — 유저 지정 "아이들 상태로
@@ -3662,7 +3680,8 @@ script MonsterAI extends Component
 		if _UtilLogic:RandomDouble() < self.BonusSkillChance then
 			-- 보너스 보스는 비행형이 아니라 사망 위치가 항상 바닥이므로 fallHeight=0 고정(groundWorldY는 미사용)
 			local wp = self.Entity.TransformComponent.WorldPosition
-			_CardManager:OnEliteKilled(wp, 0, wp.y, dropScale)
+			-- 보너스 보스(발록) 피격 보상은 순번 보스의 소환체가 아니므로 보스 웨이브 상한 대상 아님
+			_CardManager:OnEliteKilled(wp, 0, wp.y, dropScale, false)
 		end
 	end
 
@@ -4424,7 +4443,8 @@ script MonsterAI extends Component
 		-- 투구 쿨감 해금) — 무기 스킬과 동일하게 보스/엘리트 포함 모든 처치마다 누적
 		_GearEffectLogic:OnMonsterKilled()
 		if self._isElite then
-			_CardManager:OnEliteKilled(self.Entity.TransformComponent.WorldPosition, fallHeight, groundWorldY, dropScale)
+			-- 엔젤슬라임 분열체(보스 소환 엘리트급)만 보스 웨이브 슬롯 드롭 상한에 들어간다(2026-09-12 유저 지정)
+			_CardManager:OnEliteKilled(self.Entity.TransformComponent.WorldPosition, fallHeight, groundWorldY, dropScale, self._isEp1BossSplit)
 			_MonsterSpawner:OnEliteKilled()
 		elseif self._isCorruptedCentaur then
 			-- 타락한 켄타우로스(ep2_map4 MapObject_205) — 유저 지정: "엘리트처럼" 확정 드롭(빨간 포션 +
@@ -4979,6 +4999,9 @@ script MonsterAI extends Component
 		
 			if not missed then
 				-- 플레이어 HP 감소 (엘리트는 공격력 15% 추가, 보스는 BossAttackMultiplier 배)
+				-- 2026-09-12 유저 지정: 보스·엘리트의 공격은 일반 몬스터가 걸어둔 피격 무적(0.8초)을 무시하고
+				-- 항상 들어간다(아래 OnMonsterReached 2번째 인자). 엔젤슬라임 분열체는 엘리트급이지만 4마리가
+				-- 동시에 붙으므로 제외 — 일반 몬스터처럼 무적 시간을 따른다.
 				log("Monster reached player!")
 				local dmgMultiplier = 1.0
 				if self._isBoss then
@@ -4997,7 +5020,7 @@ script MonsterAI extends Component
 					local hitDelay = self._attackDuration * 0.5 + self.SlashEffectDuration
 					_TimerService:SetTimerOnce(function()
 						if not isvalid(self) or self._dead then return end
-						_GameManager:OnMonsterReached(dmgMultiplier, self._isSwarmMember or self._ignoresHitImmune, self._isBoss)
+						_GameManager:OnMonsterReached(dmgMultiplier, self._isSwarmMember or self._ignoresHitImmune or self._isBoss or (self._isElite and not self._isEp1BossSplit), self._isBoss)
 					end, hitDelay)
 				else
 					-- 무리 공격(_isSwarmMember)은 TryClaimGroupAttack으로 이미 무리 내부에서 1회로 제한해뒀는데,
@@ -5006,7 +5029,7 @@ script MonsterAI extends Component
 					-- 때리면 대미지 안들어가게 딜레이 걸었잖아? 쟤는 무시하라는말임"). 무리 공격은 이 무적
 					-- 프레임을 무시하고 항상 들어가게 한다 — 다른 몬스터끼리의 무적 프레임 상호작용은 그대로 유지.
 					-- _ignoresHitImmune(Tired Knight)도 동일한 경로로 무적 프레임을 무시한다.
-					_GameManager:OnMonsterReached(dmgMultiplier, self._isSwarmMember or self._ignoresHitImmune, self._isBoss)
+					_GameManager:OnMonsterReached(dmgMultiplier, self._isSwarmMember or self._ignoresHitImmune or self._isBoss or (self._isElite and not self._isEp1BossSplit), self._isBoss)
 				end
 			end
 		end
@@ -5512,6 +5535,7 @@ script MonsterAI extends Component
 	end
 
 end
+
 
 
 
