@@ -1,0 +1,217 @@
+@Logic
+script AttendanceLogic extends Logic
+
+	-- 7일 출석 보상 이벤트(유저 지정 2026-09-13).
+	--   · 누적 출석: 한국 시간(UTC+9) 날짜가 바뀔 때마다 다음 칸 1개를 받을 수 있다(빠진 날이 있어도 이어서 받는다).
+	--   · 7칸을 다 받으면 끝 — 로비의 출석 버튼이 사라진다(AttendanceUI.RefreshLobbyButton).
+	--   · 보상: 1일 골드 5000 / 2일 다이아 300 / 3일 유물 무료뽑기 10 / 4일 다이아 300 / 5일 골드 5000 /
+	--           6일 다이아 400 / 7일 스킬 무료뽑기 10.
+	--   · 골드는 로비 누적 코인(TotalCoins)으로 들어간다 — AddGold는 런 골드까지 같이 올려서 로비 보상엔 AddCoins.
+	--   · 무료 뽑기권은 GachaUI가 다이아보다 먼저 쓴다(RequestUseFreePull → OnGachaSpendApproved).
+	-- 저장: 유저별 UserDataStorage 키 "Attendance"에 JSON 1개({c,d,fr,fs}). 입장 시 1회 읽고, 보상 수령/무료뽑기
+	-- 사용 때만 쓴다(이벤트 구동 — OnUpdate/타이머 저장 없음).
+
+	@Sync property integer ClaimedCount = 0
+	@Sync property boolean CanClaimToday = false
+	@Sync property integer FreeRelicPulls = 0
+	@Sync property integer FreeSkillPulls = 0
+	@Sync property boolean Loaded = false
+
+	property integer TotalDays = 7
+	property string StorageKey = "Attendance"
+
+	-- 마지막으로 받은 날(한국 시간 yyyymmdd). 같은 날 두 번 받는 걸 막는 기준
+	property integer _lastClaimDayKey = 0
+	property string _profileCode = ""
+
+	-- ── 보상 정의(서버/클라 공용 — ExecSpace 없음) ──────────────────────────────
+	method string GetRewardKind(integer day)
+		-- "gold" / "diamond" / "relicPull" / "skillPull"
+		if day == 1 or day == 5 then return "gold" end
+		if day == 2 or day == 4 or day == 6 then return "diamond" end
+		if day == 3 then return "relicPull" end
+		return "skillPull"
+	end
+
+	method integer GetRewardAmount(integer day)
+		if day == 1 or day == 5 then return 5000 end
+		if day == 2 or day == 4 then return 300 end
+		if day == 6 then return 400 end
+		return 10
+	end
+
+	method string GetRewardIconRUID(integer day)
+		-- 골드/다이아는 로비 상단 배지와 같은 아이콘, 뽑기권은 유저가 준 카드 이미지
+		local kind = self:GetRewardKind(day)
+		if kind == "gold" then return "02a489cccff24a139a6c3582a5871f58" end
+		if kind == "diamond" then return "81462aeb825b4660991cef05651271cf" end
+		if kind == "relicPull" then return "3fccc38bffbd45b68cd1fc049809de54" end
+		return "38f5f4b9b8a342bf931b71298d60bb84"
+	end
+
+	method string GetRewardAmountText(integer day)
+		-- 칸 아래 수량 표기(레퍼런스 이미지 기준: 뽑기권은 "10개")
+		local kind = self:GetRewardKind(day)
+		local amount = self:GetRewardAmount(day)
+		if kind == "relicPull" or kind == "skillPull" then return tostring(amount) .. "개" end
+		if amount >= 1000 then
+			return tostring(amount // 1000) .. "," .. string.format("%03d", amount % 1000)
+		end
+		return tostring(amount)
+	end
+
+	-- ── 접근자(다른 Logic에서 property 직접 읽기 금지 — 이걸로 읽는다) ────────────
+	method integer GetClaimedCount()
+		return self.ClaimedCount
+	end
+
+	method boolean CanClaim()
+		return self.CanClaimToday
+	end
+
+	method boolean IsLoaded()
+		return self.Loaded
+	end
+
+	method boolean IsAllDone()
+		return self.ClaimedCount >= self.TotalDays
+	end
+
+	method integer GetFreePulls(boolean isSkill)
+		if isSkill then return self.FreeSkillPulls end
+		return self.FreeRelicPulls
+	end
+
+	-- ── 서버: 로드/저장 ──────────────────────────────────────────────────────
+	@ExecSpace("ServerOnly")
+	@EventSender("Service", "UserService")
+	handler HandleUserEnterEvent(UserEnterEvent event)
+		local user = _UserService:GetUserEntityByUserId(event.UserId)
+		if user == nil then return end
+		self:LoadFor(user)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void LoadFor(Entity user)
+		-- 입장 시 1회만 읽는다. 처음 보는 유저(NotFound)는 전부 0에서 시작 — 빈 값을 미리 써두지 않는다
+		self._profileCode = user.PlayerComponent.ProfileCode
+		local ds = _DataStorageService:GetUserDataStorage(self._profileCode)
+		local code, raw = ds:GetAndWait(self.StorageKey)
+		if code == 0 and raw ~= nil and raw ~= "" then
+			local t = _HttpService:JSONDecode(raw)
+			if t ~= nil then
+				self.ClaimedCount = math.floor(tonumber(t["c"]) or 0)
+				self._lastClaimDayKey = math.floor(tonumber(t["d"]) or 0)
+				self.FreeRelicPulls = math.floor(tonumber(t["fr"]) or 0)
+				self.FreeSkillPulls = math.floor(tonumber(t["fs"]) or 0)
+			end
+		elseif code ~= 0 and code ~= 1000002 then
+			log_warning("AttendanceLogic: load failed code=" .. tostring(code))
+		end
+		self.Loaded = true
+		self:RefreshCanClaim()
+		log("AttendanceLogic: loaded claimed=" .. self.ClaimedCount .. " lastDay=" .. self._lastClaimDayKey .. " today=" .. self:GetTodayKey() .. " canClaim=" .. tostring(self.CanClaimToday) .. " free(relic/skill)=" .. self.FreeRelicPulls .. "/" .. self.FreeSkillPulls)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void Save()
+		-- 수령/무료뽑기 사용 때만 부른다(값이 바뀐 순간에만 1회)
+		if self._profileCode == "" then return end
+		local ds = _DataStorageService:GetUserDataStorage(self._profileCode)
+		local t = {}
+		t["c"] = self.ClaimedCount
+		t["d"] = self._lastClaimDayKey
+		t["fr"] = self.FreeRelicPulls
+		t["fs"] = self.FreeSkillPulls
+		ds:SetAsync(self.StorageKey, _HttpService:JSONEncode(t), function(code, key)
+			if code ~= 0 then log_warning("AttendanceLogic: save failed code=" .. tostring(code)) end
+		end)
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer GetTodayKey()
+		-- 한국 시간(UTC+9) 기준 오늘 날짜를 yyyymmdd 정수로
+		local kst = DateTime.UtcNow + TimeSpan.FromHours(9)
+		return kst.Year * 10000 + kst.Month * 100 + kst.Day
+	end
+
+	@ExecSpace("ServerOnly")
+	method void RefreshCanClaim()
+		self.CanClaimToday = self.Loaded and self.ClaimedCount < self.TotalDays and self._lastClaimDayKey ~= self:GetTodayKey()
+	end
+
+	-- ── 서버: 클라 요청 ──────────────────────────────────────────────────────
+	@ExecSpace("Server")
+	method void RequestRefresh()
+		-- 팝업을 열 때마다 부른다 — 켜둔 채로 자정을 넘긴 경우에도 다음 칸이 열리게
+		self:RefreshCanClaim()
+	end
+
+	@ExecSpace("Server")
+	method void RequestClaim()
+		if not self.Loaded then return end
+		self:RefreshCanClaim()
+		if not self.CanClaimToday then
+			log("AttendanceLogic: claim rejected (claimed=" .. self.ClaimedCount .. " lastDay=" .. self._lastClaimDayKey .. ")")
+			return
+		end
+		local day = self.ClaimedCount + 1
+		self:GrantReward(day)
+		self.ClaimedCount = day
+		self._lastClaimDayKey = self:GetTodayKey()
+		self.CanClaimToday = false
+		self:Save()
+		log("AttendanceLogic: claimed day " .. day .. " (" .. self:GetRewardKind(day) .. " " .. self:GetRewardAmount(day) .. ")")
+		_AttendanceUI:OnClaimed(day, senderUserId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void GrantReward(integer day)
+		local kind = self:GetRewardKind(day)
+		local amount = self:GetRewardAmount(day)
+		if kind == "gold" then
+			_GameManager:AddCoins(amount)
+		elseif kind == "diamond" then
+			_GameManager:AddDiamond(amount)
+		elseif kind == "relicPull" then
+			self.FreeRelicPulls = self.FreeRelicPulls + amount
+		else
+			self.FreeSkillPulls = self.FreeSkillPulls + amount
+		end
+	end
+
+	@ExecSpace("Server")
+	method void RequestUseFreePull(integer count, boolean isSkill)
+		-- GachaUI의 뽑기 버튼이 무료권이 있을 때 다이아 결제 대신 부른다. 차감 후 연출 허가는 다이아 결제와 같은 경로
+		if isSkill then
+			if self.FreeSkillPulls < count then return end
+			self.FreeSkillPulls = self.FreeSkillPulls - count
+		else
+			if self.FreeRelicPulls < count then return end
+			self.FreeRelicPulls = self.FreeRelicPulls - count
+		end
+		self:Save()
+		log("AttendanceLogic: free pull used x" .. count .. " skill=" .. tostring(isSkill) .. " left(relic/skill)=" .. self.FreeRelicPulls .. "/" .. self.FreeSkillPulls)
+		_GachaUI:OnGachaSpendApproved(count, isSkill, senderUserId)
+	end
+
+	-- 테스트 전용 — "다음 날이 된 것처럼" 오늘 수령 기록만 지운다(서버 스크립트에서 직접 호출)
+	@ExecSpace("ServerOnly")
+	method void DebugSimulateNextDay()
+		self._lastClaimDayKey = 0
+		self:RefreshCanClaim()
+		log("AttendanceLogic: debug next day -> canClaim=" .. tostring(self.CanClaimToday))
+	end
+
+	-- ── 클라: 동기화되면 UI 갱신 ──────────────────────────────────────────────
+	@ExecSpace("ClientOnly")
+	method void OnSyncProperty(string name, any value)
+		if name == "ClaimedCount" or name == "CanClaimToday" or name == "Loaded" then
+			_AttendanceUI:RefreshAll()
+		elseif name == "FreeRelicPulls" or name == "FreeSkillPulls" then
+			_GachaUI:NotifyFreePullsChanged()
+		end
+	end
+
+end
+

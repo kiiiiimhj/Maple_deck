@@ -98,6 +98,19 @@ script GachaUI extends Logic
 
 	property TextGUIRendererComponent pull10CostText = "3ae4c9d4-c978-4ca7-b3cc-53358687b409"
 
+	-- 비용 아이콘(BtnPull1/CostIcon, BtnPull10/CostIcon). 무료 뽑기권으로 뽑을 땐 다이아 대신 뽑기권 카드 이미지로 바꾼다.
+	-- 다이아(81462aeb)는 pivot이 이미지 밖이라 .ui 좌표가 보정돼 있어서(-72,-68 / -80,-68), 카드(pivot 중앙)는
+	-- 다이아가 실제로 보이는 중심(-39,-36 / -47,-36)에 따로 놓는다
+	property Entity pull1CostIcon = "e70610a8-c660-4535-a377-6755d0911160"
+
+	property Entity pull10CostIcon = "a06e1674-4f01-4495-aea0-c85d1ab3a575"
+
+	property string CostDiamondRUID = "81462aeb825b4660991cef05651271cf"
+
+	property string FreeRelicCardRUID = "3fccc38bffbd45b68cd1fc049809de54"
+
+	property string FreeSkillCardRUID = "38f5f4b9b8a342bf931b71298d60bb84"
+
 	-- 현재 탭. true면 스킬 뽑기, false면 유물 뽑기(기존 동작). 기본값은 스킬 — 목업 기준
 	property boolean _skillMode = true
 
@@ -453,8 +466,55 @@ script GachaUI extends Logic
 		if isvalid(self.pull1Text) then self.pull1Text.Text = name .. " 뽑기 X1" end
 		if isvalid(self.pull10Text) then self.pull10Text.Text = name .. " 뽑기 X10" end
 		-- 비용은 아이콘 옆에 "x100"으로만 적는다 (다이아몬드 아이콘이 재화 종류를 대신 알려준다)
-		if isvalid(self.pull1CostText) then self.pull1CostText.Text = "x" .. tostring(self.Pull1Cost) end
-		if isvalid(self.pull10CostText) then self.pull10CostText.Text = "x" .. tostring(self.Pull10Cost) end
+		self:RefreshCostTexts()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshCostTexts()
+		-- 출석 보상 무료 뽑기권이 있으면 비용 대신 "무료(남은 수)"를 적는다. 탭 전환(ApplyModeVisual)뿐 아니라
+		-- 뽑기가 끝나 버튼을 다시 켤 때(SetPullButtonsEnabled)도 부른다 — 연출 중엔 NotifyFreePullsChanged가
+		-- 갱신을 건너뛰어서, 여기서 안 맞추면 뽑은 뒤에도 "무료(10)"이 그대로 남는다(2026-09-13 실측)
+		-- 무료일 땐 아이콘도 다이아 → 뽑기권 카드 이미지, 글자는 "무료"(유저 지정 2026-09-13)
+		local free = _AttendanceLogic:GetFreePulls(self._skillMode)
+		local free1 = free >= 1
+		local free10 = free >= 10
+		if isvalid(self.pull1CostText) then
+			if free1 then
+				self.pull1CostText.Text = "무료"
+			else
+				self.pull1CostText.Text = "x" .. tostring(self.Pull1Cost)
+			end
+		end
+		if isvalid(self.pull10CostText) then
+			if free10 then
+				self.pull10CostText.Text = "무료"
+			else
+				self.pull10CostText.Text = "x" .. tostring(self.Pull10Cost)
+			end
+		end
+		self:ApplyCostIcon(self.pull1CostIcon, free1, Vector2(-72, -68), Vector2(-39, -36))
+		self:ApplyCostIcon(self.pull10CostIcon, free10, Vector2(-80, -68), Vector2(-47, -36))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ApplyCostIcon(Entity icon, boolean isFree, Vector2 diamondPos, Vector2 cardPos)
+		-- 비용 아이콘 한 개를 다이아/뽑기권 카드 중 하나로 맞춘다(탭에 따라 유물/스킬 카드)
+		if not isvalid(icon) then return end
+		local sprite = icon.SpriteGUIRendererComponent
+		local tr = icon.UITransformComponent
+		if isFree then
+			if self._skillMode then
+				sprite.ImageRUID = self.FreeSkillCardRUID
+			else
+				sprite.ImageRUID = self.FreeRelicCardRUID
+			end
+			tr.anchoredPosition = cardPos
+			tr.RectSize = Vector2(54, 54)
+		else
+			sprite.ImageRUID = self.CostDiamondRUID
+			tr.anchoredPosition = diamondPos
+			tr.RectSize = Vector2(44, 44)
+		end
 	end
 
 	@ExecSpace("ClientOnly")
@@ -551,13 +611,30 @@ script GachaUI extends Logic
 	method void OnPull1Clicked()
 		-- 이미 진행 중인 뽑기가 있으면 무시 — 버튼이 비활성화되어 있어도 이중 안전장치로 한 번 더 막는다
 		if self._fieldActive then return end
+		-- 출석 보상 무료 뽑기권이 있으면 다이아 대신 그걸 먼저 쓴다(AttendanceLogic, 2026-09-13)
+		if _AttendanceLogic:GetFreePulls(self._skillMode) >= 1 then
+			_AttendanceLogic:RequestUseFreePull(1, self._skillMode)
+			return
+		end
 		_GameManager:RequestGachaSpend(self.Pull1Cost, 1, self._skillMode)
 	end
 
 	@ExecSpace("ClientOnly")
 	method void OnPull10Clicked()
 		if self._fieldActive then return end
+		if _AttendanceLogic:GetFreePulls(self._skillMode) >= 10 then
+			_AttendanceLogic:RequestUseFreePull(10, self._skillMode)
+			return
+		end
 		_GameManager:RequestGachaSpend(self.Pull10Cost, 10, self._skillMode)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void NotifyFreePullsChanged()
+		-- AttendanceLogic의 무료 뽑기권 수가 동기화될 때 호출 — 버튼 라벨("무료(N)")과 활성 상태를 다시 맞춘다
+		if self._fieldActive then return end
+		self:ApplyModeVisual()
+		self:SetPullButtonsEnabled(true)
 	end
 
 	@ExecSpace("Client")
@@ -771,13 +848,17 @@ script GachaUI extends Logic
 		local can1 = false
 		local can10 = false
 		if enabled then
-			can1 = _GameManager.Diamond >= self.Pull1Cost
-			can10 = _GameManager.Diamond >= self.Pull10Cost
+			-- 무료 뽑기권(출석 보상)이 있으면 다이아가 모자라도 누를 수 있다
+			local free = _AttendanceLogic:GetFreePulls(self._skillMode)
+			can1 = _GameManager.Diamond >= self.Pull1Cost or free >= 1
+			can10 = _GameManager.Diamond >= self.Pull10Cost or free >= 10
 		end
 		self.btnPull1.Enable = can1
 		self.btnPull10.Enable = can10
 		self:ApplyButtonDim(self.btnPull1.Entity, can1)
 		self:ApplyButtonDim(self.btnPull10.Entity, can10)
+		-- 뽑기가 끝나 버튼을 다시 켤 때 "무료(N)" 남은 수도 같이 맞춘다(RefreshCostTexts 주석 참고)
+		self:RefreshCostTexts()
 	end
 
 	@ExecSpace("ClientOnly")
@@ -1133,7 +1214,8 @@ script GachaUI extends Logic
 		if not isvalid(icon) then return end
 
 		self:PlayTeleportPuff(from, false)
-		_SoundOptionLogic:PlaySfx(self.TeleportSoundRUID, 0.55)
+		-- 텔레포트 효과음은 제거(2026-09-13 유저 지정) — 교체한 RUID(2775e6cd...)도 다시 [LEA-3015] CannotLoad가 떠서
+		-- 소리 없이 연출만 둔다
 		-- 전체 이동이 다음 공격 타이밍 안에 끝나야 해서 duration에 맞춰 줄인다
 		local shrink = math.min(0.09, duration * 0.4)
 		_TweenLogic:ScaleTo(icon, Vector2(0.12, 1.08), shrink, EaseType.QuadEaseIn)

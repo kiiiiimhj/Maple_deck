@@ -1,0 +1,243 @@
+@Logic
+script AttendanceUI extends Logic
+
+	-- 출석 보상 팝업(ui/AttendanceGroup.ui) + 로비 출석 버튼(ui/TitleGroup.ui AttendanceButton) 컨트롤러.
+	-- 상태(몇 칸 받았는지/오늘 받을 수 있는지)는 전부 AttendanceLogic이 서버에서 들고 있고, 여기는 보여주기만 한다.
+	--   · 칸(Panel/Slots/Day1~7): 받은 칸 = 보상 이미지 숨김 + 체크 + "완료", 나머지 = 보상 이미지 + 수량
+	--   · 오늘 받을 칸은 살짝 두근거리게(펄스) 해서 누를 곳을 알려준다
+	--   · 수령 연출: 체크가 크게(위에서) 나타났다가 작아지며 내려앉는다(원근감 — 유저 지정)
+
+	-- UI 바인딩 (UIBuilder가 UUID를 넣는다)
+	property Entity popupGroup = "eede3908-ddfb-45d5-97a7-d7bf73774160"
+	property ButtonComponent btnClose = "10fe71dd-610f-426d-987a-dc8ea6c4ea7c"
+	property Entity slotsRoot = "56d4fa82-f84a-4a0d-9c15-cc5ef1391dad"
+	property ButtonComponent lobbyButton = "b3516b28-fb89-43c0-adca-795b47b80883"
+	property Entity lobbyRedDot = "98b7ed0e-df11-43d6-88c1-b6f32454738b"
+
+	-- 체크 연출 값
+	property number CheckStartScale = 1.9
+	property number CheckStartOffsetY = 48
+	property number CheckDropDuration = 0.3
+	property number PulseAmplitude = 0.05
+	property number PulseSpeed = 5.0
+
+	-- 내부 상태
+	property boolean _isOpen = false
+	property boolean _lobbyTabVisible = true
+	property integer _animatingDay = 0
+	property integer _pulseTimerId = 0
+	property number _pulseTime = 0
+	property table _slotHandlers = {}
+	property any _closeHandler = nil
+	property any _lobbyHandler = nil
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		if not isvalid(self.popupGroup) then return end
+		self.popupGroup.Enable = false
+		self._closeHandler = self.btnClose.Entity:ConnectEvent(ButtonClickEvent, self.OnCloseClicked)
+		self._lobbyHandler = self.lobbyButton.Entity:ConnectEvent(ButtonClickEvent, self.OnLobbyButtonClicked)
+		self._slotHandlers = {}
+		for i = 1, 7 do
+			local capturedDay = i
+			local slot = self:GetSlot(i)
+			if isvalid(slot) then
+				local h = slot:ConnectEvent(ButtonClickEvent, function() self:OnSlotClicked(capturedDay) end)
+				table.insert(self._slotHandlers, { entity = slot, eventHandler = h })
+			end
+		end
+		self:RefreshAll()
+		log("AttendanceUI started")
+	end
+
+	@ExecSpace("ClientOnly")
+	method Entity GetSlot(integer day)
+		if not isvalid(self.slotsRoot) then return nil end
+		return self.slotsRoot:GetChildByName("Day" .. tostring(day))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnLobbyButtonClicked()
+		self:Open()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Open()
+		_AttendanceLogic:RequestRefresh()
+		self:RefreshAll()
+		self.popupGroup.Enable = true
+		self._isOpen = true
+		self:StartPulse()
+		log("AttendanceUI: opened (claimed=" .. _AttendanceLogic:GetClaimedCount() .. " canClaim=" .. tostring(_AttendanceLogic:CanClaim()) .. ")")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Close()
+		self.popupGroup.Enable = false
+		self._isOpen = false
+		self:StopPulse()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnCloseClicked()
+		self:Close()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshAll()
+		-- 7칸 + 로비 버튼을 현재 동기화된 상태로 다시 그린다(수령 연출 중인 칸은 건드리지 않는다)
+		if not isvalid(self.slotsRoot) then return end
+		local claimed = _AttendanceLogic:GetClaimedCount()
+		for i = 1, 7 do
+			if i ~= self._animatingDay then
+				self:ApplySlotState(i, i <= claimed)
+			end
+		end
+		self:RefreshLobbyButton()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ApplySlotState(integer day, boolean claimed)
+		local slot = self:GetSlot(day)
+		if not isvalid(slot) then return end
+		local icon = slot:GetChildByName("RewardIcon")
+		local amountText = slot:GetChildByName("AmountText")
+		local check = slot:GetChildByName("Check")
+		if isvalid(icon) then
+			icon.SpriteGUIRendererComponent.ImageRUID = _AttendanceLogic:GetRewardIconRUID(day)
+			icon.Enable = not claimed
+		end
+		if isvalid(amountText) then
+			if claimed then
+				amountText.TextGUIRendererComponent.Text = "완료"
+			else
+				amountText.TextGUIRendererComponent.Text = _AttendanceLogic:GetRewardAmountText(day)
+			end
+		end
+		if isvalid(check) then
+			check.Enable = claimed
+			check.UITransformComponent.Scale = Vector3(1, 1, 1)
+			check.UITransformComponent.anchoredPosition = Vector2(0, 0)
+			check.SpriteGUIRendererComponent.Color = Color(1, 1, 1, 1)
+		end
+		slot.UITransformComponent.Scale = Vector3(1, 1, 1)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshLobbyButton()
+		-- 7칸을 다 받으면 버튼 자체를 숨긴다(유저 지정). 로비의 다른 탭(상점/스킬 등)에서도 숨긴다
+		if not isvalid(self.lobbyButton) then return end
+		local show = self._lobbyTabVisible and not _AttendanceLogic:IsAllDone()
+		self.lobbyButton.Entity.Enable = show
+		if isvalid(self.lobbyRedDot) then
+			self.lobbyRedDot.Enable = _AttendanceLogic:CanClaim()
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetLobbyTabVisible(boolean visible)
+		-- TitleUI.ShowPanelOnly가 탭을 바꿀 때 부른다(인벤토리 버튼과 같은 규칙: 전투 탭에서만 보인다)
+		self._lobbyTabVisible = visible
+		self:RefreshLobbyButton()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnSlotClicked(integer day)
+		local claimed = _AttendanceLogic:GetClaimedCount()
+		if day ~= claimed + 1 then return end
+		if _AttendanceLogic:CanClaim() then
+			_AttendanceLogic:RequestClaim()
+		else
+			_UIToast:ShowMessage("내일 다시 받을 수 있어요")
+		end
+	end
+
+	@ExecSpace("Client")
+	method void OnClaimed(integer day)
+		-- AttendanceLogic.RequestClaim이 지급을 끝낸 뒤 호출 — 체크 도장 연출
+		self:PlayClaimAnimation(day)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayClaimAnimation(integer day)
+		local slot = self:GetSlot(day)
+		if not isvalid(slot) then return end
+		local icon = slot:GetChildByName("RewardIcon")
+		local amountText = slot:GetChildByName("AmountText")
+		local check = slot:GetChildByName("Check")
+		if not isvalid(check) then return end
+		self._animatingDay = day
+		slot.UITransformComponent.Scale = Vector3(1, 1, 1)
+		if isvalid(icon) then icon.Enable = false end
+		if isvalid(amountText) then amountText.TextGUIRendererComponent.Text = "완료" end
+
+		local tr = check.UITransformComponent
+		local sprite = check.SpriteGUIRendererComponent
+		tr.Scale = Vector3(self.CheckStartScale, self.CheckStartScale, 1)
+		tr.anchoredPosition = Vector2(0, self.CheckStartOffsetY)
+		sprite.Color = Color(1, 1, 1, 0)
+		check.Enable = true
+		-- 가속하며 떨어지듯(QuadEaseIn) 크게 → 원래 크기, 위 → 제자리, 투명 → 불투명
+		_TweenLogic:PlayTween(0.0, 1.0, self.CheckDropDuration, EaseType.QuadEaseIn, function(t)
+			if not isvalid(check) then return end
+			local s = self.CheckStartScale + (1.0 - self.CheckStartScale) * t
+			tr.Scale = Vector3(s, s, 1)
+			tr.anchoredPosition = Vector2(0, self.CheckStartOffsetY * (1.0 - t))
+			local a = t * 1.6
+			if a > 1 then a = 1 end
+			sprite.Color = Color(1, 1, 1, a)
+			if t >= 1.0 then
+				-- 착지 반동 — 살짝 눌렸다가 원래 크기로
+				_TweenLogic:ScaleTo(check, Vector2(0.9, 0.9), 0.06, EaseType.QuadEaseOut)
+				_TimerService:SetTimerOnce(function()
+					if not isvalid(check) then return end
+					_TweenLogic:ScaleTo(check, Vector2(1, 1), 0.12, EaseType.BackEaseOut)
+					self._animatingDay = 0
+					self:RefreshAll()
+				end, 0.06)
+			end
+		end)
+		log("AttendanceUI: claim animation day " .. day)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void StartPulse()
+		self:StopPulse()
+		self._pulseTime = 0
+		self._pulseTimerId = _TimerService:SetTimerRepeat(function()
+			self._pulseTime = self._pulseTime + 1 / 30
+			local target = 0
+			if _AttendanceLogic:CanClaim() then target = _AttendanceLogic:GetClaimedCount() + 1 end
+			for i = 1, 7 do
+				local slot = self:GetSlot(i)
+				if isvalid(slot) then
+					local s = 1.0
+					if i == target and i ~= self._animatingDay then
+						s = 1.0 + self.PulseAmplitude * math.sin(self._pulseTime * self.PulseSpeed)
+					end
+					slot.UITransformComponent.Scale = Vector3(s, s, 1)
+				end
+			end
+		end, 1 / 30)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void StopPulse()
+		if self._pulseTimerId ~= 0 then
+			_TimerService:ClearTimer(self._pulseTimerId)
+			self._pulseTimerId = 0
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		self:StopPulse()
+		if self._closeHandler then self.btnClose.Entity:DisconnectEvent(ButtonClickEvent, self._closeHandler) end
+		if self._lobbyHandler then self.lobbyButton.Entity:DisconnectEvent(ButtonClickEvent, self._lobbyHandler) end
+		for _, rec in ipairs(self._slotHandlers) do
+			if isvalid(rec.entity) then rec.entity:DisconnectEvent(ButtonClickEvent, rec.eventHandler) end
+		end
+		self._slotHandlers = {}
+	end
+
+end

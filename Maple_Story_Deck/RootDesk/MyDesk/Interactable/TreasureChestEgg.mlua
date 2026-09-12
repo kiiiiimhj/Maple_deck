@@ -11,12 +11,22 @@ script TreasureChestEgg extends Component
 
 	property boolean _opened = false
 	property any _touchHandler = nil
+	-- 열린 뒤 숨기는 예약 타이머 토큰 — 열자마자(0.8초 안에) 다시하기를 누르면 예약된 "숨기기"가
+	-- 방금 되살린 상자를 다시 꺼버리지 않게, 리셋할 때 토큰을 올려 예약을 무효화한다
+	property integer _openToken = 0
 
 	method void OnBeginPlay()
+		if self:IsServer() then
+			-- 다시하기 때 다시 닫힌 채로 되돌릴 수 있게 등록(TreasureChestEggRegistry.ResetForNewRun)
+			_TreasureChestEggRegistry:Register(self)
+		end
 		if self:IsClient() then
 			local renderer = self.Entity.SpriteRendererComponent
 			if renderer ~= nil then renderer.SpriteRUID = self.StandRUID end
-			self._touchHandler = self.Entity:ConnectEvent(TouchEvent, self.OnTouched)
+			-- 숨겼다 다시 켜질 때 OnBeginPlay가 다시 불려도 터치 핸들러가 두 번 붙지 않게 한다
+			if self._touchHandler == nil then
+				self._touchHandler = self.Entity:ConnectEvent(TouchEvent, self.OnTouched)
+			end
 		end
 	end
 
@@ -50,10 +60,17 @@ script TreasureChestEgg extends Component
 		-- 엘리트 드롭(OnEliteKilled, 최대 3개+빈 풀 시 골드)과 달리 상자 전용 룰(최대 2개+빈 풀 시 하얀 포션)을 쓴다
 		local wp = self.Entity.TransformComponent.WorldPosition
 		_CardManager:OnTreasureBoxOpened(wp, 0, wp.y, 1.0)
-		self.Entity:Destroy(self.DieDuration + 0.3)
-		if isvalid(self.extraEntity) then
-			self.extraEntity:Destroy(self.DieDuration + 0.3)
-		end
+		-- 예전엔 Entity:Destroy()로 영구 삭제해서 "다시하기"를 해도 상자가 다시 안 생겼다(유저 리포트
+		-- 2026-09-13). 이제 열림 연출만 잠깐 보여준 뒤 Enable=false로 숨기고, ResetChest()에서 되살린다
+		-- (Ep2Map1ChestEasterEggLogic과 같은 방식)
+		self._openToken = self._openToken + 1
+		local token = self._openToken
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) then return end
+			if self._openToken ~= token or not self._opened then return end
+			self.Entity.Enable = false
+			if isvalid(self.extraEntity) then self.extraEntity.Enable = false end
+		end, self.DieDuration + 0.3)
 	end
 
 	@ExecSpace("Multicast")
@@ -63,9 +80,30 @@ script TreasureChestEgg extends Component
 		if renderer ~= nil then renderer.SpriteRUID = self.DieRUID end
 	end
 
+	@ExecSpace("ServerOnly")
+	method boolean ResetChest()
+		-- TreasureChestEggRegistry.ResetForNewRun()이 호출 — 열렸던 상자만 닫힌 채로 되돌린다. 되돌렸으면 true
+		if not self._opened then return false end
+		self._opened = false
+		self._openToken = self._openToken + 1
+		self.Entity.Enable = true
+		if isvalid(self.extraEntity) then self.extraEntity.Enable = true end
+		self:PlayReset()
+		return true
+	end
+
+	@ExecSpace("Multicast")
+	method void PlayReset()
+		-- 클라에서 열림 스프라이트(PlayOpen)로 바꿔둔 걸 닫힌 스프라이트로 되돌린다
+		if self:IsServer() then return end
+		local renderer = self.Entity.SpriteRendererComponent
+		if renderer ~= nil then renderer.SpriteRUID = self.StandRUID end
+	end
+
 	method void OnEndPlay()
 		if self:IsClient() and self._touchHandler ~= nil then
 			self.Entity:DisconnectEvent(TouchEvent, self._touchHandler)
+			self._touchHandler = nil
 		end
 	end
 

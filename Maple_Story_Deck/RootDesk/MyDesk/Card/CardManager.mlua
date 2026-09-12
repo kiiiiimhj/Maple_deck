@@ -10126,12 +10126,13 @@ script CardManager extends Logic
 		return 45
 	end
 
-	-- 레벨별 타겟 수 — Lv1-2:2명 / Lv3-5:3명
+	-- 레벨별 화살 수(=WindPoemAttack이 순환 배분하는 타겟 슬롯 수) — Lv1:4 / Lv2-3:5 / Lv4-5:6
+	-- (유저 지정 2026-09-13: 활 스킬 4종 화살 +1 — 이전 3/4/5)
 	method integer GetWindPoemTargetCount()
-		if self.WindPoemLevel >= 4 then return 5
-		elseif self.WindPoemLevel >= 2 then return 4
+		if self.WindPoemLevel >= 4 then return 6
+		elseif self.WindPoemLevel >= 2 then return 5
 		end
-		return 3
+		return 4
 	end
 
 	-- 추가타(Lv2~5만 존재, Lv1은 없음) — 확률은 레벨 무관 고정 7%, 대미지 비율만 레벨별로 증가
@@ -10231,12 +10232,13 @@ script CardManager extends Logic
 		return 100
 	end
 
-	-- 화살 발사 수(=바람의 시처럼 타겟 수만큼 순환 분산) — Lv1:5 / Lv2:6 / Lv3:7
+	-- 화살 발사 수(=바람의 시처럼 타겟 수만큼 순환 분산) — Lv1:6 / Lv2:7 / Lv3:8
+	-- (유저 지정 2026-09-13: 활 스킬 4종 화살 +1 — 이전 5/6/7)
 	-- SkillInventory 폭풍의 시(인덱스30) Lv9: 추가 타격 +2, 카드 자체 레벨과 별개로 항상 가산
 	method integer GetStormPoemHitCount(integer level)
-		local base = 5
-		if level >= 3 then base = 7
-		elseif level >= 2 then base = 6
+		local base = 6
+		if level >= 3 then base = 8
+		elseif level >= 2 then base = 7
 		end
 		return base + math.floor(self:GetSkillInvTierPercent(30, 0, 0, 2))
 	end
@@ -10410,6 +10412,8 @@ script CardManager extends Logic
 	property string Card102BowReleaseClipRUID = "2ed6be9152eb4bf0b22f4ca6e6fff9fe"  -- 11번째 프레임에 겹쳐 재생
 	property number Card102BowDuration = 0.9  -- 프레임 시퀀스 총 재생시간과 맞춤(유저 요청: "연출시간 약 0.4s만 더길면" — 0.5→0.9)
 	property number Card102FireOffset = 0.3  -- 화살이 활대 연출 끝까지 안 기다리고 이만큼 일찍 발사(유저 요청: "발사되는시간 0.3s 떙겨줘") — 연출 자체 길이(Card102BowDuration)는 그대로 유지
+	property integer Card102ArrowCount = 2  -- 캐스트당 화살 수(유저 지정 2026-09-13: 활 스킬 4종 화살 +1 — 1발 → 2발)
+	property number Card102ArrowStaggerDelay = 0.15  -- 연사 간격(강화 애로우 블로우 Card117ArrowStaggerDelay와 동일)
 	property number Card102ArrowXOffset = 0.2  -- 화살 스폰 X를 활대 중앙에 맞게 미세 보정 — 이 좌표계는 +X가 화면상 왼쪽으로 보임(유저 요청: "화살대 중앙이랑 안맞아서 <이쪽으로 아주 약간만" → 0.08에서 0.2로 조정)
 	property string Card102ArrowEffectRUID = "64142d933e854590a67af044f3d091fb"  -- 일반 화살
 	property string Card102EnhancedArrowEffectRUID = "64f775829e234918bd65e9d22214bb06"  -- 강화 화살
@@ -10461,17 +10465,23 @@ script CardManager extends Logic
 		-- 불발탄 대응(유저 지적) — 캐스트 시점 타겟/좌표를 미리 고정하지 않고, 발사 예정 시각에
 		-- 타겟이 죽어있으면 그 순간 GetReplacementTarget()으로 다시 뽑는다. hitPos도 그 발사
 		-- 시점의(대체 타겟이면 그 타겟의) 현재 위치로 다시 계산한다.
-		_TimerService:SetTimerOnce(function()
-			if not isvalid(self) then return end
-			local fireTarget = target
-			if not isvalid(fireTarget) or fireTarget._dead then
-				fireTarget = self:GetReplacementTarget()
-			end
-			if not isvalid(fireTarget) or not isvalid(fireTarget.Entity) then return end
-			local p1 = fireTarget.Entity.TransformComponent.Position
-			local hitPos = Vector3(p1.x, p1.y + 0.3, p1.z)
-			self:FireArrowBlowArrow(fireTarget, hitPos, damage, isCrit)
-		end, math.max(0, self.Card102BowDuration - self.Card102FireOffset))
+		-- 유저 지정(2026-09-13): 활 스킬 4종 화살 +1 — 캐스트당 1발 → Card102ArrowCount발. 강화 애로우
+		-- 블로우(EnhancedArrowBlowAttack)와 같은 방식으로 같은 타겟에 Card102ArrowStaggerDelay 간격 연사.
+		-- 강화 화살 판정은 화살마다 독립(FireArrowBlowArrow 내부), 크리티컬은 캐스트 1회 판정을 공유한다.
+		local firstDelay = math.max(0, self.Card102BowDuration - self.Card102FireOffset)
+		for i = 1, self.Card102ArrowCount do
+			_TimerService:SetTimerOnce(function()
+				if not isvalid(self) then return end
+				local fireTarget = target
+				if not isvalid(fireTarget) or fireTarget._dead then
+					fireTarget = self:GetReplacementTarget()
+				end
+				if not isvalid(fireTarget) or not isvalid(fireTarget.Entity) then return end
+				local p1 = fireTarget.Entity.TransformComponent.Position
+				local hitPos = Vector3(p1.x, p1.y + 0.3, p1.z)
+				self:FireArrowBlowArrow(fireTarget, hitPos, damage, isCrit)
+			end, firstDelay + (i - 1) * self.Card102ArrowStaggerDelay)
+		end
 	end
 
 	-- 활대(시위 당기는) 연출 — effect/9~15 정지 스프라이트 7장을 순서대로 갈아 끼우고, 11번째
@@ -10548,7 +10558,7 @@ script CardManager extends Logic
 	-- 사격(Card113, 슬롯 없는 패시브) 보유 시 등장. 새 슬롯이 필요없고 애로우 블로우의 슬롯을 그대로
 	-- 넘겨받는다(아쿠아 서지/헤일 버스트와 동일한 "슬롯 카드 + 슬롯 없는 패시브" 단일 슬롯 조합
 	-- 패턴). 항상 단일 타겟, 쿨타임 2.5초 고정(애로우 블로우와 동일). 캐스트당 화살 발사 수는
-	-- 레벨별 2/2/3발(GetEnhancedArrowBlowArrowCount, 유저 요청: "화살 1개 쏘는걸 늘리라는건데" —
+	-- 레벨별 3/3/4발(GetEnhancedArrowBlowArrowCount, 2026-09-13 +1 — 유저 요청: "화살 1개 쏘는걸 늘리라는건데" —
 	-- 처음에 "3연타 히트 횟수"를 레벨별로 바꿨다가 유저에게 강하게 정정받음: 3연타는 고정 유지하고
 	-- 늘려야 하는 건 화살 발사 수였다), 화살마다 Card117ArrowStaggerDelay(0.15초) 간격으로 같은
 	-- 타겟에 연사한다. 화살 한 발 한 발이 독립적으로 레벨별 확률(20%/25%/30%, 유저 확인)로 "강화
@@ -10603,12 +10613,13 @@ script CardManager extends Logic
 		return 0.20
 	end
 
-	-- 캐스트당 발사하는 화살 수 — 유저 요청: "화살 1개 쏘는걸 늘리라는건데" — 레벨별 2/2/3발
-	-- 연사(각 화살은 독립적으로 강화 여부를 판정하고, 강화면 고정 3연타가 들어간다)
+	-- 캐스트당 발사하는 화살 수 — 유저 요청: "화살 1개 쏘는걸 늘리라는건데" — 레벨별 3/3/4발
+	-- (유저 지정 2026-09-13: 활 스킬 4종 화살 +1 — 이전 2/2/3) 연사(각 화살은 독립적으로 강화 여부를
+	-- 판정하고, 강화면 고정 3연타가 들어간다 — 3연타 자체는 그대로)
 	-- SkillInventory 강화 애로우 블로우(인덱스31) Lv9: 추가 타격 +2, 카드 자체 레벨과 별개로 항상 가산
 	method integer GetEnhancedArrowBlowArrowCount(integer level)
-		local base = 2
-		if level >= 3 then base = 3 end
+		local base = 3
+		if level >= 3 then base = 4 end
 		return base + math.floor(self:GetSkillInvTierPercent(31, 0, 0, 2))
 	end
 
@@ -10651,7 +10662,7 @@ script CardManager extends Logic
 
 	-- 캐스팅 시점에 착탄 위치를 미리 고정해둔다 — 애로우 블로우와 동일한 정책(활 쏘는 동안 타겟이
 	-- 죽어도 연출은 항상 끝까지 재생되고 데미지 적용만 생존 여부로 갈린다). 단일 타겟 유지하되,
-	-- 레벨별 화살 수(2/2/3발, GetEnhancedArrowBlowArrowCount)만큼 같은 타겟에 연사한다 — 화살마다
+	-- 레벨별 화살 수(3/3/4발, GetEnhancedArrowBlowArrowCount)만큼 같은 타겟에 연사한다 — 화살마다
 	-- 독립적으로 강화 여부를 판정한다(FireEnhancedArrowBlowArrow 내부).
 	@ExecSpace("ServerOnly")
 	method void EnhancedArrowBlowAttack(number damage, boolean isCrit, MonsterAI target)
@@ -16351,7 +16362,7 @@ script CardManager extends Logic
 			}
 		elseif cardIdx == 101 then
 			return {
-				"해금! (대미지 45, 타겟 3명)",
+				"해금! (대미지 45, 타겟 4명)",
 				"공격 대상 +1",
 				"피해량 +20",
 				"공격 대상 +1",
@@ -16359,7 +16370,7 @@ script CardManager extends Logic
 			}
 		elseif cardIdx == 102 then
 			return {
-				"해금! (대미지 120)",
+				"해금! (대미지 120, 화살 2발)",
 				"강화 화살 효과 신규 획득 (확률 20%)",
 				"피해량 +50, 강화 화살 대미지 +10%",
 				"강화 화살 대미지 +20%",
@@ -16467,13 +16478,13 @@ script CardManager extends Logic
 			}
 		elseif cardIdx == 116 then
 			return {
-				"해금! (대미지 100, 최대 5명 연사, 추가 타격 확률 15%)",
+				"해금! (대미지 100, 최대 6명 연사, 추가 타격 확률 15%)",
 				"피해량 +20, 연사 대상 +1, 추가 타격 대미지 증가",
 				"피해량 +20, 연사 대상 +1, 추가 타격 확률 +5%, 대미지 증가",
 			}
 		elseif cardIdx == 117 then
 			return {
-				"해금! (대미지 230, 연사 2발, 강화 확률 20%, 강화 시 3연타)",
+				"해금! (대미지 230, 연사 3발, 강화 확률 20%, 강화 시 3연타)",
 				"피해량 +20, 강화 확률 +5%",
 				"피해량 +50, 연사 개수 +1, 강화 확률 +5%",
 			}
@@ -18484,8 +18495,9 @@ script CardManager extends Logic
 			extraStr = "타겟 " .. self:GetWindPoemTargetCount() .. "명"
 		elseif cardIdx == 102 then
 			local enhancePct = math.floor(self:GetArrowBlowEnhanceChance() * 100)
+			extraStr = "화살 " .. self.Card102ArrowCount .. "발"
 			if enhancePct > 0 then
-				extraStr = "강화 화살 " .. enhancePct .. "% (" .. math.floor(self:GetArrowBlowEnhanceMultiplier() * 100) .. "% 대미지)"
+				extraStr = extraStr .. "  |  강화 화살 " .. enhancePct .. "% (" .. math.floor(self:GetArrowBlowEnhanceMultiplier() * 100) .. "% 대미지)"
 			end
 		elseif cardIdx == 103 then
 			local slowPct = math.floor(self:GetIceQuiverSlowChance() * 100)
@@ -18538,7 +18550,8 @@ script CardManager extends Logic
 			local eabLv = self.EnhancedArrowBlowLevel
 			local enhancePct = math.floor(self:GetEnhancedArrowBlowEnhanceChance(eabLv) * 100)
 			-- 유저 지정(2026-08-28): 데미지 줄을 "대미지 : X"로 단순화하면서 빠진 "연사 N발" 정보를 여기로 이동.
-			extraStr = "강화 확률(화살마다) " .. enhancePct .. "%  |  강화 시 " .. self.Card117EnhancedHitCount .. "연타(" .. string.format("%.2f", self.Card117EnhancedHitInterval) .. "초 간격)"
+			-- 2026-09-13: 위 주석대로 옮겨왔어야 할 "연사 N발"이 실제론 빠져 있어서 복원(화살 +1 반영 확인용)
+			extraStr = "연사 " .. self:GetEnhancedArrowBlowArrowCount(eabLv) .. "발  |  강화 확률(화살마다) " .. enhancePct .. "%  |  강화 시 " .. self.Card117EnhancedHitCount .. "연타(" .. string.format("%.2f", self.Card117EnhancedHitInterval) .. "초 간격)"
 		elseif cardIdx == 112 then
 			extraStr = "추가 공격 대미지 " .. math.floor(self:GetFinalAttackBowMultiplier() * 100) .. "%"
 		elseif cardIdx == 152 then
