@@ -1,0 +1,648 @@
+@Logic
+script IdleRewardUI extends Logic
+
+	-- 방치 보상 팝업(ui/IdleRewardGroup.ui) + 로비 버튼(ui/TitleGroup.ui BattlePanel/IdleRewardButton) 컨트롤러.
+	-- 쌓인 시간은 IdleRewardLogic이 서버에서 들고 있고, 여기는 보여주기 + 전투 장면 연출만 한다(유저 와이어프레임 2026-09-15).
+	--   · 위: 전투 장면 — 최고 진행 에피소드 맵(타일 바닥이 보이는 구간 캡처)에서 몬스터가 타일 위를 걸어오고 아르카나가 마법으로 잡는다
+	--     (팝업이 열려 있는 동안만 돈다). 챕터 ◁ ▷ 선택은 없앴다(유저 지정) — 이름도 최고 에피소드.
+	--   · 자동 시간(최대 24시간) / 획득 골드 / 획득 경험치 / 획득 장비(같은 장비는 묶어서 x개수) / 받기
+	--   · 받기는 최소 10분 — 그 전엔 버튼에 남은 시간이 거꾸로 흐른다(10:00 → 00:00)
+	--   · 받으면 팝업이 닫히면서 골드는 코인 배지로, 장비는 로비 장비 버튼으로 날아간다(RewardFlyUI)
+
+	-- UI 바인딩 (UIBuilder가 UUID를 넣는다)
+	property Entity popupGroup = "2a63fdcb-719f-4955-9cac-15d812fd415c"
+	property ButtonComponent btnClose = "dde49913-1c26-43c2-b6c4-b14e392eedb1"
+	property TextGUIRendererComponent chapterText = "f280920b-6a47-45c3-b9a5-83f6d1ae9b78"
+	property TextGUIRendererComponent timeText = "bd625937-5836-4b11-938d-36c444625ae6"
+	property TextGUIRendererComponent capText = "7a1b711f-ce6d-4a17-b540-632c3c35f9da"
+	property TextGUIRendererComponent goldText = "96d15974-37ce-45c6-8f83-d755e5b04d51"
+	property TextGUIRendererComponent expText = "9a31d683-22ee-42f7-91c8-1583e2cbdfad"
+	property Entity goldBox = "04ef046c-517f-4f80-96a5-bce6c482ff08"
+	property Entity gearBox = "cddfd699-5868-42e6-932e-12e1e322953e"
+	property TextGUIRendererComponent gearEmptyText = "d8b1fb7d-e215-4b89-a0d8-0bbb3dfa6b54"
+	property ButtonComponent btnClaim = "c85713c4-a0c7-4a67-8e68-7abeda52f41d"
+	property TextGUIRendererComponent claimText = "c85713c4-a0c7-4a67-8e68-7abeda52f41d"
+	property Entity scene = "2e9150a4-9a67-4219-b702-f256c0ba1bd8"
+	property Entity sceneBg = "b228aaa8-bcc0-479d-bf67-1306dca9cb55"
+	property Entity avatar = "f6005846-ffd3-4143-97be-cd2abd7b3a7b"
+	property ButtonComponent lobbyButton = "b4663786-54bd-4e24-853d-eca8e240c194"
+	property Entity lobbyRedDot = "0ccffead-15bd-4ba5-9ea7-9f34573ba562"
+
+	-- 장면 값(장면 좌표 = Panel/Scene 로컬, 중심 원점). 바닥 높이는 에피소드별 캡처 사진마다 다르다(GetSceneDef)
+	property number AvatarX = -340
+	-- 아바타 칸(100x140) 아래변 ≈ 발바닥 → 칸 중심 = 바닥선 + 70
+	property number AvatarFootOffset = 70
+	-- 몬스터 칸(85x85). 클립은 프레임 아래쪽 여백이 있어서 칸 중심을 바닥선보다 조금 위에 둔다(스샷 실측)
+	property number MonsterFootOffset = 4
+	property number SpawnX = 520
+	property number MonsterStopX = -200
+	property number MonsterSpacing = 110
+	property number MonsterSpeed = 140
+	-- 몬스터가 이 x보다 가까이 와야 쏜다 — 너무 크면 오른쪽 끝에서 다 죽어서 아르카나 앞까지 오질 않는다
+	property number AttackRangeX = 200
+	property number AttackInterval = 0.8
+	property number BoltDuration = 0.22
+	property integer MonsterPoolSize = 3
+	property number RespawnDelay = 0.8
+	property string BoltRUID = "98c65e4fb7c7473b907917cb2a60f859"
+	property string GoldIconRUID = "02a489cccff24a139a6c3582a5871f58"
+
+	-- 장비 칸
+	property integer GearSlotCount = 4
+	property number GearSlotSpacing = 160
+	property number ClaimPendingTimeout = 3.0
+	property number CloseDelayAfterClaim = 0.25
+
+	-- 내부 상태
+	property boolean _isOpen = false
+	property boolean _claimPending = false
+	property integer _holdGold = 0
+	property number _syncLocalTime = 0
+	property integer _sceneEp = 0
+	property number _groundY = -60
+	property integer _sceneGen = 0
+	property integer _attackTimerId = 0
+	property integer _tickTimerId = 0
+	property integer _lobbyTimerId = 0
+	property integer _impactNext = 1
+	property table _monsters = {}
+	property integer _pendingGold = 0
+	property table _pendingGear = {}
+	property table _handlers = {}
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		if not isvalid(self.popupGroup) then return end
+		self.popupGroup.Enable = false
+		self._syncLocalTime = _UtilLogic.ElapsedSeconds
+		self._monsters = {}
+		self._pendingGear = {}
+		self._handlers = {}
+		self:ConnectClick(self.btnClose.Entity, function() self:Close() end)
+		self:ConnectClick(self.btnClaim.Entity, function() self:OnClaimClicked() end)
+		if isvalid(self.lobbyButton) then
+			self:ConnectClick(self.lobbyButton.Entity, function() self:Open() end)
+		end
+		-- 로비 레드닷은 시간이 흘러야 켜지므로 가볍게 주기 확인(서버 호출 없음 — 동기화된 값 + 로컬 시계만 본다)
+		self._lobbyTimerId = _TimerService:SetTimerRepeat(function() self:RefreshLobbyButton() end, 5)
+		self:RefreshLobbyButton()
+		log("IdleRewardUI started")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ConnectClick(Entity e, any fn)
+		if not isvalid(e) then return end
+		local h = e:ConnectEvent(ButtonClickEvent, fn)
+		table.insert(self._handlers, { entity = e, eventHandler = h })
+	end
+
+	-- ── 표시 계산 ──────────────────────────────────────────────────────────
+	@ExecSpace("ClientOnly")
+	method integer GetDisplaySeconds()
+		-- 서버가 마지막으로 알려준 누적 초 + 그 뒤 흐른 로컬 시간
+		local logic = _IdleRewardLogic
+		local sec = logic:GetAccruedAtSync() + math.floor(_UtilLogic.ElapsedSeconds - self._syncLocalTime)
+		return logic:ClampSeconds(sec)
+	end
+
+	@ExecSpace("ClientOnly")
+	method string FormatDuration(integer sec)
+		local h = sec // 3600
+		local m = (sec % 3600) // 60
+		local s = sec % 60
+		if h > 0 then return string.format("%d시간 %02d분 %02d초", h, m, s) end
+		return string.format("%02d분 %02d초", m, s)
+	end
+
+	@ExecSpace("ClientOnly")
+	method string FormatNumber(integer n)
+		-- 1234567 → "1,234,567"
+		local s = tostring(n)
+		local out = ""
+		local len = string.len(s)
+		for i = 1, len do
+			out = out .. string.sub(s, i, i)
+			local left = len - i
+			if left > 0 and left % 3 == 0 then out = out .. "," end
+		end
+		return out
+	end
+
+	-- ── 열기/닫기 ──────────────────────────────────────────────────────────
+	@ExecSpace("ClientOnly")
+	method void Open()
+		if self._isOpen then return end
+		self._isOpen = true
+		self.popupGroup.Enable = true
+		-- 표시 시계를 서버 기준으로 다시 맞춘다(동기화가 오면 OnStateSynced가 갱신)
+		_IdleRewardLogic:RequestRefresh()
+		-- 장면 속 아르카나에 지금 장착한 장비를 입힌다(뽑기 캐릭터와 같은 규칙)
+		_GachaUI:ApplyPlayerAvatarTo(self.avatar)
+		local ep = _IdleRewardLogic:GetMaxEpisode()
+		self.chapterText.Text = _IdleRewardLogic:GetEpisodeName(ep)
+		self:StartScene(ep)
+		self:RefreshCounters()
+		if self._tickTimerId ~= 0 then _TimerService:ClearTimer(self._tickTimerId) end
+		self._tickTimerId = _TimerService:SetTimerRepeat(function() self:RefreshCounters() end, 0.25)
+		log("IdleRewardUI: opened maxEp=" .. ep .. " sec=" .. self:GetDisplaySeconds())
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Close()
+		if not self._isOpen then return end
+		self:FlyPendingRewards()
+		self:StopScene()
+		if self._tickTimerId ~= 0 then
+			_TimerService:ClearTimer(self._tickTimerId)
+			self._tickTimerId = 0
+		end
+		self.popupGroup.Enable = false
+		self._isOpen = false
+		self:RefreshLobbyButton()
+	end
+
+	-- ── 서버 동기화 ─────────────────────────────────────────────────────────
+	@ExecSpace("ClientOnly")
+	method void OnStateSynced(string name)
+		if name == "AccruedAtSync" or name == "SyncSerial" then
+			self._syncLocalTime = _UtilLogic.ElapsedSeconds
+		end
+		if self._isOpen then self:RefreshCounters() end
+		self:RefreshLobbyButton()
+	end
+
+	-- ── 숫자/장비 칸 ────────────────────────────────────────────────────────
+	@ExecSpace("ClientOnly")
+	method void RefreshCounters()
+		if not self._isOpen then return end
+		local logic = _IdleRewardLogic
+		local sec = self:GetDisplaySeconds()
+		self.timeText.Text = "자동 시간 : " .. self:FormatDuration(sec)
+		local bonusPct = math.floor((logic:GetEpisodeBonus(logic:GetMaxEpisode()) - 1.0) * 100 + 0.5)
+		local capLine = "(최대 24시간"
+		if bonusPct > 0 then capLine = capLine .. " · 진행 보너스 +" .. bonusPct .. "%" end
+		if sec >= logic:GetMaxSeconds() then
+			self.capText.Text = capLine .. " — 가득 찼어요!)"
+			self.capText.FontColor = Color(1, 0.55, 0.45, 1)
+		else
+			self.capText.Text = capLine .. ")"
+			self.capText.FontColor = Color(0.85, 0.8, 0.7, 1)
+		end
+		self.goldText.Text = self:FormatNumber(logic:GetGoldFor(sec))
+		self.expText.Text = self:FormatNumber(logic:GetExpFor(sec))
+		self:RefreshGearSlots(logic:GetGearCountFor(sec), sec)
+		self:RefreshClaimButton(sec)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshGearSlots(integer count, integer sec)
+		-- 같은 장비끼리 묶어 "아이콘 x개수"로 보여준다(4시간마다 1개라 하루 최대 6개 — 칸 4개면 충분)
+		if not isvalid(self.gearBox) then return end
+		local logic = _IdleRewardLogic
+		local ids = logic:GetGearItemIds(logic:GetMaxEpisode(), logic:GetGearSeed(), count)
+		local order = {}
+		local counts = {}
+		for _, id in ipairs(ids) do
+			if counts[id] == nil then
+				counts[id] = 0
+				table.insert(order, id)
+			end
+			counts[id] = counts[id] + 1
+		end
+		local n = #order
+		if n > self.GearSlotCount then n = self.GearSlotCount end
+		for i = 1, self.GearSlotCount do
+			local slot = self.gearBox:GetChildByName("Slot" .. tostring(i))
+			if isvalid(slot) then
+				if i <= n then
+					slot.Enable = true
+					slot.UITransformComponent.anchoredPosition = Vector2((i - (n + 1) / 2) * self.GearSlotSpacing, 0)
+					local icon = slot:GetChildByName("Icon")
+					if isvalid(icon) then
+						icon.SpriteGUIRendererComponent.ImageRUID = DataRef(_WeaponTierDataLogic:GetDisplayRUID(order[i], _GearGradeEnum.None))
+					end
+					local cnt = slot:GetChildByName("Count")
+					if isvalid(cnt) then cnt.TextGUIRendererComponent.Text = "x" .. tostring(counts[order[i]]) end
+				else
+					slot.Enable = false
+				end
+			end
+		end
+		if isvalid(self.gearEmptyText) then
+			self.gearEmptyText.Entity.Enable = n == 0
+			if n == 0 then
+				self.gearEmptyText.Text = "장비는 " .. logic:GetGearIntervalHours() .. "시간마다 1개씩 쌓여요 (다음 장비까지 " .. self:FormatDuration(logic:GetSecondsToNextGear(sec)) .. ")"
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshClaimButton(integer sec)
+		-- 10분 전: 남은 시간 "MM:SS"가 거꾸로 흐르고 회색 / 10분 이후: "받기"
+		if not isvalid(self.btnClaim) then return end
+		local logic = _IdleRewardLogic
+		local sprite = self.btnClaim.Entity.SpriteGUIRendererComponent
+		if logic:CanClaimAt(sec) then
+			self.claimText.Text = "받기"
+			if self._claimPending then
+				sprite.Color = Color(0.6, 0.6, 0.6, 1)
+			else
+				sprite.Color = Color(1, 1, 1, 1)
+			end
+		else
+			local left = logic:GetMinClaimSeconds() - sec
+			if left < 0 then left = 0 end
+			self.claimText.Text = string.format("%02d:%02d", left // 60, left % 60)
+			sprite.Color = Color(0.6, 0.6, 0.6, 1)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshLobbyButton()
+		if not isvalid(self.lobbyRedDot) then return end
+		local logic = _IdleRewardLogic
+		self.lobbyRedDot.Enable = logic:IsLoaded() and self:GetDisplaySeconds() >= logic:GetRedDotSeconds()
+	end
+
+	-- ── 수령 ───────────────────────────────────────────────────────────────
+	@ExecSpace("ClientOnly")
+	method void OnClaimClicked()
+		if self._claimPending then return end
+		local logic = _IdleRewardLogic
+		if not logic:IsLoaded() then return end
+		local sec = self:GetDisplaySeconds()
+		if not logic:CanClaimAt(sec) then
+			_UIToast:ShowMessage("최소 " .. (logic:GetMinClaimSeconds() // 60) .. "분은 방치해야 받을 수 있어요")
+			return
+		end
+		local gold = logic:GetGoldFor(sec)
+		-- 서버 지급 Multicast가 코인 배지 숫자를 바로 올리기 전에 보류 — 팝업이 닫히며 메소가 도착할 때 오른다
+		self._claimPending = true
+		self._holdGold = gold
+		if gold > 0 then _RewardFlyUI:Hold("gold", gold) end
+		self:RefreshClaimButton(sec)
+		-- 서버가 답을 못 주면 잠금과 숫자 보류를 푼다
+		_TimerService:SetTimerOnce(function()
+			if not self._claimPending then return end
+			self._claimPending = false
+			self:ReleaseHold()
+		end, self.ClaimPendingTimeout)
+		logic:RequestClaim()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ReleaseHold()
+		if self._holdGold > 0 then _RewardFlyUI:Release("gold", self._holdGold) end
+		self._holdGold = 0
+	end
+
+	@ExecSpace("Client")
+	method void OnClaimed(integer gold, integer exp, string gearCsv)
+		-- IdleRewardLogic.RequestClaim이 지급을 끝낸 뒤 호출. 서버 기준 금액이 클라 예상보다 몇 초치 많을 수 있어 보류분을 맞춘다
+		self._claimPending = false
+		if gold > self._holdGold then
+			_RewardFlyUI:Hold("gold", gold - self._holdGold)
+		elseif gold < self._holdGold then
+			_RewardFlyUI:Release("gold", self._holdGold - gold)
+		end
+		self._holdGold = 0
+		self._pendingGold = self._pendingGold + gold
+		local gearCount = 0
+		for token in string.gmatch(gearCsv, "[^,]+") do
+			local id = math.tointeger(tonumber(token))
+			if id ~= nil then
+				table.insert(self._pendingGear, id)
+				gearCount = gearCount + 1
+			end
+		end
+		log("IdleRewardUI: claimed gold=" .. gold .. " exp=" .. exp .. " gear=" .. gearCount)
+		if self._isOpen then
+			-- 받으면 바로 닫히며 날아간다(버튼 눌린 느낌이 보일 만큼만 기다린다)
+			_TimerService:SetTimerOnce(function() self:Close() end, self.CloseDelayAfterClaim)
+		else
+			self:FlyPendingRewards()
+		end
+	end
+
+	@ExecSpace("Client")
+	method void OnClaimFailed(string reason)
+		self._claimPending = false
+		self:ReleaseHold()
+		if reason == "inventory" then
+			_UIToast:ShowMessage("장비 인벤토리가 가득 찼어요! 인벤토리를 비우고 받아주세요")
+		else
+			_UIToast:ShowMessage("최소 " .. (_IdleRewardLogic:GetMinClaimSeconds() // 60) .. "분은 방치해야 받을 수 있어요")
+		end
+		self:RefreshCounters()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void FlyPendingRewards()
+		-- 골드는 골드 칸에서 코인 배지로, 장비는 장비 칸에서 로비 장비 버튼으로(같은 장비는 1번만 날린다)
+		if self._pendingGold > 0 then
+			local src = Vector2(0, 0)
+			if isvalid(self.goldBox) then src = _RewardFlyUI:GetLayerPosOf(self.goldBox, 0, 0)
+			elseif isvalid(self.lobbyButton) then src = _RewardFlyUI:GetLayerPosOf(self.lobbyButton.Entity, 0, 0) end
+			_RewardFlyUI:Fly("gold", self._pendingGold, self.GoldIconRUID, src, 0)
+			self._pendingGold = 0
+		end
+		if #self._pendingGear > 0 then
+			local src = Vector2(0, 0)
+			if isvalid(self.gearBox) then src = _RewardFlyUI:GetLayerPosOf(self.gearBox, 0, 0)
+			elseif isvalid(self.lobbyButton) then src = _RewardFlyUI:GetLayerPosOf(self.lobbyButton.Entity, 0, 0) end
+			local seen = {}
+			local delay = 0.15
+			for _, id in ipairs(self._pendingGear) do
+				if not seen[id] then
+					seen[id] = true
+					_RewardFlyUI:Fly("gear", 1, _WeaponTierDataLogic:GetDisplayRUID(id, _GearGradeEnum.None), src, delay)
+					delay = delay + 0.15
+				end
+			end
+			self._pendingGear = {}
+		end
+	end
+
+	-- ── 전투 장면(아르카나 vs 몬스터) ────────────────────────────────────────
+	@ExecSpace("ClientOnly")
+	method table GetSceneDef(integer ep)
+		-- 에피소드별 장면 배경 = 그 에피소드 첫 맵의 타일 바닥 구간을 Maker 씬 뷰에서 캡처해 계정 리소스로 올린 것.
+		-- groundY = 사진 속 바닥(발판 윗면) 높이(장면 로컬 y). 사진 비율은 장면(900x190)과 같게 잘랐다
+		-- 캡처법: 그 맵을 Maker에서 연 채 play → UI 그룹 전부 끄기(플레이어는 원래 숨김) → 스샷(1833x1031)에서
+		-- 플레이어 발밑(화면 y≈748) 기준 x316~1516, y551~804(1200x253 = 장면 비율)를 잘라 계정 리소스로 업로드.
+		-- Deck_Idle_EP1_Game = map01 / EP2_Game = ep2_map1 / EP3_Game = ep3_map1
+		if ep == 2 then return { bg = "47ee7f1d83684b539323cdd593e58b62", groundY = -49 } end
+		if ep == 3 then return { bg = "f52a47a2c6d44726939d3035c73072c4", groundY = -46 } end
+		return { bg = "5faf274e5adf47cc97dcb8ea754440f7", groundY = -47 }
+	end
+
+	@ExecSpace("ClientOnly")
+	method table GetSpeciesList(integer ep)
+		-- 그 에피소드 첫 존의 몬스터 풀(GameManager.GetMapStandRUID 등과 같은 리소스 — 서버 전용 함수라 여기 따로 둔다)
+		if ep == 2 then
+			return {
+				{ stand = "ca136923b7e84267af993bdbabada385", move = "a25f27e01d7446c6910550d595ef08b6", hit = "f0f493b1149e4b6a863890a82d82fca6", die = "8bff7824fb974b69b02d576b7c6ed257", dieDur = 0.55 },  -- 스타픽시
+				{ stand = "ff4a57bc3d4a4488b0053c33f4c3369f", move = "6c09e340af2f4ca697463ef36a95f523", hit = "187b73445d4645d68750ed12f924203a", die = "64990174c8d2411a82a12a9569abf085", dieDur = 0.55 },  -- 루나픽시
+			}
+		elseif ep == 3 then
+			return {
+				{ stand = "1975dd704eec461ab49bdeb0c11c54d9", move = "842a6865f7074f94ac4a190ed90e2e21", hit = "63a1a5f280f04e55b935d6a2155edcef", die = "13b9f2b2f7664cc5a08e663f2fe0502b", dieDur = 0.55 },  -- 주니어예티
+				{ stand = "3109357701ae41a4bcc7543f52f1f4c3", move = "57e2799fd645478d80466cce36bb17ab", hit = "ce0269079e884545b5bb6ea075e2a67f", die = "a5e65650e00e47878cac1be7a5b999a0", dieDur = 0.55 },  -- 주니어페페
+			}
+		end
+		return {
+			{ stand = "52fc9a75b6174bfa96af66c49dbb3369", move = "2873d98c57e54e1ab7a398a92e7a0b3f", hit = "4b48cdc7601e4786bf415a0162f4ebbb", die = "9cad6e1fa5b04a078d2876e3a0481b40", dieDur = 0.55 },  -- 고스텀프
+			{ stand = "9d4f9e8f572548f692438ffa817eb52d", move = "4d833dee5c1b4a2b9e5126a1d263e26d", hit = "dc128e1b65f64548841940cadd8e258d", die = "8177fddafdcb4bee958ab1aee7a714cc", dieDur = 0.45 },  -- 엑스텀프
+		}
+	end
+
+	@ExecSpace("ClientOnly")
+	method Entity GetSceneChild(string name)
+		if not isvalid(self.scene) then return nil end
+		return self.scene:GetChildByName(name)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetClip(Entity e, string ruid, boolean loop)
+		local s = e.SpriteGUIRendererComponent
+		s.ImageRUID = DataRef(ruid)
+		if loop then
+			s.AnimClipPlayType = SpriteAnimClipPlayType.Loop
+		else
+			s.AnimClipPlayType = SpriteAnimClipPlayType.Onetime
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayAvatarAction(string actionName, boolean onetime, number rate)
+		-- 뽑기 필드와 같은 방식: 아바타 몸통 엔티티에 액션 이벤트를 보낸다
+		if not isvalid(self.avatar) then return end
+		local ar = self.avatar.AvatarGUIRendererComponent
+		if not isvalid(ar) then return end
+		local body = ar:GetBodyEntity()
+		if not isvalid(body) then return end
+		local ev = ActionStateChangedEvent()
+		ev.CoreActionName = actionName
+		ev.PartsActionName = actionName
+		ev.PlayRate = rate
+		if onetime then
+			ev.PlayType = SpriteAnimClipPlayType.Onetime
+		else
+			ev.PlayType = SpriteAnimClipPlayType.ZigzagLoop
+		end
+		body:SendEvent(ev)
+	end
+
+	@ExecSpace("ClientOnly")
+	method Vector2 GetAvatarPos()
+		return Vector2(self.AvatarX, self._groundY + self.AvatarFootOffset)
+	end
+
+	@ExecSpace("ClientOnly")
+	method number GetMonsterY()
+		return self._groundY + self.MonsterFootOffset
+	end
+
+	@ExecSpace("ClientOnly")
+	method void StartScene(integer ep)
+		self:StopScene()
+		self._sceneEp = ep
+		local def = self:GetSceneDef(ep)
+		self._groundY = def.groundY
+		if isvalid(self.sceneBg) then
+			self.sceneBg.SpriteGUIRendererComponent.ImageRUID = DataRef(def.bg)
+		end
+		if isvalid(self.avatar) then
+			self.avatar.UITransformComponent.anchoredPosition = self:GetAvatarPos()
+			local ar = self.avatar.AvatarGUIRendererComponent
+			-- 아바타는 기본이 왼쪽을 본다 — 몬스터는 오른쪽에서 오므로 뒤집는다
+			if isvalid(ar) then ar.FlipX = true end
+		end
+		self:PlayAvatarAction("stand1", false, 1)
+		for i = 1, self.MonsterPoolSize do
+			local m = self:GetSceneChild("M" .. tostring(i))
+			if isvalid(m) then m.Enable = false end
+		end
+		local bolt = self:GetSceneChild("Bolt")
+		if isvalid(bolt) then bolt.Enable = false end
+		for i = 1, 2 do
+			local fx = self:GetSceneChild("Impact" .. tostring(i))
+			if isvalid(fx) then fx.Enable = false end
+		end
+		self:SpawnWave()
+		local gen = self._sceneGen
+		self._attackTimerId = _TimerService:SetTimerRepeat(function()
+			if gen ~= self._sceneGen then return end
+			self:TickAttack()
+		end, self.AttackInterval)
+		log("IdleRewardUI: scene start ep=" .. ep)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void StopScene()
+		-- 세대 번호를 올려서 날아가던 트윈/타이머 콜백을 전부 무시시킨다
+		self._sceneGen = self._sceneGen + 1
+		self._sceneEp = 0
+		if self._attackTimerId ~= 0 then
+			_TimerService:ClearTimer(self._attackTimerId)
+			self._attackTimerId = 0
+		end
+		self._monsters = {}
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SpawnWave()
+		-- 2~3마리가 오른쪽 밖에서 타일 바닥을 따라 걸어 들어와 아르카나 앞에 멈춘다
+		local gen = self._sceneGen
+		local list = self:GetSpeciesList(self._sceneEp)
+		local count = _UtilLogic:RandomIntegerRange(2, self.MonsterPoolSize)
+		local y = self:GetMonsterY()
+		self._monsters = {}
+		for i = 1, count do
+			local e = self:GetSceneChild("M" .. tostring(i))
+			if isvalid(e) then
+				local sp = list[_UtilLogic:RandomIntegerRange(1, #list)]
+				local data = { entity = e, clips = sp, hp = _UtilLogic:RandomIntegerRange(2, 3), dead = false, arrived = false, hitting = false }
+				table.insert(self._monsters, data)
+				local startX = self.SpawnX + (i - 1) * 90
+				local stopX = self.MonsterStopX + (i - 1) * self.MonsterSpacing + _UtilLogic:RandomDouble() * 30
+				local tr = e.UITransformComponent
+				tr.anchoredPosition = Vector2(startX, y)
+				tr.Scale = Vector3(1, 1, 1)
+				local sprite = e.SpriteGUIRendererComponent
+				-- 몬스터 스프라이트는 기본이 왼쪽을 본다(뽑기 필드와 같은 규칙) — 왼쪽으로 걸어오니 그대로
+				sprite.FlipX = false
+				sprite.Color = Color(1, 1, 1, 1)
+				self:SetClip(e, sp.move, true)
+				e.Enable = true
+				local dur = (startX - stopX) / self.MonsterSpeed
+				_TweenLogic:PlayTween(startX, stopX, dur, EaseType.Linear, function(x)
+					if gen ~= self._sceneGen or data.dead or not isvalid(e) then return end
+					tr.anchoredPosition = Vector2(x, y)
+				end)
+				_TimerService:SetTimerOnce(function()
+					if gen ~= self._sceneGen or data.dead or not isvalid(e) then return end
+					data.arrived = true
+					if not data.hitting then self:SetClip(e, sp.stand, true) end
+				end, dur)
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void TickAttack()
+		-- 장면 안으로 들어온 살아있는 몬스터 중 가장 가까운(왼쪽) 놈을 친다
+		local target = nil
+		local bestX = 99999
+		for _, m in ipairs(self._monsters) do
+			if not m.dead and isvalid(m.entity) then
+				local x = m.entity.UITransformComponent.anchoredPosition.x
+				if x < self.AttackRangeX and x < bestX then
+					target = m
+					bestX = x
+				end
+			end
+		end
+		if target == nil then return end
+		self:AttackMonster(target)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void AttackMonster(table m)
+		local gen = self._sceneGen
+		self:PlayAvatarAction("swingO1", true, 1.4)
+		_TimerService:SetTimerOnce(function()
+			if gen == self._sceneGen then self:PlayAvatarAction("stand1", false, 1) end
+		end, 0.5)
+		local bolt = self:GetSceneChild("Bolt")
+		if not isvalid(bolt) then return end
+		local ap = self:GetAvatarPos()
+		local from = Vector2(ap.x + 45, ap.y + 10)
+		bolt.UITransformComponent.anchoredPosition = from
+		self:SetClip(bolt, self.BoltRUID, true)
+		bolt.Enable = true
+		local mt = m.entity.UITransformComponent
+		_TweenLogic:PlayTween(0.0, 1.0, self.BoltDuration, EaseType.QuadEaseIn, function(t)
+			if gen ~= self._sceneGen or not isvalid(bolt) or not isvalid(m.entity) then return end
+			-- 걸어오는 몬스터를 따라가도록 매 프레임 현재 위치로 보간
+			local cur = mt.anchoredPosition
+			bolt.UITransformComponent.anchoredPosition = Vector2(from.x + (cur.x - from.x) * t, from.y + (cur.y - from.y) * t)
+		end)
+		_TimerService:SetTimerOnce(function()
+			if gen ~= self._sceneGen then return end
+			if isvalid(bolt) then bolt.Enable = false end
+			if m.dead or not isvalid(m.entity) then return end
+			self:PlayImpact(mt.anchoredPosition)
+			m.hp = m.hp - 1
+			if m.hp <= 0 then
+				self:KillMonster(m)
+			else
+				self:HitMonster(m)
+			end
+		end, self.BoltDuration)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayImpact(Vector2 pos)
+		-- 뽑기 필드와 같은 착탄 이펙트 후보(에너지 폭풍/파이어 오라/와일드 발칸) 중 하나
+		local fx = self:GetSceneChild("Impact" .. tostring(self._impactNext))
+		self._impactNext = self._impactNext % 2 + 1
+		if not isvalid(fx) then return end
+		local ruids = { "2912d09170704723a3d5e6141ccc95db", "2b3c964c0372411f9d6dd70dfee42935", "0c986efd8d634349a78ab00aba409ecd" }
+		fx.UITransformComponent.anchoredPosition = pos
+		self:SetClip(fx, ruids[_UtilLogic:RandomIntegerRange(1, #ruids)], false)
+		fx.Enable = true
+		local gen = self._sceneGen
+		_TimerService:SetTimerOnce(function()
+			if gen == self._sceneGen and isvalid(fx) then fx.Enable = false end
+		end, 0.5)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void HitMonster(table m)
+		m.hitting = true
+		self:SetClip(m.entity, m.clips.hit, false)
+		local gen = self._sceneGen
+		_TimerService:SetTimerOnce(function()
+			if gen ~= self._sceneGen or m.dead or not isvalid(m.entity) then return end
+			m.hitting = false
+			if m.arrived then
+				self:SetClip(m.entity, m.clips.stand, true)
+			else
+				self:SetClip(m.entity, m.clips.move, true)
+			end
+		end, 0.3)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void KillMonster(table m)
+		if m.dead then return end
+		m.dead = true
+		self:SetClip(m.entity, m.clips.die, false)
+		local gen = self._sceneGen
+		local e = m.entity
+		_TimerService:SetTimerOnce(function()
+			if gen ~= self._sceneGen then return end
+			if isvalid(e) then e.Enable = false end
+			-- 전부 잡았으면 잠깐 쉬었다가 다음 무리
+			for _, other in ipairs(self._monsters) do
+				if not other.dead then return end
+			end
+			_TimerService:SetTimerOnce(function()
+				if gen == self._sceneGen then self:SpawnWave() end
+			end, self.RespawnDelay)
+		end, m.clips.dieDur + 0.1)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		self:StopScene()
+		if self._tickTimerId ~= 0 then _TimerService:ClearTimer(self._tickTimerId) end
+		if self._lobbyTimerId ~= 0 then _TimerService:ClearTimer(self._lobbyTimerId) end
+		for _, h in ipairs(self._handlers) do
+			if isvalid(h.entity) then h.entity:DisconnectEvent(ButtonClickEvent, h.eventHandler) end
+		end
+		self._handlers = {}
+	end
+
+end

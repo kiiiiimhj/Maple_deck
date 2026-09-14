@@ -1,0 +1,387 @@
+@Logic
+script RewardFlyUI extends Logic
+
+	-- 로얄매치식 보상 비행 연출(유저 지정 2026-09-15).
+	--   보상 아이콘이 받은 자리에서 크게 톡 튀어나와 흩어졌다가, 하나씩 곡선을 그리며 작아지면서 해당 자리로 날아간다.
+	--   골드 → 우상단 코인 배지 / 다이아 → 다이아 배지 / 뽑기권 → 로비 뽑기 버튼(카드는 1장만).
+	--   날아가는 동안 뒤로 잔상 꼬리(Trails)와 반짝이(아이콘 자식 Glitter)가 따라가고, 도착하면 반짝이가 터지면서(Sparks)
+	--   배지 숫자(또는 뽑기 아이콘)가 통 튀고 숫자가 조금씩 올라간다.
+	--   · 숫자 보류(Hold): 서버가 지급하면 코인/다이아 Multicast가 곧바로 새 잔액을 보내온다. 보상을 받는 순간 Hold로
+	--     그 금액을 잡아두면 TitleUI.RefreshCurrencyText가 (잔액 - 보류분)을 보여주고, 아이콘이 도착할 때마다 보류분을
+	--     풀어서 숫자가 올라간다.
+	--   · 엔티티는 ui/RewardFlyGroup.ui(GroupOrder 19 = 맨 위)의 Layer/Trails·Icons·Sparks를 돌려쓴다. 레이캐스트 없음 → 클릭은 안 막는다.
+	--   · 골드/다이아 아이콘 RUID는 그림 기준점(pivot)이 이미지 밖이라 보이는 중심이 칸 중심에서 밀려 있다 →
+	--     GetPivotFix 비율만큼 되돌려서 "보이는 중심"이 경로를 따라가게 한다(출석/에피소드 보상 칸과 같은 보정값).
+
+	-- UI 바인딩 (UIBuilder가 UUID를 넣는다)
+	property Entity layer = "81b8f66c-8506-4d5b-a66b-e4fbef41a1bd"
+	property Entity coinBadge = "ac5dfa95-19fa-4be4-bfae-0f589ad437b5"
+	property Entity diamondBadge = "a9044ea3-dde2-4758-9b20-e7dc67216a97"
+	property Entity gachaButton = "724614aa-d203-4512-a3f8-bfc9571f9394"
+	property Entity coinText = "7953a102-4e89-451e-907d-ad8215d50f79"
+	property Entity diamondText = "0f487edf-528b-45f5-a027-eee635795401"
+	property Entity gachaIcon = "a4656e74-f58b-4fcf-8645-c3407dbad004"
+	-- 장비(방치 보상) → 로비 장비 버튼(TitleGroup EquipButton / Overlay)
+	property Entity equipButton = "f827c060-0eaf-4825-8e7f-24208c9fa5dd"
+	property Entity equipIcon = "5c314314-4790-45e6-9cab-e496b74df8e7"
+	property number GearIconSize = 80
+
+	-- 연출 값
+	property integer PoolSize = 24
+	property integer TrailCount = 3
+	property integer SparkPoolSize = 8
+	property integer CurrencyIconCount = 8
+	property integer TicketIconCount = 1
+	property number CurrencyIconSize = 64
+	property number TicketIconSize = 90
+	property number BurstRadiusMin = 50
+	property number BurstRadiusMax = 140
+	property number BurstDuration = 0.3
+	-- 크게 튀어나왔다가(BurstScale) 날아가면서 작아지며 들어간다(ArriveScale) — 유저 지정
+	property number BurstScale = 1.6
+	property number ArriveScale = 0.45
+	property number FlyDelay = 0.12
+	property number FlyStagger = 0.07
+	property number FlyDuration = 0.6
+	property number PunchScale = 1.2
+	-- 꼬리 잔상: k번째 잔상 = (k × TrailGap) 프레임 전 위치, 뒤로 갈수록 투명·작게(TrailAlpha → 3분의 1씩 줄어듦)
+	property integer TrailGap = 4
+	property number TrailAlpha = 0.55
+	-- 도착 반짝이 = 포션이 HP바에 들어갈 때와 같은 파티클(CircleBurst — DefaultGroup/HpSparkle 설정 그대로 복사한 Sparks)을
+	-- 재생하면서 알파를 1→0으로 서서히 줄인다(GameManager.PlayHpSparkle와 같은 방식, 유저 지정 2026-09-15).
+	-- ⚠ ParticleType은 런타임에 바꾸면 안 보이게 된다(실측) — 종류는 .ui에서만 바꿀 것
+	property number SparkFadeDuration = 0.5
+	-- 골드는 날아갈 때 메소가 빙글빙글 도는 애니메이션(유저 지정 — iconreward animationclip)
+	property string GoldFlyRUID = "5c78b56b91964dcaa83c1d30b8cd3cce"
+	-- 위 애니메이션의 "보이는 중심" 보정(칸 크기 비율) — 정지 코인 RUID처럼 기준점이 이미지 밖이라 오른쪽 위로 밀려 보인다(스샷 실측)
+	property Vector2 GoldFlyPivotFix = Vector2(0.63, 0.6)
+	-- 코인/다이아 배지 안 아이콘의 보이는 중심 = 배지 중심에서 왼쪽으로 70(로비 스샷 실측)
+	property number BadgeIconOffsetX = -70
+	-- 도착 효과음 — 리소스 검색 "coin collect"(item, 0.52초). 아이콘마다 울리므로 작게
+	property string ArriveSoundRUID = "e8fc70a330c0478d8c2a9c703de5edd5"
+	property number ArriveSoundVolume = 0.45
+
+	-- 내부 상태
+	property table _held = {}
+	property table _busy = {}
+	property table _icons = {}
+	property table _trails = {}
+	property table _sparks = {}
+	property table _sparkGen = {}
+	property integer _sparkNext = 1
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		self._held = {}
+		self._busy = {}
+		self._icons = {}
+		self._trails = {}
+		self._sparks = {}
+		self._sparkGen = {}
+		if not isvalid(self.layer) then return end
+		local iconsRoot = self.layer:GetChildByName("Icons")
+		local trailsRoot = self.layer:GetChildByName("Trails")
+		local sparksRoot = self.layer:GetChildByName("Sparks")
+		for i = 1, self.PoolSize do
+			if isvalid(iconsRoot) then
+				local icon = iconsRoot:GetChildByName("Fly" .. tostring(i))
+				if isvalid(icon) then icon.Enable = false end
+				self._icons[i] = icon
+			end
+			local list = {}
+			if isvalid(trailsRoot) then
+				for k = 1, self.TrailCount do
+					local t = trailsRoot:GetChildByName("T" .. tostring(i) .. "_" .. tostring(k))
+					if isvalid(t) then t.Enable = false end
+					list[k] = t
+				end
+			end
+			self._trails[i] = list
+		end
+		if isvalid(sparksRoot) then
+			for j = 1, self.SparkPoolSize do
+				self._sparks[j] = sparksRoot:GetChildByName("Spark" .. tostring(j))
+				self._sparkGen[j] = 0
+			end
+		end
+		log("RewardFlyUI started")
+	end
+
+	@ExecSpace("ClientOnly")
+	method Entity GetIcon(integer i)
+		return self._icons[i]
+	end
+
+	method integer GetHeld(string kind)
+		-- TitleUI가 배지 숫자를 그릴 때 부른다(클라 전용 상태 — 서버에선 항상 0)
+		if self._held == nil then return 0 end
+		local v = self._held[kind]
+		if v == nil then return 0 end
+		return v
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Hold(string kind, integer amount)
+		-- 보상을 받는 순간(서버 지급 전) 부른다 — 배지 숫자가 도착 전까지 안 오르게
+		self._held[kind] = self:GetHeld(kind) + amount
+		_TitleUI:RefreshCurrencyText()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Release(string kind, integer amount)
+		local v = self:GetHeld(kind) - amount
+		if v < 0 then v = 0 end
+		self._held[kind] = v
+		_TitleUI:RefreshCurrencyText()
+	end
+
+	@ExecSpace("ClientOnly")
+	method Vector2 GetLayerPosOf(Entity target, number offsetX, number offsetY)
+		-- 다른 UI 그룹 엔티티의 사각형 중심을 이 레이어 좌표로 바꾼다(네 모서리 월드좌표 → 레이어 로컬)
+		local corners = target.UITransformComponent:GetWorldCorners()
+		local cx = (corners[1].x + corners[3].x) * 0.5
+		local cy = (corners[1].y + corners[3].y) * 0.5
+		local p = self.layer.UITransformComponent:ToLocalPoint(Vector3(cx, cy, 0))
+		return Vector2(p.x + offsetX, p.y + offsetY)
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean IsCurrency(string kind)
+		return kind == "gold" or kind == "diamond"
+	end
+
+	@ExecSpace("ClientOnly")
+	method Entity GetTargetEntity(string kind)
+		if kind == "gold" then return self.coinBadge end
+		if kind == "diamond" then return self.diamondBadge end
+		if kind == "gear" then return self.equipButton end
+		return self.gachaButton
+	end
+
+	@ExecSpace("ClientOnly")
+	method Entity GetPunchEntity(string kind)
+		if kind == "gold" then return self.coinText end
+		if kind == "diamond" then return self.diamondText end
+		if kind == "gear" then return self.equipIcon end
+		return self.gachaIcon
+	end
+
+	@ExecSpace("ClientOnly")
+	method Vector2 GetPivotFix(string kind)
+		-- 보이는 중심이 칸 중심에서 (크기 × 비율)만큼 오른쪽 위로 밀려 있는 RUID들
+		if kind == "gold" then
+			if self.GoldFlyRUID ~= "" then return self.GoldFlyPivotFix end
+			return Vector2(0.605, 0.566)
+		end
+		if kind == "diamond" then return Vector2(0.75, 0.711) end
+		return Vector2(0, 0)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Fly(string kind, integer amount, string iconRUID, Vector2 fromPos, number delay)
+		-- fromPos = 이 레이어 좌표(GetLayerPosOf로 구한다). 도착하면 금액 보류를 풀고 목적지를 통 튀긴다
+		if kind == "gold" and self.GoldFlyRUID ~= "" then iconRUID = self.GoldFlyRUID end
+		local target = self:GetTargetEntity(kind)
+		if not isvalid(self.layer) or not isvalid(target) or not target.EnabledInHierarchy then
+			-- 목적지가 안 보이는 화면이면 연출 없이 숫자만 반영
+			if self:IsCurrency(kind) then self:Release(kind, amount) end
+			return
+		end
+		local count = self.TicketIconCount
+		if self:IsCurrency(kind) then count = self.CurrencyIconCount end
+		local offsetX = 0
+		if self:IsCurrency(kind) then offsetX = self.BadgeIconOffsetX end
+		local toPos = self:GetLayerPosOf(target, offsetX, 0)
+		local per = amount // count
+		for n = 1, count do
+			local portion = per
+			if n == count then portion = amount - per * (count - 1) end
+			local idx = self:AcquireIcon()
+			if idx == 0 then
+				if self:IsCurrency(kind) then self:Release(kind, portion) end
+			else
+				self:LaunchOne(idx, kind, portion, iconRUID, fromPos, toPos, delay, self.FlyDelay + (n - 1) * self.FlyStagger)
+			end
+		end
+		log("RewardFlyUI: fly " .. kind .. " x" .. amount .. " icons=" .. count .. " from(" .. math.floor(fromPos.x) .. "," .. math.floor(fromPos.y) .. ") to(" .. math.floor(toPos.x) .. "," .. math.floor(toPos.y) .. ")")
+	end
+
+	@ExecSpace("ClientOnly")
+	method integer AcquireIcon()
+		for i = 1, self.PoolSize do
+			if self._busy[i] ~= true and isvalid(self:GetIcon(i)) then
+				self._busy[i] = true
+				return i
+			end
+		end
+		return 0
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlaceIcon(Entity icon, string kind, number size, Vector2 visualPos, number s)
+		-- "보이는 중심"을 visualPos에 두고 크기 s로
+		local fix = self:GetPivotFix(kind)
+		local tr = icon.UITransformComponent
+		tr.anchoredPosition = Vector2(visualPos.x - fix.x * size * s, visualPos.y - fix.y * size * s)
+		tr.Scale = Vector3(s, s, 1)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetupSprite(Entity e, string iconRUID, number size, number alpha)
+		e.SpriteGUIRendererComponent.ImageRUID = DataRef(iconRUID)
+		-- 빌더 기본값은 Onetime(0)이라 메소 회전 애니메이션이 한 바퀴 돌고 옆면에서 멈춘다 — 계속 돌게
+		e.SpriteGUIRendererComponent.AnimClipPlayType = SpriteAnimClipPlayType.Loop
+		e.SpriteGUIRendererComponent.Color = Color(1, 1, 1, alpha)
+		e.UITransformComponent.RectSize = Vector2(size, size)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void HideTrails(integer idx)
+		local list = self._trails[idx]
+		if list == nil then return end
+		for _, t in ipairs(list) do
+			if isvalid(t) then t.Enable = false end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void LaunchOne(integer idx, string kind, integer portion, string iconRUID, Vector2 fromPos, Vector2 toPos, number startDelay, number flyDelay)
+		local icon = self:GetIcon(idx)
+		local size = self.TicketIconSize
+		if self:IsCurrency(kind) then size = self.CurrencyIconSize end
+		if kind == "gear" then size = self.GearIconSize end
+		local ang = math.random() * math.pi * 2
+		local r = self.BurstRadiusMin + math.random() * (self.BurstRadiusMax - self.BurstRadiusMin)
+		local burst = Vector2(fromPos.x + math.cos(ang) * r, fromPos.y + math.sin(ang) * r)
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(icon) then
+				self._busy[idx] = false
+				if self:IsCurrency(kind) then self:Release(kind, portion) end
+				return
+			end
+			self:SetupSprite(icon, iconRUID, size, 1)
+			local list = self._trails[idx]
+			for k, t in ipairs(list) do
+				if isvalid(t) then self:SetupSprite(t, iconRUID, size, self.TrailAlpha * (1 - (k - 1) / self.TrailCount)) end
+			end
+			self:PlaceIcon(icon, kind, size, fromPos, 0.01)
+			icon.Enable = true
+			-- 1) 크게 톡 튀어나와 흩어진다(살짝 튕기며 멈춤)
+			_TweenLogic:PlayTween(0.0, 1.0, self.BurstDuration, EaseType.BackEaseOut, function(t)
+				if not isvalid(icon) then return end
+				local s = self.BurstScale * t
+				if s < 0.01 then s = 0.01 end
+				self:PlaceIcon(icon, kind, size, Vector2(fromPos.x + (burst.x - fromPos.x) * t, fromPos.y + (burst.y - fromPos.y) * t), s)
+			end)
+			-- 2) 잠깐 머물렀다가 곡선으로 날아간다(하나씩 차례로)
+			_TimerService:SetTimerOnce(function()
+				self:FlyOne(idx, kind, portion, size, burst, toPos)
+			end, self.BurstDuration + flyDelay)
+		end, startDelay)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void FlyOne(integer idx, string kind, integer portion, number size, Vector2 fromPos, Vector2 toPos)
+		local icon = self:GetIcon(idx)
+		if not isvalid(icon) then
+			self._busy[idx] = false
+			if self:IsCurrency(kind) then self:Release(kind, portion) end
+			return
+		end
+		-- 시작→끝 중간점에서 옆으로 휘는 2차 베지어(휘는 방향/정도는 아이콘마다 무작위)
+		local dx = toPos.x - fromPos.x
+		local dy = toPos.y - fromPos.y
+		local side = 1
+		if math.random() < 0.5 then side = -1 end
+		local bend = (0.12 + math.random() * 0.2) * side
+		local cx = (fromPos.x + toPos.x) * 0.5 - dy * bend
+		local cy = (fromPos.y + toPos.y) * 0.5 + dx * bend
+		local trails = self._trails[idx]
+		for _, t in ipairs(trails) do
+			if isvalid(t) then
+				self:PlaceIcon(t, kind, size, fromPos, self.BurstScale)
+				t.Enable = true
+			end
+		end
+		local state = { done = false, hist = {} }
+		_TweenLogic:PlayTween(0.0, 1.0, self.FlyDuration, EaseType.QuadEaseIn, function(t)
+			if state.done or not isvalid(icon) then return end
+			local u = 1 - t
+			local px = u * u * fromPos.x + 2 * u * t * cx + t * t * toPos.x
+			local py = u * u * fromPos.y + 2 * u * t * cy + t * t * toPos.y
+			local s = self.BurstScale + (self.ArriveScale - self.BurstScale) * t
+			self:PlaceIcon(icon, kind, size, Vector2(px, py), s)
+			-- 꼬리: 지나온 위치를 기억해뒀다가 잔상을 뒤따라 놓는다
+			table.insert(state.hist, 1, { x = px, y = py, s = s })
+			local maxHist = self.TrailCount * self.TrailGap + 1
+			if #state.hist > maxHist then table.remove(state.hist) end
+			for k, ghost in ipairs(trails) do
+				if isvalid(ghost) then
+					local h = state.hist[math.min(#state.hist, k * self.TrailGap + 1)]
+					self:PlaceIcon(ghost, kind, size, Vector2(h.x, h.y), h.s * (1 - 0.12 * k))
+				end
+			end
+			if t >= 1.0 then
+				state.done = true
+				self:OnArrive(idx, kind, portion, toPos)
+			end
+		end)
+		-- 안전망: 트윈 마지막 프레임이 1.0에 딱 안 떨어져도 금액 보류가 영영 안 풀리는 일이 없게
+		_TimerService:SetTimerOnce(function()
+			if state.done then return end
+			state.done = true
+			self:OnArrive(idx, kind, portion, toPos)
+		end, self.FlyDuration + 0.1)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnArrive(integer idx, string kind, integer portion, Vector2 toPos)
+		local icon = self:GetIcon(idx)
+		if isvalid(icon) then icon.Enable = false end
+		self:HideTrails(idx)
+		self._busy[idx] = false
+		if self:IsCurrency(kind) then self:Release(kind, portion) end
+		self:PlaySpark(toPos)
+		self:Punch(self:GetPunchEntity(kind))
+		if self.ArriveSoundRUID ~= "" then _SoundOptionLogic:PlaySfx(self.ArriveSoundRUID, self.ArriveSoundVolume) end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlaySpark(Vector2 pos)
+		-- 도착 지점에서 반짝이가 터진다(파티클 풀 돌려쓰기)
+		local sp = self._sparks[self._sparkNext]
+		self._sparkNext = self._sparkNext % self.SparkPoolSize + 1
+		if not isvalid(sp) then return end
+		sp.UITransformComponent.anchoredPosition = pos
+		local pc = sp.UIBasicParticleComponent
+		if pc == nil then return end
+		-- 포션 반짝이(GameManager.PlayHpSparkle)와 같은 방식: 재생하면서 알파 1→0으로 서서히 사라진다.
+		-- 풀을 돌려쓰다 이전 페이드가 아직 도는 파티클을 다시 쓰면, 세대 번호로 옛 페이드/정지를 무시한다
+		local j = self._sparkNext - 1
+		if j < 1 then j = self.SparkPoolSize end
+		local gen = (self._sparkGen[j] or 0) + 1
+		self._sparkGen[j] = gen
+		pc:Stop()
+		pc.Color = Color(1, 0.9137254901960784, 0.6588235294117647, 1)
+		pc:Play()
+		_TweenLogic:PlayTween(1.0, 0.0, self.SparkFadeDuration, EaseType.QuadEaseIn, function(a)
+			if not isvalid(sp) or self._sparkGen[j] ~= gen then return end
+			local c = pc.Color
+			pc.Color = Color(c.r, c.g, c.b, a)
+		end)
+		_TimerService:SetTimerOnce(function()
+			if isvalid(sp) and self._sparkGen[j] == gen then pc:Stop() end
+		end, self.SparkFadeDuration)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Punch(Entity target)
+		-- 도착할 때마다 목적지가 통 튄다
+		if not isvalid(target) then return end
+		_TweenLogic:ScaleTo(target, Vector2(self.PunchScale, self.PunchScale), 0.06, EaseType.QuadEaseOut)
+		_TimerService:SetTimerOnce(function()
+			if isvalid(target) then _TweenLogic:ScaleTo(target, Vector2(1, 1), 0.12, EaseType.BackEaseOut) end
+		end, 0.06)
+	end
+
+end

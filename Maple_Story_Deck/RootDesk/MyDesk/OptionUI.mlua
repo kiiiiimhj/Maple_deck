@@ -44,6 +44,11 @@ script OptionUI extends Logic
 	property any _tutorialDragHandler = nil
 
 	property Entity confirmPanel = "772e6312-1d86-413b-8de5-24fe94c3d09b"
+	-- 종료 확인창 전용 딤(2026-09-13 버그 수정). 확인창(640x412)이 옵션 패널(800x800)보다 작아서
+	-- 뒤의 BtnClose(우상단)·BtnQuit(하단)가 그대로 노출·클릭됐다. 이 프로젝트에서 뒤 클릭을 막는
+	-- 방법은 "1920x1080 스프라이트 + RaycastTarget=true"뿐이라(CanvasGroup.BlocksRaycasts로는 안 막힘)
+	-- 확인창과 같이 켜지는 딤을 한 장 더 둔다. displayOrder: OptionPanel(1) < 이 딤(3) < ConfirmPanel(5)
+	property Entity confirmDimmer = "ef5fe450-2784-4756-9239-a36bea7bccb7"
 	property ButtonComponent btnConfirmYes = "5a71ffe1-5626-456b-b0b9-4a90efb96e8b"
 	property ButtonComponent btnConfirmNo = "7f6357af-85b6-474b-b581-3b16a049c2fe"
 	property ButtonComponent btnBgm = "c9f7943b-5aec-4810-a245-589a0034884f"
@@ -85,6 +90,7 @@ script OptionUI extends Logic
 
 		self.optionGroup:SetEnable(false)
 		self.confirmPanel:SetEnable(false)
+		self.confirmDimmer:SetEnable(false)
 		self.tutorialPanel:SetEnable(false)
 		self:RefreshToggleVisual()
 		log("OptionUI: ready")
@@ -141,14 +147,21 @@ script OptionUI extends Logic
 		self.optionPanel:SetEnable(true)
 		self.fusionPanel:SetEnable(false)
 		self.confirmPanel:SetEnable(false)
+		self.confirmDimmer:SetEnable(false)
 		self.tutorialPanel:SetEnable(false)
 		self:RefreshToggleVisual()
+		-- 유저 지정(2026-09-13): 옵션이 열려 있는 동안 게임은 멈춘다(몬스터 이동·공격, 스폰,
+		-- 자동 공격/쿨다운, 타임어택 카운트다운 전부). 정지 플래그는 서버가 소유한다
+		_GameManager:RequestSetOptionPaused(true)
 	end
 
 	@ExecSpace("ClientOnly")
 	method void CloseAll()
 		-- X 버튼 / 게임 종료 직전에 팝업 전체를 닫는다.
 		self.optionGroup:SetEnable(false)
+		-- ⚠ 팝업을 닫는 모든 경로가 이 메서드를 지나므로 정지 해제도 여기 한 곳에만 둔다.
+		-- 새 출구를 만들면 여기를 꼭 거치게 할 것 — 안 그러면 게임이 멈춘 채로 남는다
+		_GameManager:RequestSetOptionPaused(false)
 	end
 
 	@ExecSpace("ClientOnly")
@@ -325,6 +338,9 @@ script OptionUI extends Logic
 	@ExecSpace("ClientOnly")
 	method void OpenQuitConfirm()
 		-- "게임 종료"는 되돌릴 수 없으니 바로 끝내지 않고 확인창을 먼저 띄운다(유저 지정 2026-08-30).
+		-- 확인창(640x412)이 옵션 패널(800x800)보다 작아서 뒤의 BtnClose/BtnQuit가 그대로 눌렸다 —
+		-- 딤을 같이 켜서 확인창 바깥 클릭을 막는다(2026-09-13 버그 수정, confirmDimmer 선언부 참고)
+		self.confirmDimmer:SetEnable(true)
 		self.confirmPanel:SetEnable(true)
 	end
 
@@ -332,6 +348,7 @@ script OptionUI extends Logic
 	method void CloseQuitConfirm()
 		-- "아니오" — 확인창만 닫고 옵션 패널로 돌아간다.
 		self.confirmPanel:SetEnable(false)
+		self.confirmDimmer:SetEnable(false)
 	end
 
 	@ExecSpace("ClientOnly")
@@ -344,3 +361,4 @@ script OptionUI extends Logic
 		_GameManager:RequestGiveUp()
 	end
 end
+

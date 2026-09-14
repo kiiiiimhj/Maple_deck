@@ -1,0 +1,384 @@
+@Logic
+script EpisodeRewardUI extends Logic
+
+	-- 에피소드 생존 보상 팝업(ui/EpisodeRewardGroup.ui) + 로비 버튼(ui/TitleGroup.ui BattlePanel/EpisodeRewardButton) 컨트롤러.
+	-- 상태(몇 칸 받았는지/에피소드별 최고 생존 단계)는 전부 EpisodeRewardLogic이 서버에서 들고 있고, 여기는 보여주기만 한다.
+	--   · 9칸이 가로 한 줄(Panel/Viewport/Strip/Card1~9) — 다음에 받을 칸이 가운데 크게, 양옆은 작고 어둡게
+	--   · 받으면 체크 도장 → 줄이 왼쪽으로 밀리며 다음 칸이 오른쪽에서 가운데로 올라온다(유저 지정)
+
+	-- UI 바인딩 (UIBuilder가 UUID를 넣는다)
+	property Entity popupGroup = "8ce8bf1a-251f-40ec-9edc-dde58d16d8d7"
+	property ButtonComponent btnClose = "c8bf03d3-27ec-4f01-a060-baa4a90fb82c"
+	property Entity strip = "8cd85c72-016e-4611-9252-dba8bc88bc51"
+	property ButtonComponent btnClaim = "b1ad1f1a-eae9-4b9b-91ce-68838eb91576"
+	property TextGUIRendererComponent claimText = "b1ad1f1a-eae9-4b9b-91ce-68838eb91576"
+	property TextGUIRendererComponent hintText = "9b353907-27e7-4f9f-9dfd-fa173c95cf27"
+	property ButtonComponent lobbyButton = "5fc6997a-910e-4d69-9b95-94213dd4f114"
+	property Entity lobbyRedDot = "b0837c33-aac2-4ee3-9cb4-7db6670ad4ee"
+
+	-- 캐러셀 값
+	property number CardSpacing = 200
+	property number CardScale = 1.1
+	property number SideCardScale = 0.78
+	property number SideCardShade = 0.62
+	property number SlideDelay = 0.4
+	property number SlideDuration = 0.4
+	property number IconScale = 1.17
+	property number IconOffsetY = 32
+	property number CheckY = 20
+	property number CheckStartScale = 1.9
+	property number CheckStartOffsetY = 48
+	property number CheckDropDuration = 0.3
+	property number PulseAmplitude = 0.04
+	property number PulseSpeed = 5.0
+	property number ClaimPendingTimeout = 2.0
+
+	-- 내부 상태
+	property boolean _isOpen = false
+	property boolean _animating = false
+	property boolean _claimPending = false
+	-- 보상 비행(RewardFlyUI): 받는 순간 배지 숫자를 보류해두고, 팝업을 닫을 때 받은 칸들이 한꺼번에 날아간다
+	property string _holdKind = ""
+	property integer _holdAmount = 0
+	property table _pendingFly = {}
+	property integer _animatingIndex = 0
+	property number _focus = 1
+	property integer _pulseTimerId = 0
+	property number _pulseTime = 0
+	property any _closeHandler = nil
+	property any _claimHandler = nil
+	property any _lobbyHandler = nil
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		if not isvalid(self.popupGroup) then return end
+		self.popupGroup.Enable = false
+		self._closeHandler = self.btnClose.Entity:ConnectEvent(ButtonClickEvent, self.OnCloseClicked)
+		self._claimHandler = self.btnClaim.Entity:ConnectEvent(ButtonClickEvent, self.OnClaimClicked)
+		if isvalid(self.lobbyButton) then
+			self._lobbyHandler = self.lobbyButton.Entity:ConnectEvent(ButtonClickEvent, self.OnLobbyButtonClicked)
+		end
+		self:RefreshAll()
+		log("EpisodeRewardUI started")
+	end
+
+	@ExecSpace("ClientOnly")
+	method Entity GetCard(integer index)
+		if not isvalid(self.strip) then return nil end
+		return self.strip:GetChildByName("Card" .. tostring(index))
+	end
+
+	@ExecSpace("ClientOnly")
+	method integer GetTargetFocus()
+		-- 가운데에 올 칸 = 다음에 받을 칸(다 받았으면 마지막 칸)
+		local f = _EpisodeRewardLogic:GetClaimedCount() + 1
+		if f > 9 then f = 9 end
+		return f
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnLobbyButtonClicked()
+		self:Open()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Open()
+		self._animating = false
+		self._animatingIndex = 0
+		self:RefreshAll()
+		self.popupGroup.Enable = true
+		self._isOpen = true
+		self:StartPulse()
+		log("EpisodeRewardUI: opened (claimed=" .. _EpisodeRewardLogic:GetClaimedCount() .. " canClaim=" .. tostring(_EpisodeRewardLogic:CanClaimNext()) .. ")")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Close()
+		self:FlyPendingRewards()
+		self.popupGroup.Enable = false
+		self._isOpen = false
+		self:StopPulse()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnCloseClicked()
+		self:Close()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshAll()
+		-- 9칸 + 받기 버튼 + 로비 버튼을 현재 동기화된 상태로 다시 그린다(수령 연출 중인 칸/슬라이드는 건드리지 않는다)
+		if not isvalid(self.strip) then return end
+		local claimed = _EpisodeRewardLogic:GetClaimedCount()
+		for i = 1, 9 do
+			if i ~= self._animatingIndex then
+				self:ApplyCardState(i, i <= claimed)
+			end
+		end
+		if not self._animating then
+			self._focus = self:GetTargetFocus()
+			self:LayoutStrip()
+		end
+		self:RefreshClaimButton()
+		self:RefreshLobbyButton()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ApplyIconLayout(Entity icon, string kind)
+		-- 출석 칸(180x212)에서 맞춰둔 좌표를 카드 크기만큼 키운다 — 골드/다이아 RUID는 pivot이 이미지 밖이라 보정값이 따로 있다
+		local x = 0
+		local y = -10
+		local size = 96
+		if kind == "gold" then
+			x = -46
+			y = -53
+			size = 76
+		elseif kind == "diamond" then
+			x = -57
+			y = -64
+			size = 76
+		end
+		local tr = icon.UITransformComponent
+		tr.anchoredPosition = Vector2(x * self.IconScale, y * self.IconScale + self.IconOffsetY)
+		tr.RectSize = Vector2(size * self.IconScale, size * self.IconScale)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ApplyCardState(integer index, boolean claimed)
+		local card = self:GetCard(index)
+		if not isvalid(card) then return end
+		local icon = card:GetChildByName("Icon")
+		local amountText = card:GetChildByName("AmountText")
+		local label = card:GetChildByName("Label")
+		local check = card:GetChildByName("Check")
+		if isvalid(icon) then
+			icon.SpriteGUIRendererComponent.ImageRUID = DataRef(_EpisodeRewardLogic:GetRewardIconRUID(index))
+			self:ApplyIconLayout(icon, _EpisodeRewardLogic:GetRewardKind(index))
+			icon.Enable = not claimed
+		end
+		if isvalid(amountText) then
+			if claimed then
+				amountText.TextGUIRendererComponent.Text = "완료"
+			else
+				amountText.TextGUIRendererComponent.Text = _EpisodeRewardLogic:GetRewardAmountText(index)
+			end
+		end
+		if isvalid(label) then
+			-- 카드 안 라벨은 두 줄(유저 디자인 2026-09-15: "EP1 \n5분 생존!") — 힌트 문구는 GetSlotLabel 한 줄 그대로
+			label.TextGUIRendererComponent.Text = "EP" .. _EpisodeRewardLogic:GetSlotEpisode(index) .. "\n" .. _EpisodeRewardLogic:GetSlotMinutes(index) .. "분 생존!"
+		end
+		if isvalid(check) then
+			check.Enable = claimed
+			check.UITransformComponent.Scale = Vector3(1, 1, 1)
+			check.UITransformComponent.anchoredPosition = Vector2(0, self.CheckY)
+			check.SpriteGUIRendererComponent.Color = Color(1, 1, 1, 1)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void LayoutStrip()
+		-- _focus(실수 — 슬라이드 중엔 사이값) 칸이 가운데 오게 줄을 밀고, 가운데서 멀수록 작고 어둡게
+		if not isvalid(self.strip) then return end
+		self.strip.UITransformComponent.anchoredPosition = Vector2(-(self._focus - 1) * self.CardSpacing, 0)
+		local pulseTarget = 0
+		if not self._animating and _EpisodeRewardLogic:CanClaimNext() then pulseTarget = self:GetTargetFocus() end
+		for i = 1, 9 do
+			local card = self:GetCard(i)
+			if isvalid(card) then
+				local d = math.abs(i - self._focus)
+				if d > 1 then d = 1 end
+				-- CardScale: 카드 전체 크기(유저 지정 2026-09-15 "10% 키워줘") — .ui 카드 Scale은 여기서 매번 덮어쓴다
+				local s = self.CardScale * (1.0 - (1.0 - self.SideCardScale) * d)
+				if i == pulseTarget then
+					s = s * (1.0 + self.PulseAmplitude * math.sin(self._pulseTime * self.PulseSpeed))
+				end
+				card.UITransformComponent.Scale = Vector3(s, s, 1)
+				local shade = 1.0 - (1.0 - self.SideCardShade) * d
+				card.SpriteGUIRendererComponent.Color = Color(shade, shade, shade, 1)
+				local icon = card:GetChildByName("Icon")
+				if isvalid(icon) then icon.SpriteGUIRendererComponent.Color = Color(shade, shade, shade, 1) end
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshClaimButton()
+		if not isvalid(self.btnClaim) then return end
+		local sprite = self.btnClaim.Entity.SpriteGUIRendererComponent
+		local logic = _EpisodeRewardLogic
+		if logic:IsAllDone() then
+			self.claimText.Text = "모두 받음"
+			sprite.Color = Color(0.6, 0.6, 0.6, 1)
+			self.hintText.Text = "모든 에피소드 보상을 받았어요!"
+			return
+		end
+		local next = logic:GetClaimedCount() + 1
+		self.claimText.Text = "받기"
+		if logic:CanClaimNext() then
+			sprite.Color = Color(1, 1, 1, 1)
+			self.hintText.Text = logic:GetSlotLabel(next) .. " 달성! 보상을 받으세요"
+		else
+			sprite.Color = Color(0.6, 0.6, 0.6, 1)
+			self.hintText.Text = "EP" .. logic:GetSlotEpisode(next) .. "에서 한 판 " .. logic:GetSlotMinutes(next) .. "분을 버티면 받을 수 있어요 (타임어택·무제한 모두)"
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshLobbyButton()
+		-- 9칸을 다 받으면 버튼 자체를 숨긴다(출석 버튼과 같은 규칙). 전투 탭 밖에선 BattlePanel째로 숨는다
+		if not isvalid(self.lobbyButton) then return end
+		self.lobbyButton.Entity.Enable = not _EpisodeRewardLogic:IsAllDone()
+		if isvalid(self.lobbyRedDot) then
+			self.lobbyRedDot.Enable = _EpisodeRewardLogic:CanClaimNext()
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnClaimClicked()
+		if self._animating or self._claimPending then return end
+		local logic = _EpisodeRewardLogic
+		if logic:IsAllDone() then return end
+		if not logic:CanClaimNext() then
+			local next = logic:GetClaimedCount() + 1
+			_UIToast:ShowMessage("EP" .. logic:GetSlotEpisode(next) .. "에서 " .. logic:GetSlotMinutes(next) .. "분을 버텨야 받을 수 있어요")
+			return
+		end
+		-- 서버 지급 Multicast가 배지 숫자를 바로 올리기 전에 보류 — 팝업을 닫고 아이콘이 도착할 때 오른다
+		local claimIndex = logic:GetClaimedCount() + 1
+		self._holdKind = logic:GetRewardKind(claimIndex)
+		self._holdAmount = logic:GetRewardAmount(claimIndex)
+		if self._holdKind == "gold" or self._holdKind == "diamond" then
+			_RewardFlyUI:Hold(self._holdKind, self._holdAmount)
+		end
+		-- 서버가 거절하면 OnClaimed가 안 오므로 잠깐 뒤 연타 잠금과 숫자 보류를 푼다
+		self._claimPending = true
+		_TimerService:SetTimerOnce(function()
+			if not self._claimPending then return end
+			self._claimPending = false
+			if self._holdKind == "gold" or self._holdKind == "diamond" then
+				_RewardFlyUI:Release(self._holdKind, self._holdAmount)
+			end
+		end, self.ClaimPendingTimeout)
+		logic:RequestClaim()
+	end
+
+	@ExecSpace("Client")
+	method void OnClaimed(integer index)
+		-- EpisodeRewardLogic.RequestClaim이 지급을 끝낸 뒤 호출 — 체크 도장 → 다음 칸으로 슬라이드
+		self._claimPending = false
+		if self._isOpen then
+			table.insert(self._pendingFly, index)
+			self:PlayClaimAnimation(index)
+		else
+			-- 받자마자 팝업을 닫아버린 경우 — 로비 버튼 자리에서 바로 날린다
+			self:FlyReward(index, _RewardFlyUI:GetLayerPosOf(self.lobbyButton.Entity, 0, 0), 0)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void FlyReward(integer index, Vector2 fromPos, number delay)
+		local logic = _EpisodeRewardLogic
+		_RewardFlyUI:Fly(logic:GetRewardKind(index), logic:GetRewardAmount(index), logic:GetRewardIconRUID(index), fromPos, delay)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void FlyPendingRewards()
+		-- 팝업을 닫는 순간(끄기 직전 가운데 카드 자리에서) 이번에 받은 칸들을 차례로 날린다
+		if #self._pendingFly == 0 then return end
+		local src = Vector2(0, 0)
+		local card = self:GetCard(self:GetTargetFocus())
+		if isvalid(card) then src = _RewardFlyUI:GetLayerPosOf(card, 0, 0) end
+		local delay = 0
+		for _, index in ipairs(self._pendingFly) do
+			self:FlyReward(index, src, delay)
+			delay = delay + 0.3
+		end
+		self._pendingFly = {}
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayClaimAnimation(integer index)
+		local card = self:GetCard(index)
+		if not isvalid(card) then return end
+		local icon = card:GetChildByName("Icon")
+		local amountText = card:GetChildByName("AmountText")
+		local check = card:GetChildByName("Check")
+		if not isvalid(check) then return end
+		self._animating = true
+		self._animatingIndex = index
+		self._focus = index
+		self:LayoutStrip()
+		if isvalid(icon) then icon.Enable = false end
+		if isvalid(amountText) then amountText.TextGUIRendererComponent.Text = "완료" end
+		self:RefreshClaimButton()
+
+		local tr = check.UITransformComponent
+		local sprite = check.SpriteGUIRendererComponent
+		tr.Scale = Vector3(self.CheckStartScale, self.CheckStartScale, 1)
+		tr.anchoredPosition = Vector2(0, self.CheckY + self.CheckStartOffsetY)
+		sprite.Color = Color(1, 1, 1, 0)
+		check.Enable = true
+		-- 출석 체크와 같은 도장 연출: 크게(위) → 원래 크기로 떨어지며 불투명해진다
+		_TweenLogic:PlayTween(0.0, 1.0, self.CheckDropDuration, EaseType.QuadEaseIn, function(t)
+			if not isvalid(check) then return end
+			local s = self.CheckStartScale + (1.0 - self.CheckStartScale) * t
+			tr.Scale = Vector3(s, s, 1)
+			tr.anchoredPosition = Vector2(0, self.CheckY + self.CheckStartOffsetY * (1.0 - t))
+			local a = t * 1.6
+			if a > 1 then a = 1 end
+			sprite.Color = Color(1, 1, 1, a)
+		end)
+		_TimerService:SetTimerOnce(function()
+			self._animatingIndex = 0
+			self:SlideTo(index + 1)
+		end, self.CheckDropDuration + self.SlideDelay)
+		log("EpisodeRewardUI: claim animation slot " .. index)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SlideTo(integer target)
+		-- 다음 칸이 오른쪽에서 가운데로 — 마지막 칸을 받았으면 제자리
+		if target > 9 then
+			self._animating = false
+			self:RefreshAll()
+			return
+		end
+		local from = self._focus
+		_TweenLogic:PlayTween(0.0, 1.0, self.SlideDuration, EaseType.QuadEaseInOut, function(t)
+			self._focus = from + (target - from) * t
+			self:LayoutStrip()
+			if t >= 1.0 then
+				self._animating = false
+				self:RefreshAll()
+			end
+		end)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void StartPulse()
+		-- 받을 수 있는 가운데 칸을 살짝 두근거리게 한다
+		self:StopPulse()
+		self._pulseTime = 0
+		self._pulseTimerId = _TimerService:SetTimerRepeat(function()
+			self._pulseTime = self._pulseTime + 1 / 30
+			if not self._animating then self:LayoutStrip() end
+		end, 1 / 30)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void StopPulse()
+		if self._pulseTimerId ~= 0 then
+			_TimerService:ClearTimer(self._pulseTimerId)
+			self._pulseTimerId = 0
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		self:StopPulse()
+		if self._closeHandler then self.btnClose.Entity:DisconnectEvent(ButtonClickEvent, self._closeHandler) end
+		if self._claimHandler then self.btnClaim.Entity:DisconnectEvent(ButtonClickEvent, self._claimHandler) end
+		if self._lobbyHandler then self.lobbyButton.Entity:DisconnectEvent(ButtonClickEvent, self._lobbyHandler) end
+	end
+
+end

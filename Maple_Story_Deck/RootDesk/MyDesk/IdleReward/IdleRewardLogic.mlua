@@ -1,0 +1,290 @@
+@Logic
+script IdleRewardLogic extends Logic
+
+	-- 방치 보상(유저 지정 2026-09-15, 탕탕특공대 순찰 방식).
+	--   · 마지막으로 받은 뒤 흐른 실제 시간(서버 UTC)만큼 골드/경험치/장비가 쌓인다. 최대 24시간(MaxSeconds).
+	--   · 최소 10분(MinClaimSeconds)은 쌓여야 받을 수 있다 — 그 전엔 받기 버튼에 남은 시간이 거꾸로 흐른다.
+	--   · 진행도 = "최고 에피소드": 한 판에 5분 이상 버틴 가장 높은 에피소드(에피소드 생존 보상 첫 칸 조건과 같다).
+	--     진행이 높을수록 골드/경험치가 조금씩 더 쌓이고(EpisodeBonus), 팝업 전투 장면도 그 에피소드 맵/몬스터로 나온다.
+	--   · 장비는 4시간마다 1개. 부위는 지금까지 연 에피소드(1~최고)의 드롭 부위를 합친 풀에서 나온다
+	--     (WeaponTierDataLogic.GearItemIdsByEpisode — 태초의 마을=무기 / 구름정원=갑옷·모자 / 엘라스 산맥=장갑·망토).
+	--     k번째 장비가 무엇인지는 누적 시작 시각(GearSeed)으로 정해져 있어서 팝업 미리보기와 실제 지급이 같다.
+	--     등급/품질/스탯은 받을 때 몬스터 드롭과 같은 규칙으로 굴린다(GameManager.BuildGearCreateParam).
+	--   · 골드는 인플레이션 방지(유저 지정) — 킬당 골드가 1이라 한 판 수입이 1~2천 선이다. 방치 24시간이 한두 판 수준이 되도록
+	--     시간당 100(EP1 기준)으로 낮게 잡았다. 조정은 GoldPerHour 한 곳.
+	--   · 경험치는 플레이어 레벨이 아직 없어서 "보여주기만" 한다(지급 안 함 — GrantExp). 레벨이 생기면
+	--     GetLevelMultiplier(쌓이는 양 배율)와 GrantExp(실제 지급)만 채우면 된다.
+	--   · 장비는 한 번에 전부 넣거나(TryAddMultipleItems) 하나도 안 넣는다 — 인벤토리가 모자라면 수령 자체를 거절한다.
+	-- 저장: 유저별 UserDataStorage 키 "IdleReward" JSON {s = 누적 시작 시각(초)}.
+	-- 입장 시 1회 읽고, 수령 때만 쓴다(처음 보는 유저는 시작 시각을 1회 저장해야 다음 접속에도 이어진다).
+
+	-- 동기화 시점의 누적 초 — 클라는 이 값 + (받은 뒤 흐른 로컬 시간)으로 초 단위 표시를 돌린다
+	@Sync property integer AccruedAtSync = 0
+	-- 같은 값이 다시 와도 OnSyncProperty가 불리게 매번 올리는 번호(수령 직후 0 → 0 같은 경우)
+	@Sync property integer SyncSerial = 0
+	@Sync property integer GearSeed = 0
+	@Sync property boolean Loaded = false
+
+	property integer MaxSeconds = 86400
+	property integer MinClaimSeconds = 600
+	property integer GoldPerHour = 100
+	property integer ExpPerHour = 600
+	property integer GearIntervalSeconds = 14400
+	-- 최고 에피소드별 골드/경험치 배율(EP1/EP2/EP3)
+	property any EpisodeBonus = { 1.0, 1.25, 1.5 }
+	-- 이 초 이상 버틴 에피소드를 "진행한" 에피소드로 친다
+	property integer ProgressSeconds = 300
+	-- 로비 버튼 레드닷을 켜는 누적 시간
+	property integer RedDotSeconds = 3600
+	property string StorageKey = "IdleReward"
+
+	property integer _startSec = 0
+	property string _profileCode = ""
+
+	-- ── 공용 계산(서버/클라 공용 — ExecSpace 없음) ──────────────────────────────
+	method integer GetMaxEpisode()
+		-- 한 판에 ProgressSeconds 이상 버틴 가장 높은 에피소드(없으면 1). 에피소드 보상 Best는 서버/클라 모두 동기화돼 있다
+		for ep = 3, 2, -1 do
+			if _EpisodeRewardLogic:GetBest(ep) >= self.ProgressSeconds then return ep end
+		end
+		return 1
+	end
+
+	method number GetEpisodeBonus(integer ep)
+		local v = self.EpisodeBonus[ep]
+		if v == nil then return 1.0 end
+		return v
+	end
+
+	method number GetLevelMultiplier()
+		-- 플레이어 레벨 시스템이 아직 없다(유저 지정: UI/기능만 먼저). 레벨이 생기면 여기서 배율을 올린다
+		return 1.0
+	end
+
+	method number GetRewardMultiplier()
+		return self:GetEpisodeBonus(self:GetMaxEpisode()) * self:GetLevelMultiplier()
+	end
+
+	method integer ClampSeconds(integer sec)
+		if sec < 0 then return 0 end
+		if sec > self.MaxSeconds then return self.MaxSeconds end
+		return sec
+	end
+
+	method integer GetGoldFor(integer sec)
+		return math.floor(self:ClampSeconds(sec) * self.GoldPerHour * self:GetRewardMultiplier() / 3600)
+	end
+
+	method integer GetExpFor(integer sec)
+		return math.floor(self:ClampSeconds(sec) * self.ExpPerHour * self:GetRewardMultiplier() / 3600)
+	end
+
+	method integer GetGearCountFor(integer sec)
+		return self:ClampSeconds(sec) // self.GearIntervalSeconds
+	end
+
+	method integer GetSecondsToNextGear(integer sec)
+		-- 다음 장비 1개가 쌓이기까지 남은 초(가득 찼으면 0)
+		local c = self:ClampSeconds(sec)
+		if c >= self.MaxSeconds then return 0 end
+		return self.GearIntervalSeconds - (c % self.GearIntervalSeconds)
+	end
+
+	method boolean CanClaimAt(integer sec)
+		return self:ClampSeconds(sec) >= self.MinClaimSeconds
+	end
+
+	method table GetGearPool(integer maxEp)
+		-- 1 ~ 최고 에피소드의 드롭 부위를 합친 풀(무기 → 갑옷·모자 → 장갑·망토 순)
+		local pool = {}
+		for ep = 1, maxEp do
+			local ids = _WeaponTierDataLogic:GetGearItemIdsByEpisode(ep)
+			if ids ~= nil then
+				for _, id in ipairs(ids) do table.insert(pool, id) end
+			end
+		end
+		return pool
+	end
+
+	method table GetGearItemIds(integer maxEp, integer seed, integer count)
+		-- k번째로 쌓인 장비의 ItemId — 시드와 순번만으로 정해지는 해시라 서버/클라가 같은 결과를 낸다
+		local pool = self:GetGearPool(maxEp)
+		local ids = {}
+		if #pool == 0 then return ids end
+		for k = 1, count do
+			local h = (seed * 31 + k * 2654435761) % 1000003
+			table.insert(ids, pool[h % #pool + 1])
+		end
+		return ids
+	end
+
+	method string GetEpisodeName(integer ep)
+		-- 월드 선택 팝업(WorldCharacterSelectUI._worlds)과 같은 이름
+		if ep == 2 then return "구름정원" end
+		if ep == 3 then return "엘라스 산맥" end
+		return "태초의 마을"
+	end
+
+	-- ── 접근자(다른 Logic에서 property 직접 읽기 금지 — 이걸로 읽는다) ────────────
+	method integer GetAccruedAtSync()
+		return self.AccruedAtSync
+	end
+
+	method integer GetGearSeed()
+		return self.GearSeed
+	end
+
+	method boolean IsLoaded()
+		return self.Loaded
+	end
+
+	method integer GetRedDotSeconds()
+		return self.RedDotSeconds
+	end
+
+	method integer GetMaxSeconds()
+		return self.MaxSeconds
+	end
+
+	method integer GetMinClaimSeconds()
+		return self.MinClaimSeconds
+	end
+
+	method integer GetGearIntervalHours()
+		return self.GearIntervalSeconds // 3600
+	end
+
+	-- ── 서버: 시간/로드/저장 ─────────────────────────────────────────────────
+	@ExecSpace("ServerOnly")
+	method integer NowSec()
+		-- 서버 UTC 현재 시각(초). DateTime.Elapsed = 0001-01-01부터의 밀리초
+		return DateTime.UtcNow.Elapsed // 1000
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer GetAccruedSeconds()
+		return self:ClampSeconds(self:NowSec() - self._startSec)
+	end
+
+	@ExecSpace("ServerOnly")
+	@EventSender("Service", "UserService")
+	handler HandleUserEnterEvent(UserEnterEvent event)
+		local user = _UserService:GetUserEntityByUserId(event.UserId)
+		if user == nil then return end
+		self:LoadFor(user)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void LoadFor(Entity user)
+		-- 입장 시 1회만 읽는다
+		self._profileCode = user.PlayerComponent.ProfileCode
+		local ds = _DataStorageService:GetUserDataStorage(self._profileCode)
+		local code, raw = ds:GetAndWait(self.StorageKey)
+		local found = false
+		if code == 0 and raw ~= nil and raw ~= "" then
+			local t = _HttpService:JSONDecode(raw)
+			if t ~= nil then
+				self._startSec = math.floor(tonumber(t["s"]) or 0)
+				found = self._startSec > 0
+			end
+		elseif code ~= 0 and code ~= 1000002 then
+			log_warning("IdleRewardLogic: load failed code=" .. tostring(code))
+		end
+		if not found then
+			-- 처음 보는 유저는 지금부터 쌓기 시작 — 시작 시각을 1회 저장해야 다음 접속에도 이어진다.
+			-- 읽기 자체가 실패했으면(네트워크 등) 저장된 시작 시각을 덮어쓰지 않도록 저장하지 않는다
+			self._startSec = self:NowSec()
+			if code == 0 or code == 1000002 then self:Save() end
+		end
+		self.Loaded = true
+		self:PushSync()
+		log("IdleRewardLogic: loaded accrued=" .. self.AccruedAtSync .. "s found=" .. tostring(found))
+	end
+
+	@ExecSpace("ServerOnly")
+	method void Save()
+		-- 수령 때만 부른다(값이 바뀐 순간에만 1회)
+		if self._profileCode == "" then return end
+		local ds = _DataStorageService:GetUserDataStorage(self._profileCode)
+		local t = {}
+		t["s"] = self._startSec
+		ds:SetAsync(self.StorageKey, _HttpService:JSONEncode(t), function(code, key)
+			if code ~= 0 then log_warning("IdleRewardLogic: save failed code=" .. tostring(code)) end
+		end)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void PushSync()
+		self.AccruedAtSync = self:GetAccruedSeconds()
+		self.GearSeed = self._startSec % 1000003
+		self.SyncSerial = self.SyncSerial + 1
+	end
+
+	-- ── 서버: 클라 요청 ──────────────────────────────────────────────────────
+	@ExecSpace("Server")
+	method void RequestRefresh()
+		-- 팝업을 열 때마다 부른다 — 클라 표시 시계를 서버 기준으로 다시 맞춘다
+		if not self.Loaded then return end
+		self:PushSync()
+	end
+
+	@ExecSpace("Server")
+	method void RequestClaim()
+		if not self.Loaded then return end
+		local sec = self:GetAccruedSeconds()
+		if not self:CanClaimAt(sec) then
+			_IdleRewardUI:OnClaimFailed("tooEarly", senderUserId)
+			return
+		end
+		local maxEp = self:GetMaxEpisode()
+		local gold = self:GetGoldFor(sec)
+		local exp = self:GetExpFor(sec)
+		local gearIds = self:GetGearItemIds(maxEp, self._startSec % 1000003, self:GetGearCountFor(sec))
+		local gearCsv = ""
+		if #gearIds > 0 then
+			local params = {}
+			for i, id in ipairs(gearIds) do
+				table.insert(params, _GameManager:BuildGearCreateParam(id))
+				if i > 1 then gearCsv = gearCsv .. "," end
+				gearCsv = gearCsv .. tostring(id)
+			end
+			local result = ItemCreateResultStruct()
+			local err = _ItemFactoryLogic:TryAddMultipleItems(senderUserId, params, result)
+			if err ~= _ErrorCodeEnum.Success then
+				log("IdleRewardLogic: claim rejected — gear add failed err=" .. tostring(err) .. " count=" .. #gearIds)
+				_IdleRewardUI:OnClaimFailed("inventory", senderUserId)
+				return
+			end
+		end
+		if gold > 0 then _GameManager:AddCoins(gold) end
+		self:GrantExp(exp)
+		self._startSec = self:NowSec()
+		self:Save()
+		self:PushSync()
+		log("IdleRewardLogic: claimed " .. sec .. "s maxEp=" .. maxEp .. " gold=" .. gold .. " exp=" .. exp .. " gear=[" .. gearCsv .. "]")
+		_IdleRewardUI:OnClaimed(gold, exp, gearCsv, senderUserId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void GrantExp(integer exp)
+		-- TODO(플레이어 레벨 시스템): 아직 레벨이 없어서 지급하지 않는다 — 생기면 여기서 경험치를 넣는다
+	end
+
+	-- 테스트 전용(서버 스크립트에서 직접 호출) — 누적 시작 시각을 hours만큼 앞당긴다(= 그만큼 방치한 것처럼)
+	@ExecSpace("ServerOnly")
+	method void DebugAddHours(number hours)
+		self._startSec = self._startSec - math.floor(hours * 3600)
+		self:Save()
+		self:PushSync()
+		log("IdleRewardLogic: debug +" .. hours .. "h -> accrued=" .. self.AccruedAtSync .. "s")
+	end
+
+	-- ── 클라: 동기화되면 UI 갱신 ──────────────────────────────────────────────
+	@ExecSpace("ClientOnly")
+	method void OnSyncProperty(string name, any value)
+		if name == "AccruedAtSync" or name == "SyncSerial" or name == "Loaded" or name == "GearSeed" then
+			_IdleRewardUI:OnStateSynced(name)
+		end
+	end
+
+end

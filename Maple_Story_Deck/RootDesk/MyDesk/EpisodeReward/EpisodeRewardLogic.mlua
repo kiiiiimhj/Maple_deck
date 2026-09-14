@@ -1,0 +1,239 @@
+@Logic
+script EpisodeRewardLogic extends Logic
+
+	-- 에피소드 생존 보상(유저 지정 2026-09-15, 탕탕특공대 방식).
+	--   · 한 판에서 5분/10분/15분을 버티면 그 에피소드의 칸이 열린다(타임어택·무제한 상관없음).
+	--   · 칸은 EP1 5분 → EP1 10분 → EP1 15분 → EP2 5분 … → EP3 15분, 총 9칸을 "순서대로만" 받는다.
+	--   · 보상: 5분 골드 10,000 / 10분 다이아 500 / 15분 무료 뽑기권 10(EP1·EP3 스킬, EP2 유물).
+	--     골드는 로비 누적 코인(AddCoins), 뽑기권은 출석 보상과 같은 적립 칸(_AttendanceLogic:AddFreePulls).
+	--   · 생존 시간 = MonsterSpawner 런 경과 시간(_running일 때만 흐르고 다시하기 때 0으로).
+	--     이 런이 어느 에피소드인지는 경과 시간이 1초 미만일 때(런 시작 전후)만 잡아두고 런 중엔 고정한다 —
+	--     로비로 나갔다가 다른 에피소드로 "게임 시작"을 누르면 StartGame이 경과 시간을 안 지운 채
+	--     SelectedEpisode만 바꾸는 경로가 있어서, 그걸 그대로 믿으면 EP1에서 버틴 시간이 EP2로 잡힌다.
+	-- 저장: 유저별 UserDataStorage 키 "EpisodeReward" JSON {c,b1,b2,b3}. b = 에피소드별 최고 달성 단계(0/300/600/900초)라
+	-- 단계를 새로 넘는 순간과 수령할 때만 쓴다.
+
+	@Sync property integer ClaimedCount = 0
+	@Sync property integer Best1 = 0
+	@Sync property integer Best2 = 0
+	@Sync property integer Best3 = 0
+	@Sync property boolean Loaded = false
+
+	property integer TotalSlots = 9
+	property integer TierSeconds = 300
+	property integer MaxTierSeconds = 900
+	property string StorageKey = "EpisodeReward"
+
+	property string _profileCode = ""
+	property integer _runEpisode = 0
+	property number _lastElapsed = 0
+
+	-- ── 칸 정의(서버/클라 공용 — ExecSpace 없음) ──────────────────────────────
+	method integer GetSlotEpisode(integer index)
+		return (index - 1) // 3 + 1
+	end
+
+	method integer GetSlotMinutes(integer index)
+		return ((index - 1) % 3 + 1) * 5
+	end
+
+	method string GetRewardKind(integer index)
+		-- "gold" / "diamond" / "relicPull" / "skillPull" — 15분 칸만 에피소드마다 스킬/유물 번갈아(유저 지정)
+		local tier = (index - 1) % 3 + 1
+		if tier == 1 then return "gold" end
+		if tier == 2 then return "diamond" end
+		if self:GetSlotEpisode(index) == 2 then return "relicPull" end
+		return "skillPull"
+	end
+
+	method integer GetRewardAmount(integer index)
+		local kind = self:GetRewardKind(index)
+		if kind == "gold" then return 10000 end
+		if kind == "diamond" then return 500 end
+		return 10
+	end
+
+	method string GetRewardIconRUID(integer index)
+		-- 출석 보상과 같은 아이콘을 쓴다
+		local kind = self:GetRewardKind(index)
+		if kind == "gold" then return "02a489cccff24a139a6c3582a5871f58" end
+		if kind == "diamond" then return "81462aeb825b4660991cef05651271cf" end
+		if kind == "relicPull" then return "3fccc38bffbd45b68cd1fc049809de54" end
+		return "38f5f4b9b8a342bf931b71298d60bb84"
+	end
+
+	method string GetRewardAmountText(integer index)
+		-- 레퍼런스 이미지 기준 "X10" 표기. 천 단위는 "X10K"로 줄인다(유저 지정 — "X10,000"은 카드 밖으로 삐져나옴)
+		local amount = self:GetRewardAmount(index)
+		if amount >= 1000 then
+			if amount % 1000 == 0 then
+				return "X" .. tostring(amount // 1000) .. "K"
+			end
+			return "X" .. string.format("%.1f", amount / 1000) .. "K"
+		end
+		return "X" .. tostring(amount)
+	end
+
+	method string GetSlotLabel(integer index)
+		return "EP" .. self:GetSlotEpisode(index) .. " " .. self:GetSlotMinutes(index) .. "분 생존!"
+	end
+
+	-- ── 접근자(다른 Logic에서 property 직접 읽기 금지 — 이걸로 읽는다) ────────────
+	method integer GetClaimedCount()
+		return self.ClaimedCount
+	end
+
+	method boolean IsLoaded()
+		return self.Loaded
+	end
+
+	method boolean IsAllDone()
+		return self.ClaimedCount >= self.TotalSlots
+	end
+
+	method integer GetBest(integer episode)
+		if episode == 1 then return self.Best1 end
+		if episode == 2 then return self.Best2 end
+		if episode == 3 then return self.Best3 end
+		return 0
+	end
+
+	method boolean IsReached(integer index)
+		if index < 1 or index > self.TotalSlots then return false end
+		return self:GetBest(self:GetSlotEpisode(index)) >= self:GetSlotMinutes(index) * 60
+	end
+
+	method boolean CanClaimNext()
+		if not self.Loaded or self:IsAllDone() then return false end
+		return self:IsReached(self.ClaimedCount + 1)
+	end
+
+	-- ── 서버: 로드/저장 ──────────────────────────────────────────────────────
+	@ExecSpace("ServerOnly")
+	@EventSender("Service", "UserService")
+	handler HandleUserEnterEvent(UserEnterEvent event)
+		local user = _UserService:GetUserEntityByUserId(event.UserId)
+		if user == nil then return end
+		self:LoadFor(user)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void LoadFor(Entity user)
+		-- 입장 시 1회만 읽는다. 처음 보는 유저(NotFound)는 전부 0에서 시작 — 빈 값을 미리 써두지 않는다
+		self._profileCode = user.PlayerComponent.ProfileCode
+		local ds = _DataStorageService:GetUserDataStorage(self._profileCode)
+		local code, raw = ds:GetAndWait(self.StorageKey)
+		if code == 0 and raw ~= nil and raw ~= "" then
+			local t = _HttpService:JSONDecode(raw)
+			if t ~= nil then
+				self.ClaimedCount = math.floor(tonumber(t["c"]) or 0)
+				self.Best1 = math.floor(tonumber(t["b1"]) or 0)
+				self.Best2 = math.floor(tonumber(t["b2"]) or 0)
+				self.Best3 = math.floor(tonumber(t["b3"]) or 0)
+			end
+		elseif code ~= 0 and code ~= 1000002 then
+			log_warning("EpisodeRewardLogic: load failed code=" .. tostring(code))
+		end
+		self.Loaded = true
+		log("EpisodeRewardLogic: loaded claimed=" .. self.ClaimedCount .. " best=" .. self.Best1 .. "/" .. self.Best2 .. "/" .. self.Best3 .. " canClaim=" .. tostring(self:CanClaimNext()))
+	end
+
+	@ExecSpace("ServerOnly")
+	method void Save()
+		-- 단계 달성/수령 때만 부른다(값이 바뀐 순간에만 1회)
+		if self._profileCode == "" then return end
+		local ds = _DataStorageService:GetUserDataStorage(self._profileCode)
+		local t = {}
+		t["c"] = self.ClaimedCount
+		t["b1"] = self.Best1
+		t["b2"] = self.Best2
+		t["b3"] = self.Best3
+		ds:SetAsync(self.StorageKey, _HttpService:JSONEncode(t), function(code, key)
+			if code ~= 0 then log_warning("EpisodeRewardLogic: save failed code=" .. tostring(code)) end
+		end)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SetBest(integer episode, integer seconds)
+		if episode == 1 then self.Best1 = seconds
+		elseif episode == 2 then self.Best2 = seconds
+		elseif episode == 3 then self.Best3 = seconds end
+	end
+
+	-- ── 서버: 생존 시간 감시 ──────────────────────────────────────────────────
+	@ExecSpace("ServerOnly")
+	method void OnUpdate(number delta)
+		-- 매 프레임 숫자 비교만 한다. 저장은 5/10/15분 단계를 "처음" 넘는 순간에만
+		if not self.Loaded then return end
+		local elapsed = _MonsterSpawner:GetElapsedPlayTime()
+		if elapsed < 1.0 or elapsed < self._lastElapsed then
+			self._runEpisode = _GameManager:GetSelectedEpisode()
+		end
+		self._lastElapsed = elapsed
+		local ep = self._runEpisode
+		if ep < 1 or ep > 3 then return end
+		local tier = math.floor(elapsed / self.TierSeconds) * self.TierSeconds
+		if tier > self.MaxTierSeconds then tier = self.MaxTierSeconds end
+		if tier > self:GetBest(ep) then
+			self:SetBest(ep, tier)
+			self:Save()
+			log("EpisodeRewardLogic: EP" .. ep .. " survived " .. (tier // 60) .. "min (elapsed " .. math.floor(elapsed) .. "s) canClaim=" .. tostring(self:CanClaimNext()))
+		end
+	end
+
+	-- ── 서버: 클라 요청 ──────────────────────────────────────────────────────
+	@ExecSpace("Server")
+	method void RequestClaim()
+		if not self:CanClaimNext() then
+			log("EpisodeRewardLogic: claim rejected (claimed=" .. self.ClaimedCount .. " best=" .. self.Best1 .. "/" .. self.Best2 .. "/" .. self.Best3 .. ")")
+			return
+		end
+		local index = self.ClaimedCount + 1
+		self:GrantReward(index)
+		self.ClaimedCount = index
+		self:Save()
+		log("EpisodeRewardLogic: claimed slot " .. index .. " (" .. self:GetSlotLabel(index) .. " " .. self:GetRewardKind(index) .. " " .. self:GetRewardAmount(index) .. ")")
+		_EpisodeRewardUI:OnClaimed(index, senderUserId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void GrantReward(integer index)
+		local kind = self:GetRewardKind(index)
+		local amount = self:GetRewardAmount(index)
+		if kind == "gold" then
+			_GameManager:AddCoins(amount)
+		elseif kind == "diamond" then
+			_GameManager:AddDiamond(amount)
+		else
+			_AttendanceLogic:AddFreePulls(amount, kind == "skillPull")
+		end
+	end
+
+	-- 테스트 전용(서버 스크립트에서 직접 호출) — 에피소드 최고 기록을 강제로 넣는다(초)
+	@ExecSpace("ServerOnly")
+	method void DebugSetBest(integer episode, integer seconds)
+		self:SetBest(episode, seconds)
+		self:Save()
+		log("EpisodeRewardLogic: debug best EP" .. episode .. "=" .. seconds .. " canClaim=" .. tostring(self:CanClaimNext()))
+	end
+
+	-- 테스트 전용 — 수령/기록을 전부 0으로
+	@ExecSpace("ServerOnly")
+	method void DebugReset()
+		self.ClaimedCount = 0
+		self.Best1 = 0
+		self.Best2 = 0
+		self.Best3 = 0
+		self:Save()
+		log("EpisodeRewardLogic: debug reset")
+	end
+
+	-- ── 클라: 동기화되면 UI 갱신 ──────────────────────────────────────────────
+	@ExecSpace("ClientOnly")
+	method void OnSyncProperty(string name, any value)
+		if name == "ClaimedCount" or name == "Loaded" or name == "Best1" or name == "Best2" or name == "Best3" then
+			_EpisodeRewardUI:RefreshAll()
+		end
+	end
+
+end

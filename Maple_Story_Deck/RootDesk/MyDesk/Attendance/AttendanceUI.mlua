@@ -30,6 +30,11 @@ script AttendanceUI extends Logic
 	property table _slotHandlers = {}
 	property any _closeHandler = nil
 	property any _lobbyHandler = nil
+	-- 보상 비행(RewardFlyUI, 2026-09-15): 받는 순간 배지 숫자를 보류해두고, 팝업을 닫을 때 받은 칸에서 날아간다
+	property boolean _claimPending = false
+	property string _holdKind = ""
+	property integer _holdAmount = 0
+	property table _pendingFly = {}
 
 	@ExecSpace("ClientOnly")
 	method void OnBeginPlay()
@@ -73,6 +78,7 @@ script AttendanceUI extends Logic
 
 	@ExecSpace("ClientOnly")
 	method void Close()
+		self:FlyPendingRewards()
 		self.popupGroup.Enable = false
 		self._isOpen = false
 		self:StopPulse()
@@ -146,6 +152,22 @@ script AttendanceUI extends Logic
 		local claimed = _AttendanceLogic:GetClaimedCount()
 		if day ~= claimed + 1 then return end
 		if _AttendanceLogic:CanClaim() then
+			if self._claimPending then return end
+			-- 서버 지급 Multicast가 배지 숫자를 바로 올리기 전에 보류 — 팝업을 닫고 아이콘이 도착할 때 오른다
+			self._holdKind = _AttendanceLogic:GetRewardKind(day)
+			self._holdAmount = _AttendanceLogic:GetRewardAmount(day)
+			if self._holdKind == "gold" or self._holdKind == "diamond" then
+				_RewardFlyUI:Hold(self._holdKind, self._holdAmount)
+			end
+			-- 서버가 거절하면 OnClaimed가 안 오므로 잠깐 뒤 보류를 푼다
+			self._claimPending = true
+			_TimerService:SetTimerOnce(function()
+				if not self._claimPending then return end
+				self._claimPending = false
+				if self._holdKind == "gold" or self._holdKind == "diamond" then
+					_RewardFlyUI:Release(self._holdKind, self._holdAmount)
+				end
+			end, 2.0)
 			_AttendanceLogic:RequestClaim()
 		else
 			_UIToast:ShowMessage("내일 다시 받을 수 있어요")
@@ -154,8 +176,34 @@ script AttendanceUI extends Logic
 
 	@ExecSpace("Client")
 	method void OnClaimed(integer day)
-		-- AttendanceLogic.RequestClaim이 지급을 끝낸 뒤 호출 — 체크 도장 연출
-		self:PlayClaimAnimation(day)
+		-- AttendanceLogic.RequestClaim이 지급을 끝낸 뒤 호출 — 체크 도장 연출(보상은 팝업을 닫을 때 날아간다)
+		self._claimPending = false
+		if self._isOpen then
+			table.insert(self._pendingFly, day)
+			self:PlayClaimAnimation(day)
+		else
+			-- 받자마자 팝업을 닫아버린 경우 — 로비 출석 버튼 자리에서 바로 날린다
+			self:FlyReward(day, _RewardFlyUI:GetLayerPosOf(self.lobbyButton.Entity, 0, 0), 0)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void FlyReward(integer day, Vector2 fromPos, number delay)
+		_RewardFlyUI:Fly(_AttendanceLogic:GetRewardKind(day), _AttendanceLogic:GetRewardAmount(day), _AttendanceLogic:GetRewardIconRUID(day), fromPos, delay)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void FlyPendingRewards()
+		-- 팝업을 닫는 순간(끄기 직전) 이번에 받은 칸 자리에서 날린다
+		local delay = 0
+		for _, day in ipairs(self._pendingFly) do
+			local slot = self:GetSlot(day)
+			local src = Vector2(0, 0)
+			if isvalid(slot) then src = _RewardFlyUI:GetLayerPosOf(slot, 0, 0) end
+			self:FlyReward(day, src, delay)
+			delay = delay + 0.3
+		end
+		self._pendingFly = {}
 	end
 
 	@ExecSpace("ClientOnly")

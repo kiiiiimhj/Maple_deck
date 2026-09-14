@@ -133,7 +133,7 @@ script CardManager extends Logic
 	-- (2026-07-18) 2타 구조 폐기 — 단일 히트로 전체 데미지를 한 번에 적용하고, 칼이 바닥에 꽂히는
 	-- 연출 시점(Card3ImpactDelay)에 맞춰 데미지가 들어간다("연출 먼저, 착탄 시 데미지" 패턴). 슬로우는
 	-- Lv1부터 상시 3초 고정(빙결 효과 레벨에 따른 4초 연장 시너지는 폐기).
-	-- Lv1(해금): 타겟1명·슬로우3초 / Lv2: 타겟+1(2명) / Lv3: 데미지+50 / Lv4: 타겟+1(3명) / Lv5: 데미지+50.
+	-- Lv1(해금): 타겟2명·슬로우3초 / Lv2: 데미지+50(160) / Lv3: 타겟+1(3명) / Lv4: 데미지+50(210) / Lv5: 데미지+50(260).
 	@Sync property integer ColdBeamLevel = 0
 
 	-- 슬롯별 카드 배치 (0=비어있음, 2~5=카드번호) — 1번 슬롯부터 순서대로 쌓임
@@ -2442,6 +2442,7 @@ script CardManager extends Logic
 				local capturedMap = map
 				local capturedDamage = damage
 				local capturedIsCrit = isCrit
+				local capturedBand = self:GetDepthBand(target)
 				local tick = self.SavageBlowHitLifetime / 3
 
 				-- 유저 지정: "범위기" — 겨냥 지점 하나만 맞는 게 아니라 그 판정 사각형(SavageBlowHalfW/HalfH) 안의
@@ -2458,7 +2459,11 @@ script CardManager extends Logic
 							local mp = m.Entity.TransformComponent.Position
 							local dx = mp.x - (centerPos.x + self.SavageBlowOffsetX)
 							local dy = mp.y - centerPos.y
-							if self:InRect(dx, dy, self.SavageBlowHalfW, self.SavageBlowHalfH) then
+							-- 뎁스밴드(2026-09-13 유저 지정: "쉐이드도 밴드 적용") — 겨냥한 target과 같은
+							-- 앞/뒤 구간의 몬스터만 휩쓴다. 조준된 target 자신은 자기와 같은 밴드라 항상 맞는다
+							-- (다른 캐릭터 광역기와 동일한 규칙). 3연타 사이에 target이 죽어도 필터가 풀리지
+							-- 않도록 시전 시점 밴드를 캡처해 쓴다(GetDepthBand 선언부 주석 참고)
+							if self:InRect(dx, dy, self.SavageBlowHalfW, self.SavageBlowHalfH) and self:IsInDepthBand(m, capturedBand) then
 								hitCount = hitCount + 1
 								local offsetX = (hitIndex - 2) * self.SavageBlowDamageNumberSpacing
 								if capturedIsCrit then
@@ -6878,6 +6883,9 @@ script CardManager extends Logic
 				local capturedHalfH = self.SmokeGrenadeHalfH
 				local capturedOffX = self.SmokeGrenadeOffsetX
 				local capturedOffY = self.SmokeGrenadeOffsetY
+				-- 지속형 장판이라 1초마다 반복 판정한다 — 그 사이 조준 대상이 죽어도 밴드 필터가
+				-- 풀리지 않도록 시전 시점 밴드를 캡처해둔다(GetDepthBand 선언부 주석 참고)
+				local capturedBand = self:GetDepthBand(target)
 
 				-- 1초마다(지속시간 동안) 반경 안의 몬스터 전부에게 DoT + 명중 하락 디버프 재적용
 				local applyTick = function()
@@ -6890,7 +6898,7 @@ script CardManager extends Logic
 							local mp = m.Entity.TransformComponent.Position
 							local dx = mp.x - (centerPos.x + capturedOffX)
 							local dy = mp.y - (centerPos.y + capturedOffY)
-							if self:InEllipse(dx, dy, capturedHalfW, capturedHalfH) then
+							if self:InEllipse(dx, dy, capturedHalfW, capturedHalfH) and self:IsInDepthBand(m, capturedBand) then
 								hitCount = hitCount + 1
 								if capturedIsCrit then
 									m:TakeDamageCrit(capturedDamage * 2)
@@ -7032,6 +7040,9 @@ script CardManager extends Logic
 				local capturedHalfH = self.SmokeGrenadeHalfH
 				local capturedOffX = self.SmokeGrenadeOffsetX
 				local capturedOffY = self.SmokeGrenadeOffsetY
+				-- 지속형 장판이라 1초마다 반복 판정한다 — 그 사이 조준 대상이 죽어도 밴드 필터가
+				-- 풀리지 않도록 시전 시점 밴드를 캡처해둔다(GetDepthBand 선언부 주석 참고)
+				local capturedBand = self:GetDepthBand(target)
 
 				-- 1초마다(지속시간 동안) 반경 안의 몬스터 전부에게 DoT + 명중 하락 디버프 재적용 (연막탄과 동일)
 				local applyTick = function()
@@ -7044,7 +7055,7 @@ script CardManager extends Logic
 							local mp = m.Entity.TransformComponent.Position
 							local dx = mp.x - (centerPos.x + capturedOffX)
 							local dy = mp.y - (centerPos.y + capturedOffY)
-							if self:InEllipse(dx, dy, capturedHalfW, capturedHalfH) then
+							if self:InEllipse(dx, dy, capturedHalfW, capturedHalfH) and self:IsInDepthBand(m, capturedBand) then
 								hitCount = hitCount + 1
 								if capturedIsCrit then
 									m:TakeDamageCrit(capturedDamage * 2)
@@ -7092,7 +7103,7 @@ script CardManager extends Logic
 								local mp = m.Entity.TransformComponent.Position
 								local dx = mp.x - (centerPos.x + capturedOffX)
 								local dy = mp.y - (centerPos.y + capturedOffY)
-								if self:InEllipse(dx, dy, capturedHalfW, capturedHalfH) then
+								if self:InEllipse(dx, dy, capturedHalfW, capturedHalfH) and self:IsInDepthBand(m, capturedBand) then
 									hitCount = hitCount + 1
 									if capturedIsCrit then
 										m:TakeDamageCrit(bonusDamage * 2)
@@ -9139,7 +9150,9 @@ script CardManager extends Logic
 					local mp = m.Entity.TransformComponent.Position
 					local dxPath = math.abs(mp.x - pos.x)
 					local inPath = dxPath <= self.Card179PathWidth and mp.y > pos.y and (mp.y - pos.y) <= self.Card179PathHeight
-					if inPath then
+					-- 뎁스밴드(2026-09-13 유저 지정) — 경로에 걸려도 조준한 target과 다른 앞/뒤 구간이면 제외.
+					-- 이 루프는 시전과 같은 프레임에 동기로 돌아서 앵커가 죽을 틈이 없다 → IsSameDepthBand 직접 사용
+					if inPath and self:IsSameDepthBand(target, m) then
 						if isCrit then m:TakeDamageCrit(damage * 2)
 						else m:TakeDamage(damage) end
 						pathHitCount = pathHitCount + 1
@@ -15576,21 +15589,22 @@ script CardManager extends Logic
 		return base
 	end
 
-	-- 콜드 빔 (Card 3) 레벨별 수치 — Lv1~2: 기본(110) / Lv3~4: +50(160) / Lv5: +100(210).
-	-- 1타/2타로 반씩 나눠 적용하는 건 ColdBeamAttack 호출부에서 처리(이 값은 총 데미지 기준값)
+	-- 콜드 빔 (Card 3) 레벨별 수치 — Lv1: 기본(110) / Lv2~3: +50(160) / Lv4: +100(210) / Lv5: +150(260).
+	-- (2026-09-13 유저 지정) 타겟 수가 2,2,3,3,3으로 바뀌면서 타겟 증가가 Lv3 한 번만 남았다 —
+	-- 그대로 두면 Lv2/Lv4가 아무 변화 없는 빈 레벨이 되므로, 피해량 강화를 Lv2/Lv4/Lv5 세 번으로
+	-- 재배치해서 모든 레벨에 강화가 하나씩 붙도록 맞췄다(레벨별 표기는 GetCardLevelChangelog와 동기화).
 	method number GetColdBeamDamage()
-		if self.ColdBeamLevel >= 5 then return self.Card3Damage + 100
-		elseif self.ColdBeamLevel >= 3 then return self.Card3Damage + 50
+		if self.ColdBeamLevel >= 5 then return self.Card3Damage + 150
+		elseif self.ColdBeamLevel >= 4 then return self.Card3Damage + 100
+		elseif self.ColdBeamLevel >= 2 then return self.Card3Damage + 50
 		end
 		return self.Card3Damage
 	end
 
-	-- Lv1: 1명 / Lv2~3: 2명 / Lv4~5: 3명
+	-- Lv1~2: 2명 / Lv3~5: 3명 (2026-09-13 유저 지정: 2,2,3,3,3)
 	method integer GetColdBeamTargetCount()
-		if self.ColdBeamLevel >= 4 then return 3
-		elseif self.ColdBeamLevel >= 2 then return 2
-		end
-		return 1
+		if self.ColdBeamLevel >= 3 then return 3 end
+		return 2
 	end
 
 	-- Lv1~2: 기본(100) / Lv3~4: +50(150) / Lv5: +100(200)
@@ -16216,10 +16230,10 @@ script CardManager extends Logic
 	method table GetCardLevelChangelog(integer cardIdx)
 		if cardIdx == 3 then
 			return {
-				"해금! (대미지 110, 타겟 1명, 슬로우 3초)",
-				"공격 대상 +1",
+				"해금! (대미지 110, 타겟 2명, 슬로우 3초)",
 				"피해량 +50",
 				"공격 대상 +1",
+				"피해량 +50",
 				"피해량 +50",
 			}
 		elseif cardIdx == 4 then
@@ -18817,7 +18831,7 @@ script CardManager extends Logic
 		if _GameManager.GameOver then return end
 		-- 튜토리얼 카드 선택 단계에서는 플레이어 자동 공격/쿨다운/포션까지 전부 멈춘다
 		-- (_GameManager.TutorialPaused 선언부 주석 참고)
-		if _GameManager.TutorialPaused then return end
+		if _GameManager:IsGamePaused() then return end
 		-- 에임 단계가 열리기 전(Step 0 대기 중)에도 기본 공격을 쏘지 않는다 — 유저 지정 2026-09-11:
 		-- "처음에 공격을(기본) 안 해야 할 것 같아, 몬스터를 잡아버리네". 첫 웨이브를 한 마리도
 		-- 잡지 않은 상태에서 에임 안내가 떠야 한다(안 막으면 안내 전에 다 죽여서 화면이 빈다)
@@ -19385,6 +19399,25 @@ script CardManager extends Logic
 		return bandA == bandB
 	end
 
+	-- 조준 대상의 밴드 값(앞=true / 뒤=false)만 뽑아둔다.
+	-- ⚠ 지속형 장판이나 여러 번에 나눠 들어가는 연타처럼 **조준 대상이 도중에 죽을 수 있는** 스킬은
+	-- IsSameDepthBand를 그대로 쓰면 안 된다 — 그 함수는 무효 대상에 안전 기본값 true를 반환하므로
+	-- 앵커가 죽는 순간 밴드 필터가 통째로 풀려 앞뒤 몬스터를 전부 때리게 된다.
+	-- 그런 스킬은 시전 시점에 이 값을 캡처해두고 IsInDepthBand로 비교할 것.
+	@ExecSpace("ServerOnly")
+	method boolean GetDepthBand(MonsterAI m)
+		-- 뎁스밴드 값 캡처용
+		if not isvalid(m) then return true end
+		return m._currentScale >= self.DepthBandThreshold
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean IsInDepthBand(MonsterAI m, boolean band)
+		-- 캡처해둔 밴드와 같은 구간인지
+		if not isvalid(m) then return true end
+		return (m._currentScale >= self.DepthBandThreshold) == band
+	end
+
 	-- ── 판정 도형 헬퍼 ────────────────────────────────────────────────────────────
 	-- 스킬 판정은 원래 전부 원(dx*dx + dy*dy <= r*r)이었는데, 연출 스프라이트가 대부분 가로로
 	-- 긴 모양(평균 1.6:1, 최대 3:1)이라 원으로는 세로에 맞추면 가로가 모자라고 가로에 맞추면
@@ -19500,15 +19533,69 @@ script CardManager extends Logic
 	-- 허공을 누르면 아무 일도 일어나지 않는다(기존 포커스는 그대로 유지).
 	property number FocusBoxPad = 0.10
 
+	-- ★ 상자 개편(2026-09-13) — 스프라이트 원본 크기 기준으로 전환.
+	-- 버그: `FocusBoxBossScale = 1.7`은 블루 머쉬맘 하나만 보고 실측한 값이라 다른 보스에 안 맞았다.
+	-- 보스는 `def.scale`로 화면 크기를 정규화하기 때문에 Scale.x가 종마다 제각각이고(머쉬맘 1.95 /
+	-- 가디언 엔젤 슬라임 0.37), 슬라임 기준으로는 상자가 스프라이트의 1/4밖에 안 됐다 —
+	-- 실측(2026-09-13): **엔젤 슬라임 몸통을 정통으로 2번 눌렀는데 둘 다 뒤쪽 일반 몹이 잡혔다**.
+	-- 이제 상자도 에임과 똑같이 `스프라이트 원본 × Scale.x`(= 화면에서 실제로 보이는 크기)로 잡으므로
+	-- 종/보스 구분 없이 항상 스프라이트에 맞는다. `FocusBox{HalfWidth,Up,Down,BossScale}`는
+	-- 리소스를 못 읽었을 때의 폴백 전용으로 남는다.
+	--
+	-- 가로 여유 배율 — 스프라이트 폭보다 이만큼 넓게 잡는다(살짝 빗맞혀도 눌리도록).
+	-- 세로는 스프라이트 높이를 그대로 쓰고 FocusBoxPad만 더한다(예전 상자가 위로 너무 길어서
+	-- "허공을 눌러도 잡히는" 원인이었다).
+	property number FocusBoxWidthMul = 1.3
+
 	property string FocusMarkRUID = "47ea73beb91641cf99c982e95f7fb0d9"
 
 	property number FocusMarkDuration = 0.84  -- 실측: 7프레임
 
-	-- 유저 지정(2026-09-07): 처음 2.0으로 띄웠다가 "크기 20% 줄여줘" → 1.6
-	property number FocusMarkScale = 1.6
+	-- 에임 크기의 기준값 = "기준 몹(FocusMarkRefMonsterRUID)이 플레이어 앞까지 다 왔을 때"의 크기.
+	-- 다른 몬스터는 전부 이 값에 (보이는 폭 / 기준 폭) 비율을 곱해서 나온다 — 즉 이 숫자 하나가
+	-- 에임 전체 크기를 좌우한다.
+	-- 이력: 2.0 → 1.6(유저 "크기 20% 줄여줘", 2026-09-07) → 1.12(유저 "전체적으로 30%만 줄이자", 2026-09-13)
+	property number FocusMarkScale = 1.12
 
-	-- 유저 지정: 에임을 Y축으로 이만큼 올려서 띄운다(발밑 기준이라 그냥 두면 너무 아래에 깔린다)
-	property number FocusMarkYOffset = 0.5
+	-- 유저 지정(2026-09-13): "몬스터마다 크기가 다른데 에임은 크기가 같아 — 몬스터 크기에 따라
+	-- 크기도 변화하면 좋겠다". 에임 크기를 sizeK에 비례시키되, 기존에 눈으로 맞춰둔 1.6이 그대로
+	-- 재현되는 기준 sizeK를 여기 둔다(일반 몹이 플레이어에게 도달했을 때의 Scale.x = 1.5).
+	-- 즉 sizeK 1.5 → 1.6(기존과 동일), 그보다 크면 더 크게 / 작으면 더 작게.
+	property number FocusMarkRefSizeK = 1.5
+
+	-- 비례 계산의 위아래 한계. 아주 멀리 있는(작은) 잔몹에서 점처럼 사라지거나, 거대 보스에서
+	-- 화면을 덮어버리는 것만 막는 안전장치다 — 평상시에는 걸리지 않는다.
+	-- ⚠ FocusMarkScale을 조정하면 이 둘도 같은 비율로 같이 움직여야 한다. 안 그러면 전체를 줄였을 때
+	-- 하한에 자꾸 걸려서 "작은 몹들만 안 줄어드는" 현상이 생긴다(2026-09-13 30% 축소 때 같이 내림).
+	property number FocusMarkMinScale = 0.35
+
+	property number FocusMarkMaxScale = 5.6
+
+	-- ★ 에임 크기 기준 = **디폴트 몬스터 1마리**(유저 지정 2026-09-13: "디폴트로 어떤 몬스터를 잡고
+	-- 그 몬스터보다 큰지 작은지를 판단" + "거리도 추가되야지 거기에").
+	--
+	-- 즉 기준 몹이 플레이어 앞까지 다 왔을 때의 크기를 1.0으로 두고, 지금 찍은 몬스터가 그보다
+	-- 크면 에임도 크게 / 작으면 작게 나온다. 거리(다가온 정도)도 같은 배율에 함께 곱해진다.
+	--
+	-- ⚠ 비교 기준은 "원본 이미지 픽셀 크기" 단독이 아니라 **원본 픽셀 × 현재 Scale.x**(= 화면에서
+	-- 실제로 보이는 크기)다. 둘 중 하나만 쓰면 반드시 틀어진다 — 실측(2026-09-13):
+	--   · 원본 픽셀만: 가디언 엔젤 슬라임 494px vs 블루 머쉬맘 119px → 4배 차이지만, 슬라임은
+	--     `def.scale`로 줄여 그리기 때문에 화면에서는 오히려 머쉬맘보다 조금 작다.
+	--   · Scale.x만: 머쉬맘 1.95 / 슬라임 0.37 → 5배 차이지만 화면 폭은 2.7 vs 2.0유닛뿐.
+	--   두 값을 곱해야 비로소 "화면에서 보이는 크기"가 되고, 여기에 거리(_currentScale)까지
+	--   자동으로 포함된다(Scale.x = _currentScale × _scaleMultiplier).
+	--
+	-- 기준 몹의 원본 크기는 이 RUID에서 런타임에 직접 읽는다(숫자를 박아두지 않는다 — 기준 몹을
+	-- 바꾸고 싶으면 이 RUID만 갈아끼우면 된다). 기본값은 에피1 존1의 평범한 중간 크기 몹(원본 64×49).
+	property string FocusMarkRefMonsterRUID = "50faf654ee5d479cb2958edce9feaef0"
+
+	-- 기준 몹이 "플레이어 앞까지 다 왔을 때"의 접근 스케일(= MonsterAI._reachedScaleThreshold 기본값).
+	-- 기준 크기 = 기준 몹 원본 폭 × 이 값.
+	property number FocusMarkRefApproachScale = 1.5
+
+	-- RUID → 스프라이트 원본 메타 캐시(GetSpriteMetrics 참고). 리소스 로드가 한 프레임 멈추는
+	-- 동기 호출이라 종당 한 번만 읽는다
+	property table _spriteMetricsCache = {}
 
 	-- 유저 지정: "사이즈 좀 키운 상태에서 나와서 원래 크기로 돌아가면 더 눈에 띌 것 같다"
 	property number FocusMarkPopScale = 2.2
@@ -19546,14 +19633,12 @@ script CardManager extends Logic
 				local dx = wp.x - worldX
 				local dy = wp.y - worldY
 				local d2 = dx * dx + dy * dy
-				-- 스프라이트 상자 판정 — 엔티티 좌표가 발밑이므로 위로 넓게, 아래로 조금.
-				-- 스케일에 비례한 크기 + 고정 여유(FocusBoxPad)
-				-- 보스는 원본 스프라이트가 훨씬 커서 같은 scaleX라도 화면상 크기가 다르다(FocusBoxBossScale 주석 참고)
-				local sizeK = scale
-				if m._isBoss then sizeK = scale * self.FocusBoxBossScale end
-				local halfW = self.FocusBoxHalfWidth * sizeK + self.FocusBoxPad
-				local up = self.FocusBoxUp * sizeK + self.FocusBoxPad
-				local down = self.FocusBoxDown * sizeK + self.FocusBoxPad
+				-- 스프라이트 상자 판정 — 엔티티 좌표가 발밑이므로 스프라이트는 위로 그려진다.
+				-- 상자 규격은 GetFocusBox 한 곳에서만 계산한다(클라 ScanMonsterBoxAt와 공유)
+				local box = self:GetFocusBox(m._standRUID, scale, m._isBoss)
+				local halfW = box.halfW
+				local up = box.up
+				local down = box.down
 				if worldX >= wp.x - halfW and worldX <= wp.x + halfW
 					and worldY >= wp.y - down and worldY <= wp.y + up then
 					-- 겹치면 앞에 있는 놈(스케일 큰 쪽) 우선, 스케일이 같으면 터치점에 가까운 쪽
@@ -19610,11 +19695,11 @@ script CardManager extends Logic
 					local tf = c.TransformComponent
 					if tf ~= nil then
 						local wp = tf.WorldPosition
-						local sizeK = tf.Scale.x
-						if ai._isBoss then sizeK = sizeK * self.FocusBoxBossScale end
-						local halfW = self.FocusBoxHalfWidth * sizeK + self.FocusBoxPad
-						local up = self.FocusBoxUp * sizeK + self.FocusBoxPad
-						local down = self.FocusBoxDown * sizeK + self.FocusBoxPad
+						-- 서버 RequestFocusTarget과 같은 메서드로 계산한다(규격 공유)
+						local box = self:GetFocusBox(ai._standRUID, tf.Scale.x, ai._isBoss)
+						local halfW = box.halfW
+						local up = box.up
+						local down = box.down
 						if worldX >= wp.x - halfW and worldX <= wp.x + halfW
 							and worldY >= wp.y - down and worldY <= wp.y + up then
 							return true
@@ -19629,21 +19714,135 @@ script CardManager extends Logic
 		return false
 	end
 
+	-- 스프라이트 원본 메타(폭/높이/피벗)를 유닛 단위로 돌려준다. RUID당 한 번만 읽고 캐시한다 —
+	-- `LoadAnimationClipAndWait`는 이름 그대로 한 프레임 멈추기 때문에 매번 부르면 안 된다.
+	-- 실패하면 w = -1인 테이블을 돌려주고 그것도 캐시한다(못 읽는 RUID를 매번 재시도하지 않도록).
+	-- 반환: { w = 폭(유닛, 스케일1 기준), h = 높이, px = pivot.x, py = pivot.y }
+	--
+	-- ⚠ ExecSpace를 일부러 안 붙였다(= 부른 쪽에서 실행). 서버(에임 표식/RequestFocusTarget)와
+	-- 클라(ScanMonsterBoxAt)가 **같은 상자/크기 기준**을 써야 해서 양쪽에서 다 불린다.
+	-- 캐시(_spriteMetricsCache)는 @Sync가 아니라 각 사이드가 따로 채운다(같은 리소스라 결과는 동일).
+	method table GetSpriteMetrics(string ruid)
+		-- 에임 크기/위치 계산용 스프라이트 원본 크기 조회(캐시됨)
+		if ruid == nil or ruid == "" then return { w = -1, h = -1, px = 0.5, py = 0.0 } end
+		local cached = self._spriteMetricsCache[ruid]
+		if cached ~= nil then return cached end
+
+		local sp = nil
+		if _ResourceService:GetTypeAndWait(ruid) == ResourceType.AnimationClip then
+			local clip = _ResourceService:LoadAnimationClipAndWait(ruid)
+			if clip ~= nil and clip.Frames ~= nil and clip.Frames.Count > 0 then
+				sp = clip.Frames[1].FrameSprite
+			end
+		else
+			sp = _ResourceService:LoadSpriteAndWait(ruid)
+		end
+
+		local m = { w = -1, h = -1, px = 0.5, py = 0.0 }
+		if sp ~= nil and sp.PixelPerUnit > 0 and sp.Width > 0 then
+			m = { w = sp.Width / sp.PixelPerUnit, h = sp.Height / sp.PixelPerUnit, px = sp.Pivot.x, py = sp.Pivot.y }
+		else
+			log_warning("GetSpriteMetrics: failed to read sprite " .. ruid)
+		end
+		self._spriteMetricsCache[ruid] = m
+		return m
+	end
+
+	-- 포커스 터치 판정 상자(엔티티 발밑 기준, 월드 유닛). 반환: { halfW, up, down }.
+	-- ⚠ 서버(RequestFocusTarget)와 클라(ScanMonsterBoxAt)가 **반드시 이 한 메서드를 공유**한다 —
+	-- 한쪽만 다른 식으로 계산하면 "에임은 잡히는데 맵 오브젝트도 같이 눌리는" 어긋남이 생긴다.
+	-- 스프라이트 원본을 못 읽으면 예전 Scale.x 비례 상자로 폴백한다.
+	method table GetFocusBox(string standRuid, number scaleX, boolean isBoss)
+		-- 몬스터 터치 판정 상자 계산(에임 크기와 같은 기준)
+		local m = self:GetSpriteMetrics(standRuid)
+		if m.w > 0 then
+			local w = m.w * scaleX
+			local h = m.h * scaleX
+			return {
+				halfW = w * 0.5 * self.FocusBoxWidthMul + self.FocusBoxPad,
+				up = (1.0 - m.py) * h + self.FocusBoxPad,
+				down = m.py * h + self.FocusBoxPad,
+			}
+		end
+		local sizeK = scaleX
+		if isBoss then sizeK = sizeK * self.FocusBoxBossScale end
+		return {
+			halfW = self.FocusBoxHalfWidth * sizeK + self.FocusBoxPad,
+			up = self.FocusBoxUp * sizeK + self.FocusBoxPad,
+			down = self.FocusBoxDown * sizeK + self.FocusBoxPad,
+		}
+	end
+
+	-- 기준 몹(FocusMarkRefMonsterRUID)이 플레이어 앞까지 다 왔을 때의 화면 폭(유닛).
+	-- 에임 크기는 전부 이 값 대비 비율로 정해진다. 기준 몹 리소스를 못 읽으면 -1.
+	@ExecSpace("ServerOnly")
+	method number GetFocusRefWidth()
+		-- 에임 크기 비교의 기준이 되는 "디폴트 몬스터"의 화면 폭
+		local m = self:GetSpriteMetrics(self.FocusMarkRefMonsterRUID)
+		if m.w <= 0 then return -1 end
+		return m.w * self.FocusMarkRefApproachScale
+	end
+
 	-- 찍은 몬스터 위에 표식을 한 번 띄운다. 유저 지정대로 **원래 크기보다 크게 나왔다가 줄어들면서**
 	-- 눈에 띄게 하고, 클립 재생시간이 끝나면 사라진다(계속 붙어있는 마커가 아니라 1회 확인 연출).
+	--
+	-- 위치/크기 개편(2026-09-13, 유저 지정: "에임이 몬스터 정중앙에 가면 좋겠고, 몬스터마다 크기가
+	-- 다른데 에임은 크기가 같아" → "디폴트로 어떤 몬스터를 잡고 그 몬스터보다 큰지 작은지를 판단"
+	-- → "거리도 추가되야지 거기에"):
+	--   이전에는 위치가 고정 오프셋(+0.5)이고 크기는 GetEffectScaleRatio(= "얼마나 다가왔나"만 보는
+	--   깊이 보정, 하한 0.75)라서, 몸집이 큰 보스든 작은 달팽이든 에임이 사실상 같은 크기로 떴다.
+	--
+	-- 이제 **기준 몹 대비 화면에서 보이는 크기**로 정한다:
+	--   보이는 폭 = 스프라이트 원본 폭 × Scale.x      (Scale.x = 거리 × 종별 시각보정)
+	--   에임 크기 = FocusMarkScale × 보이는 폭 / 기준 몹의 보이는 폭
+	-- 종 고유 크기와 거리가 둘 다 자동으로 들어간다(왜 둘을 곱해야 하는지는 FocusMarkRefMonsterRUID
+	-- 선언부의 실측 주석 참고).
+	--
+	-- 위치는 스프라이트 피벗으로 정확히 중앙을 잡는다 — 몬스터 엔티티 좌표는 발밑(pivot.y = 0 실측)이고
+	-- 가로 피벗도 종마다 0.42~0.50으로 조금씩 다르다. 둘 다 보정해야 진짜 "정중앙"이 된다.
+	--
+	-- 리소스를 못 읽으면(퍼블리시 서버에서 스프라이트 로드 실패 등) 예전 방식(터치 상자 Scale.x 비례)으로
+	-- 자동 폴백한다 — 에임이 아예 안 뜨는 것보다 낫다.
 	@ExecSpace("ServerOnly")
 	method void PlayFocusMark(any target)
 		-- 포커스 지정 확인용 표식(커졌다 원래 크기로 줄어드는 팝 연출)
 		if not isvalid(target) or not isvalid(target.Entity) then return end
 		local map = target.Entity.CurrentMap
 		if map == nil then return end
-		local wp = target.Entity.TransformComponent.WorldPosition
-		local fx = _SpawnService:SpawnByModelId("skilleffect", "FocusMark", Vector3(wp.x, wp.y + self.FocusMarkYOffset, wp.z - 0.3), map)
+		local tf = target.Entity.TransformComponent
+		local wp = tf.WorldPosition
+		local sx = tf.Scale.x
+		local centerX = 0.0
+		local centerY = 0.0
+		local baseScale = 0.0
+
+		local m = self:GetSpriteMetrics(target._standRUID)
+		local refWidth = self:GetFocusRefWidth()
+		if m.w > 0 and refWidth > 0 then
+			local seenW = m.w * sx
+			local seenH = m.h * sx
+			centerX = (0.5 - m.px) * seenW
+			centerY = (0.5 - m.py) * seenH
+			baseScale = self.FocusMarkScale * seenW / refWidth
+			log(string.format("PlayFocusMark: boss=%s img=%dx%d scaleX=%.2f seen=%.2f ref=%.2f ratio=%.2f scale=%.2f",
+				tostring(target._isBoss), math.floor(m.w * 100), math.floor(m.h * 100), sx, seenW, refWidth, seenW / refWidth, baseScale))
+		else
+			-- 폴백: 예전 방식(터치 상자 기준 Scale.x 비례)
+			local sizeK = sx
+			if target._isBoss then sizeK = sizeK * self.FocusBoxBossScale end
+			centerY = (self.FocusBoxUp - self.FocusBoxDown) * 0.5 * sizeK
+			baseScale = self.FocusMarkScale * sizeK / self.FocusMarkRefSizeK
+			log_warning(string.format("PlayFocusMark: sprite metrics unavailable, fallback (boss=%s scaleX=%.2f scale=%.2f)",
+				tostring(target._isBoss), sx, baseScale))
+		end
+		if baseScale < self.FocusMarkMinScale then baseScale = self.FocusMarkMinScale end
+		if baseScale > self.FocusMarkMaxScale then baseScale = self.FocusMarkMaxScale end
+
+		local fx = _SpawnService:SpawnByModelId("skilleffect", "FocusMark", Vector3(wp.x + centerX, wp.y + centerY, wp.z - 0.3), map)
 		if fx == nil then return end
 		local renderer = fx.SpriteRendererComponent
 		if renderer ~= nil then renderer.SpriteRUID = self.FocusMarkRUID end
-		-- 깊이감 보정(멀리 있는 몬스터면 표식도 같이 작게)까지 곱한 값이 "원래 크기"다
-		local baseScale = self:GetEffectScaleRatio(target) * self.FocusMarkScale
+		-- 이 값이 "원래 크기"다(팝 연출은 이 값의 FocusMarkPopScale배에서 시작해 줄어든다)
 		local startScale = baseScale * self.FocusMarkPopScale
 		fx.TransformComponent.Scale = Vector3(startScale, startScale, 1)
 		_TweenLogic:PlayTween(0.0, 1.0, self.FocusMarkPopDuration, EaseType.QuadEaseOut, function(t)
@@ -20093,21 +20292,30 @@ script CardManager extends Logic
 	@ExecSpace("ServerOnly")
 	method void ColdBeamAttack(number damage, boolean isCrit)
 		self:PlayColdBeamSound()
-		-- 레벨별 타겟 수는 GetColdBeamTargetCount 참고(Lv1:1명/Lv2~3:2명/Lv4~5:3명). 단일 히트 —
+		-- 레벨별 타겟 수는 GetColdBeamTargetCount 참고(Lv1~2:2명/Lv3~5:3명). 단일 히트 —
 		-- 전체 데미지를 칼이 바닥에 꽂히는 연출 시점(Card3ImpactDelay)에 한 번에 적용한다
 		-- (메테오와 동일한 "연출 먼저, 착탄 시 데미지" 패턴). 슬로우는 레벨/다른 카드와 무관하게 항상 3초 고정
 		local targets = self:GetClosestTargets(self:GetColdBeamTargetCount())
 		local slowDur = 3.0
-		for _, target in ipairs(targets) do
+		for _, mob in ipairs(targets) do
+			---@type MonsterAI
+			local target = mob
+			if not isvalid(target) or not isvalid(target.Entity) then continue end
+			-- 연출은 대상 생사와 무관하게 끝까지 재생한다(공통 정책) — 좌표/스케일을 시전 시점에 값으로 캡처.
+			-- 1단계(칼)와 2단계(얼음 버스트)가 같은 자리에서 이어지도록 둘 다 이 캡처 좌표를 쓴다.
+			local castPos = target.Entity.TransformComponent.Position
+			local scaleRatio = self:GetEffectScaleRatio(target)
+			-- 존을 넘어간 뒤 지연 콜백이 실행되면 다음 존에 연출이 남는다 — 캐스트 시점 존을 캡처해 거른다
+			local castZoneIndex = target._spawnZoneIndex
+
 			-- 새 이펙트는 대상 주변으로 퍼지는 얼음 폭발이라 방향성이 없다 — 빔처럼 위쪽에 띄울 필요 없이 대상 위치에 바로 재생한다
 			-- "칼이 꽂히는" 정점(Card3ImpactFrameIndex)까지만 재생하고 그 뒤 여운 프레임은 EndFrameIndex로
 			-- 잘라낸다. 공용 "skilleffect" 모델은 자체 기본 Duration이 0.8초라 그보다 긴 Destroy 지연을
 			-- 걸어도 모델 쪽 타이머가 먼저 파괴해버려서(실측 확인) 격리된 "skilleffectlong" 모델로 스폰—
 			-- 데미지 타이밍(Card3ImpactDelay)에 맞춰 이 연출도 같이 파괴해서 여운 없이 딱 끊는다.
 			-- X는 Card3EffectXOffset만큼 오른쪽으로 밀어서 pivot 오프셋을 보정한다(위 프로퍼티 주석 참고).
-			local p3 = target.Entity.TransformComponent.Position
-			local p3fx = Vector3(p3.x + self.Card3EffectXOffset, p3.y, p3.z)
-			local fx1 = self:SpawnEffectWithModel(self.Card3EffectRUID, p3fx, 0, 0.8, 0.8349 * (self:GetEffectScaleRatio(target)), 1, "skilleffectlong")
+			local p3fx = Vector3(castPos.x + self.Card3EffectXOffset, castPos.y, castPos.z)
+			local fx1 = self:SpawnEffectWithModel(self.Card3EffectRUID, p3fx, 0, 0.8, 0.8349 * scaleRatio, 1, "skilleffectlong")
 			if fx1 ~= nil then
 				local renderer = fx1.SpriteRendererComponent
 				if renderer ~= nil then renderer.EndFrameIndex = self.Card3ImpactFrameIndex end
@@ -20119,30 +20327,35 @@ script CardManager extends Logic
 			-- 데미지를 적용한다(아이스 계열 스택 보너스는 착탄 시점 스택 기준).
 			-- 버그 수정(2026-08-25, 유저 지적: "적 죽으면 연출 끊기는거 같은데") — 2단계 연출 스폰이
 			-- 데미지 판정과 같은 target._dead 조건에 묶여 있어서, 이 딜레이 도중 다른 원인으로 대상이
-			-- 죽으면 연출 자체가 통째로 안 나갔다. 다른 스킬들과 동일한 정책(연출은 대상 생사와 무관하게
-			-- 항상 끝까지 재생, 데미지만 생사 체크)으로 분리 — 엔티티 자체가 유효하기만 하면 연출은 재생.
+			-- 죽으면 연출 자체가 통째로 안 나갔다.
+			-- 추가 수정(2026-09-13, 같은 증상 재발) — _dead는 떼어냈지만 2단계 스폰이 여전히
+			-- isvalid(target.Entity) 안에 들어 있어서, 죽은 몬스터 엔티티가 사망 연출 뒤 파괴되면
+			-- (MonsterAI.Die → Entity:Destroy(_dieDuration + 0.2)) 이 0.475초 사이에 사라져 연출이
+			-- 통째로 누락됐다. 좌표를 시전 시점에 값으로 캡처해 두고 스폰 자체는 타겟 생사/유효성과
+			-- 완전히 분리한다 — 이제 대상이 죽든 파괴되든 얼음 버스트는 항상 끝까지 나간다.
+			-- ⚠ 여기에 타겟 유효성 체크를 다시 넣지 말 것. 생사 체크는 아래 데미지 타이머에만 둔다.
 			_TimerService:SetTimerOnce(function()
-				if isvalid(target) and isvalid(target.Entity) then
-					local p4 = target.Entity.TransformComponent.Position
-					local fx2 = self:SpawnEffect(self.Card3SecondEffectRUID, p4, 0, 1, self:GetEffectScaleRatio(target), 1)
-					if fx2 ~= nil then fx2:Destroy(self.Card3SecondEffectLifetime) end
+				if not isvalid(self) then return end
+				if castZoneIndex ~= _MapManager.CurrentMapIndex then return end
+				local fx2 = self:SpawnEffect(self.Card3SecondEffectRUID, castPos, 0, 1, scaleRatio, 1)
+				if fx2 ~= nil then fx2:Destroy(self.Card3SecondEffectLifetime) end
 
-					_TimerService:SetTimerOnce(function()
-						if isvalid(target) and isvalid(target.Entity) and not target._dead then
-							local iceBonus = self:GetIceStackBonus(target)
-							local finalDamage = damage * iceBonus
-							if isCrit then target:TakeDamageCrit(finalDamage * 2)
-							else target:TakeDamage(finalDamage) end
-							target:ApplySlow(slowDur)
-							if self.FreezingEffectLevel > 0 then target:AddFreezeStack() end
-							-- SkillInventory 콜드빔(인덱스4) Lv9: 20% 확률로 빙결스택 +1 추가, 카드 자체 레벨과 별개
-							if self:GetSkillInvLevel(3) >= 9 and _UtilLogic:RandomDouble() < 0.20 then target:AddFreezeStack() end
-							log("ColdBeamAttack: impact dmg=" .. math.floor(isCrit and finalDamage * 2 or finalDamage))
-						end
-					end, self.Card3SecondEffectDamageDelay)
-				end
+				_TimerService:SetTimerOnce(function()
+					if isvalid(target) and isvalid(target.Entity) and not target._dead then
+						local iceBonus = self:GetIceStackBonus(target)
+						local finalDamage = damage * iceBonus
+						if isCrit then target:TakeDamageCrit(finalDamage * 2)
+						else target:TakeDamage(finalDamage) end
+						target:ApplySlow(slowDur)
+						if self.FreezingEffectLevel > 0 then target:AddFreezeStack() end
+						-- SkillInventory 콜드빔(인덱스4) Lv9: 20% 확률로 빙결스택 +1 추가, 카드 자체 레벨과 별개
+						if self:GetSkillInvLevel(3) >= 9 and _UtilLogic:RandomDouble() < 0.20 then target:AddFreezeStack() end
+						log("ColdBeamAttack: impact dmg=" .. math.floor(isCrit and finalDamage * 2 or finalDamage))
+					end
+				end, self.Card3SecondEffectDamageDelay)
 			end, self.Card3ImpactDelay)
 		end
+		log("ColdBeamAttack: targets=" .. #targets .. " lv=" .. self.ColdBeamLevel)
 	end
 
 	@ExecSpace("ServerOnly")
@@ -26493,6 +26706,13 @@ script CardManager extends Logic
 	end
 
 end
+
+
+
+
+
+
+
 
 
 

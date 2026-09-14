@@ -461,6 +461,14 @@ script MonsterAI extends Component
 	-- MonsterSprite 자체를 단계별로 바꿔주면 히트/공격 연출 복귀 로직을 손댈 필요가 없다(항상 "지금 단계의
 	-- 올바른 포즈"로 자동 복귀됨). 공중형은 스케일 접근이 아니라 자유비행이라 move 연출 자체가 필요 없어
 	-- _moveRUID가 빈 문자열로 유지되고(InitializeStats), 그 경우 MonsterSprite는 항상 _standRUID로 고정된다.
+	--
+	-- @Sync인 이유(2026-09-13): 포커스(에임) 터치 판정 상자를 **스프라이트 원본 크기 기준**으로 잡으면서
+	-- 클라이언트(CardManager.ScanMonsterBoxAt — 맵 오브젝트 터치 가드)도 이 RUID로 원본 크기를 읽어야
+	-- 한다. 서버와 클라가 같은 상자를 쓰지 않으면 "에임은 잡히는데 오브젝트도 같이 눌리는" 어긋남이 생긴다.
+	-- 쓰기는 전부 서버(InitializeStats 계열)라 동기화 방향과 충돌 없음(_isBoss를 @Sync로 바꾼 것과 같은 이유).
+	-- MonsterSprite(이미 @Sync) 대신 이걸 쓰는 건, MonsterSprite는 공격/피격 중 클립이 바뀌어서
+	-- 상자 크기가 흔들리기 때문 — stand 클립이 크기 기준으로 안정적이다.
+	@Sync
 	property string _standRUID = ""
 
 	property string _moveRUID = ""
@@ -1013,7 +1021,10 @@ script MonsterAI extends Component
 			-- 안 보인다"는 정확히 이 겹침 타이밍(공격 시점이 서로 얼마나 가까운가)에 좌우되는 증상과 일치.
 			-- attackRUID가 있는 종은 전부(히트 이펙트 유무 무관) attackDuration이 기본 간격보다 길면
 			-- 겹치지 않을 만큼 간격을 늘린다.
-			if self._hitEffectRUID ~= "" or (self._attackRUID ~= "" and self._attackDuration > self.AttackInterval) then
+			-- 예티류는 화면 히트 이펙트를 뺐지만(2026-09-14) 공격 간격은 예전 그대로 유지한다
+			-- (GameManager.GetMapKeepsRangedAttackPace 참고 — 안 보면 1.65초 → 1.0초로 빨라진다).
+			local keepsRangedPace = _GameManager:GetMapKeepsRangedAttackPace(appearanceZone, speciesIdx)
+			if self._hitEffectRUID ~= "" or keepsRangedPace or (self._attackRUID ~= "" and self._attackDuration > self.AttackInterval) then
 				self._customAttackInterval = self._attackDuration + 0.7
 			else
 				self._customAttackInterval = 0
@@ -1231,7 +1242,17 @@ script MonsterAI extends Component
 				self._customAttackInterval = 0
 			end
 		end
-		
+
+		-- ⚠ 버그 수정(2026-09-14, 유저 리포트 "맞으면 애니메이션이 끊기는데??" — 에피3 map4에 스노우맨
+		-- (attack1 2.95초)/레인디어(2.05초)를 섞고 나서 드러났다). 공격 연출이 긴 종은 그 사이 피격될
+		-- 때마다 1프레임 hit1로 튀어 공격이 계속 끊겨 보이므로 그때만 피격 연출을 건너뛴다(대미지는 정상
+		-- 적용) — 이 규칙은 원래 보스(1322)/엘리트(ApplyEliteSpecies)/보스파트너/미니언 경로에만 있었고
+		-- **존 몬스터 풀 경로에는 아예 없었다**. 세 분기(존7+ 풀 / 맵4~6 풀 / 웨이브)가 끝난 이 자리에서
+		-- 한 번에 세운다(보스 로스터 분기는 아래에서 자기 값으로 다시 덮어쓴다).
+		-- 엔티티 재사용 대비로 항상 양쪽 값을 대입한다 — attackRUID가 없으면 무조건 false
+		-- ([[feedback_boss_reuse_flying_flag_inherit]]와 같은 계열의 함정).
+		self._noHitAnimDuringAttack = (self._attackRUID ~= "" and self._attackDuration >= 1.0)
+
 		-- 로스터가 있는 에피소드(1·2)의 보스는 "존 몬스터가 커진 것"이 아니라 **정해진 순서대로 나오는
 		-- 전용 보스**다 (유저 지정 — 2026-09-06 엔젤 슬라임 단독 → 2026-09-07 에피1 로스터화 →
 		-- 2026-09-08 에피2 로스터 추가). 존 풀에서 읽어온 값들을 여기서 통째로 덮어쓴다 —
@@ -2604,7 +2625,7 @@ script MonsterAI extends Component
 		if _GameManager.GameOver then return end
 		-- 첫 플레이 튜토리얼의 카드 선택 단계 — 존과 무관하게 모든 몬스터가 그 자리에 멈춘다.
 		-- _paused(존 이탈용)와 달리 _neverPauses 몬스터도 예외 없이 멈춘다
-		if _GameManager.TutorialPaused then return end
+		if _GameManager:IsGamePaused() then return end
 		if self._isPushingBack then return end
 		if self._paused then return end
 		-- HP 임계 변신 중(엘리쟈)엔 이동/공격/지그재그/대시를 전부 멈춘다 — 유저 지정 "아이들 상태로
@@ -5535,6 +5556,9 @@ script MonsterAI extends Component
 	end
 
 end
+
+
+
 
 
 

@@ -119,10 +119,11 @@ script GameManager extends Logic
 	-- CardManager.OnUpdate가 이 값을 보고 기본공격(파이어샷 vs 애로우샷) 트랙을 분기한다.
 	-- 시작 팝업(WorldCharacterSelectUI)에서 고른 월드/에피소드 — 1=에피소드1(태초의 마을), 2=에피소드2
 	-- (구름정원). "다시하기"는 이 값을 건드리지 않는다(같은 에피소드로 재시작).
-	-- 게임 모드 — 무제한 모드(false, 기존과 동일) / 타임어택 모드(true, 20분 제한). 캐릭터 선택
+	-- 게임 모드 — 무제한 모드(false, 기존과 동일) / 타임어택 모드(true, 15분 제한). 캐릭터 선택
 	-- 팝업의 체크박스에서 고른 값이 RequestStartGame으로 전달돼 여기 저장된다. "다시하기"는 이
 	-- 값을 건드리지 않는다(같은 모드로 재시작 — 로비로 나가서 다시 고르기 전까지 유지).
-	property number TimeAttackDuration = 1200
+	-- 2026-09-14 유저 지정: 20분(1200) → 15분(900). "20분 너무 길다"
+	property number TimeAttackDuration = 900
 
 	-- 랭킹 보드 id — RankingConfigDataSet.csv의 Id 열과 반드시 일치해야 한다(1=무제한, 2=타임어택)
 	property integer RankBoardIdUnlimited = 1
@@ -151,6 +152,35 @@ script GameManager extends Logic
 	-- 멈춘 채로 시작되는 사고를 막기 위한 것
 	@Sync
 	property boolean TutorialPaused = false
+
+	-- 옵션 팝업이 열려 있는 동안의 전역 일시정지(유저 지정 2026-09-13: "옵션 누르면 게임 일시 정지
+	-- 되어야함"). TutorialPaused와 **완전히 같은 정지 지점**을 쓰지만 소유자가 달라서 플래그를 나눴다 —
+	-- 하나로 합치면 튜토리얼이 끝나면서 옵션 정지까지 같이 풀리는 사고가 난다.
+	-- 실제 판정은 두 플래그를 OR한 IsGamePaused() 하나로만 하고, 각 OnUpdate는 그것만 본다.
+	-- 클라(OptionUI)가 RequestSetOptionPaused로 서버에 요청해서 켠다.
+	@Sync
+	property boolean OptionPaused = false
+
+	-- 전역 일시정지 여부 — 튜토리얼 카드선택 정지 또는 옵션 팝업 정지.
+	-- ⚠ 정지 판정은 반드시 이 메서드로만 할 것. 개별 플래그를 직접 보면 한쪽이 빠진다
+	-- (다른 Logic에서는 콜론 호출로만 접근 — feedback_cross_logic_field_access_nil).
+	method boolean IsGamePaused()
+		-- 몬스터 이동/공격·스폰·플레이어 자동공격·타이머를 통째로 멈춰야 하는 상태인지
+		return self.TutorialPaused or self.OptionPaused
+	end
+
+	-- 옵션 팝업 열림/닫힘을 서버에 알린다(정지 플래그는 서버가 소유 + @Sync로 되돌아온다).
+	@ExecSpace("Server")
+	method void RequestSetOptionPaused(boolean paused)
+		-- 옵션 팝업 정지 토글
+		if self.GameOver then
+			-- 게임오버 뒤에는 정지가 남아 다음 판 시작을 막을 수 있으니 항상 해제로 정리한다
+			self.OptionPaused = false
+			return
+		end
+		self.OptionPaused = paused
+		log("GameManager: OptionPaused = " .. tostring(paused))
+	end
 
 	@Sync
 	property boolean _timeAttackOvertimeActive = false
@@ -202,10 +232,12 @@ script GameManager extends Logic
 
 	property TextComponent goldText = "96a9909e-7c1c-43e4-928f-1e97f0dcc8a3"
 
-	-- 타임어택 모드 전용 카운트다운 HUD(경험치바 바로 아래) — 무제한 모드에서는 계속 꺼져있다
-	property Entity timeAttackTimerBg = "b208537e-2e71-4bb2-b2cc-8ad505628625"
+	-- 타임어택 모드 전용 카운트다운 HUD(경험치바 바로 아래) — 무제한 모드에서는 계속 꺼져있다.
+	-- 2026-09-14 유저 지정: 히든맵 타이머판(Ep3Map4Ester1Board)과 같은 디자인의 DefaultGroup/TimeAttackBoard로
+	-- 교체(예전 검은 막대 TimeAttackTimerBg는 삭제). 글자가 TextGUIRendererComponent라 타입도 바꿨다.
+	property Entity timeAttackTimerBg = "6331f122-002c-4fff-90ef-0b308cc8ed32"
 
-	property TextComponent timeAttackTimerText = "91bf9edc-56aa-4c8b-83dc-d52537ab705a"
+	property TextGUIRendererComponent timeAttackTimerText = "62c2326b-bff6-4c46-956d-3e30ee93dc05"
 
 	-- 경험치 바가 순간이동하듯 뚝뚝 끊기지 않고 부드럽게 차오르는 데 걸리는 시간
 	property number ExpBarFillDuration = 0.4
@@ -2184,7 +2216,7 @@ script GameManager extends Logic
 	method void OnUpdate(number delta)
 		-- 튜토리얼 카드 선택 단계에서는 이 아래 전부(허리케인/글로벌 프리즈/타임어택 카운트다운/
 		-- 절망의 칼날)를 통째로 멈춘다 — TutorialPaused 선언부 주석 참고
-		if self.TutorialPaused then return end
+		if self:IsGamePaused() then return end
 		-- 존마다 독립적인 허리케인이 동시에 여러 개 활성화될 수 있으므로 전부 갱신한다.
 		if self._hurricaneEntities ~= nil then
 			local activeZones = {}
@@ -2326,6 +2358,11 @@ script GameManager extends Logic
 		_TitleUI:NotifyDiamondChanged(self.Diamond)
 	end
 
+	method integer GetSelectedEpisode()
+		-- 다른 Logic(EpisodeRewardLogic 등)이 읽는 접근자
+		return self.SelectedEpisode
+	end
+
 	@ExecSpace("ServerOnly")
 	method boolean SpendDiamond(integer amount)
 		-- 뽑기 결제. 부족하면 false만 반환하고 아무것도 바꾸지 않는다
@@ -2393,6 +2430,7 @@ script GameManager extends Logic
 			self.goldText.Text = ": " .. self.Gold
 		elseif name == "TimeAttackMode" then
 			self.timeAttackTimerBg.Enable = self.TimeAttackMode
+			self:SetTimerBoardLayoutActive(self.TimeAttackMode)
 			self:RefreshTimeAttackTimerUI()
 		elseif name == "TimeAttackRemaining" then
 			self:RefreshTimeAttackTimerUI()
@@ -2408,6 +2446,67 @@ script GameManager extends Logic
 		local minutes = math.floor(remaining / 60)
 		local seconds = remaining % 60
 		self.timeAttackTimerText.Text = string.format("%02d:%02d", minutes, seconds)
+	end
+
+	-- 타이머판 5개(타임어택 + 히든맵 2 + 보너스보스 2)는 전부 같은 자리(화면 위 가운데 y=-80, 290x92)를 쓴다.
+	-- 유저 지정(2026-09-14): 여러 개가 동시에 뜨면 아래로 쌓지 말고 **가로 한 줄**로 "타이머 타이머 타이머".
+	-- 각 판의 스크립트는 Enable만 켜고 끄고 위치는 안 건드리므로, 켜진 판 목록이 바뀔 때마다 여기서 줄을 다시 세운다.
+	-- 두 개 이상이 동시에 뜰 수 있는 건 타임어택 모드뿐이라 그때만 주기적으로 확인하고(판이 1개면 원래처럼 가운데),
+	-- 모드가 꺼지면 전부 가운데로 되돌린다.
+	property number TimerBoardY = -80
+	property number TimerBoardWidth = 290
+	property number TimerBoardGap = 10
+	property number TimerBoardLayoutInterval = 0.2
+	property integer _timerBoardLayoutTimerId = 0
+	property string _timerBoardLayoutKey = ""
+
+	@ExecSpace("ClientOnly")
+	method table GetTimerBoardPaths()
+		-- 줄 세우는 순서 = 이 목록 순서(타임어택 판이 맨 왼쪽)
+		return { "/ui/DefaultGroup/TimeAttackBoard", "/ui/DefaultGroup/Ep3Map4Ester1Board", "/ui/DefaultGroup/ExpBoostBoard", "/ui/DefaultGroup/BonusBossBoard", "/ui/DefaultGroup/Map10BonusBossBoard" }
+	end
+
+	@ExecSpace("ClientOnly")
+	method void LayoutTimerBoards()
+		-- 지금 켜진 타이머판만 골라 가운데 기준 가로 한 줄로 놓는다(켜진 목록이 그대로면 아무것도 안 한다)
+		local shown = {}
+		local key = ""
+		for _, p in ipairs(self:GetTimerBoardPaths()) do
+			local e = _EntityService:GetEntityByPath(p)
+			if e ~= nil and e.Enable then
+				table.insert(shown, e)
+				key = key .. p .. ";"
+			end
+		end
+		if key == self._timerBoardLayoutKey then return end
+		self._timerBoardLayoutKey = key
+		local step = self.TimerBoardWidth + self.TimerBoardGap
+		local startX = -(#shown - 1) * step / 2
+		for i, e in ipairs(shown) do
+			e.UITransformComponent.anchoredPosition = Vector2(startX + (i - 1) * step, self.TimerBoardY)
+		end
+		log("GameManager: timer boards in a row count=" .. tostring(#shown))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetTimerBoardLayoutActive(boolean active)
+		-- 타임어택 모드에서만 줄 세우기를 주기적으로 돌린다. 끌 때는 모든 판을 원래 자리(가운데)로 되돌린다
+		if self._timerBoardLayoutTimerId ~= 0 then
+			_TimerService:ClearTimer(self._timerBoardLayoutTimerId)
+			self._timerBoardLayoutTimerId = 0
+		end
+		self._timerBoardLayoutKey = ""
+		if active then
+			self:LayoutTimerBoards()
+			self._timerBoardLayoutTimerId = _TimerService:SetTimerRepeat(function()
+				if isvalid(self) then self:LayoutTimerBoards() end
+			end, self.TimerBoardLayoutInterval)
+			return
+		end
+		for _, p in ipairs(self:GetTimerBoardPaths()) do
+			local e = _EntityService:GetEntityByPath(p)
+			if e ~= nil then e.UITransformComponent.anchoredPosition = Vector2(0, self.TimerBoardY) end
+		end
 	end
 
 	@ExecSpace("ClientOnly")
@@ -3131,8 +3230,8 @@ script GameManager extends Logic
 		elseif mapIndex == 116 then return 3
 		elseif mapIndex == 117 then return 3
 		elseif mapIndex == 118 then return 4
-		-- 에피소드3 map4(존1~10 = mapIndex 119~128, 유저 지정: 주니어예티+다크주니어예티만 섞어서
-		-- 배치, 존마다 라이트/다크 비율을 다르게 해 map3(종 다양성)와 다른 방식으로 베리에이션)
+		-- 에피소드3 map4(존1~10 = mapIndex 119~128, 유저 지정 2026-09-14: 주니어예티/다크주니어예티 +
+		-- 레인디어/블러드레인디어에, map3의 비행(플라이아이)·원거리(스노우맨) 종을 섞어 베리에이션)
 		elseif mapIndex == 119 then return 2
 		elseif mapIndex == 120 then return 2
 		elseif mapIndex == 121 then return 2
@@ -3290,20 +3389,18 @@ script GameManager extends Logic
 			[116] = {"cbf4102c85be4ed98ac4d9a381bcdd5a", "3378ea564ffc4be7a01ba02cffec532e", "c3a0976cc92843979454d75b814f34c6"},  -- 예티와페페/웨어울프/라이칸스로프
 			[117] = {"70329bd13ca243198d1afac3f77143a6", "bf93196a2da842eaaf93c944453416d8", "04d56278279f45c6a99f6726ef5c91fe"},  -- 다크예티와페페/스노우맨/플라이아이
 			[118] = {"70329bd13ca243198d1afac3f77143a6", "cbf4102c85be4ed98ac4d9a381bcdd5a", "f6467914a7f84409b2937fa3668db94d", "2fa39477afb34d8cb6412b7fe5085f42"},  -- 다크예티와페페/예티와페페/다크예티/예티
-			-- 에피소드3 map4(존1~10 = mapIndex 119~128, 유저 지정: 주니어예티(라이트)+다크주니어예티만
-			-- 섞어서 배치, map3(종 다양성)와 다르게 존마다 라이트/다크 비율로 베리에이션). 119:라이트/다크
-			-- 120:다크/다크  121:라이트/라이트  122:라이트/다크/라이트  123:다크/라이트  124:다크/다크/라이트
-			-- 125:라이트/다크/다크  126:라이트/라이트/다크  127:다크/라이트/라이트  128:라이트/다크/라이트/다크
-			[119] = {"1975dd704eec461ab49bdeb0c11c54d9", "ce56cf9613174f80976dab5b61f7b604"},  -- 주니어예티/다크주니어예티
-			[120] = {"ce56cf9613174f80976dab5b61f7b604", "ce56cf9613174f80976dab5b61f7b604"},  -- 다크주니어예티/다크주니어예티
-			[121] = {"1975dd704eec461ab49bdeb0c11c54d9", "1975dd704eec461ab49bdeb0c11c54d9"},  -- 주니어예티/주니어예티
-			[122] = {"1975dd704eec461ab49bdeb0c11c54d9", "ce56cf9613174f80976dab5b61f7b604", "1975dd704eec461ab49bdeb0c11c54d9"},  -- 주니어예티/다크주니어예티/주니어예티
-			[123] = {"ce56cf9613174f80976dab5b61f7b604", "1975dd704eec461ab49bdeb0c11c54d9"},  -- 다크주니어예티/주니어예티
-			[124] = {"ce56cf9613174f80976dab5b61f7b604", "ce56cf9613174f80976dab5b61f7b604", "1975dd704eec461ab49bdeb0c11c54d9"},  -- 다크주니어예티/다크주니어예티/주니어예티
-			[125] = {"1975dd704eec461ab49bdeb0c11c54d9", "ce56cf9613174f80976dab5b61f7b604", "ce56cf9613174f80976dab5b61f7b604"},  -- 주니어예티/다크주니어예티/다크주니어예티
-			[126] = {"1975dd704eec461ab49bdeb0c11c54d9", "1975dd704eec461ab49bdeb0c11c54d9", "ce56cf9613174f80976dab5b61f7b604"},  -- 주니어예티/주니어예티/다크주니어예티
-			[127] = {"ce56cf9613174f80976dab5b61f7b604", "1975dd704eec461ab49bdeb0c11c54d9", "1975dd704eec461ab49bdeb0c11c54d9"},  -- 다크주니어예티/주니어예티/주니어예티
-			[128] = {"1975dd704eec461ab49bdeb0c11c54d9", "ce56cf9613174f80976dab5b61f7b604", "1975dd704eec461ab49bdeb0c11c54d9", "ce56cf9613174f80976dab5b61f7b604"},  -- 주니어예티/다크주니어예티/주니어예티/다크주니어예티
+			-- 에피소드3 map4(119~128) — 주니어예티/다크주니어예티 + 레인디어/블러드레인디어 + map3의
+			-- 플라이아이(비행)/스노우맨(원거리). 존별 구성은 각 행 끝 주석 참고.
+			[119] = {"f0244e37e2244f1f89f217d01219276e", "1975dd704eec461ab49bdeb0c11c54d9"},  -- 레인디어/주니어예티
+			[120] = {"ce56cf9613174f80976dab5b61f7b604", "04d56278279f45c6a99f6726ef5c91fe"},  -- 다크주니어예티/플라이아이(비행)
+			[121] = {"745325dcd0e7412795d3c72db0a73471", "f0244e37e2244f1f89f217d01219276e"},  -- 블러드레인디어/레인디어
+			[122] = {"1975dd704eec461ab49bdeb0c11c54d9", "bf93196a2da842eaaf93c944453416d8", "04d56278279f45c6a99f6726ef5c91fe"},  -- 주니어예티/스노우맨(원거리)/플라이아이(비행)
+			[123] = {"745325dcd0e7412795d3c72db0a73471", "ce56cf9613174f80976dab5b61f7b604"},  -- 블러드레인디어/다크주니어예티
+			[124] = {"f0244e37e2244f1f89f217d01219276e", "04d56278279f45c6a99f6726ef5c91fe", "1975dd704eec461ab49bdeb0c11c54d9"},  -- 레인디어/플라이아이(비행)/주니어예티
+			[125] = {"745325dcd0e7412795d3c72db0a73471", "bf93196a2da842eaaf93c944453416d8", "ce56cf9613174f80976dab5b61f7b604"},  -- 블러드레인디어/스노우맨(원거리)/다크주니어예티
+			[126] = {"ce56cf9613174f80976dab5b61f7b604", "f0244e37e2244f1f89f217d01219276e", "04d56278279f45c6a99f6726ef5c91fe"},  -- 다크주니어예티/레인디어/플라이아이(비행)
+			[127] = {"745325dcd0e7412795d3c72db0a73471", "1975dd704eec461ab49bdeb0c11c54d9", "bf93196a2da842eaaf93c944453416d8"},  -- 블러드레인디어/주니어예티/스노우맨(원거리)
+			[128] = {"745325dcd0e7412795d3c72db0a73471", "ce56cf9613174f80976dab5b61f7b604", "04d56278279f45c6a99f6726ef5c91fe", "bf93196a2da842eaaf93c944453416d8"},  -- 블러드레인디어/다크주니어예티/플라이아이(비행)/스노우맨(원거리)
 			-- ep3_map4_ester_1(존1~5 = mapIndex129~133, 이스터에그 전용, 아직 진입 경로 미배선 —
 			-- 유저 지정: "일단 몬스터 베리에이션만 먼저") — 쿨리좀비/마이너좀비/플라이아이/미믹 4종을
 			-- 2종씩 로테이션(129:쿨리/마이너 130:마이너/플라이아이 131:플라이아이/미믹 132:미믹/쿨리),
@@ -3440,17 +3537,17 @@ script GameManager extends Logic
 			[116] = {"0c88f44d6e184a9883f1abf230aff189", "785f86ed2d9342ce877058a399bb803f", "c2cdfe8b74f84e49859b300c9dcd3b0c"},  -- 예티와페페/웨어울프/라이칸스로프
 			[117] = {"9f05be0781b34abf8628546e19db4500", "881ed191bfad4861b63aa94d2a9a2bb8", ""},  -- 다크예티와페페/스노우맨/플라이아이
 			[118] = {"9f05be0781b34abf8628546e19db4500", "0c88f44d6e184a9883f1abf230aff189", "53a9227119764c268fbedade502834a8", "02dfd5686d7042768adcea2d24c184b4"},  -- 다크예티와페페/예티와페페/다크예티/예티
-			-- 에피소드3 map4(119~128) — 주니어예티/다크주니어예티 라이트-다크 비율 베리에이션(위 표와 동일 배치)
-			[119] = {"842a6865f7074f94ac4a190ed90e2e21", "8d2b8951794d406a86cc580e9eeff18d"},
-			[120] = {"8d2b8951794d406a86cc580e9eeff18d", "8d2b8951794d406a86cc580e9eeff18d"},
-			[121] = {"842a6865f7074f94ac4a190ed90e2e21", "842a6865f7074f94ac4a190ed90e2e21"},
-			[122] = {"842a6865f7074f94ac4a190ed90e2e21", "8d2b8951794d406a86cc580e9eeff18d", "842a6865f7074f94ac4a190ed90e2e21"},
-			[123] = {"8d2b8951794d406a86cc580e9eeff18d", "842a6865f7074f94ac4a190ed90e2e21"},
-			[124] = {"8d2b8951794d406a86cc580e9eeff18d", "8d2b8951794d406a86cc580e9eeff18d", "842a6865f7074f94ac4a190ed90e2e21"},
-			[125] = {"842a6865f7074f94ac4a190ed90e2e21", "8d2b8951794d406a86cc580e9eeff18d", "8d2b8951794d406a86cc580e9eeff18d"},
-			[126] = {"842a6865f7074f94ac4a190ed90e2e21", "842a6865f7074f94ac4a190ed90e2e21", "8d2b8951794d406a86cc580e9eeff18d"},
-			[127] = {"8d2b8951794d406a86cc580e9eeff18d", "842a6865f7074f94ac4a190ed90e2e21", "842a6865f7074f94ac4a190ed90e2e21"},
-			[128] = {"842a6865f7074f94ac4a190ed90e2e21", "8d2b8951794d406a86cc580e9eeff18d", "842a6865f7074f94ac4a190ed90e2e21", "8d2b8951794d406a86cc580e9eeff18d"},
+			-- 에피소드3 map4(119~128) — 위 stand 표와 같은 배치(주니어예티/다크주니어예티/레인디어/블러드레인디어/플라이아이/스노우맨)
+			[119] = {"b4d0e16f61714ea7ad568d3c143daa1d", "842a6865f7074f94ac4a190ed90e2e21"},
+			[120] = {"8d2b8951794d406a86cc580e9eeff18d", ""},
+			[121] = {"7f7bdf3fcf174824a36fedbc71c7e921", "b4d0e16f61714ea7ad568d3c143daa1d"},
+			[122] = {"842a6865f7074f94ac4a190ed90e2e21", "881ed191bfad4861b63aa94d2a9a2bb8", ""},
+			[123] = {"7f7bdf3fcf174824a36fedbc71c7e921", "8d2b8951794d406a86cc580e9eeff18d"},
+			[124] = {"b4d0e16f61714ea7ad568d3c143daa1d", "", "842a6865f7074f94ac4a190ed90e2e21"},
+			[125] = {"7f7bdf3fcf174824a36fedbc71c7e921", "881ed191bfad4861b63aa94d2a9a2bb8", "8d2b8951794d406a86cc580e9eeff18d"},
+			[126] = {"8d2b8951794d406a86cc580e9eeff18d", "b4d0e16f61714ea7ad568d3c143daa1d", ""},
+			[127] = {"7f7bdf3fcf174824a36fedbc71c7e921", "842a6865f7074f94ac4a190ed90e2e21", "881ed191bfad4861b63aa94d2a9a2bb8"},
+			[128] = {"7f7bdf3fcf174824a36fedbc71c7e921", "8d2b8951794d406a86cc580e9eeff18d", "", "881ed191bfad4861b63aa94d2a9a2bb8"},
 			-- ep3_map4_ester_1(존1~5 = mapIndex129~133, 이스터에그 전용, 미배선) — 쿨리좀비/마이너좀비/
 			-- 플라이아이(비행,move불필요="")/미믹 4종 로테이션
 			[129] = {"d5f67f8282954a2b87e2dc00fed0fe16", "2cfaec1131fe475f9fa9d02d1e07ae26"},  -- 쿨리좀비/마이너좀비
@@ -3579,17 +3676,17 @@ script GameManager extends Logic
 			[116] = {"47e79fb1077a4c5cb3446d4ba6c0a71a", "1f28c41ab75a4e398baa0cb5b61c69c2", "aca045d9cf774b42974f83bf0ac3b454"},  -- 예티와페페/웨어울프/라이칸스로프
 			[117] = {"ca37b1df97964250967dec4e16232a21", "4ace032a3dcf4e6a9ee28925c92a93c6", "da1ea90aa01a4d1ba8bf15f1f9a5e4f6"},  -- 다크예티와페페/스노우맨/플라이아이
 			[118] = {"ca37b1df97964250967dec4e16232a21", "47e79fb1077a4c5cb3446d4ba6c0a71a", "796022b69ac2462cbc976c7e3a30a5c0", "186789a04dd34be797ab716279f7fea7"},  -- 다크예티와페페/예티와페페/다크예티/예티
-			-- 에피소드3 map4(119~128) — 주니어예티/다크주니어예티 라이트-다크 비율 베리에이션
-			[119] = {"63a1a5f280f04e55b935d6a2155edcef", "cbe070cdf1fa4611a3529f3d70296a33"},
-			[120] = {"cbe070cdf1fa4611a3529f3d70296a33", "cbe070cdf1fa4611a3529f3d70296a33"},
-			[121] = {"63a1a5f280f04e55b935d6a2155edcef", "63a1a5f280f04e55b935d6a2155edcef"},
-			[122] = {"63a1a5f280f04e55b935d6a2155edcef", "cbe070cdf1fa4611a3529f3d70296a33", "63a1a5f280f04e55b935d6a2155edcef"},
-			[123] = {"cbe070cdf1fa4611a3529f3d70296a33", "63a1a5f280f04e55b935d6a2155edcef"},
-			[124] = {"cbe070cdf1fa4611a3529f3d70296a33", "cbe070cdf1fa4611a3529f3d70296a33", "63a1a5f280f04e55b935d6a2155edcef"},
-			[125] = {"63a1a5f280f04e55b935d6a2155edcef", "cbe070cdf1fa4611a3529f3d70296a33", "cbe070cdf1fa4611a3529f3d70296a33"},
-			[126] = {"63a1a5f280f04e55b935d6a2155edcef", "63a1a5f280f04e55b935d6a2155edcef", "cbe070cdf1fa4611a3529f3d70296a33"},
-			[127] = {"cbe070cdf1fa4611a3529f3d70296a33", "63a1a5f280f04e55b935d6a2155edcef", "63a1a5f280f04e55b935d6a2155edcef"},
-			[128] = {"63a1a5f280f04e55b935d6a2155edcef", "cbe070cdf1fa4611a3529f3d70296a33", "63a1a5f280f04e55b935d6a2155edcef", "cbe070cdf1fa4611a3529f3d70296a33"},
+			-- 에피소드3 map4(119~128) — 위 stand 표와 같은 배치
+			[119] = {"edf3f34697f84b6c87a72f09aa8d0c87", "63a1a5f280f04e55b935d6a2155edcef"},
+			[120] = {"cbe070cdf1fa4611a3529f3d70296a33", "da1ea90aa01a4d1ba8bf15f1f9a5e4f6"},
+			[121] = {"39c02e9e09054bcf85ae1f768a953e95", "edf3f34697f84b6c87a72f09aa8d0c87"},
+			[122] = {"63a1a5f280f04e55b935d6a2155edcef", "4ace032a3dcf4e6a9ee28925c92a93c6", "da1ea90aa01a4d1ba8bf15f1f9a5e4f6"},
+			[123] = {"39c02e9e09054bcf85ae1f768a953e95", "cbe070cdf1fa4611a3529f3d70296a33"},
+			[124] = {"edf3f34697f84b6c87a72f09aa8d0c87", "da1ea90aa01a4d1ba8bf15f1f9a5e4f6", "63a1a5f280f04e55b935d6a2155edcef"},
+			[125] = {"39c02e9e09054bcf85ae1f768a953e95", "4ace032a3dcf4e6a9ee28925c92a93c6", "cbe070cdf1fa4611a3529f3d70296a33"},
+			[126] = {"cbe070cdf1fa4611a3529f3d70296a33", "edf3f34697f84b6c87a72f09aa8d0c87", "da1ea90aa01a4d1ba8bf15f1f9a5e4f6"},
+			[127] = {"39c02e9e09054bcf85ae1f768a953e95", "63a1a5f280f04e55b935d6a2155edcef", "4ace032a3dcf4e6a9ee28925c92a93c6"},
+			[128] = {"39c02e9e09054bcf85ae1f768a953e95", "cbe070cdf1fa4611a3529f3d70296a33", "da1ea90aa01a4d1ba8bf15f1f9a5e4f6", "4ace032a3dcf4e6a9ee28925c92a93c6"},
 			-- ep3_map4_ester_1(존1~5 = mapIndex129~133, 이스터에그 전용, 미배선) — 쿨리좀비/마이너좀비/플라이아이/미믹
 			[129] = {"0a6e44cfa31b4da0890d2926cf8ebb16", "5362c11134bc4bd8a506a3428fde6480"},
 			[130] = {"5362c11134bc4bd8a506a3428fde6480", "da1ea90aa01a4d1ba8bf15f1f9a5e4f6"},
@@ -3717,18 +3814,18 @@ script GameManager extends Logic
 			[116] = {"c1fc107486d346389713281392ab54b5", "72b2c50fba974d478e24e8550a5d8370", "21fbf9315306484f8ab160a3310832ba"},  -- 예티와페페/웨어울프/라이칸스로프
 			[117] = {"4aa11121ec354e22bb501381d1419265", "23d06abe8f804666beaee7246a586f05", "d69b6340252740a48b4631ce00d058c7"},  -- 다크예티와페페/스노우맨/플라이아이
 			[118] = {"4aa11121ec354e22bb501381d1419265", "c1fc107486d346389713281392ab54b5", "752df226991c43b4afff11ee8e62ed98", "5a328165fb9a4f47b3810c427b8edbd6"},  -- 다크예티와페페/예티와페페/다크예티/예티
-			-- 에피소드3 map4(119~128) — 주니어예티/다크주니어예티 라이트-다크 비율 베리에이션(페이즈없는 팩
-			-- 기본값. 실제로는 스폰시 50% 코인플립으로 MonsterAI.InitializeStats가 덮어씀)
-			[119] = {"13b9f2b2f7664cc5a08e663f2fe0502b", "fad50a0e478c40fcbd383e069bc278da"},
-			[120] = {"fad50a0e478c40fcbd383e069bc278da", "fad50a0e478c40fcbd383e069bc278da"},
-			[121] = {"13b9f2b2f7664cc5a08e663f2fe0502b", "13b9f2b2f7664cc5a08e663f2fe0502b"},
-			[122] = {"13b9f2b2f7664cc5a08e663f2fe0502b", "fad50a0e478c40fcbd383e069bc278da", "13b9f2b2f7664cc5a08e663f2fe0502b"},
-			[123] = {"fad50a0e478c40fcbd383e069bc278da", "13b9f2b2f7664cc5a08e663f2fe0502b"},
-			[124] = {"fad50a0e478c40fcbd383e069bc278da", "fad50a0e478c40fcbd383e069bc278da", "13b9f2b2f7664cc5a08e663f2fe0502b"},
-			[125] = {"13b9f2b2f7664cc5a08e663f2fe0502b", "fad50a0e478c40fcbd383e069bc278da", "fad50a0e478c40fcbd383e069bc278da"},
-			[126] = {"13b9f2b2f7664cc5a08e663f2fe0502b", "13b9f2b2f7664cc5a08e663f2fe0502b", "fad50a0e478c40fcbd383e069bc278da"},
-			[127] = {"fad50a0e478c40fcbd383e069bc278da", "13b9f2b2f7664cc5a08e663f2fe0502b", "13b9f2b2f7664cc5a08e663f2fe0502b"},
-			[128] = {"13b9f2b2f7664cc5a08e663f2fe0502b", "fad50a0e478c40fcbd383e069bc278da", "13b9f2b2f7664cc5a08e663f2fe0502b", "fad50a0e478c40fcbd383e069bc278da"},
+			-- 에피소드3 map4(119~128) — 위 stand 표와 같은 배치. 예티류의 die1은 "페이즈없는 팩" 기본값이고
+			-- 실제로는 스폰시 50% 코인플립으로 MonsterAI.InitializeStats가 덮어쓴다(예티 슬롯만).
+			[119] = {"d70210a6db0c4de595d6d95f016def3e", "13b9f2b2f7664cc5a08e663f2fe0502b"},
+			[120] = {"fad50a0e478c40fcbd383e069bc278da", "d69b6340252740a48b4631ce00d058c7"},
+			[121] = {"da06afa62fa04d47ad1bba81416c0ab1", "d70210a6db0c4de595d6d95f016def3e"},
+			[122] = {"13b9f2b2f7664cc5a08e663f2fe0502b", "23d06abe8f804666beaee7246a586f05", "d69b6340252740a48b4631ce00d058c7"},
+			[123] = {"da06afa62fa04d47ad1bba81416c0ab1", "fad50a0e478c40fcbd383e069bc278da"},
+			[124] = {"d70210a6db0c4de595d6d95f016def3e", "d69b6340252740a48b4631ce00d058c7", "13b9f2b2f7664cc5a08e663f2fe0502b"},
+			[125] = {"da06afa62fa04d47ad1bba81416c0ab1", "23d06abe8f804666beaee7246a586f05", "fad50a0e478c40fcbd383e069bc278da"},
+			[126] = {"fad50a0e478c40fcbd383e069bc278da", "d70210a6db0c4de595d6d95f016def3e", "d69b6340252740a48b4631ce00d058c7"},
+			[127] = {"da06afa62fa04d47ad1bba81416c0ab1", "13b9f2b2f7664cc5a08e663f2fe0502b", "23d06abe8f804666beaee7246a586f05"},
+			[128] = {"da06afa62fa04d47ad1bba81416c0ab1", "fad50a0e478c40fcbd383e069bc278da", "d69b6340252740a48b4631ce00d058c7", "23d06abe8f804666beaee7246a586f05"},
 			-- ep3_map4_ester_1(존1~5 = mapIndex129~133, 이스터에그 전용, 미배선) — 쿨리좀비/마이너좀비/플라이아이/미믹
 			[129] = {"2791ef817267473bbe413b8dd157bc43", "9763a6106a3b4e1aba9b59e94206d875"},
 			[130] = {"9763a6106a3b4e1aba9b59e94206d875", "d69b6340252740a48b4631ce00d058c7"},
@@ -3852,17 +3949,17 @@ script GameManager extends Logic
 			[116] = {0.55, 0.85, 0.85},  -- 예티와페페/웨어울프/라이칸스로프
 			[117] = {0.75, 1.25, 1.05},  -- 다크예티와페페/스노우맨/플라이아이
 			[118] = {0.75, 0.55, 0.75, 0.75},  -- 다크예티와페페/예티와페페/다크예티/예티
-			-- 에피소드3 map4(119~128) — 주니어예티/다크주니어예티(페이즈없는 팩 die1=5프레임=0.55초 기본값)
-			[119] = {0.55, 0.55},
-			[120] = {0.55, 0.55},
-			[121] = {0.55, 0.55},
-			[122] = {0.55, 0.55, 0.55},
-			[123] = {0.55, 0.55},
-			[124] = {0.55, 0.55, 0.55},
-			[125] = {0.55, 0.55, 0.55},
-			[126] = {0.55, 0.55, 0.55},
-			[127] = {0.55, 0.55, 0.55},
-			[128] = {0.55, 0.55, 0.55, 0.55},
+			-- 에피소드3 map4(119~128) — 종별 die1 길이(예티류 0.55 / 레인디어류 1.35 / 플라이아이 1.05 / 스노우맨 1.25)
+			[119] = {1.35, 0.55},
+			[120] = {0.55, 1.05},
+			[121] = {1.35, 1.35},
+			[122] = {0.55, 1.25, 1.05},
+			[123] = {1.35, 0.55},
+			[124] = {1.35, 1.05, 0.55},
+			[125] = {1.35, 1.25, 0.55},
+			[126] = {0.55, 1.35, 1.05},
+			[127] = {1.35, 0.55, 1.25},
+			[128] = {1.35, 0.55, 1.05, 1.25},
 		}
 		local pool = pools[mapIndex]
 		if pool == nil then return 0.5 end
@@ -3965,17 +4062,17 @@ script GameManager extends Logic
 			[116] = {"992f9d470255469ca5bbe69d9551f790", "162762aec53e40dfab8cbaa0425ea0ba", "1d6be47d8a514b31ad0c746243573326"},  -- 예티와페페/웨어울프/라이칸스로프
 			[117] = {"d1dce4fdac0f4838b37af3c0fea8fd52", "022330aea10449ac970a86ee17db8709", ""},  -- 다크예티와페페/스노우맨/플라이아이
 			[118] = {"d1dce4fdac0f4838b37af3c0fea8fd52", "992f9d470255469ca5bbe69d9551f790", "55966425813d4fa1bea67ad1018dcfb5", "a9e503154e3e4ad5ab0e9e7742dd53ec"},  -- 다크예티와페페/예티와페페/다크예티/예티
-			-- 에피소드3 map4(119~128) — 주니어예티/다크주니어예티는 attack1이 없다(기존 99~103 존과 동일 컨벤션)
-			[119] = {"", ""},
+			-- 에피소드3 map4(119~128) — 주니어예티류는 attack1이 없다(기존 99~103 존과 동일 컨벤션), 플라이아이도 없음
+			[119] = {"d45c5adb6b9b4e9f85a6523aacf3992a", ""},
 			[120] = {"", ""},
-			[121] = {"", ""},
-			[122] = {"", "", ""},
-			[123] = {"", ""},
-			[124] = {"", "", ""},
-			[125] = {"", "", ""},
-			[126] = {"", "", ""},
-			[127] = {"", "", ""},
-			[128] = {"", "", "", ""},
+			[121] = {"ff1316b353c1402b9c832fdf04faa4c7", "d45c5adb6b9b4e9f85a6523aacf3992a"},
+			[122] = {"", "022330aea10449ac970a86ee17db8709", ""},
+			[123] = {"ff1316b353c1402b9c832fdf04faa4c7", ""},
+			[124] = {"d45c5adb6b9b4e9f85a6523aacf3992a", "", ""},
+			[125] = {"ff1316b353c1402b9c832fdf04faa4c7", "022330aea10449ac970a86ee17db8709", ""},
+			[126] = {"", "d45c5adb6b9b4e9f85a6523aacf3992a", ""},
+			[127] = {"ff1316b353c1402b9c832fdf04faa4c7", "", "022330aea10449ac970a86ee17db8709"},
+			[128] = {"ff1316b353c1402b9c832fdf04faa4c7", "", "", "022330aea10449ac970a86ee17db8709"},
 			-- ep3_map4_ester_1(존1~5 = mapIndex129~133, 이스터에그 전용, 미배선) — 쿨리좀비(attack1)/
 			-- 마이너좀비(attack2 전용, 원거리 연출)/플라이아이(없음)/미믹(없음)
 			[129] = {"45206ab461ee40869ade8cefdfe58349", "5902420641eb43aa9f951a5638fda3b0"},
@@ -4063,6 +4160,21 @@ script GameManager extends Logic
 		if mapIndex == 116 and idx == 3 then return 1.25 end  -- 라이칸스로프
 		if mapIndex == 117 and idx == 1 then return 0.95 end  -- 다크예티와페페
 		if mapIndex == 117 and idx == 2 then return 2.95 end  -- 스노우맨
+		-- 에피3 map4(119~128) — 레인디어/블러드 레인디어 attack1 20프레임, 섞어 넣은 스노우맨 29프레임.
+		-- 값이 없으면 기본 0.25초에 잘려서 공격 모션이 거의 안 보인다(GetMapAttackRUID 주석과 동일 규칙)
+		if mapIndex == 119 and idx == 1 then return 2.05 end  -- 레인디어
+		if mapIndex == 121 and idx == 1 then return 2.05 end  -- 블러드 레인디어
+		if mapIndex == 121 and idx == 2 then return 2.05 end  -- 레인디어
+		if mapIndex == 122 and idx == 2 then return 2.95 end  -- 스노우맨
+		if mapIndex == 123 and idx == 1 then return 2.05 end  -- 블러드 레인디어
+		if mapIndex == 124 and idx == 1 then return 2.05 end  -- 레인디어
+		if mapIndex == 125 and idx == 1 then return 2.05 end  -- 블러드 레인디어
+		if mapIndex == 125 and idx == 2 then return 2.95 end  -- 스노우맨
+		if mapIndex == 126 and idx == 2 then return 2.05 end  -- 레인디어
+		if mapIndex == 127 and idx == 1 then return 2.05 end  -- 블러드 레인디어
+		if mapIndex == 127 and idx == 3 then return 2.95 end  -- 스노우맨
+		if mapIndex == 128 and idx == 1 then return 2.05 end  -- 블러드 레인디어
+		if mapIndex == 128 and idx == 4 then return 2.95 end  -- 스노우맨
 		if mapIndex == 118 and idx == 1 then return 0.95 end  -- 다크예티와페페
 		if mapIndex == 118 and idx == 2 then return 0.95 end  -- 예티와페페
 		if mapIndex == 118 and idx == 3 then return 0.95 end  -- 다크예티
@@ -4113,39 +4225,57 @@ script GameManager extends Logic
 		if mapIndex == 95 and idx == 1 then return "7820fab74d294b2d96947f3488cfb4cc" end  -- 몽실생크림
 		if mapIndex == 97 and idx == 2 then return "7820fab74d294b2d96947f3488cfb4cc" end  -- 몽실생크림
 		if mapIndex == 98 and idx == 3 then return "7820fab74d294b2d96947f3488cfb4cc" end  -- 몽실생크림
-		-- 예티/다크예티/예티와페페/다크예티와페페(에피소드3 map2) — 유저 지정: "얘넨 원거리라 히트 연출
-		-- 있어야함", 문어 먹물처럼 화면에 쏴지는 전용 RUID(4개 종 공용 태그 리소스).
-		if mapIndex == 104 and idx == 1 then return "e260beea27054249a6e6af8f29f6e840" end  -- 예티
-		if mapIndex == 105 and idx == 1 then return "e260beea27054249a6e6af8f29f6e840" end  -- 다크예티
-		if mapIndex == 105 and idx == 3 then return "e260beea27054249a6e6af8f29f6e840" end  -- 예티
-		if mapIndex == 106 and idx == 1 then return "e260beea27054249a6e6af8f29f6e840" end  -- 예티와페페
-		if mapIndex == 106 and idx == 2 then return "e260beea27054249a6e6af8f29f6e840" end  -- 다크예티
-		if mapIndex == 107 and idx == 1 then return "e260beea27054249a6e6af8f29f6e840" end  -- 다크예티와페페
-		if mapIndex == 107 and idx == 2 then return "e260beea27054249a6e6af8f29f6e840" end  -- 예티와페페
-		if mapIndex == 107 and idx == 3 then return "e260beea27054249a6e6af8f29f6e840" end  -- 예티
-		if mapIndex == 108 and idx == 1 then return "e260beea27054249a6e6af8f29f6e840" end  -- 다크예티와페페
-		if mapIndex == 108 and idx == 2 then return "e260beea27054249a6e6af8f29f6e840" end  -- 예티와페페
-		if mapIndex == 108 and idx == 3 then return "e260beea27054249a6e6af8f29f6e840" end  -- 다크예티
+		-- 예티/다크예티/예티와페페/다크예티와페페(에피소드3 map2·map3) — 원래 문어 먹물처럼 화면에 쏴지는
+		-- 전용 RUID(e260beea27054249a6e6af8f29f6e840)를 썼는데, 유저 지정(2026-09-14)으로 **제거**했다:
+		-- "공격할때 화면에 튀는 어택 연출 빼자". 원거리 판정/공격 모션은 그대로다.
+		-- ⚠ 이 RUID가 있을 때만 공격 간격이 attack1+0.7초(1.65초)로 늘어났으므로, 빼도 공격 속도가
+		-- 안 바뀌게 GetMapKeepsRangedAttackPace가 같은 슬롯을 따로 들고 있다. 다시 넣으려면 거기도 같이 볼 것.
+		-- (GetMapHitEffectDuration/MaxConcurrent/ScaleMultiplier/Alpha의 예티 항목은 RUID가 없어 지금은 안 쓰인다.)
 		-- 에피소드3 map3(109~118) — 스노우맨(원거리, 유저 지정)은 자체 attack1/info/hit 서브클립을 쓴다.
-		-- 예티류(114~118에 재등장)는 위와 동일한 먹물 RUID를 그대로 이어서 쓴다.
+		-- 예티류(114~118에 재등장)도 위 map2와 같이 화면 연출을 뺐다(2026-09-14).
 		if mapIndex == 111 and idx == 2 then return "61a7400399b74971ac00644cecde6c77" end  -- 스노우맨
 		if mapIndex == 113 and idx == 1 then return "61a7400399b74971ac00644cecde6c77" end  -- 스노우맨
 		if mapIndex == 115 and idx == 2 then return "61a7400399b74971ac00644cecde6c77" end  -- 스노우맨
 		if mapIndex == 117 and idx == 2 then return "61a7400399b74971ac00644cecde6c77" end  -- 스노우맨
-		if mapIndex == 114 and idx == 1 then return "e260beea27054249a6e6af8f29f6e840" end  -- 예티
-		if mapIndex == 115 and idx == 1 then return "e260beea27054249a6e6af8f29f6e840" end  -- 다크예티
-		if mapIndex == 116 and idx == 1 then return "e260beea27054249a6e6af8f29f6e840" end  -- 예티와페페
-		if mapIndex == 117 and idx == 1 then return "e260beea27054249a6e6af8f29f6e840" end  -- 다크예티와페페
-		if mapIndex == 118 and idx == 1 then return "e260beea27054249a6e6af8f29f6e840" end  -- 다크예티와페페
-		if mapIndex == 118 and idx == 2 then return "e260beea27054249a6e6af8f29f6e840" end  -- 예티와페페
-		if mapIndex == 118 and idx == 3 then return "e260beea27054249a6e6af8f29f6e840" end  -- 다크예티
-		if mapIndex == 118 and idx == 4 then return "e260beea27054249a6e6af8f29f6e840" end  -- 예티
+		if mapIndex == 122 and idx == 2 then return "61a7400399b74971ac00644cecde6c77" end  -- 스노우맨
+		if mapIndex == 125 and idx == 2 then return "61a7400399b74971ac00644cecde6c77" end  -- 스노우맨
+		if mapIndex == 127 and idx == 3 then return "61a7400399b74971ac00644cecde6c77" end  -- 스노우맨
+		if mapIndex == 128 and idx == 4 then return "61a7400399b74971ac00644cecde6c77" end  -- 스노우맨
 		-- 마이너좀비(원거리, ep3_map4_ester_1 129~133, 미배선) 히트 이펙트 — 몽실생크림과 동일 원칙으로
 		-- 자기 팩 attack2/info/hit 서브클립 사용.
 		if mapIndex == 129 and idx == 2 then return "d83c452979174c8ab4c1e4a513673ddf" end  -- 마이너좀비
 		if mapIndex == 130 and idx == 1 then return "d83c452979174c8ab4c1e4a513673ddf" end  -- 마이너좀비
 		if mapIndex == 133 and idx == 2 then return "d83c452979174c8ab4c1e4a513673ddf" end  -- 마이너좀비
 		return ""
+	end
+
+	-- 원거리 히트 이펙트를 뺐지만 공격 간격은 예전(attack1 + 0.7초)대로 유지할 슬롯 — 예티류(유저 지정
+	-- 2026-09-14 화면 연출 제거). MonsterAI.InitializeStats의 "히트 이펙트가 있으면 간격을 늘린다" 조건이
+	-- 이 값도 같이 본다. 안 그러면 attack1(0.95초)이 기본 간격(1.0초)보다 짧아 공격이 1.65초 → 1.0초로 빨라진다.
+	-- 2페이즈 전환 뒤 간격은 변신 경로가 따로 계산한다(이 값과 무관).
+	@ExecSpace("ServerOnly")
+	method boolean GetMapKeepsRangedAttackPace(integer mapIndex, integer idx)
+		-- 예티류 슬롯이면 true (화면 연출 제거 전과 같은 공격 간격 유지)
+		if mapIndex == 104 and idx == 1 then return true end  -- 예티
+		if mapIndex == 105 and idx == 1 then return true end  -- 다크예티
+		if mapIndex == 105 and idx == 3 then return true end  -- 예티
+		if mapIndex == 106 and idx == 1 then return true end  -- 예티와페페
+		if mapIndex == 106 and idx == 2 then return true end  -- 다크예티
+		if mapIndex == 107 and idx == 1 then return true end  -- 다크예티와페페
+		if mapIndex == 107 and idx == 2 then return true end  -- 예티와페페
+		if mapIndex == 107 and idx == 3 then return true end  -- 예티
+		if mapIndex == 108 and idx == 1 then return true end  -- 다크예티와페페
+		if mapIndex == 108 and idx == 2 then return true end  -- 예티와페페
+		if mapIndex == 108 and idx == 3 then return true end  -- 다크예티
+		if mapIndex == 114 and idx == 1 then return true end  -- 예티
+		if mapIndex == 115 and idx == 1 then return true end  -- 다크예티
+		if mapIndex == 116 and idx == 1 then return true end  -- 예티와페페
+		if mapIndex == 117 and idx == 1 then return true end  -- 다크예티와페페
+		if mapIndex == 118 and idx == 1 then return true end  -- 다크예티와페페
+		if mapIndex == 118 and idx == 2 then return true end  -- 예티와페페
+		if mapIndex == 118 and idx == 3 then return true end  -- 다크예티
+		if mapIndex == 118 and idx == 4 then return true end  -- 예티
+		return false
 	end
 
 	-- 스노우맨(원거리, ep3_map3 109~118) 전용 — 몬스터 위치에서 플레이어 위치까지 실제로 날아가는
@@ -4159,6 +4289,10 @@ script GameManager extends Logic
 		if mapIndex == 113 and idx == 1 then return "1325ee6c65874b01ae5581b3f3d7a3f8" end  -- 스노우맨
 		if mapIndex == 115 and idx == 2 then return "1325ee6c65874b01ae5581b3f3d7a3f8" end  -- 스노우맨
 		if mapIndex == 117 and idx == 2 then return "1325ee6c65874b01ae5581b3f3d7a3f8" end  -- 스노우맨
+		if mapIndex == 122 and idx == 2 then return "1325ee6c65874b01ae5581b3f3d7a3f8" end  -- 스노우맨
+		if mapIndex == 125 and idx == 2 then return "1325ee6c65874b01ae5581b3f3d7a3f8" end  -- 스노우맨
+		if mapIndex == 127 and idx == 3 then return "1325ee6c65874b01ae5581b3f3d7a3f8" end  -- 스노우맨
+		if mapIndex == 128 and idx == 4 then return "1325ee6c65874b01ae5581b3f3d7a3f8" end  -- 스노우맨
 		return ""
 	end
 
@@ -4279,6 +4413,11 @@ script GameManager extends Logic
 		if mapIndex == 113 and idx == 1 then return true end  -- 스노우맨
 		if mapIndex == 115 and idx == 2 then return true end  -- 스노우맨
 		if mapIndex == 117 and idx == 2 then return true end  -- 스노우맨
+		-- 에피3 map4(119~128) 원거리 베리에이션 — map3의 스노우맨을 섞어 넣었다(유저 지정 2026-09-14)
+		if mapIndex == 122 and idx == 2 then return true end  -- 스노우맨
+		if mapIndex == 125 and idx == 2 then return true end  -- 스노우맨
+		if mapIndex == 127 and idx == 3 then return true end  -- 스노우맨
+		if mapIndex == 128 and idx == 4 then return true end  -- 스노우맨
 		if mapIndex == 114 and idx == 1 then return true end  -- 예티
 		if mapIndex == 115 and idx == 1 then return true end  -- 다크예티
 		if mapIndex == 116 and idx == 1 then return true end  -- 예티와페페
@@ -4370,6 +4509,12 @@ script GameManager extends Logic
 		if mapIndex == 113 and idx == 2 then return true end  -- 플라이아이
 		if mapIndex == 115 and idx == 3 then return true end  -- 플라이아이
 		if mapIndex == 117 and idx == 3 then return true end  -- 플라이아이
+		-- 에피3 map4(119~128) 공중 베리에이션 — map3의 플라이아이를 섞어 넣었다(유저 지정 2026-09-14)
+		if mapIndex == 120 and idx == 2 then return true end  -- 플라이아이
+		if mapIndex == 122 and idx == 3 then return true end  -- 플라이아이
+		if mapIndex == 124 and idx == 2 then return true end  -- 플라이아이
+		if mapIndex == 126 and idx == 3 then return true end  -- 플라이아이
+		if mapIndex == 128 and idx == 3 then return true end  -- 플라이아이
 		-- ep3_map4_ester_1(129~133, 이스터에그 전용, 미배선) 플라이아이(비행형)
 		if mapIndex == 130 and idx == 2 then return true end  -- 플라이아이
 		if mapIndex == 131 and idx == 1 then return true end  -- 플라이아이
@@ -4394,6 +4539,16 @@ script GameManager extends Logic
 		if mapIndex == 80 and (idx == 1 or idx == 2) then return true end  -- 맘무트/골든맘무트
 		if mapIndex == 81 and idx == 2 then return true end  -- 골든맘무트
 		if mapIndex == 84 and idx == 1 then return true end  -- 맘무트
+		-- 에피3 map4(119~128) 레인디어/블러드레인디어 — 유저 지정(2026-09-14) 돌진형. wind-up은 기본값 2초.
+		if mapIndex == 119 and idx == 1 then return true end  -- 레인디어
+		if mapIndex == 121 and idx == 1 then return true end  -- 블러드레인디어
+		if mapIndex == 121 and idx == 2 then return true end  -- 레인디어
+		if mapIndex == 123 and idx == 1 then return true end  -- 블러드레인디어
+		if mapIndex == 124 and idx == 1 then return true end  -- 레인디어
+		if mapIndex == 125 and idx == 1 then return true end  -- 블러드레인디어
+		if mapIndex == 126 and idx == 2 then return true end  -- 레인디어
+		if mapIndex == 127 and idx == 1 then return true end  -- 블러드레인디어
+		if mapIndex == 128 and idx == 1 then return true end  -- 블러드레인디어
 		return false
 	end
 
@@ -4512,9 +4667,26 @@ script GameManager extends Logic
 		if mapIndex == 99 and idx == 2 then return true end  -- 다크주니어예티
 		if mapIndex == 101 and idx == 1 then return true end  -- 다크주니어예티
 		if mapIndex == 103 and idx == 2 then return true end  -- 다크주니어예티
-		-- 에피소드3 map4(존1~10 = mapIndex 119~128, 유저 지정: 이 맵은 종 구성 자체가 주니어예티+
-		-- 다크주니어예티뿐이라 존의 모든 슬롯이 스폰타임 50% 코인플립 대상이다.
-		if mapIndex >= 119 and mapIndex <= 128 then return true end
+		-- 에피소드3 map4(존1~10 = mapIndex 119~128) — ⚠ 버그 수정(2026-09-14, 유저 리포트 "주니어
+		-- 예티(다크주니어 예티)가 날아다니고... 맞으면 애니메이션이 끊기는데?? 죽으면 변신은 하는거 같고").
+		-- 예전엔 `mapIndex >= 119 and mapIndex <= 128`을 통째로 true로 반환했다 — 그땐 이 맵의 종 구성이
+		-- 주니어예티+다크주니어예티 둘뿐이라 맞는 말이었지만, map3의 비행/원거리 종(플라이아이/스노우맨)과
+		-- 레인디어/블러드레인디어를 섞어 넣은 뒤로는 **모든 슬롯**이 이 분기를 타면서 MonsterAI.InitializeStats가
+		-- stand/move/hit/die/attack RUID를 전부 주니어예티 리소스팩으로 덮어썼다. 그런데 _isFlying은 그 뒤에
+		-- 실제 슬롯의 GetMapIsFlying으로 세팅되기 때문에 "플라이아이 자리에 주니어예티 외형이 공중에 떠 있는"
+		-- 상태가 됐고(증상1), hit1/attack1도 남의 종 클립이라 피격 연출이 어긋났으며(증상2), 원래 2페이즈가
+		-- 없어야 할 레인디어/스노우맨까지 50% 코인플립으로 예티로 변신했다(증상3).
+		-- → 실제 주니어예티/다크주니어예티가 들어있는 슬롯만 열거한다(GetMapIsJuniorYetiDark와 짝을 맞출 것).
+		if mapIndex == 119 and idx == 2 then return true end  -- 주니어예티(라이트)
+		if mapIndex == 120 and idx == 1 then return true end  -- 다크주니어예티
+		if mapIndex == 122 and idx == 1 then return true end  -- 주니어예티(라이트)
+		if mapIndex == 123 and idx == 2 then return true end  -- 다크주니어예티
+		if mapIndex == 124 and idx == 3 then return true end  -- 주니어예티(라이트)
+		if mapIndex == 125 and idx == 3 then return true end  -- 다크주니어예티
+		if mapIndex == 126 and idx == 1 then return true end  -- 다크주니어예티
+		if mapIndex == 127 and idx == 2 then return true end  -- 주니어예티(라이트)
+		if mapIndex == 128 and idx == 2 then return true end  -- 다크주니어예티
+		-- 존121(블러드레인디어/레인디어)엔 예티류가 아예 없다 — 여기 항목이 없는 게 정상.
 		return false
 	end
 
@@ -4524,23 +4696,13 @@ script GameManager extends Logic
 		if mapIndex == 99 and idx == 2 then return true end
 		if mapIndex == 101 and idx == 1 then return true end
 		if mapIndex == 103 and idx == 2 then return true end
-		-- 에피소드3 map4(119~128) — 존마다 라이트/다크 비율을 다르게 섞는다(map3는 종 다양성으로
-		-- 베리에이션했다면 여기는 라이트/다크 비율로 베리에이션). 119:라이트+다크 120:다크+다크
-		-- 121:라이트+라이트 122:라이트+다크+라이트 123:다크+라이트 124:다크+다크+라이트
-		-- 125:라이트+다크+다크 126:라이트+라이트+다크 127:다크+라이트+라이트 128:라이트+다크+라이트+다크
-		if mapIndex == 119 and idx == 2 then return true end
+		-- 에피소드3 map4(119~128) — 각 존 풀에서 다크주니어예티가 들어있는 슬롯만. 나머지 예티 슬롯은
+		-- 라이트(주니어예티)다. ⚠ GetMapIsJuniorYetiPhase2Roll의 슬롯 목록과 반드시 짝을 맞출 것.
 		if mapIndex == 120 and idx == 1 then return true end
-		if mapIndex == 120 and idx == 2 then return true end
-		if mapIndex == 122 and idx == 2 then return true end
-		if mapIndex == 123 and idx == 1 then return true end
-		if mapIndex == 124 and idx == 1 then return true end
-		if mapIndex == 124 and idx == 2 then return true end
-		if mapIndex == 125 and idx == 2 then return true end
+		if mapIndex == 123 and idx == 2 then return true end
 		if mapIndex == 125 and idx == 3 then return true end
-		if mapIndex == 126 and idx == 3 then return true end
-		if mapIndex == 127 and idx == 1 then return true end
+		if mapIndex == 126 and idx == 1 then return true end
 		if mapIndex == 128 and idx == 2 then return true end
-		if mapIndex == 128 and idx == 4 then return true end
 		return false
 	end
 
@@ -4568,16 +4730,16 @@ script GameManager extends Logic
 			[117] = {"f6467914a7f84409b2937fa3668db94d"},  -- 다크예티와페페→다크예티
 			[118] = {"f6467914a7f84409b2937fa3668db94d", "2fa39477afb34d8cb6412b7fe5085f42", "70329bd13ca243198d1afac3f77143a6", "f6467914a7f84409b2937fa3668db94d"},  -- 다크예티와페페→다크예티 / 예티와페페→예티 / 다크예티→다크예티와페페 / 예티→다크예티
 			-- 에피소드3 map4(119~128) — 주니어예티→예티(성체) / 다크주니어예티→다크예티(기존 99~103과 동일 목표)
-			[119] = {"2fa39477afb34d8cb6412b7fe5085f42", "f6467914a7f84409b2937fa3668db94d"},
-			[120] = {"f6467914a7f84409b2937fa3668db94d", "f6467914a7f84409b2937fa3668db94d"},
-			[121] = {"2fa39477afb34d8cb6412b7fe5085f42", "2fa39477afb34d8cb6412b7fe5085f42"},
-			[122] = {"2fa39477afb34d8cb6412b7fe5085f42", "f6467914a7f84409b2937fa3668db94d", "2fa39477afb34d8cb6412b7fe5085f42"},
-			[123] = {"f6467914a7f84409b2937fa3668db94d", "2fa39477afb34d8cb6412b7fe5085f42"},
-			[124] = {"f6467914a7f84409b2937fa3668db94d", "f6467914a7f84409b2937fa3668db94d", "2fa39477afb34d8cb6412b7fe5085f42"},
-			[125] = {"2fa39477afb34d8cb6412b7fe5085f42", "f6467914a7f84409b2937fa3668db94d", "f6467914a7f84409b2937fa3668db94d"},
-			[126] = {"2fa39477afb34d8cb6412b7fe5085f42", "2fa39477afb34d8cb6412b7fe5085f42", "f6467914a7f84409b2937fa3668db94d"},
-			[127] = {"f6467914a7f84409b2937fa3668db94d", "2fa39477afb34d8cb6412b7fe5085f42", "2fa39477afb34d8cb6412b7fe5085f42"},
-			[128] = {"2fa39477afb34d8cb6412b7fe5085f42", "f6467914a7f84409b2937fa3668db94d", "2fa39477afb34d8cb6412b7fe5085f42", "f6467914a7f84409b2937fa3668db94d"},
+			[119] = {"", "2fa39477afb34d8cb6412b7fe5085f42"},  -- 레인디어/주니어예티
+			[120] = {"f6467914a7f84409b2937fa3668db94d", ""},  -- 다크주니어예티/플라이아이(비행)
+			[121] = {"", ""},  -- 블러드레인디어/레인디어
+			[122] = {"2fa39477afb34d8cb6412b7fe5085f42", "", ""},  -- 주니어예티/스노우맨(원거리)/플라이아이(비행)
+			[123] = {"", "f6467914a7f84409b2937fa3668db94d"},  -- 블러드레인디어/다크주니어예티
+			[124] = {"", "", "2fa39477afb34d8cb6412b7fe5085f42"},  -- 레인디어/플라이아이(비행)/주니어예티
+			[125] = {"", "", "f6467914a7f84409b2937fa3668db94d"},  -- 블러드레인디어/스노우맨(원거리)/다크주니어예티
+			[126] = {"f6467914a7f84409b2937fa3668db94d", "", ""},  -- 다크주니어예티/레인디어/플라이아이(비행)
+			[127] = {"", "2fa39477afb34d8cb6412b7fe5085f42", ""},  -- 블러드레인디어/주니어예티/스노우맨(원거리)
+			[128] = {"", "f6467914a7f84409b2937fa3668db94d", "", ""},  -- 블러드레인디어/다크주니어예티/플라이아이(비행)/스노우맨(원거리)
 		}
 		local pool = pools[mapIndex]
 		if pool == nil then return "" end
@@ -4620,16 +4782,16 @@ script GameManager extends Logic
 			[116] = {"02dfd5686d7042768adcea2d24c184b4"},  -- 예티와페페→예티
 			[117] = {"53a9227119764c268fbedade502834a8"},  -- 다크예티와페페→다크예티
 			[118] = {"53a9227119764c268fbedade502834a8", "02dfd5686d7042768adcea2d24c184b4", "9f05be0781b34abf8628546e19db4500", "53a9227119764c268fbedade502834a8"},
-			[119] = {"02dfd5686d7042768adcea2d24c184b4", "53a9227119764c268fbedade502834a8"},
-			[120] = {"53a9227119764c268fbedade502834a8", "53a9227119764c268fbedade502834a8"},
-			[121] = {"02dfd5686d7042768adcea2d24c184b4", "02dfd5686d7042768adcea2d24c184b4"},
-			[122] = {"02dfd5686d7042768adcea2d24c184b4", "53a9227119764c268fbedade502834a8", "02dfd5686d7042768adcea2d24c184b4"},
-			[123] = {"53a9227119764c268fbedade502834a8", "02dfd5686d7042768adcea2d24c184b4"},
-			[124] = {"53a9227119764c268fbedade502834a8", "53a9227119764c268fbedade502834a8", "02dfd5686d7042768adcea2d24c184b4"},
-			[125] = {"02dfd5686d7042768adcea2d24c184b4", "53a9227119764c268fbedade502834a8", "53a9227119764c268fbedade502834a8"},
-			[126] = {"02dfd5686d7042768adcea2d24c184b4", "02dfd5686d7042768adcea2d24c184b4", "53a9227119764c268fbedade502834a8"},
-			[127] = {"53a9227119764c268fbedade502834a8", "02dfd5686d7042768adcea2d24c184b4", "02dfd5686d7042768adcea2d24c184b4"},
-			[128] = {"02dfd5686d7042768adcea2d24c184b4", "53a9227119764c268fbedade502834a8", "02dfd5686d7042768adcea2d24c184b4", "53a9227119764c268fbedade502834a8"},
+			[119] = {"", "02dfd5686d7042768adcea2d24c184b4"},  -- 레인디어/주니어예티
+			[120] = {"53a9227119764c268fbedade502834a8", ""},  -- 다크주니어예티/플라이아이(비행)
+			[121] = {"", ""},  -- 블러드레인디어/레인디어
+			[122] = {"02dfd5686d7042768adcea2d24c184b4", "", ""},  -- 주니어예티/스노우맨(원거리)/플라이아이(비행)
+			[123] = {"", "53a9227119764c268fbedade502834a8"},  -- 블러드레인디어/다크주니어예티
+			[124] = {"", "", "02dfd5686d7042768adcea2d24c184b4"},  -- 레인디어/플라이아이(비행)/주니어예티
+			[125] = {"", "", "53a9227119764c268fbedade502834a8"},  -- 블러드레인디어/스노우맨(원거리)/다크주니어예티
+			[126] = {"53a9227119764c268fbedade502834a8", "", ""},  -- 다크주니어예티/레인디어/플라이아이(비행)
+			[127] = {"", "02dfd5686d7042768adcea2d24c184b4", ""},  -- 블러드레인디어/주니어예티/스노우맨(원거리)
+			[128] = {"", "53a9227119764c268fbedade502834a8", "", ""},  -- 블러드레인디어/다크주니어예티/플라이아이(비행)/스노우맨(원거리)
 		}
 		local pool = pools[mapIndex]
 		if pool == nil then return "" end
@@ -4655,16 +4817,16 @@ script GameManager extends Logic
 			[116] = {"186789a04dd34be797ab716279f7fea7"},  -- 예티와페페→예티
 			[117] = {"796022b69ac2462cbc976c7e3a30a5c0"},  -- 다크예티와페페→다크예티
 			[118] = {"796022b69ac2462cbc976c7e3a30a5c0", "186789a04dd34be797ab716279f7fea7", "ca37b1df97964250967dec4e16232a21", "796022b69ac2462cbc976c7e3a30a5c0"},
-			[119] = {"186789a04dd34be797ab716279f7fea7", "796022b69ac2462cbc976c7e3a30a5c0"},
-			[120] = {"796022b69ac2462cbc976c7e3a30a5c0", "796022b69ac2462cbc976c7e3a30a5c0"},
-			[121] = {"186789a04dd34be797ab716279f7fea7", "186789a04dd34be797ab716279f7fea7"},
-			[122] = {"186789a04dd34be797ab716279f7fea7", "796022b69ac2462cbc976c7e3a30a5c0", "186789a04dd34be797ab716279f7fea7"},
-			[123] = {"796022b69ac2462cbc976c7e3a30a5c0", "186789a04dd34be797ab716279f7fea7"},
-			[124] = {"796022b69ac2462cbc976c7e3a30a5c0", "796022b69ac2462cbc976c7e3a30a5c0", "186789a04dd34be797ab716279f7fea7"},
-			[125] = {"186789a04dd34be797ab716279f7fea7", "796022b69ac2462cbc976c7e3a30a5c0", "796022b69ac2462cbc976c7e3a30a5c0"},
-			[126] = {"186789a04dd34be797ab716279f7fea7", "186789a04dd34be797ab716279f7fea7", "796022b69ac2462cbc976c7e3a30a5c0"},
-			[127] = {"796022b69ac2462cbc976c7e3a30a5c0", "186789a04dd34be797ab716279f7fea7", "186789a04dd34be797ab716279f7fea7"},
-			[128] = {"186789a04dd34be797ab716279f7fea7", "796022b69ac2462cbc976c7e3a30a5c0", "186789a04dd34be797ab716279f7fea7", "796022b69ac2462cbc976c7e3a30a5c0"},
+			[119] = {"", "186789a04dd34be797ab716279f7fea7"},  -- 레인디어/주니어예티
+			[120] = {"796022b69ac2462cbc976c7e3a30a5c0", ""},  -- 다크주니어예티/플라이아이(비행)
+			[121] = {"", ""},  -- 블러드레인디어/레인디어
+			[122] = {"186789a04dd34be797ab716279f7fea7", "", ""},  -- 주니어예티/스노우맨(원거리)/플라이아이(비행)
+			[123] = {"", "796022b69ac2462cbc976c7e3a30a5c0"},  -- 블러드레인디어/다크주니어예티
+			[124] = {"", "", "186789a04dd34be797ab716279f7fea7"},  -- 레인디어/플라이아이(비행)/주니어예티
+			[125] = {"", "", "796022b69ac2462cbc976c7e3a30a5c0"},  -- 블러드레인디어/스노우맨(원거리)/다크주니어예티
+			[126] = {"796022b69ac2462cbc976c7e3a30a5c0", "", ""},  -- 다크주니어예티/레인디어/플라이아이(비행)
+			[127] = {"", "186789a04dd34be797ab716279f7fea7", ""},  -- 블러드레인디어/주니어예티/스노우맨(원거리)
+			[128] = {"", "796022b69ac2462cbc976c7e3a30a5c0", "", ""},  -- 블러드레인디어/다크주니어예티/플라이아이(비행)/스노우맨(원거리)
 		}
 		local pool = pools[mapIndex]
 		if pool == nil then return "" end
@@ -4690,16 +4852,16 @@ script GameManager extends Logic
 			[116] = {"5a328165fb9a4f47b3810c427b8edbd6"},  -- 예티와페페→예티
 			[117] = {"752df226991c43b4afff11ee8e62ed98"},  -- 다크예티와페페→다크예티
 			[118] = {"752df226991c43b4afff11ee8e62ed98", "5a328165fb9a4f47b3810c427b8edbd6", "4aa11121ec354e22bb501381d1419265", "752df226991c43b4afff11ee8e62ed98"},
-			[119] = {"5a328165fb9a4f47b3810c427b8edbd6", "752df226991c43b4afff11ee8e62ed98"},
-			[120] = {"752df226991c43b4afff11ee8e62ed98", "752df226991c43b4afff11ee8e62ed98"},
-			[121] = {"5a328165fb9a4f47b3810c427b8edbd6", "5a328165fb9a4f47b3810c427b8edbd6"},
-			[122] = {"5a328165fb9a4f47b3810c427b8edbd6", "752df226991c43b4afff11ee8e62ed98", "5a328165fb9a4f47b3810c427b8edbd6"},
-			[123] = {"752df226991c43b4afff11ee8e62ed98", "5a328165fb9a4f47b3810c427b8edbd6"},
-			[124] = {"752df226991c43b4afff11ee8e62ed98", "752df226991c43b4afff11ee8e62ed98", "5a328165fb9a4f47b3810c427b8edbd6"},
-			[125] = {"5a328165fb9a4f47b3810c427b8edbd6", "752df226991c43b4afff11ee8e62ed98", "752df226991c43b4afff11ee8e62ed98"},
-			[126] = {"5a328165fb9a4f47b3810c427b8edbd6", "5a328165fb9a4f47b3810c427b8edbd6", "752df226991c43b4afff11ee8e62ed98"},
-			[127] = {"752df226991c43b4afff11ee8e62ed98", "5a328165fb9a4f47b3810c427b8edbd6", "5a328165fb9a4f47b3810c427b8edbd6"},
-			[128] = {"5a328165fb9a4f47b3810c427b8edbd6", "752df226991c43b4afff11ee8e62ed98", "5a328165fb9a4f47b3810c427b8edbd6", "752df226991c43b4afff11ee8e62ed98"},
+			[119] = {"", "5a328165fb9a4f47b3810c427b8edbd6"},  -- 레인디어/주니어예티
+			[120] = {"752df226991c43b4afff11ee8e62ed98", ""},  -- 다크주니어예티/플라이아이(비행)
+			[121] = {"", ""},  -- 블러드레인디어/레인디어
+			[122] = {"5a328165fb9a4f47b3810c427b8edbd6", "", ""},  -- 주니어예티/스노우맨(원거리)/플라이아이(비행)
+			[123] = {"", "752df226991c43b4afff11ee8e62ed98"},  -- 블러드레인디어/다크주니어예티
+			[124] = {"", "", "5a328165fb9a4f47b3810c427b8edbd6"},  -- 레인디어/플라이아이(비행)/주니어예티
+			[125] = {"", "", "752df226991c43b4afff11ee8e62ed98"},  -- 블러드레인디어/스노우맨(원거리)/다크주니어예티
+			[126] = {"752df226991c43b4afff11ee8e62ed98", "", ""},  -- 다크주니어예티/레인디어/플라이아이(비행)
+			[127] = {"", "5a328165fb9a4f47b3810c427b8edbd6", ""},  -- 블러드레인디어/주니어예티/스노우맨(원거리)
+			[128] = {"", "752df226991c43b4afff11ee8e62ed98", "", ""},  -- 블러드레인디어/다크주니어예티/플라이아이(비행)/스노우맨(원거리)
 		}
 		local pool = pools[mapIndex]
 		if pool == nil then return "" end
@@ -4727,16 +4889,16 @@ script GameManager extends Logic
 			[116] = {0.75},  -- 예티와페페→예티
 			[117] = {0.75},  -- 다크예티와페페→다크예티
 			[118] = {0.75, 0.75, 0.75, 0.75},
-			[119] = {0.75, 0.75},
-			[120] = {0.75, 0.75},
-			[121] = {0.75, 0.75},
-			[122] = {0.75, 0.75, 0.75},
-			[123] = {0.75, 0.75},
-			[124] = {0.75, 0.75, 0.75},
-			[125] = {0.75, 0.75, 0.75},
-			[126] = {0.75, 0.75, 0.75},
-			[127] = {0.75, 0.75, 0.75},
-			[128] = {0.75, 0.75, 0.75, 0.75},
+			[119] = {0.75, 0.75},  -- 레인디어/주니어예티
+			[120] = {0.75, 0.75},  -- 다크주니어예티/플라이아이(비행)
+			[121] = {0.75, 0.75},  -- 블러드레인디어/레인디어
+			[122] = {0.75, 0.75, 0.75},  -- 주니어예티/스노우맨(원거리)/플라이아이(비행)
+			[123] = {0.75, 0.75},  -- 블러드레인디어/다크주니어예티
+			[124] = {0.75, 0.75, 0.75},  -- 레인디어/플라이아이(비행)/주니어예티
+			[125] = {0.75, 0.75, 0.75},  -- 블러드레인디어/스노우맨(원거리)/다크주니어예티
+			[126] = {0.75, 0.75, 0.75},  -- 다크주니어예티/레인디어/플라이아이(비행)
+			[127] = {0.75, 0.75, 0.75},  -- 블러드레인디어/주니어예티/스노우맨(원거리)
+			[128] = {0.75, 0.75, 0.75, 0.75},  -- 블러드레인디어/다크주니어예티/플라이아이(비행)/스노우맨(원거리)
 		}
 		local pool = pools[mapIndex]
 		if pool == nil then return 0.5 end
@@ -4762,16 +4924,16 @@ script GameManager extends Logic
 			[116] = {"a9e503154e3e4ad5ab0e9e7742dd53ec"},  -- 예티와페페→예티
 			[117] = {"55966425813d4fa1bea67ad1018dcfb5"},  -- 다크예티와페페→다크예티
 			[118] = {"55966425813d4fa1bea67ad1018dcfb5", "a9e503154e3e4ad5ab0e9e7742dd53ec", "d1dce4fdac0f4838b37af3c0fea8fd52", "55966425813d4fa1bea67ad1018dcfb5"},
-			[119] = {"a9e503154e3e4ad5ab0e9e7742dd53ec", "55966425813d4fa1bea67ad1018dcfb5"},
-			[120] = {"55966425813d4fa1bea67ad1018dcfb5", "55966425813d4fa1bea67ad1018dcfb5"},
-			[121] = {"a9e503154e3e4ad5ab0e9e7742dd53ec", "a9e503154e3e4ad5ab0e9e7742dd53ec"},
-			[122] = {"a9e503154e3e4ad5ab0e9e7742dd53ec", "55966425813d4fa1bea67ad1018dcfb5", "a9e503154e3e4ad5ab0e9e7742dd53ec"},
-			[123] = {"55966425813d4fa1bea67ad1018dcfb5", "a9e503154e3e4ad5ab0e9e7742dd53ec"},
-			[124] = {"55966425813d4fa1bea67ad1018dcfb5", "55966425813d4fa1bea67ad1018dcfb5", "a9e503154e3e4ad5ab0e9e7742dd53ec"},
-			[125] = {"a9e503154e3e4ad5ab0e9e7742dd53ec", "55966425813d4fa1bea67ad1018dcfb5", "55966425813d4fa1bea67ad1018dcfb5"},
-			[126] = {"a9e503154e3e4ad5ab0e9e7742dd53ec", "a9e503154e3e4ad5ab0e9e7742dd53ec", "55966425813d4fa1bea67ad1018dcfb5"},
-			[127] = {"55966425813d4fa1bea67ad1018dcfb5", "a9e503154e3e4ad5ab0e9e7742dd53ec", "a9e503154e3e4ad5ab0e9e7742dd53ec"},
-			[128] = {"a9e503154e3e4ad5ab0e9e7742dd53ec", "55966425813d4fa1bea67ad1018dcfb5", "a9e503154e3e4ad5ab0e9e7742dd53ec", "55966425813d4fa1bea67ad1018dcfb5"},
+			[119] = {"", "a9e503154e3e4ad5ab0e9e7742dd53ec"},  -- 레인디어/주니어예티
+			[120] = {"55966425813d4fa1bea67ad1018dcfb5", ""},  -- 다크주니어예티/플라이아이(비행)
+			[121] = {"", ""},  -- 블러드레인디어/레인디어
+			[122] = {"a9e503154e3e4ad5ab0e9e7742dd53ec", "", ""},  -- 주니어예티/스노우맨(원거리)/플라이아이(비행)
+			[123] = {"", "55966425813d4fa1bea67ad1018dcfb5"},  -- 블러드레인디어/다크주니어예티
+			[124] = {"", "", "a9e503154e3e4ad5ab0e9e7742dd53ec"},  -- 레인디어/플라이아이(비행)/주니어예티
+			[125] = {"", "", "55966425813d4fa1bea67ad1018dcfb5"},  -- 블러드레인디어/스노우맨(원거리)/다크주니어예티
+			[126] = {"55966425813d4fa1bea67ad1018dcfb5", "", ""},  -- 다크주니어예티/레인디어/플라이아이(비행)
+			[127] = {"", "a9e503154e3e4ad5ab0e9e7742dd53ec", ""},  -- 블러드레인디어/주니어예티/스노우맨(원거리)
+			[128] = {"", "55966425813d4fa1bea67ad1018dcfb5", "", ""},  -- 블러드레인디어/다크주니어예티/플라이아이(비행)/스노우맨(원거리)
 		}
 		local pool = pools[mapIndex]
 		if pool == nil then return "" end
@@ -4807,7 +4969,7 @@ script GameManager extends Logic
 		if mapIndex == 118 and idx == 2 then return 0.95 end
 		if mapIndex == 118 and idx == 3 then return 0.95 end
 		if mapIndex == 118 and idx == 4 then return 0.95 end
-		-- 에피소드3 map4(119~128) — 전 슬롯이 주니어예티/다크주니어예티→예티(성체)/다크예티 전환 대상
+		-- 에피소드3 map4(119~128) — 주니어예티/다크주니어예티 슬롯만 2페이즈 대상(GetMapIsJuniorYetiPhase2Roll 참고)
 		if mapIndex >= 119 and mapIndex <= 128 then return 0.95 end
 		return 0.25
 	end
@@ -4830,16 +4992,16 @@ script GameManager extends Logic
 			[116] = {"c1108ba1ec0e45c3be0ba3ccb5ee0adc"},  -- 예티와페페→예티
 			[117] = {"2a852591a7c64a8fb30dcd7227866f68"},  -- 다크예티와페페→다크예티
 			[118] = {"2a852591a7c64a8fb30dcd7227866f68", "c1108ba1ec0e45c3be0ba3ccb5ee0adc", "2a852591a7c64a8fb30dcd7227866f68", "2a852591a7c64a8fb30dcd7227866f68"},
-			[119] = {"c1108ba1ec0e45c3be0ba3ccb5ee0adc", "2a852591a7c64a8fb30dcd7227866f68"},
-			[120] = {"2a852591a7c64a8fb30dcd7227866f68", "2a852591a7c64a8fb30dcd7227866f68"},
-			[121] = {"c1108ba1ec0e45c3be0ba3ccb5ee0adc", "c1108ba1ec0e45c3be0ba3ccb5ee0adc"},
-			[122] = {"c1108ba1ec0e45c3be0ba3ccb5ee0adc", "2a852591a7c64a8fb30dcd7227866f68", "c1108ba1ec0e45c3be0ba3ccb5ee0adc"},
-			[123] = {"2a852591a7c64a8fb30dcd7227866f68", "c1108ba1ec0e45c3be0ba3ccb5ee0adc"},
-			[124] = {"2a852591a7c64a8fb30dcd7227866f68", "2a852591a7c64a8fb30dcd7227866f68", "c1108ba1ec0e45c3be0ba3ccb5ee0adc"},
-			[125] = {"c1108ba1ec0e45c3be0ba3ccb5ee0adc", "2a852591a7c64a8fb30dcd7227866f68", "2a852591a7c64a8fb30dcd7227866f68"},
-			[126] = {"c1108ba1ec0e45c3be0ba3ccb5ee0adc", "c1108ba1ec0e45c3be0ba3ccb5ee0adc", "2a852591a7c64a8fb30dcd7227866f68"},
-			[127] = {"2a852591a7c64a8fb30dcd7227866f68", "c1108ba1ec0e45c3be0ba3ccb5ee0adc", "c1108ba1ec0e45c3be0ba3ccb5ee0adc"},
-			[128] = {"c1108ba1ec0e45c3be0ba3ccb5ee0adc", "2a852591a7c64a8fb30dcd7227866f68", "c1108ba1ec0e45c3be0ba3ccb5ee0adc", "2a852591a7c64a8fb30dcd7227866f68"},
+			[119] = {"", "c1108ba1ec0e45c3be0ba3ccb5ee0adc"},  -- 레인디어/주니어예티
+			[120] = {"2a852591a7c64a8fb30dcd7227866f68", ""},  -- 다크주니어예티/플라이아이(비행)
+			[121] = {"", ""},  -- 블러드레인디어/레인디어
+			[122] = {"c1108ba1ec0e45c3be0ba3ccb5ee0adc", "", ""},  -- 주니어예티/스노우맨(원거리)/플라이아이(비행)
+			[123] = {"", "2a852591a7c64a8fb30dcd7227866f68"},  -- 블러드레인디어/다크주니어예티
+			[124] = {"", "", "c1108ba1ec0e45c3be0ba3ccb5ee0adc"},  -- 레인디어/플라이아이(비행)/주니어예티
+			[125] = {"", "", "2a852591a7c64a8fb30dcd7227866f68"},  -- 블러드레인디어/스노우맨(원거리)/다크주니어예티
+			[126] = {"2a852591a7c64a8fb30dcd7227866f68", "", ""},  -- 다크주니어예티/레인디어/플라이아이(비행)
+			[127] = {"", "c1108ba1ec0e45c3be0ba3ccb5ee0adc", ""},  -- 블러드레인디어/주니어예티/스노우맨(원거리)
+			[128] = {"", "2a852591a7c64a8fb30dcd7227866f68", "", ""},  -- 블러드레인디어/다크주니어예티/플라이아이(비행)/스노우맨(원거리)
 		}
 		local pool = pools[mapIndex]
 		if pool == nil then return "" end
@@ -4865,16 +5027,16 @@ script GameManager extends Logic
 			[116] = {"655c74418f4c4d65932641a375e7a4f5"},  -- 예티와페페→예티
 			[117] = {"8049a8708de04238843f029debb2f51a"},  -- 다크예티와페페→다크예티
 			[118] = {"8049a8708de04238843f029debb2f51a", "655c74418f4c4d65932641a375e7a4f5", "8049a8708de04238843f029debb2f51a", "8049a8708de04238843f029debb2f51a"},
-			[119] = {"655c74418f4c4d65932641a375e7a4f5", "8049a8708de04238843f029debb2f51a"},
-			[120] = {"8049a8708de04238843f029debb2f51a", "8049a8708de04238843f029debb2f51a"},
-			[121] = {"655c74418f4c4d65932641a375e7a4f5", "655c74418f4c4d65932641a375e7a4f5"},
-			[122] = {"655c74418f4c4d65932641a375e7a4f5", "8049a8708de04238843f029debb2f51a", "655c74418f4c4d65932641a375e7a4f5"},
-			[123] = {"8049a8708de04238843f029debb2f51a", "655c74418f4c4d65932641a375e7a4f5"},
-			[124] = {"8049a8708de04238843f029debb2f51a", "8049a8708de04238843f029debb2f51a", "655c74418f4c4d65932641a375e7a4f5"},
-			[125] = {"655c74418f4c4d65932641a375e7a4f5", "8049a8708de04238843f029debb2f51a", "8049a8708de04238843f029debb2f51a"},
-			[126] = {"655c74418f4c4d65932641a375e7a4f5", "655c74418f4c4d65932641a375e7a4f5", "8049a8708de04238843f029debb2f51a"},
-			[127] = {"8049a8708de04238843f029debb2f51a", "655c74418f4c4d65932641a375e7a4f5", "655c74418f4c4d65932641a375e7a4f5"},
-			[128] = {"655c74418f4c4d65932641a375e7a4f5", "8049a8708de04238843f029debb2f51a", "655c74418f4c4d65932641a375e7a4f5", "8049a8708de04238843f029debb2f51a"},
+			[119] = {"", "655c74418f4c4d65932641a375e7a4f5"},  -- 레인디어/주니어예티
+			[120] = {"8049a8708de04238843f029debb2f51a", ""},  -- 다크주니어예티/플라이아이(비행)
+			[121] = {"", ""},  -- 블러드레인디어/레인디어
+			[122] = {"655c74418f4c4d65932641a375e7a4f5", "", ""},  -- 주니어예티/스노우맨(원거리)/플라이아이(비행)
+			[123] = {"", "8049a8708de04238843f029debb2f51a"},  -- 블러드레인디어/다크주니어예티
+			[124] = {"", "", "655c74418f4c4d65932641a375e7a4f5"},  -- 레인디어/플라이아이(비행)/주니어예티
+			[125] = {"", "", "8049a8708de04238843f029debb2f51a"},  -- 블러드레인디어/스노우맨(원거리)/다크주니어예티
+			[126] = {"8049a8708de04238843f029debb2f51a", "", ""},  -- 다크주니어예티/레인디어/플라이아이(비행)
+			[127] = {"", "655c74418f4c4d65932641a375e7a4f5", ""},  -- 블러드레인디어/주니어예티/스노우맨(원거리)
+			[128] = {"", "8049a8708de04238843f029debb2f51a", "", ""},  -- 블러드레인디어/다크주니어예티/플라이아이(비행)/스노우맨(원거리)
 		}
 		local pool = pools[mapIndex]
 		if pool == nil then return "" end
@@ -4950,17 +5112,18 @@ script GameManager extends Logic
 			[116] = {"9dcb7932a7d64778856b1169ad2b0820", "", ""},  -- 예티와페페/웨어울프/라이칸스로프
 			[117] = {"f032cdcff5d34a029a89ff8b2aed0a8a", "", ""},  -- 다크예티와페페/스노우맨/플라이아이
 			[118] = {"f032cdcff5d34a029a89ff8b2aed0a8a", "9dcb7932a7d64778856b1169ad2b0820", "2a852591a7c64a8fb30dcd7227866f68", "c1108ba1ec0e45c3be0ba3ccb5ee0adc"},  -- 다크예티와페페/예티와페페/다크예티/예티
-			-- 에피소드3 map4(119~128) — 주니어예티/다크주니어예티(페이즈없는 팩 voice 사운드 기본값)
-			[119] = {"6f4dcabb6d9941a38f84c1cc6b5cdad8", "f5b7e04a5ac6496cac77b016ea13a16f"},
-			[120] = {"f5b7e04a5ac6496cac77b016ea13a16f", "f5b7e04a5ac6496cac77b016ea13a16f"},
-			[121] = {"6f4dcabb6d9941a38f84c1cc6b5cdad8", "6f4dcabb6d9941a38f84c1cc6b5cdad8"},
-			[122] = {"6f4dcabb6d9941a38f84c1cc6b5cdad8", "f5b7e04a5ac6496cac77b016ea13a16f", "6f4dcabb6d9941a38f84c1cc6b5cdad8"},
-			[123] = {"f5b7e04a5ac6496cac77b016ea13a16f", "6f4dcabb6d9941a38f84c1cc6b5cdad8"},
-			[124] = {"f5b7e04a5ac6496cac77b016ea13a16f", "f5b7e04a5ac6496cac77b016ea13a16f", "6f4dcabb6d9941a38f84c1cc6b5cdad8"},
-			[125] = {"6f4dcabb6d9941a38f84c1cc6b5cdad8", "f5b7e04a5ac6496cac77b016ea13a16f", "f5b7e04a5ac6496cac77b016ea13a16f"},
-			[126] = {"6f4dcabb6d9941a38f84c1cc6b5cdad8", "6f4dcabb6d9941a38f84c1cc6b5cdad8", "f5b7e04a5ac6496cac77b016ea13a16f"},
-			[127] = {"f5b7e04a5ac6496cac77b016ea13a16f", "6f4dcabb6d9941a38f84c1cc6b5cdad8", "6f4dcabb6d9941a38f84c1cc6b5cdad8"},
-			[128] = {"6f4dcabb6d9941a38f84c1cc6b5cdad8", "f5b7e04a5ac6496cac77b016ea13a16f", "6f4dcabb6d9941a38f84c1cc6b5cdad8", "f5b7e04a5ac6496cac77b016ea13a16f"},
+			-- 에피소드3 map4(119~128) — 주니어예티/다크주니어예티만 voice 사운드, 신규 4종(레인디어/블러드레인디어/
+			-- 플라이아이/스노우맨)은 아직 사운드 미배정(빈 문자열 = 무음).
+			[119] = {"", "6f4dcabb6d9941a38f84c1cc6b5cdad8"},  -- 레인디어/주니어예티
+			[120] = {"f5b7e04a5ac6496cac77b016ea13a16f", ""},  -- 다크주니어예티/플라이아이(비행)
+			[121] = {"", ""},  -- 블러드레인디어/레인디어
+			[122] = {"6f4dcabb6d9941a38f84c1cc6b5cdad8", "", ""},  -- 주니어예티/스노우맨(원거리)/플라이아이(비행)
+			[123] = {"", "f5b7e04a5ac6496cac77b016ea13a16f"},  -- 블러드레인디어/다크주니어예티
+			[124] = {"", "", "6f4dcabb6d9941a38f84c1cc6b5cdad8"},  -- 레인디어/플라이아이(비행)/주니어예티
+			[125] = {"", "", "f5b7e04a5ac6496cac77b016ea13a16f"},  -- 블러드레인디어/스노우맨(원거리)/다크주니어예티
+			[126] = {"f5b7e04a5ac6496cac77b016ea13a16f", "", ""},  -- 다크주니어예티/레인디어/플라이아이(비행)
+			[127] = {"", "6f4dcabb6d9941a38f84c1cc6b5cdad8", ""},  -- 블러드레인디어/주니어예티/스노우맨(원거리)
+			[128] = {"", "f5b7e04a5ac6496cac77b016ea13a16f", "", ""},  -- 블러드레인디어/다크주니어예티/플라이아이(비행)/스노우맨(원거리)
 		}
 		local pool = pools[mapIndex]
 		if pool == nil then return "" end
@@ -5010,17 +5173,17 @@ script GameManager extends Logic
 			[116] = {"b95f1c447882480f874f4b45ddb0f33b", "", ""},  -- 예티와페페/웨어울프/라이칸스로프
 			[117] = {"2963a436d6074f4c83c9a2684d1df36c", "", ""},  -- 다크예티와페페/스노우맨/플라이아이
 			[118] = {"2963a436d6074f4c83c9a2684d1df36c", "b95f1c447882480f874f4b45ddb0f33b", "8049a8708de04238843f029debb2f51a", "655c74418f4c4d65932641a375e7a4f5"},  -- 다크예티와페페/예티와페페/다크예티/예티
-			-- 에피소드3 map4(119~128) — 주니어예티/다크주니어예티(페이즈없는 팩 voice 사운드 기본값)
-			[119] = {"6f3ab281ca93458d9b122b8d5cbf60df", "53324cebb7744fe69b7c972568192375"},
-			[120] = {"53324cebb7744fe69b7c972568192375", "53324cebb7744fe69b7c972568192375"},
-			[121] = {"6f3ab281ca93458d9b122b8d5cbf60df", "6f3ab281ca93458d9b122b8d5cbf60df"},
-			[122] = {"6f3ab281ca93458d9b122b8d5cbf60df", "53324cebb7744fe69b7c972568192375", "6f3ab281ca93458d9b122b8d5cbf60df"},
-			[123] = {"53324cebb7744fe69b7c972568192375", "6f3ab281ca93458d9b122b8d5cbf60df"},
-			[124] = {"53324cebb7744fe69b7c972568192375", "53324cebb7744fe69b7c972568192375", "6f3ab281ca93458d9b122b8d5cbf60df"},
-			[125] = {"6f3ab281ca93458d9b122b8d5cbf60df", "53324cebb7744fe69b7c972568192375", "53324cebb7744fe69b7c972568192375"},
-			[126] = {"6f3ab281ca93458d9b122b8d5cbf60df", "6f3ab281ca93458d9b122b8d5cbf60df", "53324cebb7744fe69b7c972568192375"},
-			[127] = {"53324cebb7744fe69b7c972568192375", "6f3ab281ca93458d9b122b8d5cbf60df", "6f3ab281ca93458d9b122b8d5cbf60df"},
-			[128] = {"6f3ab281ca93458d9b122b8d5cbf60df", "53324cebb7744fe69b7c972568192375", "6f3ab281ca93458d9b122b8d5cbf60df", "53324cebb7744fe69b7c972568192375"},
+			-- 에피소드3 map4(119~128) — 주니어예티/다크주니어예티만 voice 사운드, 신규 4종은 미배정(무음).
+			[119] = {"", "6f3ab281ca93458d9b122b8d5cbf60df"},  -- 레인디어/주니어예티
+			[120] = {"53324cebb7744fe69b7c972568192375", ""},  -- 다크주니어예티/플라이아이(비행)
+			[121] = {"", ""},  -- 블러드레인디어/레인디어
+			[122] = {"6f3ab281ca93458d9b122b8d5cbf60df", "", ""},  -- 주니어예티/스노우맨(원거리)/플라이아이(비행)
+			[123] = {"", "53324cebb7744fe69b7c972568192375"},  -- 블러드레인디어/다크주니어예티
+			[124] = {"", "", "6f3ab281ca93458d9b122b8d5cbf60df"},  -- 레인디어/플라이아이(비행)/주니어예티
+			[125] = {"", "", "53324cebb7744fe69b7c972568192375"},  -- 블러드레인디어/스노우맨(원거리)/다크주니어예티
+			[126] = {"53324cebb7744fe69b7c972568192375", "", ""},  -- 다크주니어예티/레인디어/플라이아이(비행)
+			[127] = {"", "6f3ab281ca93458d9b122b8d5cbf60df", ""},  -- 블러드레인디어/주니어예티/스노우맨(원거리)
+			[128] = {"", "53324cebb7744fe69b7c972568192375", "", ""},  -- 블러드레인디어/다크주니어예티/플라이아이(비행)/스노우맨(원거리)
 		}
 		local pool = pools[mapIndex]
 		if pool == nil then return "" end
@@ -5053,46 +5216,61 @@ script GameManager extends Logic
 		if mapIndex == 95 and idx == 1 then return 0.6 end  -- 몽실생크림
 		if mapIndex == 97 and idx == 2 then return 0.6 end  -- 몽실생크림
 		if mapIndex == 98 and idx == 3 then return 0.6 end  -- 몽실생크림
-		-- 예티/다크예티/예티와페페/다크예티와페페(에피소드3 map2) — 유저 지정: "너무 큰데 크기 15%줄이고".
-		-- 1페이즈(예티와페페 등)/2페이즈 목표(예티 성체 등) 전 슬롯에 동일하게 적용해서, 변신 전후로
-		-- 크기가 갑자기 바뀌어 보이지 않는다(ReviveAsPhase2Generic이 스케일을 따로 안 건드리므로, 스폰
-		-- 시점에 이미 같은 배율이면 변신해도 자연스럽게 이어짐).
-		if mapIndex == 104 and idx == 1 then return 0.85 end  -- 예티
-		if mapIndex == 105 and idx == 1 then return 0.85 end  -- 다크예티
-		if mapIndex == 105 and idx == 3 then return 0.85 end  -- 예티
-		if mapIndex == 106 and idx == 1 then return 0.85 end  -- 예티와페페
-		if mapIndex == 106 and idx == 2 then return 0.85 end  -- 다크예티
-		if mapIndex == 107 and idx == 1 then return 0.85 end  -- 다크예티와페페
-		if mapIndex == 107 and idx == 2 then return 0.85 end  -- 예티와페페
-		if mapIndex == 107 and idx == 3 then return 0.85 end  -- 예티
-		if mapIndex == 108 and idx == 1 then return 0.85 end  -- 다크예티와페페
-		if mapIndex == 108 and idx == 2 then return 0.85 end  -- 예티와페페
-		if mapIndex == 108 and idx == 3 then return 0.85 end  -- 다크예티
-		-- 에피소드3 map3(109~118)에 재등장하는 예티류(114~118)도 동일하게 0.85.
-		if mapIndex == 114 and idx == 1 then return 0.85 end  -- 예티
-		if mapIndex == 115 and idx == 1 then return 0.85 end  -- 다크예티
-		if mapIndex == 116 and idx == 1 then return 0.85 end  -- 예티와페페
-		if mapIndex == 117 and idx == 1 then return 0.85 end  -- 다크예티와페페
-		if mapIndex == 118 and idx == 1 then return 0.85 end  -- 다크예티와페페
-		if mapIndex == 118 and idx == 2 then return 0.85 end  -- 예티와페페
-		if mapIndex == 118 and idx == 3 then return 0.85 end  -- 다크예티
-		if mapIndex == 118 and idx == 4 then return 0.85 end  -- 예티
-		-- 웨어울프/라이칸스로프/스노우맨(원거리) — 유저 지정(2026-08-25): "크기 20% 줄이고". 플라이아이는
-		-- 언급 안 됐으므로 기본값(1.0) 유지.
-		if mapIndex == 109 and idx == 1 then return 0.8 end  -- 웨어울프
-		if mapIndex == 109 and idx == 2 then return 0.8 end  -- 라이칸스로프
-		if mapIndex == 110 and idx == 1 then return 0.8 end  -- 라이칸스로프
-		if mapIndex == 111 and idx == 1 then return 0.8 end  -- 웨어울프
+		-- 예티/다크예티/예티와페페/다크예티와페페(에피소드3 map2) — 유저 지정: "너무 큰데 크기 15%줄이고"
+		-- → 2026-09-14 재지정 0.75. 1페이즈(예티와페페 등)/2페이즈 목표(예티 성체 등) 전 슬롯에 동일하게
+		-- 적용해서, 변신 전후로 크기가 갑자기 바뀌어 보이지 않는다(ReviveAsPhase2Generic이 스케일을 따로 안
+		-- 건드리므로, 스폰 시점에 이미 같은 배율이면 변신해도 자연스럽게 이어짐).
+		if mapIndex == 104 and idx == 1 then return 0.75 end  -- 예티
+		if mapIndex == 105 and idx == 1 then return 0.75 end  -- 다크예티
+		if mapIndex == 105 and idx == 3 then return 0.75 end  -- 예티
+		if mapIndex == 106 and idx == 1 then return 0.75 end  -- 예티와페페
+		if mapIndex == 106 and idx == 2 then return 0.75 end  -- 다크예티
+		if mapIndex == 107 and idx == 1 then return 0.75 end  -- 다크예티와페페
+		if mapIndex == 107 and idx == 2 then return 0.75 end  -- 예티와페페
+		if mapIndex == 107 and idx == 3 then return 0.75 end  -- 예티
+		if mapIndex == 108 and idx == 1 then return 0.75 end  -- 다크예티와페페
+		if mapIndex == 108 and idx == 2 then return 0.75 end  -- 예티와페페
+		if mapIndex == 108 and idx == 3 then return 0.75 end  -- 다크예티
+		-- 에피소드3 map3(109~118)에 재등장하는 예티류(114~118)도 동일하게 0.75.
+		if mapIndex == 114 and idx == 1 then return 0.75 end  -- 예티
+		if mapIndex == 115 and idx == 1 then return 0.75 end  -- 다크예티
+		if mapIndex == 116 and idx == 1 then return 0.75 end  -- 예티와페페
+		if mapIndex == 117 and idx == 1 then return 0.75 end  -- 다크예티와페페
+		if mapIndex == 118 and idx == 1 then return 0.75 end  -- 다크예티와페페
+		if mapIndex == 118 and idx == 2 then return 0.75 end  -- 예티와페페
+		if mapIndex == 118 and idx == 3 then return 0.75 end  -- 다크예티
+		if mapIndex == 118 and idx == 4 then return 0.75 end  -- 예티
+		-- 웨어울프/라이칸스로프 — 유저 지정(2026-08-25) 0.8 → 2026-09-14 재지정 0.7.
+		-- 스노우맨(원거리) — 0.8 유지. 플라이아이는 언급 안 됐으므로 기본값(1.0) 유지.
+		if mapIndex == 109 and idx == 1 then return 0.7 end  -- 웨어울프
+		if mapIndex == 109 and idx == 2 then return 0.7 end  -- 라이칸스로프
+		if mapIndex == 110 and idx == 1 then return 0.7 end  -- 라이칸스로프
+		if mapIndex == 111 and idx == 1 then return 0.7 end  -- 웨어울프
 		if mapIndex == 111 and idx == 2 then return 0.8 end  -- 스노우맨
-		if mapIndex == 112 and idx == 1 then return 0.8 end  -- 웨어울프
-		if mapIndex == 112 and idx == 2 then return 0.8 end  -- 라이칸스로프
+		if mapIndex == 112 and idx == 1 then return 0.7 end  -- 웨어울프
+		if mapIndex == 112 and idx == 2 then return 0.7 end  -- 라이칸스로프
 		if mapIndex == 113 and idx == 1 then return 0.8 end  -- 스노우맨
-		if mapIndex == 114 and idx == 2 then return 0.8 end  -- 웨어울프
-		if mapIndex == 114 and idx == 3 then return 0.8 end  -- 라이칸스로프
+		if mapIndex == 114 and idx == 2 then return 0.7 end  -- 웨어울프
+		if mapIndex == 114 and idx == 3 then return 0.7 end  -- 라이칸스로프
 		if mapIndex == 115 and idx == 2 then return 0.8 end  -- 스노우맨
-		if mapIndex == 116 and idx == 2 then return 0.8 end  -- 웨어울프
-		if mapIndex == 116 and idx == 3 then return 0.8 end  -- 라이칸스로프
+		if mapIndex == 116 and idx == 2 then return 0.7 end  -- 웨어울프
+		if mapIndex == 116 and idx == 3 then return 0.7 end  -- 라이칸스로프
 		if mapIndex == 117 and idx == 2 then return 0.8 end  -- 스노우맨
+		-- 에피소드3 map4(119~128) — 유저 지정(2026-09-14): 스노우맨 0.8(map3과 통일, 이전엔 여기만 빠져
+		-- 원래 크기였다), 레인디어/블러드레인디어 0.8.
+		if mapIndex == 122 and idx == 2 then return 0.8 end  -- 스노우맨
+		if mapIndex == 125 and idx == 2 then return 0.8 end  -- 스노우맨
+		if mapIndex == 127 and idx == 3 then return 0.8 end  -- 스노우맨
+		if mapIndex == 128 and idx == 4 then return 0.8 end  -- 스노우맨
+		if mapIndex == 119 and idx == 1 then return 0.8 end  -- 레인디어
+		if mapIndex == 121 and idx == 1 then return 0.8 end  -- 블러드레인디어
+		if mapIndex == 121 and idx == 2 then return 0.8 end  -- 레인디어
+		if mapIndex == 123 and idx == 1 then return 0.8 end  -- 블러드레인디어
+		if mapIndex == 124 and idx == 1 then return 0.8 end  -- 레인디어
+		if mapIndex == 125 and idx == 1 then return 0.8 end  -- 블러드레인디어
+		if mapIndex == 126 and idx == 2 then return 0.8 end  -- 레인디어
+		if mapIndex == 127 and idx == 1 then return 0.8 end  -- 블러드레인디어
+		if mapIndex == 128 and idx == 1 then return 0.8 end  -- 블러드레인디어
 		return 1.0
 	end
 
@@ -5472,7 +5650,7 @@ script GameManager extends Logic
 		self.TimeAttackMode = timeAttack
 		self.TimeAttackRemaining = timeAttack and self.TimeAttackDuration or 0
 		-- 튜토리얼 정지가 남은 채로 새 런이 시작되면 게임이 멈춘 채로 시작된다 — 항상 풀고 들어간다
-		self.TutorialPaused = false
+		self.TutorialPaused = false ; self.OptionPaused = false
 		-- 타이틀 화면에서 처음 한 번만 실제 웨이브 스폰을 활성화한다. 그 전까지 OnBeginPlay에서
 		-- 곧바로 스폰을 켜두면, 유저가 타이틀 화면을 보는 동안에도 몬스터가 쌓이게 된다.
 		if self.GameStarted then
@@ -5563,7 +5741,7 @@ script GameManager extends Logic
 		self.TimeAttackMode = timeAttack
 		self.TimeAttackRemaining = timeAttack and self.TimeAttackDuration or 0
 		-- 다시하기로 새 런을 시작할 때도 튜토리얼 정지는 반드시 풀고 들어간다(StartGame과 동일)
-		self.TutorialPaused = false
+		self.TutorialPaused = false ; self.OptionPaused = false
 		self._timeAttackOvertimeDeath = false
 		self._gaveUp = false
 		self:ClearDespairBlade()
@@ -5833,17 +6011,18 @@ script GameManager extends Logic
 				[116] = {"yeti_pepe_ice_shard", "werewolf_fang", "lycan_claw"},                -- 예티와페페(2페이즈)/웨어울프/라이칸스로프
 				[117] = {"dark_yeti_pepe_ice_shard", "snowman_crystal", "flyeye_eyeball"},     -- 다크예티와페페(2페이즈)/스노우맨/플라이아이
 				[118] = {"dark_yeti_pepe_ice_shard", "yeti_pepe_ice_shard", "dark_yeti_horn", "yeti_horn"}, -- 다크예티와페페/예티와페페/다크예티/예티(전부 2페이즈)
-				-- 에피소드3 map4(119~128) — 주니어예티/다크주니어예티(기존 89~103과 동일 잡템 재사용)
-				[119] = {"jr_yeti_snowball", "dark_jr_yeti_hide"},
-				[120] = {"dark_jr_yeti_hide", "dark_jr_yeti_hide"},
-				[121] = {"jr_yeti_snowball", "jr_yeti_snowball"},
-				[122] = {"jr_yeti_snowball", "dark_jr_yeti_hide", "jr_yeti_snowball"},
-				[123] = {"dark_jr_yeti_hide", "jr_yeti_snowball"},
-				[124] = {"dark_jr_yeti_hide", "dark_jr_yeti_hide", "jr_yeti_snowball"},
-				[125] = {"jr_yeti_snowball", "dark_jr_yeti_hide", "dark_jr_yeti_hide"},
-				[126] = {"jr_yeti_snowball", "jr_yeti_snowball", "dark_jr_yeti_hide"},
-				[127] = {"dark_jr_yeti_hide", "jr_yeti_snowball", "jr_yeti_snowball"},
-				[128] = {"jr_yeti_snowball", "dark_jr_yeti_hide", "jr_yeti_snowball", "dark_jr_yeti_hide"},
+				-- 에피소드3 map4(119~128) — 예티류는 기존 잡템 재사용, 플라이아이/스노우맨은 map3와 공용,
+				-- 레인디어/블러드레인디어는 이 맵에서 처음 등장하는 신규 전용 잡템.
+				[119] = {"reindeer_antler", "jr_yeti_snowball"},  -- 레인디어/주니어예티
+				[120] = {"dark_jr_yeti_hide", "flyeye_eyeball"},  -- 다크주니어예티/플라이아이(비행)
+				[121] = {"blood_reindeer_bell", "reindeer_antler"},  -- 블러드레인디어/레인디어
+				[122] = {"jr_yeti_snowball", "snowman_crystal", "flyeye_eyeball"},  -- 주니어예티/스노우맨(원거리)/플라이아이(비행)
+				[123] = {"blood_reindeer_bell", "dark_jr_yeti_hide"},  -- 블러드레인디어/다크주니어예티
+				[124] = {"reindeer_antler", "flyeye_eyeball", "jr_yeti_snowball"},  -- 레인디어/플라이아이(비행)/주니어예티
+				[125] = {"blood_reindeer_bell", "snowman_crystal", "dark_jr_yeti_hide"},  -- 블러드레인디어/스노우맨(원거리)/다크주니어예티
+				[126] = {"dark_jr_yeti_hide", "reindeer_antler", "flyeye_eyeball"},  -- 다크주니어예티/레인디어/플라이아이(비행)
+				[127] = {"blood_reindeer_bell", "jr_yeti_snowball", "snowman_crystal"},  -- 블러드레인디어/주니어예티/스노우맨(원거리)
+				[128] = {"blood_reindeer_bell", "dark_jr_yeti_hide", "flyeye_eyeball", "snowman_crystal"},  -- 블러드레인디어/다크주니어예티/플라이아이(비행)/스노우맨(원거리)
 				-- -121: 존21 이스터에그 전용 가상 존 번호(실제 맵 인덱스와 절대 겹치지 않도록 음수 sentinel —
 				-- 2026-08-25: 기존 121을 썼었는데 에피소드3 map4가 실제 mapIndex 121을 쓰게 되면서 충돌
 				-- 직전 발견, 음수로 변경) — 뉴그레이 화이트는 존 몬스터 풀 시스템(InitializeStats)을
@@ -5942,16 +6121,33 @@ script GameManager extends Logic
 		end
 		if userId == nil then return end
 		
-		local grade = (_UtilLogic:RandomDouble() < self.WeaponDropMagicChance) and _GearGradeEnum.Magic or _GearGradeEnum.None
-		local quality = _QualityEnum:RollDropQuality()
-		
 		-- 2026-08-17: 장비 라인이 스태프 하나에서 9종(스태프/활/양손검/자마다르/슈트A/슈트B/투구/장갑/망토)으로
 		-- 늘어났다 — 전부 공용 아이템이라 캐릭터 무관 균등 랜덤으로 어느 라인이 떨어질지 먼저 고른다.
 		-- 2026-08-31: 유저 지정으로 맵(에피소드)별 드롭 부위를 갈랐다 — 태초의 마을=무기 / 구름정원=갑옷·모자 /
 		-- 엘라스 산맥=장갑·망토. 월드 선택 팝업의 맵 사진에 붙은 부위 아이콘 배지와 같은 분배다
 		local gearItemIds = _WeaponTierDataLogic:GetGearItemIdsByEpisode(self.SelectedEpisode)
 		local itemId = gearItemIds[_UtilLogic:RandomIntegerRange(1, #gearItemIds)]
-		
+
+		-- 2026-09-15: 등급/품질/스탯 굴림을 BuildGearCreateParam으로 뺐다 — 방치 보상(IdleRewardLogic)이 같은 규칙으로 쓴다
+		local createParam = self:BuildGearCreateParam(itemId)
+		local grade = createParam.Grade
+
+		local resultStruct = ItemCreateResultStruct()
+		local errorCode = _ItemFactoryLogic:TryAddItem(userId, createParam, resultStruct)
+		if errorCode ~= _ErrorCodeEnum.Success then
+			log_error("TryDropWeaponItem: TryAddItem failed. Error : " .. tostring(errorCode))
+			return
+		end
+
+		self:PlayLobbyDropVisual(Vector2(worldPos.x, worldPos.y), fallHeight, groundWorldY, dropScale, _WeaponTierDataLogic:GetDisplayRUID(itemId, grade))
+	end
+
+	@ExecSpace("ServerOnly")
+	method ItemCreateParamStruct BuildGearCreateParam(integer itemId)
+		-- 장비 1개 생성 파라미터 — 몬스터 드롭(GrantWeaponItemDrop)과 방치 보상(IdleRewardLogic.RequestClaim)이 같이 쓴다
+		local grade = (_UtilLogic:RandomDouble() < self.WeaponDropMagicChance) and _GearGradeEnum.Magic or _GearGradeEnum.None
+		local quality = _QualityEnum:RollDropQuality()
+
 		local skillVariant = _WeaponTierDataLogic:RollSkillVariant()
 		local procChancePerMille = _WeaponTierDataLogic:RollProcChancePerMille(itemId, quality)
 		
@@ -5978,15 +6174,7 @@ script GameManager extends Logic
 		createParam.AtkByGrade = atkByGrade
 		createParam.HpByGrade = hpByGrade
 		createParam.BonusPercentPerMilleByGrade = bonusPercentPerMilleByGrade
-		
-		local resultStruct = ItemCreateResultStruct()
-		local errorCode = _ItemFactoryLogic:TryAddItem(userId, createParam, resultStruct)
-		if errorCode ~= _ErrorCodeEnum.Success then
-			log_error("TryDropWeaponItem: TryAddItem failed. Error : " .. tostring(errorCode))
-			return
-		end
-		
-		self:PlayLobbyDropVisual(Vector2(worldPos.x, worldPos.y), fallHeight, groundWorldY, dropScale, _WeaponTierDataLogic:GetDisplayRUID(itemId, grade))
+		return createParam
 	end
 
 	@ExecSpace("Multicast")
@@ -8024,4 +8212,6 @@ script GameManager extends Logic
 	end
 
 end
+
+
 
