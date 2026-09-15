@@ -30,6 +30,28 @@ script UIEquipPopup extends Component
 
 	property TextGUIRendererComponent StatValueText = "4a556226-b3fc-40e1-a724-ecd88adc4b2d"
 
+	-- 스탯 줄 왼쪽 아이콘(StatRow/Icon) — 공격력/체력에 따라 바꾼다(유저 지정 2026-09-16).
+	-- 예전엔 .ui에 하트 한 장이 박혀 있어서 공격력 장비에도 하트가 떴다
+	property SpriteGUIRendererComponent StatIcon = "d4f189b6-9baf-4712-93db-f93ff9e9ec33"
+
+	property string AtkStatIconRUID = "e8ed10a8b44d47d5a0d42f7f32656a58"
+
+	property string HpStatIconRUID = "7ecb5769578f4b05808afaad17ee83ac"
+
+	-- 스탯 줄 라벨(StatRow/Label) — 공격력이면 ATK, 체력이면 HP(유저 시안 2026-09-16)
+	property TextGUIRendererComponent StatLabelText = "8bb20d54-44af-4f97-9681-7b4fa185d197"
+
+	-- 강화로 붙은 수치(+N)만 초록 계열로(유저 시안 "150 (+30)")
+	property string StatBonusColorHex = "#5DC25D"
+
+	-- 메이플 원본 아이콘은 스프라이트 기준점이 그림 왼쪽 아래라, 기준점이 칸 가운데에 찍혀서 그림이
+	-- 칸 크기 절반만큼 밀려 그려진다(하트는 오른쪽 위, 좌우 반전한 칼은 왼쪽 위 — 스샷 실측).
+	-- 그림 가운데가 라벨 왼쪽(StatRow 로컬 x≈50, 가운데 줄)에 오도록 칸 위치를 반대로 보정한다
+	-- 칸 64x64 기준(유저 지정 2026-09-16: 아이콘 조금 키우고 라벨과 함께 경계 쪽으로) — 그림 가운데 x≈89
+	property Vector2 AtkStatIconPos = Vector2(89, -29)
+
+	property Vector2 HpStatIconPos = Vector2(25, -33)
+
 	property TextGUIRendererComponent DescText = "daa61354-9d65-4169-83be-c60f64aeb55b"
 
 	property TextGUIRendererComponent GoldText = "5009a399-2408-45a3-8922-cebb3a880852"
@@ -179,16 +201,20 @@ script UIEquipPopup extends Component
 			-- 강화 레벨 보너스를 합쳐서 보여준다(2026-09-02). 기본값만 띄우면 강화해도 숫자가
 			-- 안 변해서 "강화가 안 먹는다"고 보인다. 괄호로 강화분을 따로 표기한다.
 			local levelBonus = _EnhanceScrollLogic:GetStatBonusForLevel(gearStruct.Level)
+			-- 스탯 이름은 왼쪽 라벨(ATK/HP)이 맡으니 수치 칸엔 숫자만, 강화분은 같은 줄에 초록으로 붙인다
 			local bonusText = ""
 			if levelBonus > 0 then
-				bonusText = " (+" .. tostring(levelBonus) .. ")"
+				bonusText = " (<color=" .. self.StatBonusColorHex .. ">+" .. tostring(levelBonus) .. "</color>)"
 			end
 			if statField == "Hp" then
-				self.StatValueText.Text = "체력 " .. tostring(gearStruct.Hp + levelBonus) .. bonusText
+				self.StatValueText.Text = tostring(gearStruct.Hp + levelBonus) .. bonusText
+				self:SetStatIcon(false)
 			elseif statField == "Atk" then
-				self.StatValueText.Text = "공격력 " .. tostring(gearStruct.Atk + levelBonus) .. bonusText
+				self.StatValueText.Text = tostring(gearStruct.Atk + levelBonus) .. bonusText
+				self:SetStatIcon(true)
 			else
 				self.StatValueText.Text = "-"
+				self:SetStatIcon(false)
 			end
 
 			-- 설명란은 아이템 플레이버 문구를 보여준다. 예전엔 현재 등급의 효과 텍스트를 넣었는데,
@@ -203,6 +229,7 @@ script UIEquipPopup extends Component
 		else
 			local placeholderHp = 10 + (gearStruct ~= nil and gearStruct.Grade or 0) * 10
 			self.StatValueText.Text = tostring(placeholderHp)
+			self:SetStatIcon(false)
 			self.DescText.Text = "아이템 설명이 아직 등록되지 않았습니다."
 
 			-- 아이템 품질(D~SS, 기존 Rare/Epic 같은 Grade와는 별개 축) — 무기 외에는 실제 산출 로직/데이터가
@@ -361,6 +388,33 @@ script UIEquipPopup extends Component
 			self.ScrollCostText.FontColor = Color(0.85, 0.45, 0.45, 1)
 		end
 		self.ScrollCostText.Entity.Enable = true
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetStatIcon(boolean isAtk)
+		-- 공격력 = 검 아이콘 좌우 반전(유저 지정 "y축 플립"), 체력 = 하트. 검 아이콘이 36x32라
+		-- 48x48 칸에 늘리면 눌려 보이므로 비율 유지
+		if isvalid(self.StatLabelText) then
+			if isAtk then
+				self.StatLabelText.Text = "ATK"
+			else
+				self.StatLabelText.Text = "HP"
+			end
+		end
+		if not isvalid(self.StatIcon) then return end
+		-- .ui에 빨간 틴트(Color 1,0,0)가 남아 있어서 원본 색이 안 나왔다 — 원본 그대로
+		self.StatIcon.Color = Color(1, 1, 1, 1)
+		self.StatIcon.PreserveSprite = PreserveSpriteType.AspectOnly
+		local iconTransform = self.StatIcon.Entity.UITransformComponent
+		if isAtk then
+			self.StatIcon.ImageRUID = self.AtkStatIconRUID
+			self.StatIcon.FlipX = true
+			iconTransform.anchoredPosition = self.AtkStatIconPos
+		else
+			self.StatIcon.ImageRUID = self.HpStatIconRUID
+			self.StatIcon.FlipX = false
+			iconTransform.anchoredPosition = self.HpStatIconPos
+		end
 	end
 
 	-- EquipInfoGrid(장비판) 슬롯이 쓰는 부위별 픽토그램 RUID를 그대로 재사용한다. 장비판에 전용 슬롯이

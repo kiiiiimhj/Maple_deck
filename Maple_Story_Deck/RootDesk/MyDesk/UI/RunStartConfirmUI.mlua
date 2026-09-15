@@ -1,0 +1,117 @@
+@Logic
+script RunStartConfirmUI extends Logic
+
+	-- 판 시작 전 "인벤토리 가득 참" 확인 팝업(ui/RunStartConfirmGroup.ui) 컨트롤러 — 유저 지정 2026-09-15.
+	-- "게임 시작"(월드/캐릭터 선택 팝업의 확인)과 게임오버 "다시하기" 직전에 서버에 이번 판 드롭이 들어갈
+	-- 탭이 가득 찼는지 묻고(GameManager.RequestRunStartInventoryCheck), 가득 찬 탭이 있으면 [시작]/[취소]를 묻는다.
+	-- 가득 찬 탭이 없으면 팝업 없이 바로 진행한다. 모양은 방치 보상 확인창(IdleRewardGroup ConfirmPanel)과 같다.
+
+	-- UI 바인딩 (UIBuilder가 UUID를 넣는다)
+	property Entity rootGroup = "1dce8989-7c91-49f5-9b6f-09a3f025bf0d"
+	property TextGUIRendererComponent messageText = "f3221445-68bc-4785-b7df-5088b9ae9e49"
+	property TextGUIRendererComponent subText = "ce664f66-2ae4-4293-b2b8-a6a3728e33a1"
+	property ButtonComponent btnYes = "0e1208f4-919a-4cbe-a41c-2b3664da61c7"
+	property ButtonComponent btnNo = "6f2a896e-6ba2-4534-9479-0857547447c6"
+
+	-- 서버 응답이 이 시간 안에 안 오면 막지 않고 그냥 진행한다(경고일 뿐이라 입장을 막을 이유가 없다)
+	property number ReplyTimeout = 2.0
+
+	property any _pending = nil
+	property integer _requestSeq = 0
+	property integer _timeoutTimerId = 0
+	property table _handlers = {}
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		-- 그룹은 DefaultShow=false로 저장돼 있지만 혹시 켜진 채로 시작하지 않게 한 번 더 끈다
+		if isvalid(self.rootGroup) then self.rootGroup.Enable = false end
+		if isvalid(self.btnYes) then
+			local h = self.btnYes.Entity:ConnectEvent(ButtonClickEvent, function() self:OnYesClicked() end)
+			table.insert(self._handlers, { entity = self.btnYes.Entity, eventHandler = h })
+		end
+		if isvalid(self.btnNo) then
+			local h = self.btnNo.Entity:ConnectEvent(ButtonClickEvent, function() self:OnNoClicked() end)
+			table.insert(self._handlers, { entity = self.btnNo.Entity, eventHandler = h })
+		end
+		log("RunStartConfirmUI started")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		self:ClearTimeout()
+		for _, h in ipairs(self._handlers) do
+			if isvalid(h.entity) then h.entity:DisconnectEvent(ButtonClickEvent, h.eventHandler) end
+		end
+		self._handlers = {}
+	end
+
+	@ExecSpace("ClientOnly")
+	method void CheckThen(integer episode, any proceed)
+		-- proceed: 가득 찬 탭이 없거나 [시작]을 누르면 실행할 함수(실제 입장/다시하기).
+		-- 이미 확인 중이거나 팝업이 떠 있으면 연타로 보고 무시한다
+		if self._pending ~= nil then return end
+		self._pending = proceed
+		self._requestSeq = self._requestSeq + 1
+		local seq = self._requestSeq
+		log("RunStartConfirmUI: check requested ep=" .. episode .. " seq=" .. seq)
+		_GameManager:RequestRunStartInventoryCheck(episode, seq)
+		self:ClearTimeout()
+		self._timeoutTimerId = _TimerService:SetTimerOnce(function()
+			self._timeoutTimerId = 0
+			if not isvalid(self) then return end
+			if self._requestSeq ~= seq or self._pending == nil then return end
+			if isvalid(self.rootGroup) and self.rootGroup.Enable then return end
+			log("RunStartConfirmUI: no reply in " .. self.ReplyTimeout .. "s, proceeding")
+			self:RunPending()
+		end, self.ReplyTimeout)
+	end
+
+	@ExecSpace("Client")
+	method void OnInventoryCheckResult(integer seq, string fullNames)
+		-- 서버 응답. fullNames = 가득 찬 탭 이름("무기·기타"), 없으면 ""
+		if seq ~= self._requestSeq or self._pending == nil then return end
+		self:ClearTimeout()
+		log("RunStartConfirmUI: result seq=" .. seq .. " full=[" .. fullNames .. "]")
+		if fullNames == "" then
+			self:RunPending()
+			return
+		end
+		if isvalid(self.messageText) then self.messageText.Text = fullNames .. " 인벤토리가 가득 찼어요!" end
+		if isvalid(self.subText) then self.subText.Text = "자리가 없는 아이템은 사라져요.\n그래도 시작할까요?" end
+		if isvalid(self.rootGroup) then self.rootGroup.Enable = true end
+		log("RunStartConfirmUI: popup shown")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnYesClicked()
+		-- [시작] — 팝업을 닫고 원래 하려던 입장/다시하기를 진행한다
+		if self._pending == nil then return end
+		log("RunStartConfirmUI: yes")
+		self:RunPending()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnNoClicked()
+		-- [취소] — 아무것도 하지 않고 팝업만 닫는다(선택 팝업 / 게임오버 창에 그대로 남는다)
+		log("RunStartConfirmUI: no")
+		self._pending = nil
+		if isvalid(self.rootGroup) then self.rootGroup.Enable = false end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RunPending()
+		local proceed = self._pending
+		self._pending = nil
+		if isvalid(self.rootGroup) then self.rootGroup.Enable = false end
+		if proceed ~= nil then proceed() end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ClearTimeout()
+		if self._timeoutTimerId ~= 0 then
+			_TimerService:ClearTimer(self._timeoutTimerId)
+			self._timeoutTimerId = 0
+		end
+	end
+
+end

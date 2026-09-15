@@ -110,6 +110,42 @@ script InventoryExpandLogic extends Logic
 		return "인벤토리"
 	end
 
+	@ExecSpace("ServerOnly")
+	method integer GetItemTab(integer itemId)
+		-- 아이템이 인벤 창 어느 탭에 보이는지(UIInventoryTabHolder.SetCachingItemsFunctions와 같은 분류) —
+		-- 2=무기 / 3=방어구 / 4=기타(장비 아님). 무기도 방어구도 아닌 장비는 전체 탭에만 보여서 탭 정원이 없다 → 0
+		local itemData = _ItemDataLogic:GetData(itemId)
+		if itemData == nil then return 0 end
+		local gear = itemData:GetGearData()
+		if gear == nil then return self.TabEtc end
+		if _GearCategoryEnum:IsWeapon(gear.GearCategory) then return self.TabWeapon end
+		if _GearCategoryEnum:IsArmor(gear.GearCategory) then return self.TabArmor end
+		return 0
+	end
+
+	@ExecSpace("ServerOnly")
+	method table CountItemsByTab(string userId)
+		-- 탭별 보유 수 {[2]=n, [3]=n, [4]=n} — 인벤 창 "N / M"과 같은 기준(장착 중인 장비 포함)
+		local used = {}
+		local user = _UserService:GetUserEntityByUserId(userId)
+		if not isvalid(user) or not isvalid(user.PkgPlayerInventory) then return used end
+		for _, itemStruct in pairs(user.PkgPlayerInventory.Items) do
+			local tab = self:GetItemTab(itemStruct.ItemId)
+			if tab ~= 0 then used[tab] = (used[tab] or 0) + 1 end
+		end
+		return used
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean HasRoomFor(string userId, integer itemId)
+		-- 이 아이템 1개가 들어갈 탭 자리가 남았는지. ItemFactory는 정원을 안 보므로(IsIgnoreInvenCapacity 기본 true)
+		-- 정원 제한이 필요한 곳(몬스터 드롭 등)은 여기서 직접 판정한다
+		local tab = self:GetItemTab(itemId)
+		if tab == 0 then return true end
+		local used = self:CountItemsByTab(userId)
+		return (used[tab] or 0) < self:GetCapacity(tab)
+	end
+
 	@ExecSpace("Server")
 	method void RequestExpand(integer tabEnum)
 		-- 확장 요청. 다이아 차감과 저장은 전부 여기(서버)에서만 하고, 결과는 @Sync로 클라에 내려간다

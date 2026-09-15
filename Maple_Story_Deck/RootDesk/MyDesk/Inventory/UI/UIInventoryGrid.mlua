@@ -82,6 +82,8 @@ script UIInventoryGrid extends Component
 
 		self.GridView.TotalCount = shown
 		self.GridView:Refresh(resetPos, resetPos)
+		-- 장착/해제처럼 force 없이 갱신될 때는 이미 그려진 셀이 OnRefresh를 안 타므로 장착 표시만 따로 맞춘다
+		self:RefreshEquippedMarks()
 	end
 
 	-- 목록 구성(개수/정렬)은 그대로인데 특정 아이템의 표시 내용만 바뀐 경우(합성으로 등급이 올라
@@ -152,6 +154,33 @@ script UIInventoryGrid extends Component
 
 		if itemStruct ~= nil and self.Inventory ~= nil and self.Inventory.IsSellMode then
 			slot.ImageDim.Enable = isSelected or not _GearSellLogic:CanSell(itemStruct)
+		end
+
+		self:ApplyEquippedMark(slot)
+	end
+
+	-- 장착 중인 장비 표시(2026-09-15 유저 요청): 반투명 검정 딤 + "장착중" 글자. 인벤토리 그리드에서만
+	-- 켠다 — UIItemSlot은 장착 칸/합성 팝업에서도 쓰이므로 Set()은 항상 끄고 여기서만 다시 켠다.
+	-- 판매 모드의 딤은 선택/판매불가 규칙(OnRefresh)이 정하므로 여기서는 장착 장비만 켜고 끄지 않는다
+	@ExecSpace("ClientOnly")
+	method void ApplyEquippedMark(UIItemSlot slot)
+		local equipped = false
+		if slot.ItemStruct ~= nil then equipped = slot.ItemStruct:IsAttached() end
+		slot:SetEquippedMark(equipped)
+		if equipped then
+			slot.ImageDim.Enable = true
+		elseif self.Inventory == nil or not self.Inventory.IsSellMode then
+			slot.ImageDim.Enable = false
+		end
+	end
+
+	-- 장착/해제는 force 없이 갱신돼(Update 참고) 이미 그려진 셀은 OnRefresh를 다시 안 탄다 — 그대로 두면
+	-- 해제한 장비에 "장착중"이 남는다(실측). 보이는 셀 전부에 장착 표시만 다시 적용한다
+	@ExecSpace("ClientOnly")
+	method void RefreshEquippedMarks()
+		for _, comp in ipairs(self.Entity:GetChildComponentsByTypeName("script.UIItemSlot", false)) do
+			local slot = comp.Entity.UIItemSlot
+			if slot ~= nil then self:ApplyEquippedMark(slot) end
 		end
 	end
 

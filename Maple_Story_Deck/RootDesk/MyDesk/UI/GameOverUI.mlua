@@ -38,6 +38,8 @@ script GameOverUI extends Logic
 	property boolean _prevGameOver = false
 	property any _continueHandler = nil
 	property any _closeHandler = nil
+	-- 잡템 슬롯 아이콘별 .ui 원래 PreserveSprite 값(ApplyIconAspect가 처음 만질 때 기록)
+	property any _iconPreserveDefaults = nil
 	property any _restartHandler = nil
 	property any _restartOvertimeHandler = nil
 	property any _dragHandler = nil
@@ -107,7 +109,10 @@ script GameOverUI extends Logic
 			if isvalid(slot) then
 				slot.Enable = true
 				local icon = slot:GetChildByName("Icon")
-				if isvalid(icon) then icon.SpriteGUIRendererComponent.ImageRUID = DataRef(def.icon) end
+				if isvalid(icon) then
+					icon.SpriteGUIRendererComponent.ImageRUID = DataRef(def.icon)
+					self:ApplyIconAspect(icon, def.keepAspect == true)
+				end
 				local countText = slot:GetChildByName("CountText")
 				if isvalid(countText) then countText.TextComponent.Text = "x" .. tostring(count) end
 			end
@@ -118,6 +123,21 @@ script GameOverUI extends Logic
 			if isvalid(slot) then slot.Enable = false end
 		end
 		self.scoreValueText.Text = self:FormatNumber(totalScore) .. " 점"
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ApplyIconAspect(Entity iconEntity, boolean keepAspect)
+		-- keepAspect 잡템(가로로 긴 발광 박쥐의 날개 등)만 칸 안에 원본 비율 그대로 맞추고, 나머지는 .ui 원래
+		-- PreserveSprite로 되돌린다(슬롯 재사용 시 이전 아이템 설정이 남지 않게)
+		local renderer = iconEntity.SpriteGUIRendererComponent
+		if self._iconPreserveDefaults == nil then self._iconPreserveDefaults = {} end
+		local key = iconEntity.Id
+		if self._iconPreserveDefaults[key] == nil then self._iconPreserveDefaults[key] = renderer.PreserveSprite end
+		if keepAspect then
+			renderer.PreserveSprite = PreserveSpriteType.AspectOnly
+		else
+			renderer.PreserveSprite = self._iconPreserveDefaults[key]
+		end
 	end
 
 	@ExecSpace("ClientOnly")
@@ -193,16 +213,23 @@ script GameOverUI extends Logic
 		-- "게임 시작"과 마찬가지로 입장 로딩 화면을 씌운다 — 다시하기도 곧바로 인게임이라
 		-- 유저가 화면을 인식하기 전에 몹에게 맞는 문제가 똑같이 있었다
 		log("GameOverUI: Restart clicked")
-		_LoadingUI:PlayEntry(nil)
-		_GameManager:RequestRestart(_GameManager.TimeAttackMode, _GameManager.SelectedCharacter, _GameManager.SelectedEpisode)
+		-- 유저 지정(2026-09-15): 인벤 탭이 가득 찼으면 다시하기 전에 확인 팝업(RunStartConfirmUI) — 취소하면 게임오버 창에 남는다
+		_RunStartConfirmUI:CheckThen(_GameManager.SelectedEpisode, function()
+			if not isvalid(self) then return end
+			_LoadingUI:PlayEntry(nil)
+			_GameManager:RequestRestart(_GameManager.TimeAttackMode, _GameManager.SelectedCharacter, _GameManager.SelectedEpisode)
+		end)
 	end
 
 	@ExecSpace("ClientOnly")
 	method void OnRestartOvertimeClicked()
 		-- 이어하기/다시하기 사이에 뜨는 오버타임 전용 다시하기 — 동작은 OnRestartClicked와 동일하다.
 		log("GameOverUI: Restart(overtime) clicked")
-		_LoadingUI:PlayEntry(nil)
-		_GameManager:RequestRestart(_GameManager.TimeAttackMode, _GameManager.SelectedCharacter, _GameManager.SelectedEpisode)
+		_RunStartConfirmUI:CheckThen(_GameManager.SelectedEpisode, function()
+			if not isvalid(self) then return end
+			_LoadingUI:PlayEntry(nil)
+			_GameManager:RequestRestart(_GameManager.TimeAttackMode, _GameManager.SelectedCharacter, _GameManager.SelectedEpisode)
+		end)
 	end
 
 	-- "다시하기만" 모드 판정 — 이어하기/다시하기 두 버튼을 숨기고 중앙의 전용 다시하기 버튼만 남긴다.

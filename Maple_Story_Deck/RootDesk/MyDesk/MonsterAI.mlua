@@ -4367,23 +4367,30 @@ script MonsterAI extends Component
 		self.ComboStack = 0
 		self:ClearAllComboOrbs()
 		log("Monster died")
+		-- 인게임 HUD 처치 수 — 보상 경로(일반/루돌프/보스)와 무관하게 사망 1회당 1
+		_GameManager:AddKillCount()
 		-- 보스는 OnBossDefeated()가 처치 보상(Exp/Gold)까지 전부 처리한다. OnMonsterKilled()도
 		-- 같이 부르면 NotifyExpChanged가 한 프레임 안에 두 번 겹쳐 호출되어, 레벨업 트윈이 강제로
 		-- 0%부터 시작하기 직전에 다른 값으로 이미 차오르고 있던 바가 순간적으로 줄어드는 것처럼
 		-- 보이는 버그가 있었다. OnBossDefeated() 호출 자체는 스킬조각/파워엘릭서 드롭 위치 계산
 		-- (fallHeight/groundWorldY/dropScale)이 끝난 뒤로 아래로 옮겼다.
 		if not self._isBoss then
+			-- 엘리트 처치 골드 5(유저 지정 2026-09-16). 에피1 보스 분열체는 스탯만 엘리트급(MarkElite)이라
+			-- 보스 웨이브 조각으로 보고 일반 골드를 준다(보스 본체가 20을 따로 받는다)
+			local eliteReward = false
+			if self._isElite and not self._isEp1BossSplit then eliteReward = true end
 			if self._isBadRudolph then
 				-- "불량 루돌프" — 유저 지정: 골드는 정상 지급하되 EXP는 주지 않는다(OnMonsterKilled는
-				-- 골드+EXP를 한 번에 처리하므로 골드만 떼어낸 GetGoldPerKill을 직접 호출한다)
-				_GameManager:AddGold(_GameManager:GetGoldPerKill())
+				-- 골드+EXP를 한 번에 처리하므로 골드만 떼어낸 GetKillGold를 직접 호출한다)
+				_GameManager:AddGold(_GameManager:GetKillGold(eliteReward))
 			else
-				_GameManager:OnMonsterKilled()
+				_GameManager:OnMonsterKilled(eliteReward)
 			end
-			-- 유물 수리검(10번) — 마지막 타격이 치명타였으면 확률로 골드를 한 번 더 준다(2배 효과).
-			-- OnMonsterKilled의 시그니처를 건드리지 않으려고 별도 호출로 뺐다.
+			-- 유물 수리검(10번) — 마지막 타격이 치명타였으면 확률로 방금 받은 골드를 한 번 더 준다(2배 효과).
+			-- 에피2·3 일반 처치 골드는 확률(1~3)이라 GetKillGold를 다시 부르면 방금 받은 값과 달라진다 —
+			-- 방금 지급한 값을 그대로 읽는다(GetLastKillGold)
 			if self._lastHitWasCrit then
-				_GameManager:TryRelicCritCoinBonus()
+				_GameManager:TryRelicCritCoinBonus(_GameManager:GetLastKillGold())
 			end
 		end
 		-- 에피소드1 보스 분열체 — 마지막 1마리가 죽는 순간 보스 웨이브가 끝난다(스포너가 판정).
