@@ -41,6 +41,9 @@ script EpisodeRewardUI extends Logic
 	property string _holdKind = ""
 	property integer _holdAmount = 0
 	property table _pendingFly = {}
+	-- 이번에 받은 칸들이 날아갈 출발점(받은 순간 가운데 칸 자리 — OnClaimed에서 잡는다)
+	property Vector2 _pendingFlySrc = Vector2(0, 0)
+	property boolean _hasFlySrc = false
 	property integer _animatingIndex = 0
 	property number _focus = 1
 	property integer _pulseTimerId = 0
@@ -269,6 +272,14 @@ script EpisodeRewardUI extends Logic
 		if self._isOpen then
 			table.insert(self._pendingFly, index)
 			self:PlayClaimAnimation(index)
+			-- PlayClaimAnimation이 방금 받은 칸을 가운데로 맞춘(LayoutStrip) 이 순간의 자리를 비행 출발점으로 잡아둔다.
+			-- 닫을 때 다시 구하면 다음 칸이 오른쪽에서 미끄러져 오는 중이라 도장/슬라이드 중에 닫으면 오른쪽에서
+			-- 날아갔다(유저 리포트 2026-09-15 "어쩔 때는 오른쪽에서 나온다")
+			local card = self:GetCard(index)
+			if isvalid(card) and not self._hasFlySrc then
+				self._pendingFlySrc = _RewardFlyUI:GetLayerPosOf(card, 0, 0)
+				self._hasFlySrc = true
+			end
 		else
 			-- 받자마자 팝업을 닫아버린 경우 — 로비 버튼 자리에서 바로 날린다
 			self:FlyReward(index, _RewardFlyUI:GetLayerPosOf(self.lobbyButton.Entity, 0, 0), 0)
@@ -286,14 +297,20 @@ script EpisodeRewardUI extends Logic
 		-- 팝업을 닫는 순간(끄기 직전 가운데 카드 자리에서) 이번에 받은 칸들을 차례로 날린다
 		if #self._pendingFly == 0 then return end
 		local src = Vector2(0, 0)
-		local card = self:GetCard(self:GetTargetFocus())
-		if isvalid(card) then src = _RewardFlyUI:GetLayerPosOf(card, 0, 0) end
+		if self._hasFlySrc then
+			-- 받은 순간 가운데 칸 자리(OnClaimed에서 잡음) — 슬라이드 도중에 닫아도 항상 가운데에서 나간다
+			src = self._pendingFlySrc
+		else
+			local card = self:GetCard(self:GetTargetFocus())
+			if isvalid(card) then src = _RewardFlyUI:GetLayerPosOf(card, 0, 0) end
+		end
 		local delay = 0
 		for _, index in ipairs(self._pendingFly) do
 			self:FlyReward(index, src, delay)
 			delay = delay + 0.3
 		end
 		self._pendingFly = {}
+		self._hasFlySrc = false
 	end
 
 	@ExecSpace("ClientOnly")

@@ -27,6 +27,12 @@ script IdleRewardUI extends Logic
 	property Entity avatar = "f6005846-ffd3-4143-97be-cd2abd7b3a7b"
 	property ButtonComponent lobbyButton = "b4663786-54bd-4e24-853d-eca8e240c194"
 	property Entity lobbyRedDot = "0ccffead-15bd-4ba5-9ea7-9f34573ba562"
+	-- 장비 인벤토리 부족 확인창(유저 지정 2026-09-15) — 옵션의 게임 종료 확인창과 같은 모양
+	property Entity confirmDimmer = "c06f7aca-1dcd-486b-91d0-208da5266db5"
+	property Entity confirmPanel = "3a7756aa-2047-4c4f-9073-b5a97c899fe2"
+	property TextGUIRendererComponent confirmSubText = "84da9a2f-f41f-4c44-864a-1c7c0c0aa9cd"
+	property ButtonComponent btnConfirmYes = "92c987f6-3771-4229-929e-df4ef11b3907"
+	property ButtonComponent btnConfirmNo = "3fa2448d-9060-41d5-902f-d2b425a9aa98"
 
 	-- 장면 값(장면 좌표 = Panel/Scene 로컬, 중심 원점). 바닥 높이는 에피소드별 캡처 사진마다 다르다(GetSceneDef)
 	property number AvatarX = -340
@@ -82,6 +88,13 @@ script IdleRewardUI extends Logic
 		self:ConnectClick(self.btnClaim.Entity, function() self:OnClaimClicked() end)
 		if isvalid(self.lobbyButton) then
 			self:ConnectClick(self.lobbyButton.Entity, function() self:Open() end)
+		end
+		self:CloseConfirm()
+		if isvalid(self.btnConfirmYes) then
+			self:ConnectClick(self.btnConfirmYes.Entity, function() self:OnConfirmDiscardYes() end)
+		end
+		if isvalid(self.btnConfirmNo) then
+			self:ConnectClick(self.btnConfirmNo.Entity, function() self:CloseConfirm() end)
 		end
 		-- 로비 레드닷은 시간이 흘러야 켜지므로 가볍게 주기 확인(서버 호출 없음 — 동기화된 값 + 로컬 시계만 본다)
 		self._lobbyTimerId = _TimerService:SetTimerRepeat(function() self:RefreshLobbyButton() end, 5)
@@ -150,6 +163,8 @@ script IdleRewardUI extends Logic
 	@ExecSpace("ClientOnly")
 	method void Close()
 		if not self._isOpen then return end
+		-- 확인창이 떠 있는 채로 닫으면 다음에 열 때 그대로 남아 있으므로 같이 내린다
+		self:CloseConfirm()
 		self:FlyPendingRewards()
 		self:StopScene()
 		if self._tickTimerId ~= 0 then
@@ -275,6 +290,14 @@ script IdleRewardUI extends Logic
 			_UIToast:ShowMessage("최소 " .. (logic:GetMinClaimSeconds() // 60) .. "분은 방치해야 받을 수 있어요")
 			return
 		end
+		self:SendClaim(false)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SendClaim(boolean discardOverflow)
+		-- 서버에 수령 요청. discardOverflow=true면 자리가 없는 장비를 버리고 받는다(확인창 "받기")
+		local logic = _IdleRewardLogic
+		local sec = self:GetDisplaySeconds()
 		local gold = logic:GetGoldFor(sec)
 		-- 서버 지급 Multicast가 코인 배지 숫자를 바로 올리기 전에 보류 — 팝업이 닫히며 메소가 도착할 때 오른다
 		self._claimPending = true
@@ -287,7 +310,53 @@ script IdleRewardUI extends Logic
 			self._claimPending = false
 			self:ReleaseHold()
 		end, self.ClaimPendingTimeout)
-		logic:RequestClaim()
+		if discardOverflow then
+			logic:RequestClaimDiscardOverflow()
+		else
+			logic:RequestClaim()
+		end
+	end
+
+	@ExecSpace("Client")
+	method void OnClaimNeedConfirm(integer total, integer fit)
+		-- 장비 자리가 모자라 서버가 지급을 멈췄다 — 사라질 개수를 알려주고 그래도 받을지 묻는다
+		self._claimPending = false
+		self:ReleaseHold()
+		local lost = total - fit
+		log("IdleRewardUI: need confirm gear total=" .. total .. " fit=" .. fit)
+		if not self._isOpen then
+			_UIToast:ShowMessage("장비 인벤토리가 가득 찼어요! 자리가 없는 장비 " .. lost .. "개는 사라질 수 있어요")
+			return
+		end
+		if isvalid(self.confirmSubText) then
+			self.confirmSubText.Text = "자리가 없는 장비 " .. lost .. "개는 사라져요.\n그래도 받을까요?"
+		end
+		self:OpenConfirm()
+		self:RefreshCounters()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OpenConfirm()
+		-- 딤이 확인창 바깥(뒤의 받기/닫기 버튼)을 막는다 — 딤이 먼저, 확인창이 그 위(displayOrder 2 < 3)
+		if isvalid(self.confirmDimmer) then self.confirmDimmer.Enable = true end
+		if isvalid(self.confirmPanel) then self.confirmPanel.Enable = true end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void CloseConfirm()
+		-- "취소" / 팝업 닫기 — 확인창만 내린다(아무것도 지급되지 않은 상태 그대로)
+		if isvalid(self.confirmPanel) then self.confirmPanel.Enable = false end
+		if isvalid(self.confirmDimmer) then self.confirmDimmer.Enable = false end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnConfirmDiscardYes()
+		-- 확인창 "받기" — 자리가 없는 장비는 버리고 나머지(골드·들어가는 장비)를 받는다
+		self:CloseConfirm()
+		if self._claimPending then return end
+		if not _IdleRewardLogic:IsLoaded() then return end
+		log("IdleRewardUI: confirm yes — claim discarding overflow")
+		self:SendClaim(true)
 	end
 
 	@ExecSpace("ClientOnly")
@@ -328,8 +397,9 @@ script IdleRewardUI extends Logic
 	method void OnClaimFailed(string reason)
 		self._claimPending = false
 		self:ReleaseHold()
-		if reason == "inventory" then
-			_UIToast:ShowMessage("장비 인벤토리가 가득 찼어요! 인벤토리를 비우고 받아주세요")
+		if reason == "error" then
+			-- 인벤토리 부족은 확인창(OnClaimNeedConfirm)으로 가고, 여기는 그 밖의 지급 실패(DB 미로드 등)만 온다
+			_UIToast:ShowMessage("장비를 넣지 못했어요. 잠시 후 다시 시도해 주세요")
 		else
 			_UIToast:ShowMessage("최소 " .. (_IdleRewardLogic:GetMinClaimSeconds() // 60) .. "분은 방치해야 받을 수 있어요")
 		end
