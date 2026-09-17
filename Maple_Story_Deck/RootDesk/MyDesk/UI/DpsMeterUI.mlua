@@ -24,6 +24,14 @@ script DpsMeterUI extends Logic
 	property number PanelTopPadding = 44
 	property number RowSpacing = 44
 	property number PanelBottomPadding = 42
+	-- 유저 지정(2026-09-18): 미터를 화면 왼쪽 끝에 붙였더니 줄이 늘어나면 좌측 이동 버튼(BtnMapLeft,
+	-- 화면 중앙 높이 x40~130)과 겹친다 → 한 열에 RowsPerColumn줄까지만 쌓고, 넘치면 오른쪽에 열을 하나 더 만든다.
+	-- 줄 위치는 이 값들로 매 갱신마다 다시 계산하므로 .ui의 Line1~7 원래 좌표는 무시된다.
+	property integer RowsPerColumn = 4
+	property number ColumnSpacing = 350
+	property number RowStartX = 10
+	-- 패널 가로 = 열 수 × ColumnSpacing + 좌우 여백
+	property number PanelSidePadding = 20
 	property string ToggleOpenLabel = "DPS 접기"
 	property string ToggleClosedLabel = "DPS 보기"
 	property Color SkillBarColor = Color(1.0, 0.604, 0.235, 1.0)
@@ -138,11 +146,16 @@ script DpsMeterUI extends Logic
 		if etc > 0 then table.insert(shown, { card = 0, damage = etc }) end
 		self.totalText.Text = self:FormatNumber(total)
 
-		-- 패널 높이를 표시 중인 줄 수에 맞춘다(스킬이 적을 때 빈 반투명 영역이 크게 남지 않게)
+		-- 패널 크기를 표시 중인 줄 수에 맞춘다. 한 열에 RowsPerColumn줄까지만 쌓고 넘치면 오른쪽 열로
+		-- 넘어가므로(이동 버튼과 겹치지 않게), 높이는 "가장 긴 열"의 줄 수로, 가로는 열 수로 정한다.
+		local rowsPerCol = math.max(1, self.RowsPerColumn)
+		local columns = math.max(1, math.ceil(#shown / rowsPerCol))
+		local rowsInFirstColumn = math.min(#shown, rowsPerCol)
 		local panelT = self.dpsPanel.UITransformComponent
-		local wantHeight = self.PanelTopPadding + #shown * self.RowSpacing + self.PanelBottomPadding
-		if math.abs(panelT.RectSize.y - wantHeight) > 0.5 then
-			panelT.RectSize = Vector2(panelT.RectSize.x, wantHeight)
+		local wantHeight = self.PanelTopPadding + rowsInFirstColumn * self.RowSpacing + self.PanelBottomPadding
+		local wantWidth = columns * self.ColumnSpacing + self.PanelSidePadding
+		if math.abs(panelT.RectSize.y - wantHeight) > 0.5 or math.abs(panelT.RectSize.x - wantWidth) > 0.5 then
+			panelT.RectSize = Vector2(wantWidth, wantHeight)
 		end
 
 		-- 막대 길이는 가장 큰 줄 기준(기타가 제일 클 수도 있으니 전체에서 최대값)
@@ -160,6 +173,14 @@ script DpsMeterUI extends Logic
 				rowInfo.card = -1
 			else
 				if not rowInfo.entity.Enable then rowInfo.entity:SetEnable(true) end
+				-- 열/행 배치 — i번째 줄은 (i-1)을 RowsPerColumn으로 나눈 몫이 열, 나머지가 그 열 안의 순번
+				local col = math.floor((i - 1) / rowsPerCol)
+				local rowInCol = (i - 1) % rowsPerCol
+				local rowT = rowInfo.entity.UITransformComponent
+				local wantPos = Vector2(self.RowStartX + col * self.ColumnSpacing, -(self.PanelTopPadding + rowInCol * self.RowSpacing))
+				if math.abs(rowT.anchoredPosition.x - wantPos.x) > 0.5 or math.abs(rowT.anchoredPosition.y - wantPos.y) > 0.5 then
+					rowT.anchoredPosition = wantPos
+				end
 				if rowInfo.card ~= data.card then
 					rowInfo.card = data.card
 					if rowInfo.icon ~= nil then
