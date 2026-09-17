@@ -63,6 +63,13 @@ script OptionUI extends Logic
 
 	property integer FusionRowCount = 7
 
+	-- 미발견 조합 가림 연출 — 아이콘은 이 색으로 곱해 실루엣으로 만들고, 같은 엔티티에 "?" 글자를 얹는다
+	property Color FusionHiddenTint = Color(0, 0, 0, 1)
+	property string FusionHiddenMark = "?"
+	property Color FusionHiddenMarkColor = Color(1, 1, 1, 1)
+	property number FusionHiddenMarkSize = 36
+	property string FusionHiddenName = "???"
+
 	-- 캐릭터별 조합식. { result = 결과 카드, mats = { 재료 카드들 } }
 	-- 재료 첫 번째가 Lv5까지 올려야 하는 슬롯 카드, 나머지는 보유만 하면 되는 패시브다.
 	-- 원본은 CardManager.GenerateLevelUpChoices의 조합 해금 조건문들 — 거기 조건이 바뀌면 여기도 같이 고칠 것.
@@ -99,44 +106,8 @@ script OptionUI extends Logic
 	@ExecSpace("ClientOnly")
 	method void BuildRecipeTable()
 		-- 캐릭터 인덱스(_GameManager.SelectedCharacter) → 조합식 목록.
-		-- 0 = 아르카나(기본), 1 = 실피드, 2 = 레이온, 3 = 쉐이드
-		self._recipes = {}
-		self._recipes[0] = {
-			{ result = 16,  mats = { 4, 8 } },
-			{ result = 17,  mats = { 3, 10 } },
-			{ result = 19,  mats = { 9, 7 } },
-			{ result = 20,  mats = { 11, 13 } },
-			{ result = 21,  mats = { 12, 7, 18 } },
-			{ result = 23,  mats = { 15, 10, 22 } },
-			{ result = 24,  mats = { 14, 22 } },
-		}
-		self._recipes[1] = {
-			{ result = 114, mats = { 103, 104 } },
-			{ result = 115, mats = { 105, 110 } },
-			{ result = 116, mats = { 101, 112 } },
-			{ result = 117, mats = { 102, 113 } },
-			{ result = 118, mats = { 106, 109, 110 } },
-			{ result = 119, mats = { 107, 109, 111 } },
-			{ result = 120, mats = { 108, 112, 113 } },
-		}
-		self._recipes[2] = {
-			{ result = 160, mats = { 153, 158 } },
-			{ result = 165, mats = { 154, 161 } },
-			{ result = 166, mats = { 155, 164, 163 } },
-			{ result = 167, mats = { 152, 151, 162 } },
-			{ result = 168, mats = { 156, 164, 151 } },
-			{ result = 169, mats = { 159, 161, 164 } },
-			{ result = 170, mats = { 157, 163, 164 } },
-		}
-		self._recipes[3] = {
-			{ result = 185, mats = { 171, 181, 183 } },
-			{ result = 186, mats = { 173, 180, 182 } },
-			{ result = 187, mats = { 174, 184, 180 } },
-			{ result = 188, mats = { 175, 176 } },
-			{ result = 189, mats = { 177, 182, 184, 183 } },
-			{ result = 190, mats = { 178, 184, 181 } },
-			{ result = 191, mats = { 179, 180, 183 } },
-		}
+		-- 표 원본은 FusionDiscoveryLogic.GetRecipeTable — 서버의 "발견" 기록과 같은 표를 쓰도록 한 곳으로 옮겼다(2026-09-17)
+		self._recipes = _FusionDiscoveryLogic:GetRecipeTable()
 	end
 
 	@ExecSpace("ClientOnly")
@@ -270,12 +241,18 @@ script OptionUI extends Logic
 					row:SetEnable(true)
 					local mats = rec.mats
 					local matCount = #mats
+					-- 유저 지정(2026-09-17): 아직 만들어보지 않은 조합은 첫 재료만 공개하고, 나머지 재료·결과는
+					-- 검은 실루엣 + "?"로 가린다. 결과 스킬을 한 번 획득하면 FusionDiscoveryLogic이 영구 공개한다
+					local discovered = _FusionDiscoveryLogic:IsDiscovered(rec.result)
 					for s = 1, 4 do
 						local slot = row:GetChildByName("Slot" .. s, false)
 						if slot ~= nil then
 							if s <= matCount then
 								slot:SetEnable(true)
 								slot.SpriteGUIRendererComponent.ImageRUID = DataRef(_CardManager:GetCardIconRUID(mats[s]))
+								local hideSlot = false
+								if not discovered and s >= 2 then hideSlot = true end
+								self:ApplyFusionMask(slot, hideSlot)
 							else
 								slot:SetEnable(false)
 							end
@@ -288,13 +265,52 @@ script OptionUI extends Logic
 					local res = row:GetChildByName("Result", false)
 					if res ~= nil then
 						res.SpriteGUIRendererComponent.ImageRUID = DataRef(_CardManager:GetCardIconRUID(rec.result))
+						self:ApplyFusionMask(res, not discovered)
 					end
 					local nameEntity = row:GetChildByName("Name", false)
 					if nameEntity ~= nil then
-						nameEntity.TextGUIRendererComponent.Text = _CardManager:GetSlotBaseName(rec.result)
+						if discovered then
+							nameEntity.TextGUIRendererComponent.Text = _CardManager:GetSlotBaseName(rec.result)
+						else
+							nameEntity.TextGUIRendererComponent.Text = self.FusionHiddenName
+						end
 					end
 				end
 			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ApplyFusionMask(Entity iconEntity, boolean hidden)
+		-- 아이콘 하나를 가리거나(검은 실루엣 + "?") 원래대로 되돌린다.
+		-- "?" 글자는 .ui를 건드리지 않도록 처음 가릴 때 아이콘 엔티티에 TextGUIRendererComponent를 붙여서 쓴다
+		local sprite = iconEntity.SpriteGUIRendererComponent
+		if sprite ~= nil then
+			if hidden then
+				sprite.Color = self.FusionHiddenTint
+			else
+				sprite.Color = Color(1, 1, 1, 1)
+			end
+		end
+		local mark = iconEntity.TextGUIRendererComponent
+		if mark == nil then
+			if not hidden then return end
+			iconEntity:AddComponent(TextGUIRendererComponent)
+			mark = iconEntity.TextGUIRendererComponent
+			if mark == nil then
+				log_warning("OptionUI: failed to add fusion mask text on " .. iconEntity.Name)
+				return
+			end
+			mark.Font = "Maple"
+			mark.FontSize = self.FusionHiddenMarkSize
+			mark.FontColor = self.FusionHiddenMarkColor
+			mark.HorizontalAlignment = TextHorizontalAlignmentOption.Center
+			mark.VerticalAlignment = TextVerticalAlignmentOption.Middle
+		end
+		if hidden then
+			mark.Text = self.FusionHiddenMark
+		else
+			mark.Text = ""
 		end
 	end
 

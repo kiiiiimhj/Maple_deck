@@ -12,6 +12,12 @@ script MapManager extends Logic
 	-- 태어남). 이 플래그가 true인 동안은 CurrentMapIndex가 맞아도 "지금 있는 맵이 아니다"로 취급한다.
 	property boolean AwayOnSideMap = false
 
+	-- 구름정원 콜로세움(몬스터 갤러리 미니게임, ep2_map2_estermap_1)에 들어가 있는 동안 true.
+	-- AwayOnSideMap은 에피3 보너스 보스 아레나(싸우는 곳)도 같이 켜서 구분이 안 되므로 따로 둔다.
+	-- 켜고 끄는 곳: Ep2Map4GalleryPortalTrigger(진입) / Ep2Map2GalleryReturnPortalTrigger(복귀) / GameManager 새 런 시작.
+	-- 이 동안 플레이 시계·포션 등 전투 틱을 멈춘다(유저 지정 2026-09-17, GameManager.IsPlayClockFrozen 참고)
+	property boolean InColosseum = false
+
 	property integer MinMapIndex = 1
 	-- 맵11(해변 존)이 맵6의 우측 분기로 추가되면서, 그리고 맵12가 맵11의 순차적 연장으로 추가되면서
 	-- 스폰/정리 루프(SpawnWave, ClearAllMonsters 등)가 도는 범위에 11~12도 포함되도록 12로 올린다.
@@ -1211,6 +1217,19 @@ script MapManager extends Logic
 	-- 정확히 그 존 몬스터만 골라 Pause/Resume한다 — container 기반 존도 자기 자신의 zoneIndex와 항상
 	-- 일치하므로 부작용 없이 그대로 적용된다.
 	@ExecSpace("ServerOnly")
+	method void SetInColosseum(boolean inside)
+		-- 콜로세움 체류 플래그(InColosseum 선언부 주석 참고)
+		if self.InColosseum == inside then return end
+		self.InColosseum = inside
+		log("MapManager: InColosseum = " .. tostring(inside))
+	end
+
+	method boolean IsInColosseum()
+		-- 다른 Logic은 InColosseum을 직접 읽지 말고 이걸로 읽는다
+		return self.InColosseum
+	end
+
+	@ExecSpace("ServerOnly")
 	method void SetMonstersPausedForZone(Entity map, integer zoneIndex, boolean paused)
 		if map == nil then return end
 		-- 성능 최적화(2026-08-24, 유저 리포트 "맵이동할때 렉 여전함") — 실측: map:GetChildComponentsByTypeName로
@@ -1715,7 +1734,12 @@ script MapManager extends Logic
 	method void ApplyDefaultZoomImmediate()
 		local cam = _CameraService:GetCurrentCameraComponent()
 		if cam == nil then return end
-		cam.ZoomRatio = self.DefaultZoomRatio
+		-- 모바일은 네이티브 세로 시야가 PC의 75%(2.7/3.6)라 같은 줌이면 37% 확대돼 보인다(2026-09-17 아이폰 스샷 실측) →
+		-- 모바일일 때만 배율(0.75)을 곱해 세로 범위를 PC와 맞춘다. PC는 배율 1이라 기존 115 그대로.
+		-- (주의: ZoomRatio는 클수록 줌인 — 위 DefaultZoomRatio 선언부 "크면 줌아웃" 설명은 실측과 반대였다)
+		local zoom = self.DefaultZoomRatio * _MobileScreenFitLogic:GetZoomMultiplier()
+		if zoom > cam.ZoomRatioMax then zoom = cam.ZoomRatioMax end
+		cam.ZoomRatio = zoom
 	end
 
 	-- SilentMoveToMap(게임 시작 리다이렉트)은 MapTransitionLogic의 와이프 커버 같은 가림막이 없다 —

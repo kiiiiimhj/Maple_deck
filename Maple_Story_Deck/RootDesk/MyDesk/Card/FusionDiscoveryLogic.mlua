@@ -1,0 +1,147 @@
+@Logic
+script FusionDiscoveryLogic extends Logic
+
+	-- 조합식 "발견" 기록(유저 지정 2026-09-17).
+	--   · 옵션 → 조합식 목록에서, 아직 한 번도 만들어보지 않은 조합은 첫 번째 재료만 보여주고
+	--     두 번째 이후 재료 + 결과 스킬은 검은 실루엣 위에 "?"로 가린다(이름도 ???).
+	--   · 결과 스킬 카드를 한 번이라도 획득하면(CardManager.ApplyCardUpgrade → NotifyCardAcquired) 그 조합은 영구 공개.
+	-- 저장: 유저별 UserDataStorage 키 "FusionDiscovered" — 발견한 결과 카드 번호를 콤마로 이은 문자열("16,114,...").
+	--      새로 발견할 때만 1회 저장하므로 계정당 최대 28번.
+	-- 조합식 표(GetRecipeTable)의 원본은 CardManager.GenerateLevelUpChoices의 조합 해금 조건문 —
+	-- 거기 조건이 바뀌면 이 표도 같이 고칠 것(OptionUI도 이 표를 읽는다).
+
+	property string StorageKey = "FusionDiscovered"
+
+	-- 클라이언트(OptionUI)가 읽는 발견 목록. 콤마 구분 결과 카드 번호
+	@Sync
+	property string DiscoveredCsv = ""
+
+	property boolean _loaded = false
+	property string _profileCode = ""
+	property any _resultSet = nil
+
+	method table GetRecipeTable()
+		-- 캐릭터 인덱스(_GameManager.SelectedCharacter) → 조합식 목록. 0 = 아르카나, 1 = 실피드, 2 = 레이온, 3 = 쉐이드.
+		-- { result = 결과 카드, mats = { 재료 카드들 } } — 재료 첫 번째가 Lv5까지 올려야 하는 슬롯 카드, 나머지는 보유만 하면 되는 패시브.
+		local recipes = {}
+		recipes[0] = {
+			{ result = 16,  mats = { 4, 8 } },
+			{ result = 17,  mats = { 3, 10 } },
+			{ result = 19,  mats = { 9, 7 } },
+			{ result = 20,  mats = { 11, 13 } },
+			{ result = 21,  mats = { 12, 7, 18 } },
+			{ result = 23,  mats = { 15, 10, 22 } },
+			{ result = 24,  mats = { 14, 22 } },
+		}
+		recipes[1] = {
+			{ result = 114, mats = { 103, 104 } },
+			{ result = 115, mats = { 105, 110 } },
+			{ result = 116, mats = { 101, 112 } },
+			{ result = 117, mats = { 102, 113 } },
+			{ result = 118, mats = { 106, 109, 110 } },
+			{ result = 119, mats = { 107, 109, 111 } },
+			{ result = 120, mats = { 108, 112, 113 } },
+		}
+		recipes[2] = {
+			{ result = 160, mats = { 153, 158 } },
+			{ result = 165, mats = { 154, 161 } },
+			{ result = 166, mats = { 155, 164, 163 } },
+			{ result = 167, mats = { 152, 151, 162 } },
+			{ result = 168, mats = { 156, 164, 151 } },
+			{ result = 169, mats = { 159, 161, 164 } },
+			{ result = 170, mats = { 157, 163, 164 } },
+		}
+		recipes[3] = {
+			{ result = 185, mats = { 171, 181, 183 } },
+			{ result = 186, mats = { 173, 180, 182 } },
+			{ result = 187, mats = { 174, 184, 180 } },
+			{ result = 188, mats = { 175, 176 } },
+			{ result = 189, mats = { 177, 182, 184, 183 } },
+			{ result = 190, mats = { 178, 184, 181 } },
+			{ result = 191, mats = { 179, 180, 183 } },
+		}
+		return recipes
+	end
+
+	method boolean IsFusionResult(integer cardIdx)
+		-- 조합식 표에 결과로 등장하는 카드인가(처음 물을 때 집합을 만들어 둔다)
+		if self._resultSet == nil then
+			local set = {}
+			for _, list in pairs(self:GetRecipeTable()) do
+				for _, rec in ipairs(list) do set[rec.result] = true end
+			end
+			self._resultSet = set
+		end
+		return self._resultSet[cardIdx] == true
+	end
+
+	method boolean IsDiscovered(integer resultCardIdx)
+		-- 이 결과 카드를 만들어본 적 있는가(서버/클라 공용 — @Sync 문자열 기준)
+		local needle = tostring(resultCardIdx)
+		for token in string.gmatch(self.DiscoveredCsv, "[^,]+") do
+			if token == needle then return true end
+		end
+		return false
+	end
+
+	-- ── 로드/저장 ────────────────────────────────────────────────────────────
+	@ExecSpace("ServerOnly")
+	@EventSender("Service", "UserService")
+	handler HandleUserEnterEvent(UserEnterEvent event)
+		local user = _UserService:GetUserEntityByUserId(event.UserId)
+		if user == nil then return end
+		self:LoadFor(user)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void LoadFor(Entity user)
+		-- 입장 시 1회만 읽는다. 처음 하는 유저(NotFound)는 빈 목록
+		self._profileCode = user.PlayerComponent.ProfileCode
+		local ds = _DataStorageService:GetUserDataStorage(self._profileCode)
+		local code, raw = ds:GetAndWait(self.StorageKey)
+		if code == 0 then
+			-- 한 번도 저장한 적 없는 키는 code 0 + raw nil로 온다(2026-09-17 실측) — 빈 목록으로 시작
+			if raw ~= nil then self.DiscoveredCsv = raw end
+		elseif code ~= 1000002 then
+			log_warning("FusionDiscoveryLogic: load failed code=" .. tostring(code))
+			return
+		end
+		self._loaded = true
+		log("FusionDiscoveryLogic: loaded discovered=[" .. self.DiscoveredCsv .. "]")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void Save()
+		-- 새로 발견했을 때만 부른다
+		if self._profileCode == "" then return end
+		local ds = _DataStorageService:GetUserDataStorage(self._profileCode)
+		ds:SetAsync(self.StorageKey, self.DiscoveredCsv, function(code, key)
+			if code ~= 0 then log_warning("FusionDiscoveryLogic: save failed code=" .. tostring(code)) end
+		end)
+	end
+
+	-- ── CardManager가 부르는 훅 ────────────────────────────────────────────────
+	@ExecSpace("ServerOnly")
+	method void NotifyCardAcquired(integer cardIdx)
+		-- 카드 업그레이드가 적용될 때마다 불린다. 조합 결과 카드를 처음 얻었으면 발견 목록에 추가
+		if not self._loaded then return end
+		if not self:IsFusionResult(cardIdx) then return end
+		if self:IsDiscovered(cardIdx) then return end
+		if self.DiscoveredCsv == "" then
+			self.DiscoveredCsv = tostring(cardIdx)
+		else
+			self.DiscoveredCsv = self.DiscoveredCsv .. "," .. tostring(cardIdx)
+		end
+		self:Save()
+		log("FusionDiscoveryLogic: discovered fusion result " .. cardIdx .. " -> [" .. self.DiscoveredCsv .. "]")
+	end
+
+	-- 테스트 전용(서버 스크립트에서 직접 호출)
+	@ExecSpace("ServerOnly")
+	method void DebugSetDiscovered(string csv)
+		self.DiscoveredCsv = csv
+		self:Save()
+		log("FusionDiscoveryLogic: debug discovered=[" .. csv .. "]")
+	end
+
+end

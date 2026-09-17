@@ -1,0 +1,115 @@
+@Logic
+script DiamondDropLogic extends Logic
+
+	-- 인게임 다이아 드롭(유저 지정 2026-09-18).
+	--   · 보스/엘리트 몬스터 처치 5% (MonsterAI.Die)
+	--   · 아이템이 나오는 터치 이스터에그 5% (EasterEggBonusLogic)
+	-- 지급량은 5~10개 무작위. 잡템과 동일하게 바닥에 떨어졌다가 가방으로 날아가는 연출
+	-- (GameManager.ScheduleLootDrop)을 거친 뒤 GameManager.AddDiamond로 실제 재화에 더한다 —
+	-- AddDiamond가 @Sync Diamond 갱신 + TitleUI.NotifyDiamondChanged까지 하므로 화면 숫자도 즉시 바뀐다.
+	--
+	-- 어뷰징 방지: 12시간 동안 WindowCap(100개)까지만 나온다. 창(window)은 "처음 다이아를 얻은 시각"부터
+	-- 12시간이고, 다 지나면 다음 획득 때 자동으로 새 창이 열린다. 누적값은 다이아 잔액과 같은
+	-- 전역 저장소("PlayerCoins")에 별도 키로 저장해서 월드를 껐다 켜도 유지된다.
+
+	property number DropChance = 0.05
+	property integer MinAmount = 5
+	property integer MaxAmount = 10
+	property integer WindowCap = 100
+	property number WindowHours = 12
+
+	property any _storage = nil
+	property integer _windowStartSec = 0
+	property integer _windowEarned = 0
+	property boolean _loaded = false
+	property boolean _dirty = false
+	property integer _flushTimerId = 0
+
+	property string StorageKeyStart = "DiamondDropWindowStart"
+	property string StorageKeyEarned = "DiamondDropWindowEarned"
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		-- 저장된 12시간 창 상태를 불러오고, 코인/다이아와 같은 3초 지연 flush를 건다
+		self._storage = _DataStorageService:GetGlobalDataStorage("PlayerCoins")
+		local startCode, startRaw = self._storage:GetAndWait(self.StorageKeyStart)
+		if startCode == 0 and startRaw ~= nil and startRaw ~= "" then
+			local v = tonumber(startRaw)
+			if v ~= nil then self._windowStartSec = math.floor(v) end
+		end
+		local earnedCode, earnedRaw = self._storage:GetAndWait(self.StorageKeyEarned)
+		if earnedCode == 0 and earnedRaw ~= nil and earnedRaw ~= "" then
+			local v = tonumber(earnedRaw)
+			if v ~= nil then self._windowEarned = math.floor(v) end
+		end
+		self._loaded = true
+		self._flushTimerId = _TimerService:SetTimerRepeat(function()
+			if isvalid(self) then self:FlushIfDirty() end
+		end, 3.0)
+		log(string.format("DiamondDropLogic: window start=%d earned=%d", self._windowStartSec, self._windowEarned))
+	end
+
+	@ExecSpace("ServerOnly")
+	method void FlushIfDirty()
+		-- 바뀐 창 상태를 저장한다(획득할 때마다 쓰지 않고 3초에 한 번 모아서)
+		if not self._dirty then return end
+		self._dirty = false
+		self._storage:SetAndWait(self.StorageKeyStart, tostring(self._windowStartSec))
+		self._storage:SetAndWait(self.StorageKeyEarned, tostring(self._windowEarned))
+	end
+
+	method integer NowSec()
+		-- 서버 UTC 현재 시각(초) — IdleRewardLogic과 같은 방식
+		return DateTime.UtcNow.Elapsed // 1000
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer GetRemainingCap()
+		-- 지금 창에서 더 받을 수 있는 다이아 개수. 창이 만료됐으면 0부터 다시 시작한다.
+		local now = self:NowSec()
+		local windowSec = math.floor(self.WindowHours * 3600)
+		if self._windowStartSec <= 0 or now - self._windowStartSec >= windowSec then
+			return self.WindowCap
+		end
+		local remain = self.WindowCap - self._windowEarned
+		if remain < 0 then remain = 0 end
+		return remain
+	end
+
+	-- 확률 판정 없이 바로 굴려서 지급하는 진입점이 필요하면 GrantDiamondDrop을 직접 부른다(치트/테스트용).
+	@ExecSpace("ServerOnly")
+	method void TryDropDiamond(Vector3 worldPos, number fallHeight, number groundWorldY, number dropScale)
+		-- 보스/엘리트 처치, 이스터에그에서 호출 — DropChance로 굴려서 당첨이면 연출과 함께 지급한다
+		if _GameManager.GameOver then return end
+		if _UtilLogic:RandomDouble() >= self.DropChance then return end
+		self:GrantDiamondDrop(worldPos, fallHeight, groundWorldY, dropScale)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void GrantDiamondDrop(Vector3 worldPos, number fallHeight, number groundWorldY, number dropScale)
+		-- 12시간 상한을 넘지 않는 선에서 MinAmount~MaxAmount개를 지급한다(남은 한도가 더 적으면 그만큼만).
+		local remain = self:GetRemainingCap()
+		if remain <= 0 then
+			log("DiamondDropLogic: window cap reached, skip")
+			return
+		end
+		local amount = _UtilLogic:RandomIntegerRange(self.MinAmount, self.MaxAmount)
+		if amount > remain then amount = remain end
+
+		local now = self:NowSec()
+		local windowSec = math.floor(self.WindowHours * 3600)
+		if self._windowStartSec <= 0 or now - self._windowStartSec >= windowSec then
+			-- 새 12시간 창 시작
+			self._windowStartSec = now
+			self._windowEarned = 0
+		end
+		self._windowEarned = self._windowEarned + amount
+		self._dirty = true
+
+		_GameManager:ScheduleLootDrop(worldPos, _GameManager.DiamondIconRUID, fallHeight, groundWorldY, function()
+			if isvalid(self) then _GameManager:AddDiamond(amount) end
+		end, dropScale)
+		log(string.format("DiamondDropLogic: dropped %d (window %d/%d)", amount, self._windowEarned, self.WindowCap))
+	end
+
+end

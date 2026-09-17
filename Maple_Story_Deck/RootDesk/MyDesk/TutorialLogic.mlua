@@ -71,13 +71,36 @@ script TutorialLogic extends Logic
 
 	property number _aimWaitElapsed = 0
 
+	-- ── 이스터에그 튜토리얼(유저 지정 2026-09-17) ─────────────────────────────────
+	-- 에피1 map04 존4(EasterEggObject 버섯이 있는 존)에 들어가고 EggDelaySeconds 뒤,
+	-- 게임 정지 + 월드 딤(버섯·몬스터는 딤 위로 보임) + 손가락이 버섯을 콕콕 + 안내 배너.
+	-- 버섯을 누르면(TreasureChestEgg.RequestOpen → NotifyEggObjectOpened) 정지를 풀고 끝, 계정당 1회.
+	-- 첫 플레이 온보딩이 진행 중이면 기다렸다가 끝난 뒤에 뜬다. 이미 이번 판에 버섯을 눌러 숨겨진 상태면 안 띄운다.
+	-- "봤음" 저장 키는 온보딩과 같은 전역 저장소("PlayerCoins")의 EggTutorialSeen.
+	@Sync
+	property boolean EggTutorialSeen = false
+
+	@Sync
+	property boolean EggActive = false
+
+	property string EggStorageKey = "EggTutorialSeen"
+	property integer EggEpisode = 1
+	property integer EggZoneIndex = 4
+	property string EggObjectPath = "/maps/map04/EasterEggObject"
+	property number EggDelaySeconds = 1.0
+
+	-- 존에 들어온 뒤 흐른 시간(-1이면 그 존 밖)
+	property number _eggZoneElapsed = -1
+
 	@ExecSpace("ServerOnly")
 	method void OnBeginPlay()
 		-- 월드 시작 시 "이미 본 유저인지"를 한 번 읽어 @Sync로 클라이언트에 내려준다
 		self._storage = _DataStorageService:GetGlobalDataStorage("PlayerCoins")
 		local errorCode, raw = self._storage:GetAndWait(self.StorageKey)
 		self.TutorialSeen = (errorCode == 0 and raw == "1")
-		log("TutorialLogic started (seen=" .. tostring(self.TutorialSeen) .. ")")
+		local eggCode, eggRaw = self._storage:GetAndWait(self.EggStorageKey)
+		self.EggTutorialSeen = (eggCode == 0 and eggRaw == "1")
+		log("TutorialLogic started (seen=" .. tostring(self.TutorialSeen) .. ", eggSeen=" .. tostring(self.EggTutorialSeen) .. ")")
 	end
 
 	method boolean HasSeenTutorial()
@@ -115,6 +138,7 @@ script TutorialLogic extends Logic
 		-- Step 0 동안만 도는 감시자: 첫 웨이브가 누를 만한 크기로 다가오면 에임 단계를 연다.
 		-- ⚠ 이 Logic의 OnUpdate는 TutorialPaused 가드를 걸지 않는다 — 정지를 거는 주체가 여기라서
 		-- 자기 자신까지 멈추면 아무도 정지를 풀 수 없다
+		self:TickEggTutorial(delta)
 		if not self.Active then return end
 		if self.Step ~= 0 then return end
 
@@ -238,6 +262,86 @@ script TutorialLogic extends Logic
 		self.TutorialSeen = true
 		self._storage:SetAndWait(self.StorageKey, "1")
 		log("TutorialLogic: marked as seen")
+	end
+
+	-- ── 이스터에그 튜토리얼 ──────────────────────────────────────────────────────
+	@ExecSpace("ServerOnly")
+	method void TickEggTutorial(number delta)
+		-- 매 프레임: 에피1 존4에 EggDelaySeconds 머물면 시작. 진행 중에 게임오버가 나면 조용히 취소(다음에 다시 뜸)
+		if self.EggActive then
+			if _GameManager.GameOver then self:EndEggTutorial(false) end
+			return
+		end
+		if self.EggTutorialSeen or self.Active then return end
+		if not _GameManager.GameStarted or _GameManager.GameOver or _GameManager:IsGamePaused() then
+			self._eggZoneElapsed = -1
+			return
+		end
+		if _GameManager.SelectedEpisode ~= self.EggEpisode or _MapManager.CurrentMapIndex ~= self.EggZoneIndex then
+			self._eggZoneElapsed = -1
+			return
+		end
+		if self._eggZoneElapsed < 0 then self._eggZoneElapsed = 0 end
+		self._eggZoneElapsed = self._eggZoneElapsed + delta
+		if self._eggZoneElapsed < self.EggDelaySeconds then return end
+
+		local egg = _EntityService:GetEntityByPath(self.EggObjectPath)
+		if not isvalid(egg) or not egg.Enable then return end
+		self:BeginEggTutorial()
+	end
+
+	@ExecSpace("ServerOnly")
+	method void BeginEggTutorial()
+		self.EggActive = true
+		_GameManager.TutorialPaused = true
+		self:ShowEggStep(self.EggObjectPath)
+		-- 버섯(OrderInLayer 2)·몬스터는 딤(0) 위에 그려진다 — 에임 단계와 같은 월드 딤
+		_CardManager:ShowTutorialAimDim()
+		log("TutorialLogic: egg tutorial opened (zone " .. self.EggZoneIndex .. ")")
+
+		self:ClearFailSafe()
+		self._failSafeTimerId = _TimerService:SetTimerOnce(function()
+			if not isvalid(self) then return end
+			log_warning("TutorialLogic: egg tutorial fail-safe fired — resuming")
+			self:EndEggTutorial(true)
+		end, self.PauseFailSafeSeconds)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void NotifyEggObjectOpened(string entityPath)
+		-- TreasureChestEgg.RequestOpen이 열릴 때마다 부른다 — 튜토리얼 대상 오브젝트가 진행 중에 눌렸으면 끝낸다
+		if not self.EggActive then return end
+		if entityPath ~= self.EggObjectPath then return end
+		log("TutorialLogic: egg tutorial cleared")
+		self:EndEggTutorial(true)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void EndEggTutorial(boolean markSeen)
+		-- 정지/딤/손가락 해제. markSeen=false(게임오버로 취소)면 다음에 다시 뜬다
+		self:ClearFailSafe()
+		_CardManager:HideTutorialAimDim()
+		_GameManager.TutorialPaused = false
+		self.EggActive = false
+		self._eggZoneElapsed = -1
+		self:HideEggStep()
+		if markSeen and not self.EggTutorialSeen then
+			self.EggTutorialSeen = true
+			self._storage:SetAndWait(self.EggStorageKey, "1")
+			log("TutorialLogic: egg tutorial marked as seen")
+		end
+	end
+
+	@ExecSpace("Multicast")
+	method void ShowEggStep(string objectPath)
+		if self:IsServer() then return end
+		_TutorialGuideUI:ShowEggStep(objectPath)
+	end
+
+	@ExecSpace("Multicast")
+	method void HideEggStep()
+		if self:IsServer() then return end
+		_TutorialGuideUI:HideEggStep()
 	end
 
 	@ExecSpace("Multicast")

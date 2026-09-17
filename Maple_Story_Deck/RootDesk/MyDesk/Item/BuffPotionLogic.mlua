@@ -1,0 +1,365 @@
+@Logic
+script BuffPotionLogic extends Logic
+
+	-- 필드 버프 포션 3종(유저 지정 2026-09-18).
+	--   · 흡혈 포션   30초 — 몬스터를 때릴 때마다 체력 1 회복(타격당 고정, 유저 지정 2026-09-18)
+	--   · 크리티컬 포션 20초 — 크리티컬 확률 100%
+	--   · 파워 포션   30초 — 공격력 50% 증가
+	-- 일반 몬스터 처치 시 확률 드롭(허수아비/토네이도와 같은 0.2%씩, MonsterAI 드롭 체인에서 호출) → 톡 튀어나와 바닥에
+	-- 안착 → 기본 공격 버튼으로 날아가 흡수되는 순간 효과 발동 + 토스트 메시지 + 하단 패시브 버프 줄에 시간제 아이콘.
+	-- 시간이 끝나면 아이콘이 사라지고 뒤쪽 아이콘이 앞으로 당겨진다(CardManager._activeBuffOrder/RepositionBuffIcons).
+	-- 같은 포션을 효과 중에 또 먹으면 남은 시간을 최대치로 갱신한다.
+	--
+	-- 효과 적용 지점:
+	--   · 공격력 — MonsterAI의 TakeDamage 계열 5개 진입점에서 GetDamageMult()를 곱한다(플레이어→몬스터 대미지 전부가 거친다)
+	--   · 크리티컬 — CardManager.RollCrit이 IsCritForced()면 무조건 true
+	--   · 흡혈 — 같은 5개 진입점이 OnPlayerDamageDealt()를 부를 때마다 VampireHealPerHit만큼 회복
+
+	property SpriteGUIRendererComponent buffPotionFlyIcon = "55d2f161-2b1c-4f00-ba74-98b128501109"
+	property UITransformComponent attackButtonTransform = "b2027c74-dedb-4101-9810-408c08ddaaf9"
+
+	property number VampireDropChance = 0.002
+	property number CritDropChance = 0.002
+	property number PowerDropChance = 0.002
+
+	property number VampireDuration = 30
+	property number CritDuration = 20
+	property number PowerDuration = 30
+	-- 타격 1번당 회복량(유저 지정 2026-09-18: 대미지 1% → 고정 1)
+	property integer VampireHealPerHit = 1
+	property number PowerDamageMult = 1.5
+
+	property string VampireItemRUID = "3b2799d10a7a469592272e5c1b06fe2e"
+	property string CritItemRUID = "2a9b72895b2b4328a1d78924ea73344a"
+	property string PowerItemRUID = "ec4226424e164356a95ba65ad6ac62cc"
+
+	-- 드롭 연출 타이밍(GameManager 포션 드롭과 같은 홉 길이 + 바닥 대기 + 비행)
+	property number GroundWaitSeconds = 0.5
+	property number FlyDuration = 0.5
+	property number PopDuration = 0.59
+	property number DropYOffset = 60
+
+	-- 1 = 흡혈, 2 = 크리티컬, 3 = 파워. 효과 종료 시각(_UtilLogic.ElapsedSeconds 기준)
+	property number _vampireUntil = 0
+	property number _critUntil = 0
+	property number _powerUntil = 0
+	property any _endTimerIds = nil
+	property any _endSeq = nil
+
+	property boolean _flyActive = false
+
+	-- 유저 지정(2026-09-18): 너무 작다 → 25% 키움. 얼음 파편/허수아비/토네이도 아이템(GameManager, 1.25배)과 같은 크기.
+	property number IconScale = 1.25
+
+	-- 포션이 기본 공격 버튼에 흡수되는 순간 버튼 원형 크기 그대로 재생하는 연출(Button_Attack 자식 템플릿을 Clone)
+	property Entity potionAbsorbFxTemplate = "f0db4a4e-6e02-484c-8c19-8a25ac790b89"
+	property string PotionAbsorbFxRUID = "341a2fd02d0343cfa64da45970aa7cf2"
+	-- 클립 8프레임 합계 0.72초(LoadAnimationClipAndWait 실측)
+	property number PotionAbsorbFxLifetime = 0.75
+	-- 유저 지정(2026-09-18): 버튼 원형 크기에서 30% 키움 → 거기서 다시 30% 더(1.3×1.3)
+	property number PotionAbsorbFxSizeMult = 1.69
+
+	-- 흡혈 회복 연출(유저 지정 2026-09-18): HP바 위에 회복 이펙트 + 메이플 대미지 숫자 룩의 초록 "+N"이 떠오른다.
+	-- 흡혈은 타격마다 조금씩 들어와서 매번 띄우면 숫자가 겹쳐 뭉개진다 — 서버에서 HealShowInterval 동안 모아 한 번에 보낸다.
+	property Entity vampireHealFx = "0700b977-f5b2-4508-b046-8e2ce0bc8f72"
+	property Entity vampireHealTextTemplate = "c5d770ef-dc84-45ab-b196-a23ec4e57c19"
+	property string VampireHealFxRUID = "4dac30d1d53849218bd363fee1739e42"
+	-- 클립 9프레임 합계 0.54초(LoadAnimationClipAndWait 실측)
+	property number VampireHealFxLifetime = 0.55
+	property number VampireHealFxCooldown = 0.6
+	property number HealShowInterval = 0.35
+	property number _healShowAcc = 0
+	property number _lastHealShowAt = 0
+	property number _lastHealFxAt = -100
+
+	-- ── 서버: 드롭 판정 ──────────────────────────────────────────────────────────
+	@ExecSpace("ServerOnly")
+	method void TryDropBuffPotion(Vector3 worldPos, number fallHeight, number groundWorldY, number dropScale)
+		-- 처치 1회당 최대 1개 — 세 확률을 이어 붙여 한 번만 굴린다
+		if _GameManager.GameOver then return end
+		local r = _UtilLogic:RandomDouble()
+		local potionType = 0
+		if r < self.VampireDropChance then
+			potionType = 1
+		elseif r < self.VampireDropChance + self.CritDropChance then
+			potionType = 2
+		elseif r < self.VampireDropChance + self.CritDropChance + self.PowerDropChance then
+			potionType = 3
+		end
+		if potionType == 0 then return end
+		self:ScheduleBuffPotion(potionType, worldPos, fallHeight, groundWorldY, dropScale)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ScheduleBuffPotion(integer potionType, Vector3 worldPos, number fallHeight, number groundWorldY, number dropScale)
+		-- 포션이 기본 공격 버튼에 도착하는 시점에 맞춰 효과를 켠다(클라 연출 길이와 같은 공식)
+		local fallDuration = 0
+		if fallHeight > 0 then fallDuration = math.min(0.6, 0.15 + fallHeight / 500) end
+		local arrivalDelay = fallDuration + self.PopDuration + self.GroundWaitSeconds + self.FlyDuration
+		log(string.format("BuffPotionLogic: dropped type=%d (arrive in %.2fs)", potionType, arrivalDelay))
+		_TimerService:SetTimerOnce(function()
+			if isvalid(self) then self:ApplyBuffPotion(potionType) end
+		end, arrivalDelay)
+		self:PlayBuffPotionDropVisual(Vector2(worldPos.x, worldPos.y), potionType, fallHeight, groundWorldY, dropScale)
+	end
+
+	-- ── 서버: 효과 ────────────────────────────────────────────────────────────────
+	@ExecSpace("ServerOnly")
+	method void ApplyBuffPotion(integer potionType)
+		-- 효과 시작(이미 켜져 있으면 남은 시간을 최대치로 갱신) + 메시지 + 버프 아이콘
+		if _GameManager.GameOver then return end
+		local now = _UtilLogic.ElapsedSeconds
+		local duration = 0
+		if potionType == 1 then
+			duration = self.VampireDuration
+			self._vampireUntil = now + duration
+			_UIToast:ShowMessage("흡혈 포션! 피해량의 일부만큼 체력을 회복")
+		elseif potionType == 2 then
+			duration = self.CritDuration
+			self._critUntil = now + duration
+			_UIToast:ShowMessage("크리티컬 포션! 크리티컬 확률 100%")
+		elseif potionType == 3 then
+			duration = self.PowerDuration
+			self._powerUntil = now + duration
+			_UIToast:ShowMessage("파워 포션! 공격력 50% 증가")
+		else
+			return
+		end
+		if self._endTimerIds == nil then self._endTimerIds = {} end
+		if self._endSeq == nil then self._endSeq = {} end
+		local prev = self._endTimerIds[potionType]
+		if prev ~= nil and prev ~= 0 then _TimerService:ClearTimer(prev) end
+		local seq = (self._endSeq[potionType] or 0) + 1
+		self._endSeq[potionType] = seq
+		self._endTimerIds[potionType] = _TimerService:SetTimerOnce(function()
+			if not isvalid(self) then return end
+			if self._endSeq[potionType] ~= seq then return end
+			self._endTimerIds[potionType] = 0
+			self:NotifyPotionBuffOff(potionType)
+			log("BuffPotionLogic: buff ended type=" .. potionType)
+		end, duration)
+		self:NotifyPotionBuffOn(potionType, duration)
+		log("BuffPotionLogic: buff applied type=" .. potionType .. " for " .. duration .. "s")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetRun()
+		-- 새 판 시작(StartGame/RestartGame) — 효과와 아이콘 모두 끈다
+		self._vampireUntil = 0
+		self._critUntil = 0
+		self._powerUntil = 0
+		self._healShowAcc = 0
+		if self._endTimerIds ~= nil then
+			for potionType, id in pairs(self._endTimerIds) do
+				if id ~= nil and id ~= 0 then _TimerService:ClearTimer(id) end
+			end
+		end
+		self._endTimerIds = {}
+		self._endSeq = {}
+		for potionType = 1, 3 do self:NotifyPotionBuffOff(potionType) end
+	end
+
+	method number GetDamageMult()
+		-- MonsterAI 피격 진입점에서 곱하는 공격력 배율(파워 포션 중 1.5)
+		if _UtilLogic.ElapsedSeconds < self._powerUntil then return self.PowerDamageMult end
+		return 1
+	end
+
+	method boolean IsCritForced()
+		-- CardManager.RollCrit이 묻는다 — 크리티컬 포션 중이면 무조건 크리티컬
+		return _UtilLogic.ElapsedSeconds < self._critUntil
+	end
+
+	method void OnPlayerDamageDealt(number damage)
+		-- 흡혈 포션 중이면 타격 1번당 VampireHealPerHit(1)만큼 회복한다.
+		-- 유저 지정(2026-09-18): 원래 준 대미지의 1%였는데 후반 대미지가 커지면 회복량이 과해져서
+		-- (유저: "1%로 하니깐 너무 과밸런스") 대미지와 무관한 고정값으로 바꿨다.
+		if damage <= 0 then return end
+		if _UtilLogic.ElapsedSeconds >= self._vampireUntil then return end
+		local heal = self.VampireHealPerHit
+		if heal > 0 then
+			_GameManager:HealPlayer(heal)
+			self._healShowAcc = self._healShowAcc + heal
+		end
+		local now = _UtilLogic.ElapsedSeconds
+		if self._healShowAcc >= 1 and now - self._lastHealShowAt >= self.HealShowInterval then
+			local shown = math.floor(self._healShowAcc)
+			self._healShowAcc = 0
+			self._lastHealShowAt = now
+			self:PlayVampireHealVisual(shown)
+		end
+	end
+
+	-- ── 클라이언트: 흡혈 회복 연출(HP바) ──────────────────────────────────────────
+	@ExecSpace("Multicast")
+	method void PlayVampireHealVisual(integer amount)
+		-- HP바 위 회복 이펙트(쿨다운 안이면 생략) + 초록 "+N" 숫자가 팝 하고 떠올라 사라진다.
+		-- 템플릿을 Clone해서 쓰므로 여러 개가 겹쳐도 각자 처음부터 재생된다(GachaUI.SpawnDamageText와 같은 방식).
+		if self:IsServer() then return end
+		if _GameManager.GameOver then return end
+		local now = _UtilLogic.ElapsedSeconds
+		if isvalid(self.vampireHealFx) and now - self._lastHealFxAt >= self.VampireHealFxCooldown then
+			self._lastHealFxAt = now
+			local fx = self.vampireHealFx:Clone("VampireHealFx_" .. tostring(now))
+			local sprite = fx.SpriteGUIRendererComponent
+			sprite.ImageRUID = self.VampireHealFxRUID
+			sprite.AnimClipPlayType = SpriteAnimClipPlayType.Onetime
+			sprite.Color = Color(1, 1, 1, 1)
+			fx.Enable = true
+			fx:Destroy(self.VampireHealFxLifetime)
+		end
+		if not isvalid(self.vampireHealTextTemplate) then return end
+		local label = self.vampireHealTextTemplate:Clone("VampireHealText_" .. tostring(now))
+		label.TextGUIRendererComponent.Text = "+" .. tostring(amount)
+		label.Enable = true
+		local base = self.vampireHealTextTemplate.UITransformComponent.anchoredPosition
+		local jitter = (_UtilLogic:RandomDouble() * 2 - 1) * 30
+		local startPos = Vector2(base.x + jitter, base.y)
+		local endPos = Vector2(startPos.x, startPos.y + 70)
+		label.UITransformComponent.anchoredPosition = startPos
+		_TweenLogic:PlayTween(startPos, endPos, 0.6, EaseType.QuadEaseOut, function(value)
+			if isvalid(label) then label.UITransformComponent.anchoredPosition = value end
+		end)
+		_TweenLogic:ScaleTo(label, Vector2(1.35, 1.35), 0.12, EaseType.QuadEaseOut)
+		_TimerService:SetTimerOnce(function()
+			if isvalid(label) then _TweenLogic:ScaleTo(label, Vector2(0.8, 0.8), 0.45, EaseType.QuadEaseIn) end
+		end, 0.14)
+		label:Destroy(0.65)
+	end
+
+	-- ── 클라이언트: 버프 아이콘 ────────────────────────────────────────────────────
+	@ExecSpace("Multicast")
+	method void NotifyPotionBuffOn(integer potionType, number duration)
+		if self:IsServer() then return end
+		_CardManager:ShowPotionBuffIcon(potionType, duration)
+	end
+
+	@ExecSpace("Multicast")
+	method void NotifyPotionBuffOff(integer potionType)
+		if self:IsServer() then return end
+		_CardManager:HidePotionBuffIcon(potionType)
+	end
+
+	-- ── 클라이언트: 드롭 → 기본 공격 버튼으로 비행 ─────────────────────────────────
+	@ExecSpace("Multicast")
+	method void PlayBuffPotionDropVisual(Vector2 worldPos, integer potionType, number fallHeight, number groundWorldY, number dropScale)
+		-- 사망 위치에서 톡 튀어나와 바닥에 안착 → 잠깐 머문 뒤 기본 공격 버튼으로 날아가 흡수된다.
+		-- 이전 연출이 진행 중이면 연출만 건너뛴다(효과는 서버 타이머로 별도 적용).
+		if self:IsServer() then return end
+		if not isvalid(self.buffPotionFlyIcon) then return end
+		if self._flyActive then return end
+		self._flyActive = true
+
+		local icon = self.buffPotionFlyIcon
+		if potionType == 1 then
+			icon.ImageRUID = self.VampireItemRUID
+		elseif potionType == 2 then
+			icon.ImageRUID = self.CritItemRUID
+		else
+			icon.ImageRUID = self.PowerItemRUID
+		end
+		icon.Color = Color(1, 1, 1, 1)
+		icon.Entity:SetEnable(true)
+		local rawUI = _UILogic:ScreenToUIPosition(_UILogic:WorldToScreenPosition(worldPos))
+		local startUI = Vector2(rawUI.x, rawUI.y + self.DropYOffset)
+		local tc = icon.Entity.UITransformComponent
+		tc.anchoredPosition = startUI
+		tc.Scale = Vector3(self.IconScale * dropScale, self.IconScale * dropScale, 1)
+		tc.ZRotation = 0
+
+		local continueFromGround = function(groundUI)
+			_GameManager:PlayDropPop(icon, groundUI, function(landUI)
+				_TimerService:SetTimerOnce(function()
+					self:FlyToAttackButton(icon, landUI, dropScale)
+				end, self.GroundWaitSeconds)
+			end)
+		end
+
+		local landYCorrection = _GameManager:GetDropLandYCorrection(dropScale)
+		if fallHeight > 0 then
+			local groundUI = _UILogic:ScreenToUIPosition(_UILogic:WorldToScreenPosition(Vector2(worldPos.x, groundWorldY)))
+			groundUI = Vector2(groundUI.x, groundUI.y + landYCorrection)
+			_GameManager:PlayFallSpin(icon, startUI, groundUI, fallHeight, continueFromGround)
+		else
+			continueFromGround(Vector2(rawUI.x, rawUI.y + landYCorrection))
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method Vector2 GetAttackButtonCenterUI()
+		-- 기본 공격 버튼(좌하단 앵커, pivot 0,0)의 중심을 캔버스 중앙 원점 UI 좌표로 환산한다.
+		-- 모바일은 캔버스 폭이 1920이 아니라서 부모(HUD 루트) 실제 크기를 기준으로 계산한다.
+		local t = self.attackButtonTransform
+		if not isvalid(t) then return Vector2(-540, -365) end
+		local canvas = Vector2(1920, 1080)
+		local parent = t.Entity.Parent
+		if isvalid(parent) and parent.UITransformComponent ~= nil then canvas = parent.UITransformComponent.RectSize end
+		local pos = t.anchoredPosition
+		local size = t.RectSize
+		return Vector2(-canvas.x / 2 + pos.x + size.x / 2, -canvas.y / 2 + pos.y + size.y / 2)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void FlyToAttackButton(SpriteGUIRendererComponent icon, Vector2 startUI, number dropScale)
+		-- 포물선을 그리며 기본 공격 버튼으로 날아가 작아지며 사라지고, 버튼을 살짝 펀치한다
+		if not isvalid(icon) then
+			self._flyActive = false
+			return
+		end
+		local endUI = self:GetAttackButtonCenterUI()
+		local arcHeight = 150
+		_TweenLogic:PlayTween(0.0, 1.0, self.FlyDuration, EaseType.QuadEaseOut, function(t)
+			if not isvalid(icon) then return end
+			local x = startUI.x + (endUI.x - startUI.x) * t
+			local y = startUI.y + (endUI.y - startUI.y) * t + math.sin(t * math.pi) * arcHeight
+			icon.Entity.UITransformComponent.anchoredPosition = Vector2(x, y)
+			local scale = (1.0 - 0.5 * t) * dropScale * self.IconScale
+			icon.Entity.UITransformComponent.Scale = Vector3(scale, scale, 1)
+			icon.Color = Color(1, 1, 1, 1.0 - 0.6 * t)
+		end)
+		_TimerService:SetTimerOnce(function()
+			if isvalid(icon) then icon.Entity:SetEnable(false) end
+			self._flyActive = false
+			self:PunchAttackButton()
+			self:PlayPotionAbsorbFx()
+		end, self.FlyDuration)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayPotionAbsorbFx()
+		-- 기본 공격 버튼 위에 버튼 원형과 같은 크기로 흡수 연출을 한 번 재생한다
+		local template = self.potionAbsorbFxTemplate
+		if not isvalid(template) then return end
+		local fx = template:Clone("PotionAbsorbFx_" .. tostring(_UtilLogic.ElapsedSeconds))
+		local t = self.attackButtonTransform
+		if isvalid(t) then fx.UITransformComponent.RectSize = Vector2(t.RectSize.x * self.PotionAbsorbFxSizeMult, t.RectSize.y * self.PotionAbsorbFxSizeMult) end
+		fx.UITransformComponent.anchoredPosition = Vector2(0, 0)
+		local sprite = fx.SpriteGUIRendererComponent
+		sprite.ImageRUID = self.PotionAbsorbFxRUID
+		sprite.AnimClipPlayType = SpriteAnimClipPlayType.Onetime
+		sprite.Color = Color(1, 1, 1, 1)
+		fx.Enable = true
+		fx:Destroy(self.PotionAbsorbFxLifetime)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PunchAttackButton()
+		-- 도착감 — 기본 공격 버튼을 잠깐 키웠다 되돌린다
+		local t = self.attackButtonTransform
+		if not isvalid(t) then return end
+		_TweenLogic:ScaleTo(t.Entity, Vector2(1.12, 1.12), 0.12, EaseType.BackEaseOut)
+		_TimerService:SetTimerOnce(function()
+			if isvalid(t) then _TweenLogic:ScaleTo(t.Entity, Vector2(1, 1), 0.15, EaseType.QuadEaseOut) end
+		end, 0.12)
+	end
+
+	-- 테스트 전용(서버 스크립트에서 직접 호출) — 몬스터 없이 드롭 연출+효과를 바로 확인
+	@ExecSpace("ServerOnly")
+	method void DebugDrop(integer potionType)
+		local users = _UserService.UserEntities.Values
+		if #users == 0 then return end
+		local pos = users[1].TransformComponent.WorldPosition
+		self:ScheduleBuffPotion(potionType, Vector3(pos.x + 1.5, pos.y, pos.z), 0, pos.y, 1.0)
+	end
+
+end

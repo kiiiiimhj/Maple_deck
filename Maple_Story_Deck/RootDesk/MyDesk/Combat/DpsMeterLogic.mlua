@@ -1,0 +1,107 @@
+@Logic
+script DpsMeterLogic extends Logic
+
+	-- 인게임 DPS 미터 집계(유저 지정 2026-09-17). 화면은 DpsMeterUI가 그린다.
+	--
+	-- 대미지 출처(어느 카드인지) 판정:
+	--   · 몬스터 대미지는 전부 MonsterAI의 TakeDamage 계열 5개 진입점만 거친다.
+	--   · CardManager의 모든 호출부(234곳)는 `_DpsMeterLogic:Tag(카드번호, 대상):TakeDamage(...)` 형태로 감싸 두었다.
+	--     Tag가 "다음 한 번의 피격 출처"를 기록하고 대상을 그대로 돌려주므로, 바로 이어지는 TakeDamage가 같은 프레임에 소비한다.
+	--     카드 번호는 그 호출이 들어 있는 스킬 함수 기준으로 정적으로 붙였다(쉐도우 파트너 복제 타격은 원본 스킬로 잡힌다).
+	--   · 태그 없이 들어온 피격(소환물 등)은 카드 0("기타")으로 모아 총 DPS에만 반영한다.
+	--
+	-- DPS = 이번 판 누적 대미지 ÷ 이번 판 전투 시간(정지·게임오버 제외). 새 판(StartGame/RestartGame)에 초기화, 이어하기는 유지.
+	-- 클라이언트엔 1초마다 @Sync 문자열 스냅샷("초|카드:대미지,카드:대미지,...")으로 내려준다.
+
+	property number SnapshotInterval = 1.0
+
+	@Sync
+	property string Snapshot = ""
+
+	property integer _pendingCard = 0
+	property any _totals = nil
+	property number _elapsed = 0
+	property number _snapshotTimer = 0
+	property boolean _dirty = false
+
+	-- ── CardManager / MonsterAI 훅(서버에서만 불린다) ─────────────────────────────
+	method any Tag(integer cardIdx, any target)
+		-- 바로 다음 피격의 출처 카드를 기록하고 대상을 그대로 돌려준다(호출부를 한 줄로 감싸기 위함)
+		self._pendingCard = cardIdx
+		return target
+	end
+
+	method integer ConsumeSource()
+		-- TakeDamage 진입 직후 부른다 — 기록된 출처를 꺼내고 비운다(태그 없는 피격은 0)
+		local card = self._pendingCard
+		self._pendingCard = 0
+		return card
+	end
+
+	method void RecordDamage(integer cardIdx, number damage)
+		-- 실제로 들어간 최종 대미지를 카드별로 누적한다
+		if damage <= 0 then return end
+		if self._totals == nil then self._totals = {} end
+		self._totals[cardIdx] = (self._totals[cardIdx] or 0) + damage
+		self._dirty = true
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetRun()
+		-- 새 판 시작 시 초기화(GameManager.StartGame / RestartGame)
+		self._totals = {}
+		self._elapsed = 0
+		self._pendingCard = 0
+		self._snapshotTimer = 0
+		self._dirty = false
+		self.Snapshot = "0|"
+		log("DpsMeterLogic: reset for new run")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnUpdate(number delta)
+		-- 전투 중인 시간만 센다(옵션/튜토리얼 정지·게임오버 제외). 스냅샷은 1초마다만 갱신
+		if not _GameManager.GameStarted or _GameManager.GameOver then return end
+		if _GameManager:IsGamePaused() then return end
+		self._elapsed = self._elapsed + delta
+		self._snapshotTimer = self._snapshotTimer + delta
+		if self._snapshotTimer < self.SnapshotInterval then return end
+		self._snapshotTimer = 0
+		self:PublishSnapshot()
+	end
+
+	@ExecSpace("ServerOnly")
+	method void PublishSnapshot()
+		-- "경과초|카드:대미지,..." — 대미지는 정수로 반올림해 문자열을 짧게 유지
+		local parts = {}
+		if self._totals ~= nil then
+			for card, dmg in pairs(self._totals) do
+				table.insert(parts, tostring(card) .. ":" .. tostring(math.floor(dmg + 0.5)))
+			end
+		end
+		self.Snapshot = string.format("%.1f", self._elapsed) .. "|" .. table.concat(parts, ",")
+	end
+
+	-- ── 클라이언트용 파서 ──────────────────────────────────────────────────────
+	method table ParseSnapshot()
+		-- { elapsed = 초, rows = { {card=, damage=}, ... } } — 대미지 내림차순
+		local result = { elapsed = 0, rows = {} }
+		local raw = self.Snapshot
+		if raw == nil or raw == "" then return result end
+		local bar = string.find(raw, "|", 1, true)
+		if bar == nil then return result end
+		result.elapsed = tonumber(string.sub(raw, 1, bar - 1)) or 0
+		local body = string.sub(raw, bar + 1)
+		for token in string.gmatch(body, "[^,]+") do
+			local colon = string.find(token, ":", 1, true)
+			if colon ~= nil then
+				local card = math.floor(tonumber(string.sub(token, 1, colon - 1)) or 0)
+				local dmg = tonumber(string.sub(token, colon + 1)) or 0
+				table.insert(result.rows, { card = card, damage = dmg })
+			end
+		end
+		table.sort(result.rows, function(a, b) return a.damage > b.damage end)
+		return result
+	end
+
+end

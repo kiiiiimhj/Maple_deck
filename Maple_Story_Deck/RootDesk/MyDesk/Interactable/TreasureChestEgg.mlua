@@ -5,6 +5,11 @@ script TreasureChestEgg extends Component
 	property string DieRUID = "7a09c81fa4534f898a41595750d7411d"
 	property number DieDuration = 0.5
 
+	-- 열렸을 때 보상 방식
+	--   "chest"       기본 상자 규칙(CardManager.OnTreasureBoxOpened — 슬롯카드 최대 2개, 빈 풀이면 하얀 포션)
+	--   "skillPotion" 슬롯 스킬 1개 + 빨간 포션 1개(유저 지정 2026-09-17, map04 EasterEggObject). 강화할 스킬이 없으면 포션만
+	property string RewardMode = "chest"
+
 	-- 상자 옆에 같이 놓인 장식(map12의 object-1036 등) — 상자가 열릴 때 같이 사라져야 하는 딸린 엔티티.
 	-- 안 쓰는 맵의 상자는 빈 값이면 그냥 무시된다
 	property Entity extraEntity = ""
@@ -50,6 +55,8 @@ script TreasureChestEgg extends Component
 		if self._opened then return end
 		self._opened = true
 		self:PlayOpen()
+		-- 이스터에그 튜토리얼이 이 오브젝트를 가리키고 있었다면 여기서 끝난다(TutorialLogic.NotifyEggObjectOpened)
+		_TutorialLogic:NotifyEggObjectOpened(self.Entity.Path)
 		-- CardManager.OnTreasureBoxOpened는 파라미터 이름이 worldPos일 정도로 월드 좌표를 기대한다
 		-- (내부에서 _UILogic:WorldToScreenPosition으로 화면 좌표 변환). 이 상자가 Zone12처럼
 		-- 오프셋을 가진 컨테이너 밑에 있으면(또는 유저가 Maker에서 상자를 옮기면) Position(로컬)과
@@ -59,7 +66,43 @@ script TreasureChestEgg extends Component
 		-- 고정된 월드 오브젝트라 거리에 따른 깊이 스케일 개념이 없으므로 dropScale은 항상 1.0(원래 크기).
 		-- 엘리트 드롭(OnEliteKilled, 최대 3개+빈 풀 시 골드)과 달리 상자 전용 룰(최대 2개+빈 풀 시 하얀 포션)을 쓴다
 		local wp = self.Entity.TransformComponent.WorldPosition
-		_CardManager:OnTreasureBoxOpened(wp, 0, wp.y, 1.0)
+		if self.RewardMode == "skillPotion" then
+			-- 빨간 포션 1개(ApplyPotionDrop potionType 1) + 슬롯 스킬 1개(Ep1TouchEasterEggLogic "skill"과 같은 경로)
+			-- 이 오브젝트는 공중에 떠 있어서 fallHeight=0이면 제자리 근처에서 멈춘다(유저 리포트 2026-09-17 "바닥까지 착지").
+			-- 공중몹 사망 드롭(MonsterAI.GetLootDropFallParams)과 같은 방식 — 아래로 레이캐스트해서 바로 밑 발판에 착지.
+			-- fallHeight는 UI px 근사(월드 1 = 100)
+			local groundY = wp.y
+			local fallHeight = 0
+			local map = self.Entity.CurrentMap
+			if map ~= nil then
+				---@type FootholdComponent
+				local foothold = map:GetComponent("FootholdComponent")
+				if foothold ~= nil then
+					local hits = foothold:RaycastAll(Vector2(wp.x, wp.y), Vector2(0, -1), 50)
+					local bestDist = nil
+					for i = 1, #hits do
+						local y = hits[i]:GetYByX(wp.x)
+						local dist = wp.y - y
+						if dist >= 0 and (bestDist == nil or dist < bestDist) then
+							bestDist = dist
+							groundY = y
+						end
+					end
+					if wp.y > groundY then fallHeight = (wp.y - groundY) * 100 end
+				end
+			end
+			_GameManager:ApplyPotionDrop(1, wp, fallHeight, groundY, 1.0)
+			local pool = _CardManager:BuildActiveUpgradePool()
+			if #pool > 0 then
+				_CardManager:GrantCardUpgradesFromPool(pool, wp, fallHeight, groundY, 1.0, 1, 0)
+			end
+			log("TreasureChestEgg: " .. self.Entity.Name .. " opened -> red potion + slot skill (pool=" .. #pool .. ", fall " .. string.format("%.2f", wp.y) .. " -> " .. string.format("%.2f", groundY) .. ")")
+			-- 덤(유저 지정 2026-09-18): 버프 포션 5% / 다이아 5%
+			_EasterEggBonusLogic:RollBonus(wp, fallHeight, groundY)
+		else
+			_CardManager:OnTreasureBoxOpened(wp, 0, wp.y, 1.0)
+			_EasterEggBonusLogic:RollBonus(wp, 0, wp.y)
+		end
 		-- 예전엔 Entity:Destroy()로 영구 삭제해서 "다시하기"를 해도 상자가 다시 안 생겼다(유저 리포트
 		-- 2026-09-13). 이제 열림 연출만 잠깐 보여준 뒤 Enable=false로 숨기고, ResetChest()에서 되살린다
 		-- (Ep2Map1ChestEasterEggLogic과 같은 방식)

@@ -18,12 +18,52 @@ script MapTransitionLogic extends Logic
 	property Vector2 _savedCameraDamping = Vector2(2.5, 5.0)
 	property boolean _dampingSaved = false
 
+	-- 모바일 대응(2026-09-17, 유저 스샷 "좌우가 번갈아 잘린다"): 치워둔 패널이 x=±1920에 대기하는데, 아이폰은
+	-- UI 캔버스가 1920보다 넓어(≈2040) 패널 끝 ≈52 + 안전영역 밖 127px가 검은 띠로 남았다 — 마지막 전환
+	-- 방향에 따라 왼쪽/오른쪽이 바뀌어 보였음. → 리빌이 끝나면 패널을 꺼두고(Enable=false), 커버 때만 켠다.
+	-- 모바일에선 패널 크기/이동거리도 실제 화면 폭에 맞춘다(PC는 1920 그대로).
+	property number _wipeTravel = 1920
+	property number _wipeCenterX = 0
+	property number _wipeCenterY = 0
+	property boolean _wipeSized = false
+	property integer _wipeSeq = 0
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		-- 시작 시 대기 위치(x=1920)에 켜진 채로 있던 패널을 꺼서 모바일 화면 끝에 걸치지 않게 한다.
+		if isvalid(self.wipePanel) then
+			self.wipePanel.Enable = false
+			log("MapTransitionLogic: wipe panel hidden on begin")
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void EnsureWipeSize()
+		-- 처음 커버할 때 한 번만 패널 크기·중심·이동거리를 정한다. PC는 기존 값(1920×1080, 중심 0, 이동 1920).
+		if self._wipeSized then return end
+		self._wipeSized = true
+		self._wipeTravel = self.ScreenWidth
+		local t = self.wipePanel.UITransformComponent
+		local cover = _MobileScreenFitLogic:GetWipeCover(t)
+		if cover == nil then return end
+		if cover.width > self.ScreenWidth then
+			t.RectSize = Vector2(cover.width, math.max(1080, cover.height))
+			self._wipeTravel = cover.width
+			self._wipeCenterX = cover.cx
+			self._wipeCenterY = cover.cy
+		end
+		log(string.format("MapTransitionLogic: wipe sized travel=%.0f center(%.0f,%.0f)", self._wipeTravel, self._wipeCenterX, self._wipeCenterY))
+	end
+
 	@ExecSpace("Multicast")
 	method void PlayCover(string direction)
 		-- 서버에서도 호출되므로 실제 연출은 클라이언트에서만 재생한다
 		if not self:IsClient() then return end
 		if not isvalid(self.wipePanel) then return end
 		log("MapTransitionLogic: PlayCover " .. direction)
+		self:EnsureWipeSize()
+		self._wipeSeq = self._wipeSeq + 1
+		self.wipePanel.Enable = true
 
 		-- 화면이 가려져 있는 동안만 카메라 Damping을 거의 0으로 낮춰서, 텔레포트로 카메라 위치가
 		-- 바뀌어도 부드럽게 따라오는 대신 즉시 스냅되게 한다 — 리빌이 끝나면 원래 값으로 되돌린다
@@ -34,10 +74,12 @@ script MapTransitionLogic extends Logic
 			cam.Damping = Vector2(0.001, 0.001)
 		end
 
-		local startX = self.ScreenWidth
-		if direction == "left" then startX = -self.ScreenWidth end
-		self.wipePanel.UITransformComponent.anchoredPosition = Vector2(startX, 0)
-		_TweenLogic:PlayTween(Vector2(startX, 0), Vector2(0, 0), self.CoverDuration, EaseType.QuadEaseIn, function(value)
+		local cx = self._wipeCenterX
+		local cy = self._wipeCenterY
+		local startX = cx + self._wipeTravel
+		if direction == "left" then startX = cx - self._wipeTravel end
+		self.wipePanel.UITransformComponent.anchoredPosition = Vector2(startX, cy)
+		_TweenLogic:PlayTween(Vector2(startX, cy), Vector2(cx, cy), self.CoverDuration, EaseType.QuadEaseIn, function(value)
 			if isvalid(self.wipePanel) then
 				self.wipePanel.UITransformComponent.anchoredPosition = value
 			end
@@ -50,17 +92,24 @@ script MapTransitionLogic extends Logic
 		if not self:IsClient() then return end
 		if not isvalid(self.wipePanel) then return end
 		log("MapTransitionLogic: PlayReveal " .. direction)
-		local endX = -self.ScreenWidth
-		if direction == "left" then endX = self.ScreenWidth end
-		_TweenLogic:PlayTween(Vector2(0, 0), Vector2(endX, 0), self.RevealDuration, EaseType.QuadEaseOut, function(value)
+		local cx = self._wipeCenterX
+		local cy = self._wipeCenterY
+		local endX = cx - self._wipeTravel
+		if direction == "left" then endX = cx + self._wipeTravel end
+		_TweenLogic:PlayTween(Vector2(cx, cy), Vector2(endX, cy), self.RevealDuration, EaseType.QuadEaseOut, function(value)
 			if isvalid(self.wipePanel) then
 				self.wipePanel.UITransformComponent.anchoredPosition = value
 			end
 		end)
 
-		-- 화면이 다 드러난 뒤 카메라 Damping을 원래 값으로 복구한다
+		-- 화면이 다 드러난 뒤 카메라 Damping을 원래 값으로 복구하고, 패널을 꺼둔다
+		-- (그 사이 새 커버가 시작됐으면 _wipeSeq가 바뀌어 있으니 끄지 않는다)
+		local seq = self._wipeSeq
 		_TimerService:SetTimerOnce(function()
 			if not isvalid(self) then return end
+			if seq == self._wipeSeq and isvalid(self.wipePanel) then
+				self.wipePanel.Enable = false
+			end
 			local cam = _CameraService:GetCurrentCameraComponent()
 			if cam ~= nil and self._dampingSaved then
 				cam.Damping = self._savedCameraDamping

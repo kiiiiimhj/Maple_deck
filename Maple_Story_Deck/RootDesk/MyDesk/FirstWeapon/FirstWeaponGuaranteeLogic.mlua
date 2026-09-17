@@ -1,0 +1,131 @@
+@Logic
+script FirstWeaponGuaranteeLogic extends Logic
+
+	-- 신규 유저 첫 무기 보장(유저 지정 2026-09-17).
+	--   · 에피1(태초의 마을) 판을 2판 했는데도 무기가 한 번도 드롭되지 않았다면, 3번째 에피1 판에서 레벨 3을 찍는 순간
+	--     무기 1개를 확정 드롭한다. 단 1회뿐.
+	--   · 판 수는 에피1 새 런 시작마다 센다 — 게임 시작(StartGame 최초)과 다시하기(RestartGame) 모두 포함, 이어하기는 같은 판.
+	--   · 3번째 판이 레벨 3 전에 끝나면 다음 에피1 판의 레벨 3에서 준다(보장 자체가 1회라 받을 때까지 남는다).
+	--   · "무기를 이미 받은" 판정: 몬스터 드롭 경로(GameManager.GrantWeaponItemDrop)로 무기 탭 아이템이 실제로 들어오면 끝.
+	--     발동 시점에 인벤 무기 탭에 이미 무기가 있으면(방치/레벨 보상 등 다른 경로) 드롭 없이 끝낸다.
+	--   · 드롭 자체는 일반 드롭과 같은 GrantWeaponItemDrop(등급/품질/스탯 굴림·연출 동일), 위치는 플레이어 발밑.
+	-- 저장: 유저별 UserDataStorage 키 "FirstWeaponGuarantee" JSON {r = 지금까지 시작한 에피1 판 수, d = 1이면 끝}.
+
+	property integer TriggerRun = 3
+	property integer TriggerLevel = 3
+	property integer Episode = 1
+	-- InventoryExpandLogic.TabWeapon과 같은 값(다른 Logic의 property 직접 읽기 금지라 값을 둔다)
+	property integer WeaponTab = 2
+	property string StorageKey = "FirstWeaponGuarantee"
+
+	property boolean _loaded = false
+	property string _profileCode = ""
+	property integer _ep1Runs = 0
+	property boolean _done = false
+	-- 지금 진행 중인 판이 몇 번째 에피1 판인지(에피1이 아니면 0)
+	property integer _currentRunIndex = 0
+
+	-- ── 로드/저장 ────────────────────────────────────────────────────────────
+	@ExecSpace("ServerOnly")
+	@EventSender("Service", "UserService")
+	handler HandleUserEnterEvent(UserEnterEvent event)
+		local user = _UserService:GetUserEntityByUserId(event.UserId)
+		if user == nil then return end
+		self:LoadFor(user)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void LoadFor(Entity user)
+		-- 입장 시 1회만 읽는다
+		self._profileCode = user.PlayerComponent.ProfileCode
+		local ds = _DataStorageService:GetUserDataStorage(self._profileCode)
+		local code, raw = ds:GetAndWait(self.StorageKey)
+		if code == 0 and raw ~= nil and raw ~= "" then
+			local t = _HttpService:JSONDecode(raw)
+			if t ~= nil then
+				self._ep1Runs = math.floor(tonumber(t["r"]) or 0)
+				self._done = (tonumber(t["d"]) or 0) == 1
+			end
+		elseif code ~= 0 and code ~= 1000002 then
+			log_warning("FirstWeaponGuaranteeLogic: load failed code=" .. tostring(code))
+			return
+		end
+		self._loaded = true
+		log("FirstWeaponGuaranteeLogic: loaded ep1Runs=" .. self._ep1Runs .. " done=" .. tostring(self._done))
+	end
+
+	@ExecSpace("ServerOnly")
+	method void Save()
+		-- 판 시작 / 완료 때만 부른다
+		if self._profileCode == "" then return end
+		local ds = _DataStorageService:GetUserDataStorage(self._profileCode)
+		local t = {}
+		t["r"] = self._ep1Runs
+		t["d"] = self._done and 1 or 0
+		ds:SetAsync(self.StorageKey, _HttpService:JSONEncode(t), function(code, key)
+			if code ~= 0 then log_warning("FirstWeaponGuaranteeLogic: save failed code=" .. tostring(code)) end
+		end)
+	end
+
+	-- ── GameManager가 부르는 훅 ────────────────────────────────────────────────
+	@ExecSpace("ServerOnly")
+	method void OnRunStarted(integer episode)
+		-- 새 런 시작(StartGame 최초 / RestartGame). 이어하기는 부르지 않는다
+		if episode ~= self.Episode or not self._loaded or self._done then
+			self._currentRunIndex = 0
+			return
+		end
+		self._ep1Runs = self._ep1Runs + 1
+		self._currentRunIndex = self._ep1Runs
+		self:Save()
+		log("FirstWeaponGuaranteeLogic: ep1 run #" .. self._currentRunIndex .. " started")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnGearGranted(integer itemId)
+		-- 드롭 장비가 인벤에 실제로 들어왔을 때(GrantWeaponItemDrop). 무기면 보장은 필요 없어진다
+		if self._done or not self._loaded then return end
+		if _InventoryExpandLogic:GetItemTab(itemId) ~= self.WeaponTab then return end
+		self._done = true
+		self:Save()
+		log("FirstWeaponGuaranteeLogic: weapon obtained (item " .. itemId .. ") -> guarantee closed")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnLevelReached(integer level, integer episode)
+		-- 레벨업 직후(GameManager.LevelUp). 조건이 맞으면 무기 1개를 확정 드롭한다
+		if self._done or not self._loaded then return end
+		if episode ~= self.Episode or level ~= self.TriggerLevel then return end
+		if self._currentRunIndex < self.TriggerRun then return end
+
+		local user = nil
+		for _, u in pairs(_UserService.UserEntities) do
+			user = u
+			break
+		end
+		if not isvalid(user) then return end
+
+		local used = _InventoryExpandLogic:CountItemsByTab(user.PlayerComponent.UserId)
+		if (used[self.WeaponTab] or 0) > 0 then
+			self._done = true
+			self:Save()
+			log("FirstWeaponGuaranteeLogic: already has weapon (" .. tostring(used[self.WeaponTab]) .. ") -> closed without drop")
+			return
+		end
+
+		local pos = user.TransformComponent.WorldPosition
+		log("FirstWeaponGuaranteeLogic: forcing weapon drop (run #" .. self._currentRunIndex .. ", Lv." .. level .. ")")
+		-- 인벤에 실제로 들어가면 GrantWeaponItemDrop 안에서 OnGearGranted가 불려 _done이 켜진다
+		_GameManager:GrantWeaponItemDrop(pos, 0, pos.y, 1.0)
+	end
+
+	-- 테스트 전용(서버 스크립트에서 직접 호출)
+	@ExecSpace("ServerOnly")
+	method void DebugSetState(integer ep1Runs, boolean done)
+		self._ep1Runs = ep1Runs
+		self._done = done
+		self:Save()
+		log("FirstWeaponGuaranteeLogic: debug state ep1Runs=" .. ep1Runs .. " done=" .. tostring(done))
+	end
+
+end

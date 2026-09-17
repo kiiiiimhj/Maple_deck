@@ -4,8 +4,10 @@ script EpisodeRewardLogic extends Logic
 	-- 에피소드 생존 보상(유저 지정 2026-09-15, 탕탕특공대 방식).
 	--   · 한 판에서 5분/10분/15분을 버티면 그 에피소드의 칸이 열린다(타임어택·무제한 상관없음).
 	--   · 칸은 EP1 5분 → EP1 10분 → EP1 15분 → EP2 5분 … → EP3 15분, 총 9칸을 "순서대로만" 받는다.
-	--   · 보상: 5분 골드 10,000 / 10분 다이아 500 / 15분 무료 뽑기권 10(EP1·EP3 스킬, EP2 유물).
-	--     골드는 로비 누적 코인(AddCoins), 뽑기권은 출석 보상과 같은 적립 칸(_AttendanceLogic:AddFreePulls).
+	--   · 보상: 5분 매직 장비 1개 / 10분 다이아 500 / 15분 무료 뽑기권 10(EP1·EP3 스킬, EP2 유물).
+	--     5분 장비(유저 지정 2026-09-17, 예전 골드 10,000): 그 에피소드 드롭 부위 풀(EP1 무기 / EP2 갑옷·모자 / EP3 장갑·망토)에서
+	--     받을 때 균등 랜덤 1개, 등급 매직 고정, 품질 F/E 50%씩. 레벨업 보상처럼 그 탭이 가득 차 있으면 지급하지 않고 거절한다.
+	--     뽑기권은 출석 보상과 같은 적립 칸(_AttendanceLogic:AddFreePulls).
 	--   · 생존 시간 = MonsterSpawner 런 경과 시간(_running일 때만 흐르고 다시하기 때 0으로).
 	--     이 런이 어느 에피소드인지는 경과 시간이 1초 미만일 때(런 시작 전후)만 잡아두고 런 중엔 고정한다 —
 	--     로비로 나갔다가 다른 에피소드로 "게임 시작"을 누르면 StartGame이 경과 시간을 안 지운 채
@@ -38,9 +40,10 @@ script EpisodeRewardLogic extends Logic
 	end
 
 	method string GetRewardKind(integer index)
-		-- "gold" / "diamond" / "relicPull" / "skillPull" — 15분 칸만 에피소드마다 스킬/유물 번갈아(유저 지정)
+		-- "gear" / "diamond" / "relicPull" / "skillPull" — 15분 칸만 에피소드마다 스킬/유물 번갈아(유저 지정)
+		-- "gear"는 RewardFlyUI에서도 그대로 장비 버튼으로 날아가는 종류 이름이다
 		local tier = (index - 1) % 3 + 1
-		if tier == 1 then return "gold" end
+		if tier == 1 then return "gear" end
 		if tier == 2 then return "diamond" end
 		if self:GetSlotEpisode(index) == 2 then return "relicPull" end
 		return "skillPull"
@@ -48,14 +51,18 @@ script EpisodeRewardLogic extends Logic
 
 	method integer GetRewardAmount(integer index)
 		local kind = self:GetRewardKind(index)
-		if kind == "gold" then return 10000 end
+		if kind == "gear" then return 1 end
 		if kind == "diamond" then return 500 end
 		return 10
 	end
 
 	method string GetRewardIconRUID(integer index)
-		-- 출석 보상과 같은 아이콘을 쓴다
+		-- 출석 보상과 같은 아이콘을 쓴다. 장비는 레벨업 보상과 같은 무기(EP1)/방어구(EP2·3) 아이콘
 		local kind = self:GetRewardKind(index)
+		if kind == "gear" then
+			if self:GetSlotEpisode(index) == 1 then return "88c02c7916d34c9fb93e77ed04891fa1" end
+			return "b3bb11564cc046ff849a6da55e5d7342"
+		end
 		if kind == "gold" then return "02a489cccff24a139a6c3582a5871f58" end
 		if kind == "diamond" then return "81462aeb825b4660991cef05651271cf" end
 		if kind == "relicPull" then return "3fccc38bffbd45b68cd1fc049809de54" end
@@ -189,7 +196,13 @@ script EpisodeRewardLogic extends Logic
 			return
 		end
 		local index = self.ClaimedCount + 1
-		self:GrantReward(index)
+		if not self:GrantReward(index, senderUserId) then
+			-- 장비 칸이 가득 찬 경우 — 수령 자체를 미룬다(칸은 그대로 남는다, 레벨업 보상과 같은 규칙)
+			local tabName = "방어구"
+			if self:GetSlotEpisode(index) == 1 then tabName = "무기" end
+			_EpisodeRewardUI:OnClaimFailed(tabName, senderUserId)
+			return
+		end
 		self.ClaimedCount = index
 		self:Save()
 		log("EpisodeRewardLogic: claimed slot " .. index .. " (" .. self:GetSlotLabel(index) .. " " .. self:GetRewardKind(index) .. " " .. self:GetRewardAmount(index) .. ")")
@@ -197,9 +210,13 @@ script EpisodeRewardLogic extends Logic
 	end
 
 	@ExecSpace("ServerOnly")
-	method void GrantReward(integer index)
+	method boolean GrantReward(integer index, string userId)
+		-- 실제 지급. 장비 칸에서 인벤 자리가 없으면 아무것도 주지 않고 false
 		local kind = self:GetRewardKind(index)
 		local amount = self:GetRewardAmount(index)
+		if kind == "gear" then
+			return self:GrantGear(index, userId)
+		end
 		if kind == "gold" then
 			_GameManager:AddCoins(amount)
 		elseif kind == "diamond" then
@@ -207,6 +224,38 @@ script EpisodeRewardLogic extends Logic
 		else
 			_AttendanceLogic:AddFreePulls(amount, kind == "skillPull")
 		end
+		return true
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean GrantGear(integer index, string userId)
+		-- 5분 칸 장비(유저 지정 2026-09-17): 그 에피소드 드롭 풀에서 균등 랜덤 1개, 등급 매직 고정, 품질 F/E 50%씩.
+		-- 스탯/발동확률/등급스킬은 그 품질로 드롭과 같은 규칙으로 굴린다(GameManager.BuildGearCreateParamForGradeQuality)
+		local ep = self:GetSlotEpisode(index)
+		local pool = _WeaponTierDataLogic:GetGearItemIdsByEpisode(ep)
+		if pool == nil or #pool == 0 then
+			log_warning("EpisodeRewardLogic: gear pool empty for EP" .. ep)
+			return false
+		end
+		local itemId = pool[_UtilLogic:RandomIntegerRange(1, #pool)]
+		if not _InventoryExpandLogic:HasRoomFor(userId, itemId) then
+			log("EpisodeRewardLogic: gear grant blocked — inventory tab full (slot " .. index .. " item " .. itemId .. ")")
+			return false
+		end
+		local quality = _QualityEnum.F
+		if _UtilLogic:RandomIntegerRange(1, 2) == 2 then quality = _QualityEnum.E end
+		local createParam = _GameManager:BuildGearCreateParamForGradeQuality(itemId, _GearGradeEnum.Magic, quality)
+		local errorCode = _ItemFactoryLogic:TryAddItem(userId, createParam, ItemCreateResultStruct())
+		if errorCode ~= _ErrorCodeEnum.Success then
+			log_error("EpisodeRewardLogic: gear add failed err=" .. tostring(errorCode))
+			return false
+		end
+		-- 쉐이드 해금 조건(누적 장비 250개) — 드롭/방치/레벨업 보상과 같은 카운터
+		_CharacterUnlockLogic:AddGearCollected(1)
+		-- 무기를 받았으면 신규 유저 첫 무기 보장도 더 필요 없다
+		_FirstWeaponGuaranteeLogic:OnGearGranted(itemId)
+		log("EpisodeRewardLogic: gear granted slot " .. index .. " EP" .. ep .. " item=" .. itemId .. " grade=Magic quality=" .. _QualityEnum:GetKoreanName(quality))
+		return true
 	end
 
 	-- 테스트 전용(서버 스크립트에서 직접 호출) — 에피소드 최고 기록을 강제로 넣는다(초)
