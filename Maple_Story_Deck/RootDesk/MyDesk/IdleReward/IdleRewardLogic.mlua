@@ -9,11 +9,12 @@ script IdleRewardLogic extends Logic
 	--   · 장비는 4시간마다 1개. 부위는 지금까지 연 에피소드(1~최고)의 드롭 부위를 합친 풀에서 나온다
 	--     (WeaponTierDataLogic.GearItemIdsByEpisode — 태초의 마을=무기 / 구름정원=갑옷·모자 / 엘라스 산맥=장갑·망토).
 	--     k번째 장비가 무엇인지는 누적 시작 시각(GearSeed)으로 정해져 있어서 팝업 미리보기와 실제 지급이 같다.
-	--     등급/품질/스탯은 받을 때 몬스터 드롭과 같은 규칙으로 굴린다(GameManager.BuildGearCreateParam).
+	--     등급/스탯은 받을 때 몬스터 드롭과 같은 규칙으로 굴리되, 품질은 최대 C(F47/E33/D15/C5)로 제한한다
+	--     (GameManager.BuildIdleGearCreateParam, 유저 지정 2026-09-17).
 	--   · 골드는 인플레이션 방지(유저 지정) — 킬당 골드가 1이라 한 판 수입이 1~2천 선이다. 방치 24시간이 한두 판 수준이 되도록
 	--     시간당 100(EP1 기준)으로 낮게 잡았다. 조정은 GoldPerHour 한 곳.
-	--   · 경험치는 플레이어 레벨이 아직 없어서 "보여주기만" 한다(지급 안 함 — GrantExp). 레벨이 생기면
-	--     GetLevelMultiplier(쌓이는 양 배율)와 GrantExp(실제 지급)만 채우면 된다.
+	--   · 경험치는 계정 레벨(PlayerLevelLogic)로 실제 지급된다(2026-09-16 연결 — GrantExp).
+	--     시간당 600(EP1)은 킬당 계정 경험치 6과 같은 비율이라 "방치 24시간 ≈ 한두 판"이 골드와 동일하게 맞는다.
 	--   · 장비가 인벤 창에 보이는 탭 정원(무기/방어구 탭별 InventoryExpandLogic.GetCapacity)을 넘기면 일단 지급을 멈추고
 	--     "자리가 없는 장비 N개는 사라져요. 그래도 받을까요?" 확인창을 띄운다 — "받기"를 누르면 정원 안에 들어가는 장비만
 	--     넣고 나머지는 버린 채 골드/시간 초기화까지 진행한다(유저 지정 2026-09-15, ClaimFor/PickFittingGearIndexes).
@@ -60,7 +61,8 @@ script IdleRewardLogic extends Logic
 	end
 
 	method number GetLevelMultiplier()
-		-- 플레이어 레벨 시스템이 아직 없다(유저 지정: UI/기능만 먼저). 레벨이 생기면 여기서 배율을 올린다
+		-- 계정 레벨(PlayerLevelLogic)로 방치 누적량을 더 주고 싶으면 여기서 배율을 올린다.
+		-- 2026-09-16 현재는 유저 지정이 없어 1.0 고정 — 레벨은 보상 해금에만 쓴다
 		return 1.0
 	end
 
@@ -272,9 +274,12 @@ script IdleRewardLogic extends Logic
 			local params = {}
 			for _, i in ipairs(fitIndexes) do
 				table.insert(keepIds, gearIds[i])
-				table.insert(params, _GameManager:BuildGearCreateParam(gearIds[i]))
+				table.insert(params, _GameManager:BuildIdleGearCreateParam(gearIds[i]))
 			end
 			lost = #gearIds - #keepIds
+			local qualityText = ""
+			for _, p in ipairs(params) do qualityText = qualityText .. _QualityEnum:GetKoreanName(p.Quality) end
+			log("IdleRewardLogic: gear qualities [" .. qualityText .. "]")
 			if #params > 0 then
 				local err = _ItemFactoryLogic:TryAddMultipleItems(userId, params, ItemCreateResultStruct())
 				if err ~= _ErrorCodeEnum.Success then
@@ -282,6 +287,8 @@ script IdleRewardLogic extends Logic
 					_IdleRewardUI:OnClaimFailed("error", userId)
 					return
 				end
+				-- 쉐이드 해금 조건(누적 장비 250개) — 정원에 들어간 만큼만 센다(버려진 lost는 제외)
+				_CharacterUnlockLogic:AddGearCollected(#params)
 			end
 			for i, id in ipairs(keepIds) do
 				if i > 1 then gearCsv = gearCsv .. "," end
@@ -331,7 +338,9 @@ script IdleRewardLogic extends Logic
 
 	@ExecSpace("ServerOnly")
 	method void GrantExp(integer exp)
-		-- TODO(플레이어 레벨 시스템): 아직 레벨이 없어서 지급하지 않는다 — 생기면 여기서 경험치를 넣는다
+		-- 계정 레벨 경험치(2026-09-16 연결). 시간당 600(EP1)이라 24시간 = 14,400 —
+		-- 킬당 6과 맞물려 "방치 24시간 ≈ 한두 판"이 골드와 같은 비율로 유지된다
+		_PlayerLevelLogic:AddExp(exp)
 	end
 
 	-- 테스트 전용(서버 스크립트에서 직접 호출) — 누적 시작 시각을 hours만큼 앞당긴다(= 그만큼 방치한 것처럼)

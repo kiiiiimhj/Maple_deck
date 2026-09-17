@@ -60,7 +60,9 @@ script GameManager extends Logic
 	-- dirty-flag 지연 flush)으로 런과 무관하게 영구 보존된다. 아직 인게임 획득처가 없으므로, 저장된
 	-- 값이 아예 없는 신규 유저에게만 DiamondStartingAmount를 1회 지급한다(획득처가 생기면 이 지급은
 	-- 빼면 된다). 잔액 표시는 로비 우상단 배지(TitleGroup/DiamondBadge)와 뽑기 팝업 두 곳.
-	property integer DiamondStartingAmount = 3000
+	-- 2026-09-17 출시 준비로 3000 -> 0. 개발 중엔 뽑기 테스트 편하라고 3000을 얹어뒀는데,
+	-- 그대로 내보내면 신규 유저 전원이 공짜 다이아 3000을 들고 시작한다(상점 최저가 300 = 440코인).
+	property integer DiamondStartingAmount = 0
 
 	property any _diamondStorage = nil
 
@@ -165,12 +167,30 @@ script GameManager extends Logic
 	@Sync
 	property boolean OptionPaused = false
 
-	-- 전역 일시정지 여부 — 튜토리얼 카드선택 정지 또는 옵션 팝업 정지.
+	-- 인게임(게임오버 아님)에서 간이 다이아 상점이 열려 있는 동안의 정지(유저 지정 2026-09-17 —
+	-- 6번 슬롯 해금에 다이아가 모자랄 때 상점을 띄우는데, 그동안 몬스터에게 맞으면 안 된다).
+	-- 옵션 정지와 소유자가 달라 플래그를 나눴다. 켜고 끄는 곳은 DiaShopUI.OpenInGame / Close 한 쌍뿐.
+	@Sync
+	property boolean ShopPaused = false
+
+	-- 전역 일시정지 여부 — 튜토리얼 카드선택 정지 / 옵션 팝업 정지 / 인게임 다이아 상점 정지.
 	-- ⚠ 정지 판정은 반드시 이 메서드로만 할 것. 개별 플래그를 직접 보면 한쪽이 빠진다
 	-- (다른 Logic에서는 콜론 호출로만 접근 — feedback_cross_logic_field_access_nil).
 	method boolean IsGamePaused()
 		-- 몬스터 이동/공격·스폰·플레이어 자동공격·타이머를 통째로 멈춰야 하는 상태인지
-		return self.TutorialPaused or self.OptionPaused
+		return self.TutorialPaused or self.OptionPaused or self.ShopPaused
+	end
+
+	-- 인게임 다이아 상점 열림/닫힘을 서버에 알린다(정지 플래그는 서버가 소유 + @Sync로 되돌아온다).
+	@ExecSpace("Server")
+	method void RequestSetShopPaused(boolean paused)
+		-- 인게임 다이아 상점 정지 토글. 게임오버 뒤엔 정지가 남지 않게 항상 해제로 정리한다
+		if self.GameOver then
+			self.ShopPaused = false
+			return
+		end
+		self.ShopPaused = paused
+		log("GameManager: ShopPaused = " .. tostring(paused))
 	end
 
 	-- 옵션 팝업 열림/닫힘을 서버에 알린다(정지 플래그는 서버가 소유 + @Sync로 되돌아온다).
@@ -388,7 +408,9 @@ script GameManager extends Logic
 	-- 사라지는 즉시 전체 맵의 모든 몬스터를 얼려버리는 스킬이 발동한다(빙결스택과는 무관한 별도 효과).
 	property number FreezeItemDropChance = 0.002  -- 유저 요청으로 1%→0.5%→0.2%(총 0.6%)
 
-	property string FreezeItemIconRUID = "822e603fb3ed41e2a24560b65f896790"
+	-- 2026-09-16 유저 지정 이미지로 교체. 원본 비율이 정사각이 아니라 FreezeItemFlyIcon(ui/DefaultGroup.ui)의
+	-- SpriteGUIRenderer는 PreserveSprite=1(AspectOnly)로 둬야 눌리지 않는다
+	property string FreezeItemIconRUID = "6e5f1e8fe8fe453bb3e342b2c0fe1731"
 
 	property number GlobalFreezeDuration = 7.0
 
@@ -685,7 +707,11 @@ script GameManager extends Logic
 	--
 	-- 초반은 1분 단위로 촘촘하게 오르고 뒤로 갈수록 계단 폭이 넓어진다:
 	--   0~1 / 1~2 / 2~3 / 3~5 / 5~7 / 7~9 / 9~12 / 12~15 / 15~20 / 20~25분, 그 뒤 5분 간격
-	property any _atkStepBoundarySeconds = { 60, 120, 180, 300, 420, 540, 720, 900, 1200, 1500 }
+	-- 공격력 계단이 "끝나는" 시각(초). 2026-09-17 유저 지정으로 앞 구간을 넓혔다 —
+	-- 3분→4분, 5분→7분으로 합쳐지면서 칸이 10개에서 9개로 줄었다(1/2/4/7/9/12/15/20/25분).
+	-- ⚠ GetAtkTimeStep / GetWaveAttack 둘 다 하드코딩 인덱스가 아니라 #로 길이를 읽으므로
+	-- 칸 수를 바꿔도 안 어긋난다. 단 attacks 표의 길이와 항상 같아야 한다.
+	property any _atkStepBoundarySeconds = { 60, 120, 240, 420, 540, 720, 900, 1200, 1500 }
 
 	-- 거대 네펜데스 2페이즈(부활 후 — 원거리 공격, 실제 사망) 고정 스탯. 네펜데스/다크네펜데스는 그냥
 	-- 죽으면 끝 — 별도로 거대 네펜데스를 소환/변신시키지 않는다(유저 요청, 2026-08-10 최종 확정).
@@ -2429,17 +2455,52 @@ script GameManager extends Logic
 		return true
 	end
 
+	@ExecSpace("ServerOnly")
+	method string RollAndGrantGacha(integer count, boolean isSkill)
+		-- 뽑기 결과를 서버가 굴리고 **그 자리에서 지급까지 끝낸다**(유저 지정 2026-09-16).
+		-- ⚠ 예전엔 클라가 굴려서 연출이 끝난 뒤 RequestAddSkill/RequestAddRelic을 따로 불렀다 —
+		-- 연출 도중 튕기거나 앱이 꺼지면 다이아만 빠지고 보상은 안 들어왔다.
+		-- 이제 "다이아 차감 = 보상 확정"이라 껐다 켜도 이미 들어와 있다. 연출은 확정된 결과를 보여주기만 한다.
+		-- 결과는 0-based 인덱스 CSV로 돌려준다(연출용 — RPC 파라미터로 table을 못 넘기므로 문자열).
+		local csv = ""
+		for i = 1, count do
+			local idx = 0
+			if isSkill then
+				idx = _SkillInventory:RollGachaSkillIndex()
+				_SkillInventory:RequestAddSkill(idx)
+			else
+				idx = _RelicInventory:RollGachaRelicIndex()
+				_RelicInventory:RequestAddRelic(idx)
+			end
+			if i > 1 then csv = csv .. "," end
+			csv = csv .. tostring(idx)
+		end
+		local kindName = "relic"
+		if isSkill then kindName = "skill" end
+		log("Gacha granted (" .. kindName .. ") x" .. count .. " = [" .. csv .. "]")
+		return csv
+	end
+
 	@ExecSpace("Server")
 	method void RequestGachaSpend(integer cost, integer count, boolean isSkill)
 		-- 뽑기 결제 요청. 잔액 검증/차감은 서버에서만 하고, 성공했을 때만 요청한 클라이언트에게
 		-- 연출 시작을 허가한다(실패하면 아무 응답도 보내지 않아 팝업이 그대로 대기 상태로 남는다).
-		-- 실제 보상 지급(RequestAddRelic / RequestAddSkill)은 기존과 동일하게 연출이 끝나는 시점에
-		-- 클라이언트가 개별로 요청한다 — 결제만 이 경로로 앞당겼다.
+		-- 차감 직후 같은 흐름에서 추첨+지급까지 끝내고(RollAndGrantGacha), 결과만 연출용으로 내려준다
+		--
+		-- ⚠ 지역 정책 차단(2026-09-17) — 유료 확률형 아이템이 금지된 지역이면 **다이아를 깎기 전에**
+		-- 거절한다. 다이아는 현금(월드코인)으로 사는 재화라 이 뽑기가 규제 대상이다.
+		-- 클라(GachaUI)도 버튼을 끄지만 그건 안내일 뿐이고, 실제 방어선은 여기다.
+		-- 무료 뽑기권(AttendanceLogic.RequestUseFreePull)은 현금이 안 들어가 별도 경로로 남겨둔다.
+		if _PolicyGateLogic:IsPaidGachaBlocked() then
+			log("RequestGachaSpend: blocked by region policy (ArePaidRandomItemsRestricted)")
+			return
+		end
 		if not self:SpendDiamond(cost) then
 			log("RequestGachaSpend: not enough diamond (cost=" .. cost .. ", have=" .. self.Diamond .. ")")
 			return
 		end
-		_GachaUI:OnGachaSpendApproved(count, isSkill, senderUserId)
+		local results = self:RollAndGrantGacha(count, isSkill)
+		_GachaUI:OnGachaSpendApproved(count, isSkill, results, senderUserId)
 	end
 
 	-- HP/EXP 동기화 → UI 갱신
@@ -2762,6 +2823,11 @@ script GameManager extends Logic
 		
 		self:AddGold(self:GetKillGold(isElite))
 		self.Exp = self.Exp + self:GetExpPerKill()
+		-- 계정 레벨(PlayerLevelLogic)은 런 레벨과 완전히 별개 — 킬당 고정 경험치가 따로 들어간다
+		-- (2분 이후 절반 감소는 런 페이싱 장치라 계정 쪽엔 적용하지 않는다)
+		_PlayerLevelLogic:AddKillExp(isElite)
+		-- 린 해금 조건(누적 100,000마리) 카운터 — 해금이 끝나면 CharacterUnlockLogic 쪽에서 바로 리턴한다
+		_CharacterUnlockLogic:AddMonsterKill(1)
 		log("Kill! EXP:" .. self.Exp .. "/" .. self.ExpNeeded .. " Gold:" .. self.Gold)
 		
 		-- 2026-08-03: 보스 등장이 처치 기반(웨이브9 80%)에서 순수 시간 기반(MonsterSpawner의
@@ -2791,6 +2857,11 @@ script GameManager extends Logic
 		-- OnBossDefeated() 한 번만 처치 보상까지 전부 처리한다.
 		self:AddGold(self.BossGoldPerKill)
 		self.Exp = self.Exp + self:GetExpPerKill() + self.ExpNeeded
+		-- 계정 레벨 경험치도 여기서 한 번만 준다 — 보스는 Die()가 OnMonsterKilled을 안 부르므로
+		-- (위 주석 참고) AddKillExp 경로로는 들어오지 않는다
+		_PlayerLevelLogic:AddBossExp()
+		-- 린 해금 카운터도 같은 이유로 여기서 1회 — "아무 몬스터"에 보스도 포함된다
+		_CharacterUnlockLogic:AddMonsterKill(1)
 		self:LevelUp()
 		-- 엘리트 드롭과 동일한 방식(이미 장착/해금된 카드 레벨업)으로 액티브 1개 + 패시브 1개 확정 지급
 		_CardManager:GrantBossCardRewards(worldPos, fallHeight, groundWorldY, dropScale)
@@ -2865,11 +2936,19 @@ script GameManager extends Logic
 		-- ⚠ 인자 이름이 wave지만 실제로 들어오는 건 **공격력 시간 계단 + 1**이다
 		-- (GetAtkTimeStep, 2026-08-03에 처치 기반 웨이브 → 시간 기반으로 바뀌면서 이름만 남았다).
 		--
-		-- 2026-09-12 유저 지정 커브(3차 하향, 레벨업 HP 증가 삭제와 짝) —
-		-- 0~1분 4 / 1~2분 5 / 2~3분 6 / 3~5분 6 / 5~7분 7 / 7~9분 8 / 9~12분 9 /
-		-- 12~15분 10 / 15~20분 11 / 20~25분 12. 계단 경계는 _atkStepBoundarySeconds.
-		-- (이전: 4/5/7/9/11/13/15/17/19/22 — 레벨업 HP +7이 있던 시절 값)
-		local attacks = {4, 5, 6, 6, 7, 8, 9, 10, 11, 12}
+		-- 2026-09-17 유저 지정 커브(5차 하향, 경계까지 같이 변경) —
+		-- 0~1분 1 / 1~2분 2 / 2~4분 3 / 4~7분 4 / 7~9분 5 / 9~12분 6 / 12~15분 7 /
+		-- 15~20분 8 / 20~25분 9. 계단 경계는 _atkStepBoundarySeconds(9칸으로 줄었다).
+		-- 유저가 앞 5칸(1/2/3/4/5)과 그 경계(1/2/4/7/9분)를 지정했고, +1 등차를 뒤까지 이었다.
+		-- (이전: 2/3/4/5/6/7/8/9/10/11 — 같은 날 4차, 경계 1/2/3/5/7/9/12/15/20/25분)
+		-- (그 이전: 4/5/6/6/7/8/9/10/11/12 — 2026-09-12 3차 하향)
+		-- (그 이전: 4/5/7/9/11/13/15/17/19/22 — 레벨업 HP +7이 있던 시절)
+		--
+		-- ⚠⚠ 에피소드 배율(1.0/1.25/1.5)이 곱해진 뒤 floor 되는데, 값이 한 자리로 내려오면서
+		-- 반올림 손실이 커졌다 — **0~1분은 EP1/EP2/EP3 공격력이 전부 1로 같고**, 1~2분과
+		-- 2~4분도 EP1과 EP2가 같다(floor(2*1.25)=2, floor(3*1.25)=3).
+		-- 초반부터 에피소드 차이를 내려면 배율이 아니라 이 표를 에피소드별로 분리해야 한다.
+		local attacks = {1, 2, 3, 4, 5, 6, 7, 8, 9}
 		local base = 0
 		if wave <= #attacks then
 			base = attacks[wave]
@@ -5719,7 +5798,7 @@ script GameManager extends Logic
 		self.TimeAttackMode = timeAttack
 		self.TimeAttackRemaining = timeAttack and self.TimeAttackDuration or 0
 		-- 튜토리얼 정지가 남은 채로 새 런이 시작되면 게임이 멈춘 채로 시작된다 — 항상 풀고 들어간다
-		self.TutorialPaused = false ; self.OptionPaused = false
+		self.TutorialPaused = false ; self.OptionPaused = false ; self.ShopPaused = false
 		-- 타이틀 화면에서 처음 한 번만 실제 웨이브 스폰을 활성화한다. 그 전까지 OnBeginPlay에서
 		-- 곧바로 스폰을 켜두면, 유저가 타이틀 화면을 보는 동안에도 몬스터가 쌓이게 된다.
 		if self.GameStarted then
@@ -5841,7 +5920,7 @@ script GameManager extends Logic
 		self.TimeAttackMode = timeAttack
 		self.TimeAttackRemaining = timeAttack and self.TimeAttackDuration or 0
 		-- 다시하기로 새 런을 시작할 때도 튜토리얼 정지는 반드시 풀고 들어간다(StartGame과 동일)
-		self.TutorialPaused = false ; self.OptionPaused = false
+		self.TutorialPaused = false ; self.OptionPaused = false ; self.ShopPaused = false
 		self._timeAttackOvertimeDeath = false
 		self._gaveUp = false
 		self:ClearDespairBlade()
@@ -6302,16 +6381,39 @@ script GameManager extends Logic
 			log_error("TryDropWeaponItem: TryAddItem failed. Error : " .. tostring(errorCode))
 			return
 		end
+		-- 쉐이드 해금 조건(누적 장비 250개) — 인벤에 실제로 들어간 것만 센다(위 정원 초과 분기는 이미 return)
+		_CharacterUnlockLogic:AddGearCollected(1)
 
 		self:PlayLobbyDropVisual(Vector2(worldPos.x, worldPos.y), fallHeight, groundWorldY, dropScale, _WeaponTierDataLogic:GetDisplayRUID(itemId, grade))
 	end
 
 	@ExecSpace("ServerOnly")
 	method ItemCreateParamStruct BuildGearCreateParam(integer itemId)
-		-- 장비 1개 생성 파라미터 — 몬스터 드롭(GrantWeaponItemDrop)과 방치 보상(IdleRewardLogic.RequestClaim)이 같이 쓴다
+		-- 장비 1개 생성 파라미터 — 몬스터 드롭(GrantWeaponItemDrop)과 방치 보상(IdleRewardLogic.RequestClaim)이 같이 쓴다.
+		-- 등급만 굴려서 BuildGearCreateParamForGrade에 넘긴다(레벨업 보상은 등급을 고정해서 그쪽을 직접 부른다).
 		local grade = (_UtilLogic:RandomDouble() < self.WeaponDropMagicChance) and _GearGradeEnum.Magic or _GearGradeEnum.None
-		local quality = _QualityEnum:RollDropQuality()
+		return self:BuildGearCreateParamForGrade(itemId, grade)
+	end
 
+	@ExecSpace("ServerOnly")
+	method ItemCreateParamStruct BuildIdleGearCreateParam(integer itemId)
+		-- 일반 방치 보상(IdleRewardLogic.ClaimFor) 전용 — 등급은 몬스터 드롭과 같게 굴리고,
+		-- 품질만 최대 C로 제한된 표(QualityEnum.RollIdleQuality: F47/E33/D15/C5)로 굴린다(유저 지정 2026-09-17)
+		local grade = (_UtilLogic:RandomDouble() < self.WeaponDropMagicChance) and _GearGradeEnum.Magic or _GearGradeEnum.None
+		return self:BuildGearCreateParamForGradeQuality(itemId, grade, _QualityEnum:RollIdleQuality())
+	end
+
+	@ExecSpace("ServerOnly")
+	method ItemCreateParamStruct BuildGearCreateParamForGrade(integer itemId, integer grade)
+		-- 등급을 호출측이 정하는 버전 — 레벨업 보상(LevelRewardLogic.GrantGear)이 레어/에픽/유니크를
+		-- 고정 지급할 때 쓴다. 등급 말고 품질/스탯/등급스킬은 몬스터 드롭과 완전히 같은 규칙으로 굴린다.
+		-- mlua는 method 기본값 파라미터를 못 쓰므로(Logic 자체가 무력화됨) 메서드를 따로 뒀다.
+		return self:BuildGearCreateParamForGradeQuality(itemId, grade, _QualityEnum:RollDropQuality())
+	end
+
+	@ExecSpace("ServerOnly")
+	method ItemCreateParamStruct BuildGearCreateParamForGradeQuality(integer itemId, integer grade, integer quality)
+		-- 등급·품질을 둘 다 호출측이 정하는 본체 — 스탯/발동확률/등급스킬은 그 품질로 굴린다
 		local skillVariant = _WeaponTierDataLogic:RollSkillVariant()
 		local procChancePerMille = _WeaponTierDataLogic:RollProcChancePerMille(itemId, quality)
 		

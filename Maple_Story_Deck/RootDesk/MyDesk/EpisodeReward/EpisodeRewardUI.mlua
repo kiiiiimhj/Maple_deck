@@ -37,6 +37,8 @@ script EpisodeRewardUI extends Logic
 	property boolean _isOpen = false
 	property boolean _animating = false
 	property boolean _claimPending = false
+	-- 수령 번호표 — 타임아웃 타이머가 "자기 수령분"만 되돌리게 하는 용도(연속 수령 시 섞임 방지)
+	property integer _claimSeq = 0
 	-- 보상 비행(RewardFlyUI): 받는 순간 배지 숫자를 보류해두고, 팝업을 닫을 때 받은 칸들이 한꺼번에 날아간다
 	property string _holdKind = ""
 	property integer _holdAmount = 0
@@ -253,13 +255,21 @@ script EpisodeRewardUI extends Logic
 		if self._holdKind == "gold" or self._holdKind == "diamond" then
 			_RewardFlyUI:Hold(self._holdKind, self._holdAmount)
 		end
-		-- 서버가 거절하면 OnClaimed가 안 오므로 잠깐 뒤 연타 잠금과 숫자 보류를 푼다
+		-- 서버가 거절하면 OnClaimed가 안 오므로 잠깐 뒤 연타 잠금과 숫자 보류를 푼다.
+		-- ⚠ 콜백 안에서 self._holdKind/_holdAmount를 읽으면 안 된다 — 연속 수령하면 그 사이에 다음 칸
+		-- 값으로 덮여 있어서 방금 받은 보상의 보류를 잘못 풀어버린다. 자기 수령분을 클로저로 잡아두고,
+		-- 번호표가 바뀌었으면(=그 뒤 수령이 진행됨) 아무것도 안 한다
 		self._claimPending = true
+		self._claimSeq = self._claimSeq + 1
+		local seq = self._claimSeq
+		local pendingKind = self._holdKind
+		local pendingAmount = self._holdAmount
 		_TimerService:SetTimerOnce(function()
+			if self._claimSeq ~= seq then return end
 			if not self._claimPending then return end
 			self._claimPending = false
-			if self._holdKind == "gold" or self._holdKind == "diamond" then
-				_RewardFlyUI:Release(self._holdKind, self._holdAmount)
+			if pendingKind == "gold" or pendingKind == "diamond" then
+				_RewardFlyUI:Release(pendingKind, pendingAmount)
 			end
 		end, self.ClaimPendingTimeout)
 		logic:RequestClaim()
@@ -267,8 +277,10 @@ script EpisodeRewardUI extends Logic
 
 	@ExecSpace("Client")
 	method void OnClaimed(integer index)
-		-- EpisodeRewardLogic.RequestClaim이 지급을 끝낸 뒤 호출 — 체크 도장 → 다음 칸으로 슬라이드
+		-- EpisodeRewardLogic.RequestClaim이 지급을 끝낸 뒤 호출 — 체크 도장 → 다음 칸으로 슬라이드.
+		-- 번호표를 올려서 이 수령의 타임아웃 타이머가 뒤늦게 보류를 풀어버리지 않게 한다
 		self._claimPending = false
+		self._claimSeq = self._claimSeq + 1
 		if self._isOpen then
 			table.insert(self._pendingFly, index)
 			self:PlayClaimAnimation(index)
@@ -304,9 +316,25 @@ script EpisodeRewardUI extends Logic
 			local card = self:GetCard(self:GetTargetFocus())
 			if isvalid(card) then src = _RewardFlyUI:GetLayerPosOf(card, 0, 0) end
 		end
-		local delay = 0
+		-- ⚠ 같은 종류는 합쳐서 한 번만 날린다(유저 지정 2026-09-16). 칸마다 따로 날리면 통화 1건당
+		-- 아이콘을 8개씩 쓰는데, 연속 수령 후 닫으면 아이콘 풀(RewardFlyUI.PoolSize=24)이 바닥나고
+		-- 그때 남은 몫은 연출 없이 즉시 반영돼 숫자가 먼저 튀어오른다. 어차피 같은 보상이라 합쳐도 똑같다
+		local logic = _EpisodeRewardLogic
+		local order = {}
+		local sums = {}
+		local ruids = {}
 		for _, index in ipairs(self._pendingFly) do
-			self:FlyReward(index, src, delay)
+			local kind = logic:GetRewardKind(index)
+			if sums[kind] == nil then
+				sums[kind] = 0
+				ruids[kind] = logic:GetRewardIconRUID(index)
+				table.insert(order, kind)
+			end
+			sums[kind] = sums[kind] + logic:GetRewardAmount(index)
+		end
+		local delay = 0
+		for _, kind in ipairs(order) do
+			_RewardFlyUI:Fly(kind, sums[kind], ruids[kind], src, delay)
 			delay = delay + 0.3
 		end
 		self._pendingFly = {}

@@ -7,6 +7,19 @@ script UIEquippedGearPanel extends Component
 
 	property UIEquipPopup EquipPopup = nil
 
+	-- 하의(Pants) 칸은 아직 해당 카테고리 장비가 하나도 없어서(ItemGearDataSet에 Pants 행 0개)
+	-- 자물쇠만 띄워두고 누르면 "준비 중" 안내를 보여준다. 나중에 Pants 장비가 생기면
+	-- EquipInfoGrid/Pants/Icon 을 지우고 아래 핸들러만 떼면 원래대로 동작한다.
+	property TextGUIRendererComponent comingSoonText = "b7c65400-72d5-4320-a29f-c50c0a8812ab"
+
+	property any _pantsLockHandler = nil
+
+	-- .ui에 배치해 둔 토스트의 기준 위치. 연출이 매번 여기서 시작해 위로 떠오른다 —
+	-- (0,0)으로 리셋해버리면 .ui에서 잡은 배치가 무시되므로 시작할 때 한 번 기억해 둔다
+	property number _toastBaseY = 0
+
+	property boolean _toastBaseCaptured = false
+
 	@ExecSpace("ClientOnly")
 	method void OnBeginPlay()
 		local playerInfo = self.Entity:GetChildByName("PlayerInfo")
@@ -41,6 +54,65 @@ script UIEquippedGearPanel extends Component
 			---@type Entity
 			local slotEntity = entity
 			slotEntity.UIEquippedGearGridCell.EquipPopup = self.EquipPopup
+		end
+
+		-- 잠긴 하의 칸 — 슬롯 엔티티 자신의 ButtonComponent에 붙인다. 안쪽 UIItemSlot은 아이템이
+		-- 없으면 Enable=false라 클릭이 거기까진 안 간다(UIEquippedGearGridCell.Clear)
+		local pantsSlot = self.SlotEntityByGearCategory[_GearCategoryEnum.Pants]
+		if pantsSlot ~= nil then
+			self._pantsLockHandler = pantsSlot:ConnectEvent(ButtonClickEvent, function()
+				self:ShowComingSoon()
+			end)
+		end
+	end
+
+	-- 준비 중 안내 — 공용 토스트(_UIToast)는 ToastGroup이 별도 UIGroup이라 이 장비창 위로
+	-- 못 올라온다(ShopUI 주석과 동일한 이유). 그래서 장비창 안의 전용 텍스트를 쓴다.
+	-- 연출은 상점 구매 토스트(ShadowShopUI.PlayPurchaseToast)와 같은 "떠오르며 사라짐"
+	@ExecSpace("ClientOnly")
+	method void ShowComingSoon()
+		local text = self.comingSoonText
+		if not isvalid(text) then
+			log_warning("UIEquippedGearPanel: comingSoonText 바인딩 없음")
+			return
+		end
+
+		local transform = text.Entity.UITransformComponent
+		-- 첫 표시 때 .ui의 배치값을 기준점으로 붙잡는다(연출이 좌표를 덮어쓰기 전에)
+		if not self._toastBaseCaptured then
+			self._toastBaseY = transform.anchoredPosition.y
+			self._toastBaseCaptured = true
+		end
+		local baseY = self._toastBaseY
+
+		text.Text = "Coming Soon!"
+		text.Entity:SetEnable(true)
+		text.FontColor = Color(1, 1, 1, 1)
+		transform.anchoredPosition = Vector2(0, baseY)
+
+		local duration = 0.9
+		local riseDistance = 80
+		_TweenLogic:PlayTween(0.0, 1.0, duration, EaseType.QuadEaseOut, function(t)
+			if not isvalid(text) then return end
+			text.Entity.UITransformComponent.anchoredPosition = Vector2(0, baseY + riseDistance * t)
+			text.FontColor = Color(1, 1, 1, 1.0 - t)
+		end)
+		_TimerService:SetTimerOnce(function()
+			if isvalid(text) then text.Entity:SetEnable(false) end
+		end, duration)
+
+		log("UIEquippedGearPanel: 하의 칸(잠김) 클릭 -> Coming Soon 표시")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		-- OnBeginPlay에서 건 클릭 핸들러를 반드시 되돌린다
+		if self._pantsLockHandler ~= nil then
+			local pantsSlot = self.SlotEntityByGearCategory[_GearCategoryEnum.Pants]
+			if pantsSlot ~= nil then
+				pantsSlot:DisconnectEvent(ButtonClickEvent, self._pantsLockHandler)
+			end
+			self._pantsLockHandler = nil
 		end
 	end
 

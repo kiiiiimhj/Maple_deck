@@ -63,6 +63,10 @@ script RewardFlyUI extends Logic
 
 	-- 내부 상태
 	property table _held = {}
+	-- 보류 묶음이 시작된 순간 "보이던 숫자" — 배지가 이 값 밑으로는 절대 안 내려가게 잡아두는 바닥.
+	-- 받기를 누르는 순간엔 서버 지급이 아직 도착 전이라 (옛 잔액 - 보류분)이 되어 숫자가 잠깐
+	-- 내려갔다가 지급이 오면 원래대로 돌아오는 것처럼 보였다(유저 리포트 2026-09-16)
+	property table _holdFloor = {}
 	property table _busy = {}
 	property table _icons = {}
 	property table _trails = {}
@@ -73,6 +77,7 @@ script RewardFlyUI extends Logic
 	@ExecSpace("ClientOnly")
 	method void OnBeginPlay()
 		self._held = {}
+		self._holdFloor = {}
 		self._busy = {}
 		self._icons = {}
 		self._trails = {}
@@ -120,9 +125,25 @@ script RewardFlyUI extends Logic
 		return v
 	end
 
+	method integer GetHoldFloor(string kind)
+		-- 보류 중이면 "그 묶음이 시작될 때 보이던 숫자", 아니면 -1(클램프 안 함).
+		-- TitleUI가 배지 숫자를 이 값 밑으로 못 내려가게 막는 데 쓴다
+		if self._held == nil or self._holdFloor == nil then return -1 end
+		local h = self._held[kind]
+		if h == nil or h <= 0 then return -1 end
+		local v = self._holdFloor[kind]
+		if v == nil then return -1 end
+		return v
+	end
+
 	@ExecSpace("ClientOnly")
 	method void Hold(string kind, integer amount)
 		-- 보상을 받는 순간(서버 지급 전) 부른다 — 배지 숫자가 도착 전까지 안 오르게
+		if amount <= 0 then return end
+		if self:GetHeld(kind) <= 0 then
+			-- 이번 보류 묶음의 바닥을 지금 보이는 숫자로 고정한다(아래로 안 내려가게)
+			self._holdFloor[kind] = _TitleUI:GetLastCurrency(kind)
+		end
 		self._held[kind] = self:GetHeld(kind) + amount
 		_TitleUI:RefreshCurrencyText()
 	end
@@ -132,6 +153,17 @@ script RewardFlyUI extends Logic
 		local v = self:GetHeld(kind) - amount
 		if v < 0 then v = 0 end
 		self._held[kind] = v
+		-- 묶음이 다 풀렸으면 바닥도 같이 놓아준다(다음 보상은 그때 숫자를 새 바닥으로)
+		if v <= 0 then self._holdFloor[kind] = nil end
+		_TitleUI:RefreshCurrencyText()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ReleaseAll()
+		-- 팝업을 닫지 않고 로비를 떠나는(게임 시작 등) 경우 보류분이 영영 안 풀려서 배지가 실제보다
+		-- 적게 보이는 것을 막는다. 실제 재화는 서버가 이미 지급해둔 상태라 숫자만 제자리로 돌리면 된다
+		self._held = {}
+		self._holdFloor = {}
 		_TitleUI:RefreshCurrencyText()
 	end
 

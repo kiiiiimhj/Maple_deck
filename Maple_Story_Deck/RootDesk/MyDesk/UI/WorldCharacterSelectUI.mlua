@@ -36,6 +36,9 @@ script WorldCharacterSelectUI extends Logic
 	-- 영구 해금되는 슬롯, 나머지는 향후 캐릭터 추가를 위한 잠금 슬롯
 	property any _characters = nil
 	property integer _selectedCharIndex = -1
+	-- 쉐이드/린 해금 진행도. 서버가 팝업을 열 때 OnProgressSynced로 내려준다(CharacterUnlockLogic 참고)
+	property integer _gearCollected = 0
+	property integer _monsterKilled = 0
 
 	property any _closeHandler = nil
 	property any _confirmHandler = nil
@@ -75,25 +78,28 @@ script WorldCharacterSelectUI extends Logic
 			{ name = "엘라스 산맥", imageRuid = "3ad5d3ae556b42fe94401c63d788bf7a", enterable = true,
 				partIcons = { "1c9eba05b6c142e789f5a197c472c066", "1d74d38d49ac41c5a14009e6f6414772" } },
 		}
+		-- 2026-09-16 유저 지정: 해금된 캐릭터는 컨셉 소개, 해금 전에는 "무엇을 해야 풀리는지"를 같은 자리에
+		-- 보여준다(unlockHint). 누적 카운터로 풀리는 쉐이드/린은 진행도(progressKind)까지 한 줄 더 붙는다.
+		-- 아르카나는 기본 캐릭터라 해금 조건이 없다.
 		self._characters = {
-			{ name = "아르카나", desc = "CC기를 보유한 마법사", iconRuid = "f13366e4ab0c4523b3f96f131aafbe85", locked = false },
-			{ name = "", desc = "", iconRuid = "", locked = true },
+			{ name = "아르카나", desc = "번개와 얼음을 자유자재로 다루는 살짝 어벙한 마법사", iconRuid = "f13366e4ab0c4523b3f96f131aafbe85", locked = false, unlockHint = "", progressKind = "" },
+			{ name = "", desc = "", iconRuid = "", locked = true, unlockHint = "", progressKind = "" },
 			-- 레이온(3번 슬롯) — 전사 컨셉, 콤보어택 패시브. 몬스터 갤러리 전투 미니게임(1등 픽)으로
 			-- 해금된다(RefreshLeionSlot이 매번 최신 상태로 덮어쓴다). 여기 placeholder는 최초 1프레임
 			-- 동안만 보일 수 있는 값이라 Sylph 슬롯(69번 줄)과 동일하게 잠금으로 시작한다.
-			{ name = "", desc = "", iconRuid = "", locked = true },
+			{ name = "", desc = "", iconRuid = "", locked = true, unlockHint = "", progressKind = "" },
 			-- 쉐이드(4번 슬롯) — 아직 전용 카드/스킬 없음(유저 지정: 레이온과 동일하게 먼저 선택 슬롯만
 			-- 추가하고 실제 전용 카드는 나중에 따로 작업). CardManager.OnUpdate/BuildActiveUpgradePool 둘 다
 			-- SelectedCharacter가 1(실피드)/2(레이온)이 아니면 기본값(아르카나 파이어샷+카드1~24 풀)으로
 			-- 폴백하므로, 지금 당장은 쉐이드 선택 시 아르카나와 동일하게 동작한다.
-			{ name = "쉐이드", desc = "어둠을 가르는 빠른 움직임으로 적을 제압하는 그림자 도적", iconRuid = "a8348a83ab4343409cd461ddd83c6730", locked = false },
+			{ name = "쉐이드", desc = "어둠 속에서 날카로운 단도로 적을 처단하는 도적", iconRuid = "a8348a83ab4343409cd461ddd83c6730", locked = true, unlockHint = "장비 250개를 획득하세요!", progressKind = "gear" },
 			-- 린(5번 슬롯, SelectedCharacter == 4) — 쉐이드를 처음 넣었을 때와 동일하게 선택 슬롯만 먼저
 			-- 만든다. 전용 카드가 아직 없어서 CardManager 쪽 폴백(아르카나 파이어샷 + 카드1~24 풀)으로
 			-- 동작한다. 설명 문구는 임시 — 컨셉 확정되면 교체할 것.
-			{ name = "린", desc = "설명 준비 중", iconRuid = "e64d2ef49017475b925f18c98510ee7f", locked = false },
-			{ name = "", desc = "", iconRuid = "", locked = true },
-			{ name = "", desc = "", iconRuid = "", locked = true },
-			{ name = "", desc = "", iconRuid = "", locked = true },
+			{ name = "린", desc = "쏟아지는 표창으로 적을 압도하는 표창의 달인", iconRuid = "e64d2ef49017475b925f18c98510ee7f", locked = true, unlockHint = "아무 몬스터 100,000마리를 처치하세요!", progressKind = "kill" },
+			{ name = "", desc = "", iconRuid = "", locked = true, unlockHint = "", progressKind = "" },
+			{ name = "", desc = "", iconRuid = "", locked = true, unlockHint = "", progressKind = "" },
+			{ name = "", desc = "", iconRuid = "", locked = true, unlockHint = "", progressKind = "" },
 		}
 		self._slotHandlers = {}
 
@@ -134,6 +140,11 @@ script WorldCharacterSelectUI extends Logic
 		self.unlimitedModeCheckMark.Enable = true
 		self:RefreshSylphSlot()
 		self:RefreshLeionSlot()
+		self:RefreshShadeSlot()
+		self:RefreshRinSlot()
+		-- 진행도(장비/처치 누적)는 @Sync가 아니라 요청-응답이라 여기서 한 번 물어본다. 응답은
+		-- OnProgressSynced로 늦게 도착할 수 있어서, 그때 설명란만 다시 그린다
+		_CharacterUnlockLogic:RequestProgress()
 		self:RefreshWorld()
 		self:RefreshCharList()
 		-- 0번(썬콜법사)을 기본 선택 상태로 열어준다 — 지금은 캐릭터가 얘 하나뿐이라 매번 직접
@@ -249,9 +260,12 @@ script WorldCharacterSelectUI extends Logic
 		local unlocked = _CharacterUnlockLogic.SylphUnlocked
 		self._characters[2] = {
 			name = "실피드",
-			desc = "차원을 넘나드는 바람의 정령",
+			desc = "폭풍을 머금은 화살로 전장을 휩쓰는 궁수",
 			iconRuid = "c8d5851228a844da80c8c94586b06aa7",
 			locked = not unlocked,
+			-- 맵21(태초의 마을) 비밀구역의 봉인 — Map21RelicEasterEgg / Map21TreePuzzleLogic
+			unlockHint = "태초의 마을에 숨겨진 봉인을 찾아 해제하세요!",
+			progressKind = "",
 		}
 	end
 
@@ -262,10 +276,93 @@ script WorldCharacterSelectUI extends Logic
 		local unlocked = _CharacterUnlockLogic.LeionUnlocked
 		self._characters[3] = {
 			name = "레이온",
-			desc = "적중할수록 강해지는 전사",
+			desc = "강인한 육체와 엄청난 힘으로 적을 압도하는 전사",
 			iconRuid = "c26beb96e46e41289ecd838a62c60da1",
 			locked = not unlocked,
+			-- 구름정원 몬스터 갤러리(ep2_map2_estermap_1) 전투 미니게임 1등 픽 — Ep2Map2ArenaLogic
+			unlockHint = "구름정원 콜로세움에서 1위를 차지하세요!",
+			progressKind = "",
 		}
+	end
+
+	-- 4번 슬롯(쉐이드)은 누적 장비 획득 100개로 풀린다(CharacterUnlockLogic.ShadeUnlocked, @Sync).
+	-- 실피드/레이온과 같은 패턴이되, 진행도(n/100)를 설명란에 한 줄 더 보여준다.
+	@ExecSpace("ClientOnly")
+	method void RefreshShadeSlot()
+		local unlocked = _CharacterUnlockLogic.ShadeUnlocked
+		self._characters[4] = {
+			name = "쉐이드",
+			desc = "어둠 속에서 날카로운 단도로 적을 처단하는 도적",
+			iconRuid = "a8348a83ab4343409cd461ddd83c6730",
+			locked = not unlocked,
+			unlockHint = "장비 250개를 획득하세요!",
+			progressKind = "gear",
+		}
+	end
+
+	-- 5번 슬롯(린)은 누적 몬스터 처치 20,000마리로 풀린다. RefreshShadeSlot과 동일 패턴.
+	@ExecSpace("ClientOnly")
+	method void RefreshRinSlot()
+		local unlocked = _CharacterUnlockLogic.RinUnlocked
+		self._characters[5] = {
+			name = "린",
+			desc = "쏟아지는 표창으로 적을 압도하는 표창의 달인",
+			iconRuid = "e64d2ef49017475b925f18c98510ee7f",
+			locked = not unlocked,
+			unlockHint = "아무 몬스터 100,000마리를 처치하세요!",
+			progressKind = "kill",
+		}
+	end
+
+	-- 서버(CharacterUnlockLogic.RequestProgress)가 팝업을 열 때 한 번 내려준다. 카운터는 킬마다 오르는
+	-- 값이라 @Sync를 걸지 않고, 필요한 순간에만 받아서 설명란을 다시 그린다.
+	@ExecSpace("Client")
+	method void OnProgressSynced(integer gearCollected, integer monsterKilled)
+		self._gearCollected = gearCollected
+		self._monsterKilled = monsterKilled
+		-- 응답이 팝업을 연 뒤에 도착하므로, 지금 보고 있는 칸이 진행도 캐릭터면 문구를 다시 채운다
+		self:RefreshCharDesc()
+	end
+
+	-- 1234 → "1,234". 진행도 숫자를 조건 문구(20,000마리)와 같은 표기로 맞춘다
+	@ExecSpace("ClientOnly")
+	method string FormatCount(integer n)
+		local s = tostring(n)
+		local out = ""
+		local count = 0
+		for i = #s, 1, -1 do
+			out = string.sub(s, i, i) .. out
+			count = count + 1
+			if count % 3 == 0 and i > 1 then out = "," .. out end
+		end
+		return out
+	end
+
+	-- 오른쪽 설명 패널 갱신 — 해금됐으면 컨셉 소개, 잠겨 있으면 해금 조건(+진행도)을 같은 자리에 쓴다
+	@ExecSpace("ClientOnly")
+	method void RefreshCharDesc()
+		if self._selectedCharIndex < 0 then return end
+		local charData = self._characters[self._selectedCharIndex + 1]
+		if charData == nil then return end
+
+		if not charData.locked then
+			self.charDescNameText.Text = charData.name
+			self.charDescText.Text = charData.desc
+			return
+		end
+
+		-- 잠긴 칸은 슬롯 목록과 동일하게 이름을 가린다(기존 "???" 규칙)
+		self.charDescNameText.Text = "???"
+		local body = charData.unlockHint
+		if body == "" then body = "준비 중인 캐릭터입니다." end
+		-- 라벨과 숫자를 일부러 줄을 갈라 쓴다 — 한 줄로 붙이면 글상자 폭(208)을 넘겨서
+		-- "몬스터 처치 (8,462 /" / "20,000)" 처럼 괄호 한가운데서 잘린다(2026-09-16 실측)
+		if charData.progressKind == "gear" then
+			body = body .. "\n\n장비\n(" .. self:FormatCount(self._gearCollected) .. " / " .. self:FormatCount(_CharacterUnlockLogic:GetShadeGearGoal()) .. ")"
+		elseif charData.progressKind == "kill" then
+			body = body .. "\n\n몬스터 처치\n(" .. self:FormatCount(self._monsterKilled) .. " / " .. self:FormatCount(_CharacterUnlockLogic:GetRinKillGoal()) .. ")"
+		end
+		self.charDescText.Text = body
 	end
 
 	-- 슬롯 이름(Name)이 게임 시작 시 갱신되지 않던 버그 수정 — 기존엔 아이콘만 갱신하고 슬롯 자체의
@@ -306,12 +403,13 @@ script WorldCharacterSelectUI extends Logic
 
 	@ExecSpace("ClientOnly")
 	method void OnCharSlotClicked(integer index)
+		-- 2026-09-16 유저 지정: 잠긴 칸도 눌러서 "해금 조건"을 읽을 수 있어야 한다. 그래서 여기서
+		-- 막지 않고 선택까지 허용하고, 실제 입장은 RefreshConfirmState가 확인 버튼을 꺼서 막는다.
 		local charData = self._characters[index + 1]
-		if charData == nil or charData.locked then return end
+		if charData == nil then return end
 		self._selectedCharIndex = index
 		self:RefreshCharSelection()
-		self.charDescNameText.Text = charData.name
-		self.charDescText.Text = charData.desc
+		self:RefreshCharDesc()
 		self:RefreshConfirmState()
 	end
 
@@ -336,7 +434,11 @@ script WorldCharacterSelectUI extends Logic
 	@ExecSpace("ClientOnly")
 	method void RefreshConfirmState()
 		local world = self._worlds[self._worldIndex]
-		local canConfirm = self._selectedCharIndex >= 0 and world.enterable
+		-- 잠긴 캐릭터를 고른 상태(조건만 읽는 중)에서는 입장할 수 없다
+		local selected = nil
+		if self._selectedCharIndex >= 0 then selected = self._characters[self._selectedCharIndex + 1] end
+		local charOk = selected ~= nil and not selected.locked
+		local canConfirm = charOk and world.enterable
 		self.btnConfirm.Enable = canConfirm
 		local sprite = self.btnConfirm.Entity.SpriteGUIRendererComponent
 		if canConfirm then
@@ -350,6 +452,9 @@ script WorldCharacterSelectUI extends Logic
 	method void OnConfirmClicked()
 		local world = self._worlds[self._worldIndex]
 		if self._selectedCharIndex < 0 or not world.enterable then return end
+		-- 잠긴 캐릭터로는 입장 금지(확인 버튼도 꺼져 있지만 이중 방어)
+		local selected = self._characters[self._selectedCharIndex + 1]
+		if selected == nil or selected.locked then return end
 		-- 유저 지정(2026-09-15): 이번 판 드롭이 들어갈 인벤 탭이 가득 찼으면 입장 전에 확인 팝업을 띄운다.
 		-- [취소]를 누르면 이 선택 팝업에 그대로 남는다(값은 누른 순간 기준으로 캡처)
 		local unlimited = self._unlimitedModeChecked

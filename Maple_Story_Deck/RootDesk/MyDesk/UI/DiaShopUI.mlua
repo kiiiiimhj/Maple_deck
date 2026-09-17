@@ -19,6 +19,9 @@ script DiaShopUI extends Logic
 	property SliderComponent scrollBar = "984fbae2-a193-4dad-b61d-066f66545498"
 	property Entity noticeBanner = "3c3da1fe-8742-4618-a782-4ebe349bf703"
 	property TextComponent noticeText = "54b01987-11b7-4cb0-8163-6f766e8b48cc"
+	-- DiaShop의 부모(GameOverGroup .ui 루트). 인게임에서 열 때(OpenInGame)는 이 루트가 꺼져 있어
+	-- DiaShop만 켜면 화면에 안 나온다 — 루트를 켜되 게임오버 패널(Dimmer/GameOverBack)은 숨긴다
+	property Entity gameOverGroup = "481d8642-e741-4155-b940-463a755816b5"
 
 	-- 카드 배치 상수. ui/GameOverGroup.ui 의 DiaShop/Panel/ScrollArea 는 로비 상점의
 	-- ScrollArea 를 그대로 복제한 것이라 값도 같다(카드 391 / 간격 28 / 좌우 여백 23+23 / 뷰포트 1300).
@@ -34,6 +37,8 @@ script DiaShopUI extends Logic
 	property number _maxScrollNorm = 1
 	property boolean _syncingScrollBar = false
 	property boolean _isOpen = false
+	-- OpenInGame으로 열려 GameOverGroup 루트를 대신 켜둔 상태인지(닫을 때 원래대로 되돌린다)
+	property boolean _openedInGame = false
 	property integer _noticeTimerId = 0
 	property table _cardHandlers = {}
 	property any _closeHandler = nil
@@ -75,10 +80,43 @@ script DiaShopUI extends Logic
 	end
 
 	@ExecSpace("ClientOnly")
+	method void OpenInGame(string noticeMessage)
+		-- 게임 진행 중(게임오버 팝업 없음)에 상점을 띄운다 — 6번 슬롯 해금에 다이아가 모자랄 때(유저 지정 2026-09-17).
+		-- DiaShop은 GameOverGroup 루트 아래라 루트가 꺼져 있으면 Open()만으로는 안 보인다(실측 EnabledInHierarchy=false).
+		-- 루트를 켜고 게임오버 패널/딤은 숨긴 뒤 열고, 안내 배너를 토스트로 띄우고, 닫힐 때까지 게임을 멈춘다.
+		if self._isOpen then return end
+		if not self.gameOverGroup.Enable then
+			self:SetGameOverPanelsEnabled(false)
+			self.gameOverGroup.Enable = true
+			self._openedInGame = true
+			_GameManager:RequestSetShopPaused(true)
+		end
+		self:Open()
+		if noticeMessage ~= "" then self:ShowNotice(noticeMessage) end
+		log("DiaShopUI: opened in-game (standalone=" .. tostring(self._openedInGame) .. ")")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetGameOverPanelsEnabled(boolean enabled)
+		-- GameOverGroup 루트 아래 DiaShop을 뺀 형제(Dimmer / GameOverBack)를 켜고 끈다
+		for _, child in ipairs(self.gameOverGroup.Children:ToTable()) do
+			if child.Id ~= self.diaShopRoot.Id then child.Enable = enabled end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
 	method void Close()
 		-- 팝업을 닫는다. 게임오버 팝업이 새로 열릴 때도 항상 닫힌 상태로 맞추려고 불린다
 		self.diaShopRoot.Enable = false
 		self._isOpen = false
+		if self._openedInGame then
+			-- 인게임에서 열었던 경우: 루트를 다시 끄고 게임오버 패널을 원래대로 켜둔 뒤 정지를 푼다
+			self._openedInGame = false
+			self.gameOverGroup.Enable = false
+			self:SetGameOverPanelsEnabled(true)
+			_GameManager:RequestSetShopPaused(false)
+			log("DiaShopUI: closed in-game shop, resume")
+		end
 	end
 
 	@ExecSpace("ClientOnly")

@@ -316,6 +316,45 @@ script SkillInventory extends Logic
 		return self.skillCount
 	end
 
+	-- 뽑기 등급 가중치(1=일반 / 2=매직 / 3=레어). 확률 공개 팝업(GachaUI)과 실제 추첨이 같은 값을
+	-- 보도록 여기 한 곳에만 둔다 — 예전엔 GachaUI가 자기 사본을 들고 굴려서 어긋날 여지가 있었다
+	property any GachaGradeWeights = { 55, 30, 15 }
+
+	method integer GetGachaGradeWeight(integer grade)
+		-- GachaUI 확률 공개 팝업이 읽는다(표시와 실제 추첨이 같은 표를 쓰게)
+		local w = self.GachaGradeWeights[grade]
+		if w == nil then return 0 end
+		return w
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer RollGachaSkillIndex()
+		-- 등급을 가중 추첨한 뒤 그 등급 안에서는 균등하게 하나 고른다(해당 등급이 비면 일반=1로 내린다).
+		-- ⚠ 2026-09-16: 예전엔 GachaUI(클라)가 굴린 뒤 연출이 끝나고 RequestAddSkill을 따로 불렀다.
+		-- 연출 중 끊기면 다이아만 빠지는 문제가 있어서, 결제와 같은 흐름에서 서버가 굴리도록 옮겼다
+		local buckets = { {}, {}, {} }
+		for i = 0, self.skillCount - 1 do
+			local g = self:GetSkillGrade(i)
+			if g >= 1 and g <= 3 then table.insert(buckets[g], i) end
+		end
+		local total = 0
+		for i = 1, 3 do total = total + self:GetGachaGradeWeight(i) end
+		local roll = _UtilLogic:RandomDouble() * total
+		local grade = 1
+		local acc = 0
+		for i = 1, 3 do
+			acc = acc + self:GetGachaGradeWeight(i)
+			if roll < acc then
+				grade = i
+				break
+			end
+		end
+		local bucket = buckets[grade]
+		if bucket == nil or #bucket == 0 then bucket = buckets[1] end
+		if bucket == nil or #bucket == 0 then return 0 end
+		return bucket[_UtilLogic:RandomIntegerRange(1, #bucket)]
+	end
+
 	-- 1=일반 / 2=매직 / 3=레어
 	method integer GetSkillGrade(integer skillIndex)
 		local def = self._skillDefs[skillIndex + 1]
@@ -380,3 +419,4 @@ script SkillInventory extends Logic
 	end
 
 end
+

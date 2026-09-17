@@ -182,6 +182,22 @@ script CardManager extends Logic
 	property SpriteGUIRendererComponent slot4 = "f04dcc8a-e646-4039-97cf-c0e5a7c7a62d"
 	property SpriteGUIRendererComponent slot5 = "d35d73b8-a7d0-45b7-b9b9-c71bfd64464a"
 	property SpriteGUIRendererComponent slot6 = "66d8cc22-f407-4a29-8c31-af13134bf2dd"
+
+	-- ── 6번 슬롯 유료 해금(유저 지정 2026-09-17) ──────────────────────────
+	-- "매판 구매해야 이용 가능" — 판마다 잠긴 채로 시작하고, 인게임에서 슬롯을 눌러 다이아로 산다.
+	-- 이어하기(RequestContinue)로 살아나면 같은 판이므로 유지되고, 다시하기/캐릭터 변경으로 새 판이
+	-- 시작되면 ResetAllCards()가 다시 잠근다(그림자상점 스킬 슬롯과 같은 "런 스코프" 규칙).
+	-- ⚠ 잠겨 있는 동안 GetNextEmptySlot()이 6을 안 돌려주므로, 슬롯1~5가 다 차면
+	-- BuildActiveUpgradePool의 hasEmptySlot이 false가 되어 "신규 해금" 선택지가 레벨업 풀에서
+	-- 자동으로 빠진다(선택지 낭비 방지). 사면 그 다음 레벨업부터 다시 등장한다.
+	@Sync property boolean Slot6Unlocked = false
+
+	property integer Slot6UnlockCost = 10
+
+	-- 잠금 상태 오버레이(빈 슬롯 카드 뒷면 위에 얹힌다) — 해금되면 전부 끈다
+	property SpriteGUIRendererComponent slot6Lock = "833b3c33-e22f-4d33-afc6-138fb2c8084e"
+	property SpriteGUIRendererComponent slot6BuyPlus = "c6a52679-a1cd-4335-b70d-d89ef7ca4fba"
+	property TextGUIRendererComponent slot6CostText = "a8529c7e-0dfd-4b1f-96d4-284a07bad701"
 	-- 빈 카드 슬롯에 보여줄 카드 뒷면 이미지
 	property string EmptySlotRUID = "a4027817dbc84dbbba125a5e67464343"
 	-- 카드 획득 시 뒤집히는 연출의 절반(접히는 데 걸리는 시간) — 전체 연출은 이 값의 2배
@@ -14195,8 +14211,9 @@ script CardManager extends Logic
 	property ButtonComponent slotBtn5 = "d61da933-cc33-411a-9adf-a4aef9ce81e2"
 	property ButtonComponent slotBtn6 = "1f088b0d-89b4-439d-ba64-2e0a38ce7ad3"
 
-	-- 에디터 디버그용 (배포 전 false로 변경)
-	property boolean DebugMode = true
+	-- 에디터 디버그용 (배포 전 false로 변경) — 2026-09-17 출시 준비로 false 적용.
+	-- 개발 중 다시 켤 때만 true로. true면 L/K/P/O 디버그 키가 전부 열린다.
+	property boolean DebugMode = false
 	property any _debugKeyHandler = nil
 
 	-- 서버 전용 타이머 (슬롯별)
@@ -15077,8 +15094,70 @@ script CardManager extends Logic
 		if self.Slot3Card == 0 then return 3 end
 		if self.Slot4Card == 0 then return 4 end
 		if self.Slot5Card == 0 then return 5 end
-		if self.Slot6Card == 0 then return 6 end
+		-- 6번 슬롯은 이번 판에 구매한 경우에만 빈 슬롯으로 친다(유저 지정 2026-09-17)
+		if self.Slot6Card == 0 and self.Slot6Unlocked then return 6 end
 		return 0
+	end
+
+	-- 인게임에서 잠긴 6번 슬롯을 눌렀을 때 — 이어하기 결제(GameOverUI.OnContinueClicked)와 완전히
+	-- 같은 규칙이다: 다이아가 모자라면 결제를 요청하지 않고 간이 다이아 상점을 대신 띄운다.
+	@ExecSpace("ClientOnly")
+	method void OnSlot6Clicked()
+		if self.Slot6Unlocked then
+			-- 이미 산 판이면 기존 동작(개발용 치트)으로 넘긴다
+			self:CheatCycleSlotLevel(6)
+			return
+		end
+
+		if _GameManager.Diamond < self.Slot6UnlockCost then
+			log("CardManager: slot6 unlock blocked (diamond=" .. tostring(_GameManager.Diamond)
+				.. " < " .. tostring(self.Slot6UnlockCost) .. "), opening dia shop")
+			-- 게임 중이라 GameOverGroup이 꺼져 있다 — Open()이 아니라 OpenInGame으로 띄워야 보인다(2026-09-17 버그 수정)
+			_DiaShopUI:OpenInGame("다이아가 부족합니다")
+			return
+		end
+
+		log("CardManager: slot6 unlock requested (cost=" .. tostring(self.Slot6UnlockCost) .. ")")
+		self:RequestUnlockSlot6()
+	end
+
+	-- 실제 차감/검증은 서버가 한다(클라 잔액은 @Sync 사본이라 신뢰하지 않는다).
+	@ExecSpace("Server")
+	method void RequestUnlockSlot6()
+		if self.Slot6Unlocked then return end
+		if not _GameManager:SpendDiamond(self.Slot6UnlockCost) then
+			log("CardManager: slot6 unlock rejected (not enough diamond)")
+			return
+		end
+		self.Slot6Unlocked = true
+		log("CardManager: slot6 unlocked for this run (-" .. tostring(self.Slot6UnlockCost) .. " diamond)")
+	end
+
+	-- 잠금 오버레이(자물쇠 / + / 가격) 표시를 현재 상태에 맞춘다.
+	-- 해금됐거나 이미 카드가 꽂혀 있으면 전부 끈다.
+	@ExecSpace("ClientOnly")
+	method void RefreshSlot6Lock()
+		local locked = (not self.Slot6Unlocked) and self.Slot6Card == 0
+
+		-- 딤드는 별도 오버레이 엔티티를 얹지 않고 카드 뒷면 스프라이트 자체를 어둡게 칠한다(유저 지정
+		-- "카드 크기만큼"). 같은 UIGroup에선 나중 자식이 위에 그려져서, 새로 추가한 딤 판은 자물쇠/＋/
+		-- 가격까지 같이 덮어버린다 — 부모 색을 죽이면 자식(자물쇠 등)은 자기 색 그대로라 또렷하게 남는다.
+		-- ⚠ UpdateSlotVisual이 두 분기 모두에서 slot.Color를 흰색으로 되돌리므로, 이 메서드는 반드시
+		-- 그 뒤에 호출돼야 한다(UpdateSlotVisual 꼬리에서 호출 중).
+		if isvalid(self.slot6) then
+			if locked then
+				self.slot6.Color = Color(0.42, 0.42, 0.42, 1)
+			else
+				self.slot6.Color = Color(1, 1, 1, 1)
+			end
+		end
+
+		if isvalid(self.slot6Lock) then self.slot6Lock.Entity:SetEnable(locked) end
+		if isvalid(self.slot6BuyPlus) then self.slot6BuyPlus.Entity:SetEnable(locked) end
+		if isvalid(self.slot6CostText) then
+			self.slot6CostText.Entity:SetEnable(locked)
+			if locked then self.slot6CostText.Text = "다이아 " .. tostring(self.Slot6UnlockCost) end
+		end
 	end
 
 	method boolean IsCardUnlocked(integer cardIdx)
@@ -15874,7 +15953,8 @@ script CardManager extends Logic
 	-- 개발 중엔 항상 켜둔다. 실제 배포 전에는 반드시 false로 바꿀 것.
 	-- Lv1~5 고정 시스템으로 전환된 슬롯 카드(3/4/9/10/11/12/13/14/15)만 대상 — 아직 구식
 	-- (배율 곱연산 누적이라 "레벨"만으로 되돌릴 수 없는) 1/2/5번 카드는 순환 대상에서 제외한다.
-	property boolean CheatCycleLevelOnClick = true
+	-- 2026-09-17 출시 준비로 false 적용. 개발 재개 시에만 true로 되돌린다.
+	property boolean CheatCycleLevelOnClick = false
 
 	-- ── 디버그: 플레이어 기본 공격 임시 차단(개발자 전용) ──────────────
 	-- 기본 false — 에피소드2 map3 소환수(Ep2Map3SummonLogic) 광역기 판정 반경 튜닝처럼, 플레이어
@@ -17263,7 +17343,8 @@ script CardManager extends Logic
 			self.slotBtn3.Entity:ConnectEvent(ButtonClickEvent, function() self:CheatCycleSlotLevel(3) end)
 			self.slotBtn4.Entity:ConnectEvent(ButtonClickEvent, function() self:CheatCycleSlotLevel(4) end)
 			self.slotBtn5.Entity:ConnectEvent(ButtonClickEvent, function() self:CheatCycleSlotLevel(5) end)
-			self.slotBtn6.Entity:ConnectEvent(ButtonClickEvent, function() self:CheatCycleSlotLevel(6) end)
+			-- 6번 슬롯은 잠겨 있으면 구매 흐름으로 먼저 빠진다(치트는 해금된 뒤에만 의미가 있다)
+			self.slotBtn6.Entity:ConnectEvent(ButtonClickEvent, function() self:OnSlot6Clicked() end)
 			self.slotBtn1.Entity:ConnectEvent(ButtonStateChangeEvent, function(event) self:OnSlotHoldStateChanged(event, 1) end)
 			self.slotBtn2.Entity:ConnectEvent(ButtonStateChangeEvent, function(event) self:OnSlotHoldStateChanged(event, 2) end)
 			self.slotBtn3.Entity:ConnectEvent(ButtonStateChangeEvent, function(event) self:OnSlotHoldStateChanged(event, 3) end)
@@ -17356,6 +17437,7 @@ script CardManager extends Logic
 		elseif name == "Slot4Card" then self:UpdateSlotVisual(4, true)
 		elseif name == "Slot5Card" then self:UpdateSlotVisual(5, true)
 		elseif name == "Slot6Card" then self:UpdateSlotVisual(6, true)
+		elseif name == "Slot6Unlocked" then self:RefreshSlot6Lock()
 		elseif name == "PotionLevel" then self:UpdatePotionVisual()
 		elseif name == "AquaTrapLevel" then self:RefreshSlotIfHoldsCard(14)
 		elseif name == "HailStoneLevel" then self:RefreshSlotIfHoldsCard(15)
@@ -17591,6 +17673,10 @@ script CardManager extends Logic
 			num.Entity:SetEnable(false)
 			cooldown.Entity:SetEnable(false)
 		end
+
+		-- 6번 슬롯은 다시 그릴 때마다 잠금 오버레이를 현재 상태에 맞춰 다시 얹는다
+		-- (카드가 꽂히면 자동으로 꺼지고, 비워지면 잠긴 판에서 다시 켜진다)
+		if slotIdx == 6 then self:RefreshSlot6Lock() end
 	end
 
 	-- 카드 뒷면 → 앞면으로 뒤집히는 연출: UIScale.x를 1→0으로 접고, 정확히 다 접힌 순간(폭이 0일 때)
@@ -25804,6 +25890,10 @@ script CardManager extends Logic
 
 		self.Slot1Card = 0 ; self.Slot2Card = 0 ; self.Slot3Card = 0
 		self.Slot4Card = 0 ; self.Slot5Card = 0 ; self.Slot6Card = 0
+
+		-- 6번 슬롯 유료 해금은 "그 판 한정" — 새 판에서는 다시 잠근다(유저 지정 2026-09-17).
+		-- 이어하기(RequestContinue)는 ResetAllCards를 부르지 않으므로 해금이 그대로 유지된다.
+		self.Slot6Unlocked = false
 
 		self._timerBasic = self.Card1Cooldown
 		self._timerBasicArrow = self.ArrowShotCooldown

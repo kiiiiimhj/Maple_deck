@@ -7,8 +7,28 @@ script CharacterUnlockLogic extends Logic
 	-- 레이온 해금 여부 — 몬스터 갤러리(ep2_map2_estermap_1) 전투 미니게임에서 고른 몬스터가 1등을
 	-- 하면 해금된다(Ep2Map2ArenaLogic.GrantVictoryReward). 실피드와 동일한 영구 저장 패턴.
 	@Sync property boolean LeionUnlocked = false
+	-- 쉐이드 해금 여부 — 누적 장비 획득 250개(유저 지정 2026-09-16). 실피드/레이온과 달리 "특정 장소에서
+	-- 한 번" 이 아니라 누적 카운터라, 진행도(_gearCollected)를 같이 저장하고 선택 팝업에 (n/250)으로 보여준다.
+	@Sync property boolean ShadeUnlocked = false
+	-- 린 해금 여부 — 누적 몬스터 처치 100,000마리(유저 지정 2026-09-16). 쉐이드와 동일한 누적 카운터 방식.
+	@Sync property boolean RinUnlocked = false
+
+	-- 해금 목표치. 조건 문구(WorldCharacterSelectUI의 unlockHint — _characters 초기값과
+	-- RefreshShadeSlot/RefreshRinSlot 두 곳)와 반드시 같이 고칠 것
+	property integer ShadeGearGoal = 250
+	property integer RinKillGoal = 100000
 
 	property any _unlockStorage = nil
+
+	-- 누적 진행도. 킬 카운터는 초당 몇 번씩 오르므로 @Sync를 걸지 않는다(매 킬마다 서버→클라 동기화가
+	-- 나간다). 선택 팝업이 열릴 때 RequestProgress로 한 번만 내려보낸다.
+	property integer _gearCollected = 0
+	property integer _monsterKilled = 0
+	property boolean _progressDirty = false
+	property integer _flushTimerId = 0
+	-- 진행도는 {g,k,s,r} JSON 1개 키로 모아서 저장한다(출석/방치 보상과 같은 패턴 — 키당 1크레딧).
+	property string ProgressKey = "Progress"
+	property number FlushInterval = 10.0
 
 	@ExecSpace("ServerOnly")
 	method void OnBeginPlay()
@@ -23,7 +43,8 @@ script CharacterUnlockLogic extends Logic
 		if leionErrorCode == 0 and leionRaw == "1" then
 			self.LeionUnlocked = true
 		end
-		log("CharacterUnlockLogic: SylphUnlocked=" .. tostring(self.SylphUnlocked) .. " LeionUnlocked=" .. tostring(self.LeionUnlocked))
+		self:LoadProgress()
+		log("CharacterUnlockLogic: SylphUnlocked=" .. tostring(self.SylphUnlocked) .. " LeionUnlocked=" .. tostring(self.LeionUnlocked) .. " ShadeUnlocked=" .. tostring(self.ShadeUnlocked) .. "(" .. self._gearCollected .. "/" .. self.ShadeGearGoal .. ")" .. " RinUnlocked=" .. tostring(self.RinUnlocked) .. "(" .. self._monsterKilled .. "/" .. self.RinKillGoal .. ")")
 
 		-- 이전 세션에서 이미 실피드를 획득했다면(영구 저장된 값), 맵21 퍼즐/오브젝트가 새 세션에서
 		-- 다시 미해결 상태로 보이지 않도록 여기서 곧바로 "이미 해결됨" 상태를 적용한다. 두 Logic의
@@ -33,6 +54,148 @@ script CharacterUnlockLogic extends Logic
 			_Map21RelicEasterEgg:ApplyAlreadyUnlockedState()
 			_Map21TreePuzzleLogic:ApplyAlreadyUnlockedState()
 		end
+
+		-- 킬/장비 카운터는 판을 도는 내내 오르므로 매번 저장하지 않고 10초마다 모아서 한 번 쓴다
+		-- (DataStorage 크레딧 — 둘 다 해금되면 카운트 자체를 멈춰서 쓰기가 0이 된다).
+		self._flushTimerId = _TimerService:SetTimerRepeat(function()
+			self:FlushProgressIfDirty()
+		end, self.FlushInterval)
+	end
+
+	-- ── 접근자(다른 Logic/UI에서 property 직접 읽기 금지 — 이걸로 읽는다) ────────
+	method integer GetShadeGearGoal()
+		return self.ShadeGearGoal
+	end
+
+	method integer GetRinKillGoal()
+		return self.RinKillGoal
+	end
+
+	-- ── 누적 진행도(쉐이드/린) ────────────────────────────────────────────────
+	@ExecSpace("ServerOnly")
+	method void LoadProgress()
+		local code, raw = self._unlockStorage:GetAndWait(self.ProgressKey)
+		if code == 0 and raw ~= nil and raw ~= "" then
+			local t = _HttpService:JSONDecode(raw)
+			if t ~= nil then
+				self._gearCollected = math.floor(tonumber(t["g"]) or 0)
+				self._monsterKilled = math.floor(tonumber(t["k"]) or 0)
+				self.ShadeUnlocked = math.floor(tonumber(t["s"]) or 0) == 1
+				self.RinUnlocked = math.floor(tonumber(t["r"]) or 0) == 1
+			end
+		elseif code ~= 0 and code ~= 1000002 then
+			-- 1000002(NotFound)는 아직 한 번도 안 센 계정 — 정상이므로 경고하지 않는다
+			log_warning("CharacterUnlockLogic: progress load failed code=" .. tostring(code))
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SaveProgress(boolean blocking)
+		-- blocking=true는 해금 순간/월드 종료처럼 반드시 남아야 하는 시점에만 쓴다(마지막 기회 저장).
+		self._progressDirty = false
+		local t = {}
+		t["g"] = self._gearCollected
+		t["k"] = self._monsterKilled
+		local s = 0
+		if self.ShadeUnlocked then s = 1 end
+		local r = 0
+		if self.RinUnlocked then r = 1 end
+		t["s"] = s
+		t["r"] = r
+		local raw = _HttpService:JSONEncode(t)
+		if blocking then
+			local code = self._unlockStorage:SetAndWait(self.ProgressKey, raw)
+			if code ~= 0 then log_warning("CharacterUnlockLogic: progress save failed code=" .. tostring(code)) end
+		else
+			self._unlockStorage:SetAsync(self.ProgressKey, raw, function(code, key)
+				if code ~= 0 then log_warning("CharacterUnlockLogic: progress save failed code=" .. tostring(code)) end
+			end)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void FlushProgressIfDirty()
+		if not self._progressDirty then return end
+		self:SaveProgress(false)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void AddGearCollected(integer count)
+		-- 장비를 실제로 인벤에 넣는 데 성공한 시점에만 부른다 — 몬스터 드롭(GameManager.TryDropWeaponItem),
+		-- 방치 보상(IdleRewardLogic.ClaimFor), 레벨업 보상(LevelRewardLogic.GrantGear) 세 곳.
+		-- 인벤이 꽉 차서 버려진 장비는 "획득"이 아니므로 세지 않는다.
+		if self.ShadeUnlocked then return end
+		if count <= 0 then return end
+		self._gearCollected = self._gearCollected + count
+		self._progressDirty = true
+		if self._gearCollected >= self.ShadeGearGoal then
+			self:UnlockShade()
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void AddMonsterKill(integer count)
+		-- 일반/엘리트/보스 가리지 않고 "아무 몬스터" 1마리 — GameManager.OnMonsterKilled / OnBossDefeated.
+		-- 목표 100,000마리라 한 판에 수백~수천씩 쌓인다(저장은 10초 모아쓰기라 호출 빈도와 무관).
+		if self.RinUnlocked then return end
+		if count <= 0 then return end
+		self._monsterKilled = self._monsterKilled + count
+		self._progressDirty = true
+		if self._monsterKilled >= self.RinKillGoal then
+			self:UnlockRin()
+		end
+	end
+
+	-- 선택 팝업(WorldCharacterSelectUI.Open)이 열릴 때 1회 요청한다. 카운터에 @Sync를 걸지 않는 대신
+	-- 필요한 순간에만 내려보내는 방식 — 킬마다 동기화가 나가는 걸 피한다.
+	@ExecSpace("Server")
+	method void RequestProgress()
+		_WorldCharacterSelectUI:OnProgressSynced(self._gearCollected, self._monsterKilled, senderUserId)
+	end
+
+	-- 해금 축하 팝업(CharacterUnlockUI)을 띄울 대상. 이 월드는 인스턴스당 1명이라 첫 유저를 쓴다
+	-- (GameManager.TryDropWeaponItem과 동일 패턴).
+	@ExecSpace("ServerOnly")
+	method string GetSoleUserId()
+		for _, u in pairs(_UserService.UserEntities) do
+			return u.PlayerComponent.UserId
+		end
+		return ""
+	end
+
+	@ExecSpace("ServerOnly")
+	method void UnlockShade()
+		if self.ShadeUnlocked then return end
+		self.ShadeUnlocked = true
+		self:SaveProgress(true)
+		log("CharacterUnlockLogic: Shade unlocked and saved (gear " .. self._gearCollected .. ")")
+		local userId = self:GetSoleUserId()
+		if userId ~= "" then
+			-- 실피드/레이온과 같은 축하 팝업을 재사용한다. 자동전투라 판 중에 떠도 조작을 막지 않는다
+			_CharacterUnlockUI:Open("a8348a83ab4343409cd461ddd83c6730", "쉐이드", "어둠 속에서 날카로운 단도로 적을 처단하는 도적", userId)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void UnlockRin()
+		if self.RinUnlocked then return end
+		self.RinUnlocked = true
+		self:SaveProgress(true)
+		log("CharacterUnlockLogic: Rin unlocked and saved (kills " .. self._monsterKilled .. ")")
+		local userId = self:GetSoleUserId()
+		if userId ~= "" then
+			_CharacterUnlockUI:Open("e64d2ef49017475b925f18c98510ee7f", "린", "쏟아지는 표창으로 적을 압도하는 표창의 달인", userId)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnEndPlay()
+		if self._flushTimerId ~= 0 then
+			_TimerService:ClearTimer(self._flushTimerId)
+			self._flushTimerId = 0
+		end
+		-- 마지막 기회 저장 — 여기서 Async로 던지면 월드가 내려가면서 요청이 씹힌다
+		if self._progressDirty then self:SaveProgress(true) end
 	end
 
 	@ExecSpace("ServerOnly")
@@ -66,6 +229,30 @@ script CharacterUnlockLogic extends Logic
 		self.LeionUnlocked = false
 		self._unlockStorage:SetAndWait("LeionUnlocked", "0")
 		log("CharacterUnlockLogic: [DEBUG] Leion unlock reset")
+	end
+
+	-- [DEBUG] 쉐이드/린은 누적 카운터라 해금 플래그만 끄면 다음 1킬에 바로 다시 해금된다 —
+	-- 진행도까지 같이 0으로 되돌린다. 서버 스크립트에서 직접 호출(재테스트용).
+	@ExecSpace("ServerOnly")
+	method void DebugResetProgressUnlocks()
+		self.ShadeUnlocked = false
+		self.RinUnlocked = false
+		self._gearCollected = 0
+		self._monsterKilled = 0
+		self:SaveProgress(true)
+		log("CharacterUnlockLogic: [DEBUG] Shade/Rin unlock + progress reset")
+	end
+
+	-- [DEBUG] 진행도만 원하는 값으로 밀어넣는다(목표치 근처 테스트용). 목표를 넘기면 그 자리에서 해금된다.
+	@ExecSpace("ServerOnly")
+	method void DebugSetProgress(integer gear, integer kills)
+		self._gearCollected = gear
+		self._monsterKilled = kills
+		self._progressDirty = true
+		log("CharacterUnlockLogic: [DEBUG] progress set gear=" .. gear .. " kills=" .. kills)
+		if not self.ShadeUnlocked and self._gearCollected >= self.ShadeGearGoal then self:UnlockShade() end
+		if not self.RinUnlocked and self._monsterKilled >= self.RinKillGoal then self:UnlockRin() end
+		self:SaveProgress(true)
 	end
 
 end

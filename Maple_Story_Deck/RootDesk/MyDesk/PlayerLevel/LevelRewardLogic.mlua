@@ -1,0 +1,284 @@
+@Logic
+script LevelRewardLogic extends Logic
+
+	-- 계정 레벨업 보상(유저 지정 2026-09-16) — 5레벨마다 1칸, 총 20칸(Lv5 ~ Lv100).
+	--   · 에피소드 생존 보상과 완전히 같은 방식: 칸을 "순서대로만" 하나씩 받는다(건너뛰기 없음).
+	--     n번째 칸은 계정 레벨(PlayerLevelLogic)이 n*5 이상이면 열린다.
+	--   · 보상 종류: 다이아 / 골드 / 스킬·유물 무료 뽑기권 / 등급 고정 장비(무기·방어구).
+	--     - 골드는 로비 누적 코인(AddCoins), 뽑기권은 출석 보상과 같은 적립 칸(AddFreePulls).
+	--     - 장비는 몬스터 드롭과 같은 규칙으로 굴리되 등급만 고정한다
+	--       (GameManager.BuildGearCreateParamForGrade — 품질/스탯/등급스킬은 평소대로 랜덤).
+	--       "무기"는 에피1 드롭 풀(스태프/활/양손검/자마다르), "장비"는 에피2+3 드롭 풀
+	--       (슈트A/슈트B/투구/장갑/망토)에서 균등 랜덤.
+	--   · 장비 칸이 가득 차 있으면 지급하지 않고 거절한다 — 방치 보상처럼 조용히 버리면
+	--     "5레벨마다 한 번뿐인 보상"이 사라져 버리기 때문(HasRoomFor).
+	-- 저장: 유저별 UserDataStorage 키 "LevelReward" JSON {c = 지금까지 받은 칸 수}.
+
+	@Sync property integer ClaimedCount = 0
+	@Sync property boolean Loaded = false
+
+	property integer TotalSlots = 20
+	property integer LevelStep = 5
+	property string StorageKey = "LevelReward"
+
+	-- 칸 정의(20칸) — 유저가 준 표 그대로. 인덱스가 곧 칸 번호이고 레벨은 index * LevelStep.
+	property any RewardKinds = { "diamond", "gold", "gearWeapon", "skillPull", "gold",
+		"gearArmor", "relicPull", "diamond", "gold", "gearWeapon",
+		"skillPull", "gold", "diamond", "gearArmor", "relicPull",
+		"diamond", "gearWeapon", "gold", "diamond", "gearArmor" }
+	property any RewardAmounts = { 100, 10000, 1, 5, 30000,
+		1, 5, 500, 50000, 1,
+		10, 50000, 1000, 1, 10,
+		1000, 1, 50000, 1000, 1 }
+	-- 장비 칸만 의미 있는 등급(GearGradeEnum: 레어2 / 에픽3 / 유니크4). 나머지 칸은 0
+	property any RewardGrades = { 0, 0, 2, 0, 0,
+		2, 0, 0, 0, 3,
+		0, 0, 0, 3, 0,
+		0, 4, 0, 0, 4 }
+
+	property string _profileCode = ""
+
+	-- ── 칸 정의(서버/클라 공용 — ExecSpace 없음) ──────────────────────────────
+	method integer GetSlotLevel(integer index)
+		-- n번째 칸이 열리는 계정 레벨
+		return index * self.LevelStep
+	end
+
+	method string GetRewardKind(integer index)
+		-- "diamond" / "gold" / "skillPull" / "relicPull" / "gearWeapon" / "gearArmor"
+		local kind = self.RewardKinds[index]
+		if kind == nil then return "gold" end
+		return kind
+	end
+
+	method integer GetRewardAmount(integer index)
+		-- 지급 수량(장비는 1)
+		local amount = self.RewardAmounts[index]
+		if amount == nil then return 0 end
+		return amount
+	end
+
+	method integer GetRewardGrade(integer index)
+		-- 장비 칸의 고정 등급(GearGradeEnum). 장비가 아니면 0
+		local grade = self.RewardGrades[index]
+		if grade == nil then return 0 end
+		return grade
+	end
+
+	method boolean IsGearSlot(integer index)
+		-- 이 칸이 장비(무기/방어구) 칸인지
+		local kind = self:GetRewardKind(index)
+		return kind == "gearWeapon" or kind == "gearArmor"
+	end
+
+	method string GetRewardIconRUID(integer index)
+		-- 출석/에피소드 보상과 같은 아이콘. 장비는 유저 지정 무기/방어구 아이콘
+		local kind = self:GetRewardKind(index)
+		if kind == "gold" then return "02a489cccff24a139a6c3582a5871f58" end
+		if kind == "diamond" then return "81462aeb825b4660991cef05651271cf" end
+		if kind == "relicPull" then return "3fccc38bffbd45b68cd1fc049809de54" end
+		if kind == "skillPull" then return "38f5f4b9b8a342bf931b71298d60bb84" end
+		if kind == "gearWeapon" then return "88c02c7916d34c9fb93e77ed04891fa1" end
+		return "b3bb11564cc046ff849a6da55e5d7342"
+	end
+
+	method string GetRewardAmountText(integer index)
+		-- 에피소드 보상과 같은 "X10" 표기. 천 단위는 "X10K"로 줄인다(카드 밖으로 안 삐져나오게)
+		local amount = self:GetRewardAmount(index)
+		if amount >= 1000 then
+			if amount % 1000 == 0 then
+				return "X" .. tostring(amount // 1000) .. "K"
+			end
+			return "X" .. string.format("%.1f", amount / 1000) .. "K"
+		end
+		return "X" .. tostring(amount)
+	end
+
+	method string GetRewardName(integer index)
+		-- 보상 이름(힌트 문구용)
+		local kind = self:GetRewardKind(index)
+		if kind == "gold" then return "골드" end
+		if kind == "diamond" then return "다이아" end
+		if kind == "relicPull" then return "유물 뽑기권" end
+		if kind == "skillPull" then return "스킬 뽑기권" end
+		local gradeName = _GearGradeEnum:GetKoreanName(self:GetRewardGrade(index))
+		if kind == "gearWeapon" then return gradeName .. " 무기" end
+		return gradeName .. " 장비"
+	end
+
+	method string GetSlotLabel(integer index)
+		-- 카드 안 라벨 + 팝업 문구에 쓰는 "레벨 5 보상"
+		return "레벨 " .. self:GetSlotLevel(index) .. " 보상"
+	end
+
+	-- ── 접근자(다른 Logic에서 property 직접 읽기 금지 — 이걸로 읽는다) ────────────
+	method integer GetClaimedCount()
+		-- 지금까지 받은 칸 수
+		return self.ClaimedCount
+	end
+
+	method boolean IsLoaded()
+		-- 저장소에서 불러오기가 끝났는지
+		return self.Loaded
+	end
+
+	method boolean IsAllDone()
+		-- 20칸을 전부 받았는지
+		return self.ClaimedCount >= self.TotalSlots
+	end
+
+	method boolean IsReached(integer index)
+		-- 그 칸이 레벨 조건을 넘겼는지
+		if index < 1 or index > self.TotalSlots then return false end
+		return _PlayerLevelLogic:GetLevel() >= self:GetSlotLevel(index)
+	end
+
+	method boolean CanClaimNext()
+		-- 다음 칸을 지금 받을 수 있는지
+		if not self.Loaded then return false end
+		if not _PlayerLevelLogic:IsLoaded() then return false end
+		if self:IsAllDone() then return false end
+		return self:IsReached(self.ClaimedCount + 1)
+	end
+
+	-- ── 서버: 로드/저장 ──────────────────────────────────────────────────────
+	@ExecSpace("ServerOnly")
+	@EventSender("Service", "UserService")
+	handler HandleUserEnterEvent(UserEnterEvent event)
+		local user = _UserService:GetUserEntityByUserId(event.UserId)
+		if user == nil then return end
+		self:LoadFor(user)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void LoadFor(Entity user)
+		-- 입장 시 1회만 읽는다. 처음 보는 유저(NotFound)는 0칸에서 시작
+		self._profileCode = user.PlayerComponent.ProfileCode
+		local ds = _DataStorageService:GetUserDataStorage(self._profileCode)
+		local code, raw = ds:GetAndWait(self.StorageKey)
+		if code == 0 and raw ~= nil and raw ~= "" then
+			local t = _HttpService:JSONDecode(raw)
+			if t ~= nil then
+				self.ClaimedCount = math.floor(tonumber(t["c"]) or 0)
+			end
+		elseif code ~= 0 and code ~= 1000002 then
+			log_warning("LevelRewardLogic: load failed code=" .. tostring(code))
+		end
+		self.Loaded = true
+		log("LevelRewardLogic: loaded claimed=" .. self.ClaimedCount .. " canClaim=" .. tostring(self:CanClaimNext()))
+	end
+
+	@ExecSpace("ServerOnly")
+	method void Save()
+		-- 수령 때만 부른다(값이 바뀐 순간에만 1회)
+		if self._profileCode == "" then return end
+		local ds = _DataStorageService:GetUserDataStorage(self._profileCode)
+		local t = {}
+		t["c"] = self.ClaimedCount
+		ds:SetAsync(self.StorageKey, _HttpService:JSONEncode(t), function(code, key)
+			if code ~= 0 then log_warning("LevelRewardLogic: save failed code=" .. tostring(code)) end
+		end)
+	end
+
+	-- ── 서버: 클라 요청 ──────────────────────────────────────────────────────
+	@ExecSpace("Server")
+	method void RequestClaim()
+		if not self:CanClaimNext() then
+			log("LevelRewardLogic: claim rejected (claimed=" .. self.ClaimedCount .. " level=" .. _PlayerLevelLogic:GetLevel() .. ")")
+			return
+		end
+		local index = self.ClaimedCount + 1
+		if not self:GrantReward(index, senderUserId) then
+			-- 장비 칸이 가득 찬 경우 — 수령 자체를 미룬다(칸은 그대로 남는다).
+			-- 어느 탭을 비워야 하는지 같이 알려준다(무기 칸 / 방어구 칸)
+			local tabName = "방어구"
+			if self:GetRewardKind(index) == "gearWeapon" then tabName = "무기" end
+			_LevelRewardUI:OnClaimFailed("inventoryFull", tabName, senderUserId)
+			return
+		end
+		self.ClaimedCount = index
+		self:Save()
+		log("LevelRewardLogic: claimed slot " .. index .. " (" .. self:GetSlotLabel(index) .. " " .. self:GetRewardKind(index) .. " " .. self:GetRewardAmount(index) .. ")")
+		_LevelRewardUI:OnClaimed(index, senderUserId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean GrantReward(integer index, string userId)
+		-- 실제 지급. 장비 칸에서 인벤 자리가 없으면 아무것도 주지 않고 false
+		local kind = self:GetRewardKind(index)
+		local amount = self:GetRewardAmount(index)
+		if kind == "gold" then
+			_GameManager:AddCoins(amount)
+			return true
+		end
+		if kind == "diamond" then
+			_GameManager:AddDiamond(amount)
+			return true
+		end
+		if kind == "skillPull" or kind == "relicPull" then
+			_AttendanceLogic:AddFreePulls(amount, kind == "skillPull")
+			return true
+		end
+		return self:GrantGear(index, userId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method table GetGearPool(string kind)
+		-- "gearWeapon" = 에피1 드롭 풀(무기 4종) / "gearArmor" = 에피2+3 드롭 풀(방어구 5종)
+		local pool = {}
+		if kind == "gearWeapon" then
+			for _, id in ipairs(_WeaponTierDataLogic:GetGearItemIdsByEpisode(1)) do
+				table.insert(pool, id)
+			end
+			return pool
+		end
+		for ep = 2, 3 do
+			for _, id in ipairs(_WeaponTierDataLogic:GetGearItemIdsByEpisode(ep)) do
+				table.insert(pool, id)
+			end
+		end
+		return pool
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean GrantGear(integer index, string userId)
+		-- 등급 고정 장비 1개. 부위는 풀에서 균등 랜덤, 품질/스탯/등급스킬은 드롭과 같은 규칙으로 굴린다
+		local pool = self:GetGearPool(self:GetRewardKind(index))
+		if #pool == 0 then
+			log_warning("LevelRewardLogic: gear pool empty for slot " .. index)
+			return false
+		end
+		local itemId = pool[_UtilLogic:RandomIntegerRange(1, #pool)]
+		if not _InventoryExpandLogic:HasRoomFor(userId, itemId) then
+			log("LevelRewardLogic: gear grant blocked — inventory tab full (slot " .. index .. " item " .. itemId .. ")")
+			return false
+		end
+		local createParam = _GameManager:BuildGearCreateParamForGrade(itemId, self:GetRewardGrade(index))
+		local errorCode = _ItemFactoryLogic:TryAddItem(userId, createParam, ItemCreateResultStruct())
+		if errorCode ~= _ErrorCodeEnum.Success then
+			log_error("LevelRewardLogic: gear add failed err=" .. tostring(errorCode))
+			return false
+		end
+		-- 쉐이드 해금 조건(누적 장비 250개) — 드롭/방치 보상과 같은 카운터
+		_CharacterUnlockLogic:AddGearCollected(1)
+		log("LevelRewardLogic: gear granted slot " .. index .. " item=" .. itemId .. " grade=" .. self:GetRewardGrade(index))
+		return true
+	end
+
+	-- 테스트 전용(서버 스크립트에서 직접 호출) — 수령 칸 수를 0으로
+	@ExecSpace("ServerOnly")
+	method void DebugReset()
+		self.ClaimedCount = 0
+		self:Save()
+		log("LevelRewardLogic: debug reset")
+	end
+
+	-- ── 클라: 동기화되면 UI 갱신 ──────────────────────────────────────────────
+	@ExecSpace("ClientOnly")
+	method void OnSyncProperty(string name, any value)
+		if name == "ClaimedCount" or name == "Loaded" then
+			_LevelRewardUI:RefreshAll()
+		end
+	end
+
+end
