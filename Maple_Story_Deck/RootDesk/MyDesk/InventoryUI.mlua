@@ -43,6 +43,10 @@ script InventoryUI extends Logic
 	-- 슬롯을 다른 잡템이 재사용할 때 원래 설정으로 되돌리기 위해
 	property any _iconPreserveDefaults = nil
 
+	-- 슬롯 아이콘별 .ui 원래 RectSize — keepAspect 잡템은 이 크기 안에 원본 비율로 줄여 넣고,
+	-- 일반 잡템이 그 슬롯을 재사용할 때 원래 크기로 되돌린다
+	property any _iconSizeDefaults = nil
+
 	property string _shadowVoucherIcon = "b4ef5ecaa6584954831a86bd844e287e"
 
 	-- itemId별 마지막으로 확인한 개수 — 실시간 갱신 시 "늘어났는지"를 판단해 획득 연출을 재생하는 데 쓴다
@@ -136,17 +140,37 @@ script InventoryUI extends Logic
 
 	@ExecSpace("ClientOnly")
 	method void ApplyIconAspect(Entity iconEntity, boolean keepAspect)
-		-- keepAspect 잡템(가로로 긴 발광 박쥐의 날개 등)만 칸 안에 원본 비율 그대로 맞추고, 나머지는 .ui 원래
-		-- PreserveSprite로 되돌린다(슬롯 재사용 시 이전 아이템 설정이 남지 않게)
+		-- keepAspect 잡템(가로로 긴 발광 박쥐의 날개 등)을 칸 안에 원본 비율 그대로 보여준다.
+		--
+		-- ⚠ 예전에는 PreserveSprite=AspectOnly로 했는데, 그러면 **아이콘이 칸 밖으로 밀려 나온다**
+		-- (유저 리포트 2026-09-18: "인벤토리에 아이템이 어긋나 있는 게 있다" — 실측: 꼬리/철판/돌 등
+		-- keepAspect 잡템만 위/오른쪽으로 치우쳐 잘림). AspectOnly가 스프라이트 자체 피벗을 기준으로
+		-- 맞추는데 메이플 아이템 아이콘은 피벗이 가운데가 아니기 때문이다.
+		-- → PreserveSprite는 항상 .ui 원래값(None)으로 두고, **칸(RectSize)을 원본 비율에 맞게 줄여서**
+		-- 늘어짐 없이 가운데 정렬되게 한다(칸 자체가 가운데 앵커라 자동으로 중앙).
 		local renderer = iconEntity.SpriteGUIRendererComponent
 		if self._iconPreserveDefaults == nil then self._iconPreserveDefaults = {} end
+		if self._iconSizeDefaults == nil then self._iconSizeDefaults = {} end
 		local key = iconEntity.Id
+		local t = iconEntity.UITransformComponent
 		if self._iconPreserveDefaults[key] == nil then self._iconPreserveDefaults[key] = renderer.PreserveSprite end
-		if keepAspect then
-			renderer.PreserveSprite = PreserveSpriteType.AspectOnly
-		else
-			renderer.PreserveSprite = self._iconPreserveDefaults[key]
+		if self._iconSizeDefaults[key] == nil then self._iconSizeDefaults[key] = t.RectSize end
+		renderer.PreserveSprite = self._iconPreserveDefaults[key]
+
+		local baseSize = self._iconSizeDefaults[key]
+		if not keepAspect then
+			t.RectSize = baseSize
+			return
 		end
+
+		-- 원본 가로/세로 비율로 칸 안에 맞춘다(둘 중 넘치는 쪽을 기준으로 축소)
+		local m = _CardManager:GetSpriteMetrics(tostring(renderer.ImageRUID.DataId))
+		if m.w <= 0 or m.h <= 0 then
+			t.RectSize = baseSize
+			return
+		end
+		local scale = math.min(baseSize.x / m.w, baseSize.y / m.h)
+		t.RectSize = Vector2(m.w * scale, m.h * scale)
 	end
 
 	@ExecSpace("ClientOnly")

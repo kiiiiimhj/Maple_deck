@@ -19,6 +19,24 @@ script MobileScreenFitLogic extends Logic
 	-- 153으로 올리니 4.7칸으로 더 좁아짐. 그래서 모바일은 2.7/3.6 = 0.75를 곱해(115 → 86.25) 세로 범위를 PC와 맞춘다.
 	property number MobileZoomMultiplier = 0.75
 
+	-- 2026-09-18 아이폰15 프로맥스 실기 리포트: "인게임 양옆이 PC보다 더 나온다".
+	-- 폰은 19.5:9(≈2.17)로 PC 16:9보다 길쭉해서 세로를 PC와 맞추면(0.75) 가로가 PC의 12.8칸 → 15.6칸이 된다.
+	-- 유저 선택: **가로를 PC와 동일하게**. 그래서 고정 배율 대신 화면 비율에서 매번 계산한다:
+	--   보이는 세로 = PcViewWidthUnits / (화면 가로/세로),  배율 = MobileNativeVerticalUnits / 보이는 세로
+	--   = MobileNativeVerticalUnits × 화면비 / PcViewWidthUnits
+	-- 16:9 기기에서는 5.4×1.778/12.8 = 0.75로 예전 값과 같아진다(= 그 기기에선 세로도 PC와 동일).
+	-- ⚠ "PC와 같은 줌 값에서 모바일이 보여주는 세로 칸수" 실측값(2026-09-18 시뮬레이터 iPhone15PM):
+	-- 줌 105.15에서 세로 5.14칸 → 줌 115 환산 4.70칸(PC는 같은 줌에서 7.2칸). 예전 주석의 5.4는 줌 100 기준이라
+	-- 그대로 쓰면 가로가 11.15칸으로 목표(12.8)보다 좁았다. 이 값은 첫 근삿값이고, 최종 보정은 FitCameraWidth가 실측으로 한다.
+	property number MobileNativeVerticalUnits = 4.7
+	property number PcViewWidthUnits = 12.8
+	property number ZoomMultiplierMin = 0.5
+	property number ZoomMultiplierMax = 1.5
+	-- 보이는 가로가 이 값(월드 유닛) 이내로 목표에 붙어 있으면 더 건드리지 않는다
+	property number CameraWidthTolerance = 0.1
+	-- 실측 가로가 목표의 이 배율을 벗어나면 "카메라가 아직 안 잡힌 상태"로 보고 보정을 건너뛴다
+	property number CameraWidthMaxCorrection = 1.3
+
 	-- 화면 끝 좌표 측정이 실패하거나 모자랄 때를 대비한 최소 확장량(UI 단위). 아이폰 가로 안전영역 ≈ 좌우 150 / 아래 55.
 	property Vector2 MinBleed = Vector2(160, 60)
 
@@ -31,6 +49,10 @@ script MobileScreenFitLogic extends Logic
 
 	-- 로비 재화 배지를 모바일에서 왼쪽으로 미는 양(MSW 기본 버튼 2개 폭 ≈ 180 + 여유)
 	property number LobbyBadgeShiftX = 200
+
+	-- 로비 탭바를 바닥 안전영역의 몇 배만큼 내릴지. 계산상 1.0이 "아래로 늘어난 나무판의 한가운데"다
+	-- (나무판은 아래로 (inset - shift)만큼 늘어나므로 shift = inset일 때 버튼이 보이는 띠의 중앙에 온다).
+	property number TabBarShiftRatio = 1.0
 
 	-- UI 레이아웃이 한 프레임 이상 잡힌 뒤에 재야 stretch RectSize가 실제 캔버스 크기로 채워져 있다
 	property number ApplyDelay = 0.5
@@ -70,8 +92,116 @@ script MobileScreenFitLogic extends Logic
 
 	method number GetZoomMultiplier()
 		-- MapManager.ApplyDefaultZoomImmediate가 기본 줌에 곱하는 값. PC는 1.
-		if self:IsActive() then return self.MobileZoomMultiplier end
-		return 1
+		-- 모바일은 "가로로 보이는 범위를 PC와 동일하게" 맞추도록 화면 비율에서 계산한다(위 주석 참고).
+		if not self:IsActive() then return 1 end
+		local sw = _UILogic.ScreenWidth
+		local sh = _UILogic.ScreenHeight
+		if sw <= 0 or sh <= 0 then return self.MobileZoomMultiplier end
+		local mult = self.MobileNativeVerticalUnits * (sw / sh) / self.PcViewWidthUnits
+		if mult < self.ZoomMultiplierMin then mult = self.ZoomMultiplierMin end
+		if mult > self.ZoomMultiplierMax then mult = self.ZoomMultiplierMax end
+		return mult
+	end
+
+	@ExecSpace("ClientOnly")
+	method number GetVisibleWorldWidth()
+		-- 지금 카메라가 보여주는 가로 범위(월드 유닛). 화면 좌우 끝을 월드 좌표로 변환해서 잰다.
+		local sh = _UILogic.ScreenHeight
+		local sw = _UILogic.ScreenWidth
+		if sw <= 0 or sh <= 0 then return -1 end
+		local left = _UILogic:ScreenToWorldPosition(Vector2(0, sh / 2))
+		local right = _UILogic:ScreenToWorldPosition(Vector2(sw, sh / 2))
+		if left == nil or right == nil then return -1 end
+		return math.abs(right.x - left.x)
+	end
+
+	-- MapManager가 기본 줌을 적용한 뒤 호출 — 실제로 보이는 가로 범위를 재서 PC와 같아지도록 줌을 미세 보정한다.
+	-- 배율 계산에 쓰는 상수(MobileNativeVerticalUnits)가 기기/엔진 버전마다 조금씩 다를 수 있어서,
+	-- 추정값으로 한 번 맞춘 뒤 실측으로 한 번 더 교정하는 2단 방식이다(유저 지정: 가로를 PC와 동일하게).
+	@ExecSpace("ClientOnly")
+	method void FitCameraWidth()
+		-- 보이는 가로가 PcViewWidthUnits가 되도록 ZoomRatio를 곱셈 보정(줌이 클수록 확대 = 보이는 범위가 좁아진다)
+		if not self:IsActive() then return end
+		local cam = _CameraService:GetCurrentCameraComponent()
+		if cam == nil then return end
+		local width = self:GetVisibleWorldWidth()
+		if width <= 0 then return end
+		if math.abs(width - self.PcViewWidthUnits) <= self.CameraWidthTolerance then return end
+		-- 카메라가 아직 자리를 못 잡았거나(전환 중) 다른 연출이 줌을 크게 바꾼 순간이면 건드리지 않는다.
+		-- 추정 배율이 이미 꽤 정확해서(실측 오차 1% 이내) 정상 상황의 보정폭은 아주 작다 —
+		-- 2026-09-18 실측: 부팅 직후 한 번 18.35칸(=카메라 미정착)이 잡혀 줌이 131까지 튀었다.
+		if width > self.PcViewWidthUnits * self.CameraWidthMaxCorrection
+			or width < self.PcViewWidthUnits / self.CameraWidthMaxCorrection then
+			log_warning(string.format("MobileScreenFitLogic: camera width %.2f out of range, skip", width))
+			return
+		end
+		local newZoom = cam.ZoomRatio * (width / self.PcViewWidthUnits)
+		if newZoom > cam.ZoomRatioMax then newZoom = cam.ZoomRatioMax end
+		if newZoom < 1 then newZoom = 1 end
+		cam.ZoomRatio = newZoom
+		log(string.format("MobileScreenFitLogic: camera width %.2f -> zoom %.2f (target %.2f)", width, newZoom, self.PcViewWidthUnits))
+	end
+
+	-- 화면 아래 안전영역(홈 바) 두께를 UI 단위로 잰다. 아이폰은 UI 캔버스가 안전영역 안쪽에만 깔려서
+	-- 바닥 앵커 HUD(카드 슬롯/공격·포션 버튼)가 그만큼 위로 떠 보인다(유저 리포트 2026-09-18).
+	-- 기준 엔티티는 "바닥 앵커 + pivot.y = 0"이어야 한다. 실패하면 -1.
+	-- 작은 요소(탭바 배경 150px, 카드 슬롯 185px 등)를 기준으로 화면을 잴 때 쓰는 완화판.
+	-- MeasureScreenLocal의 상식 범위 검사는 "요소 자신이 화면만 한 크기"라는 가정이라, 작은 요소에 그대로 쓰면
+	-- 화면 높이(≈1080)가 요소 높이의 4배를 넘어 항상 nil이 된다(2026-09-18 실측 — 탭바/하단 HUD 보정이 조용히 안 돌고 있었다).
+	@ExecSpace("ClientOnly")
+	method table MeasureScreenLoose(UITransformComponent t)
+		-- 화면 사각형을 요소 로컬 좌표로 잰다(기준 크기는 캔버스 기본값 1920×1080)
+		return self:MeasureScreenLocal(t, 1920, 1080)
+	end
+
+	@ExecSpace("ClientOnly")
+	method number GetBottomInset(UITransformComponent t)
+		-- 캔버스 바닥과 화면 바닥의 거리(UI 단위)
+		if t == nil then return -1 end
+		local m = self:MeasureScreenLoose(t)
+		if m == nil then return -1 end
+		-- 로컬 원점(= 요소 pivot)에서 캔버스 바닥까지의 거리 = anchoredPosition.y
+		local canvasBottomLocal = -t.anchoredPosition.y
+		local inset = canvasBottomLocal - m.y0
+		if inset < 0 then inset = 0 end
+		return inset
+	end
+
+	method table GetBottomHudPaths()
+		-- 화면 맨 아래까지 내릴 인게임 하단 HUD(유저 지정 2026-09-18: "끝까지 내리기")
+		return {
+			"/ui/DefaultGroup/CardSlots",
+			"/ui/DefaultGroup/Button_Attack",
+			"/ui/DefaultGroup/Button_Potion",
+		}
+	end
+
+	@ExecSpace("ClientOnly")
+	method void FitBottomHud()
+		-- 바닥 안전영역만큼 하단 HUD를 내린다. 원본 위치는 한 번만 저장하고 매번 원본 기준으로 다시 계산한다.
+		local paths = self:GetBottomHudPaths()
+		local ref = _EntityService:GetEntityByPath(paths[1])
+		if not isvalid(ref) then return end
+		if self._T.bottomOrig == nil then self._T.bottomOrig = {} end
+		-- 기준 엔티티는 원본 위치로 되돌린 상태에서 재야 안전영역을 두 번 빼지 않는다
+		local refT = ref.UITransformComponent
+		if self._T.bottomOrig[paths[1]] ~= nil then
+			refT.anchoredPosition = Vector2(refT.anchoredPosition.x, self._T.bottomOrig[paths[1]])
+		end
+		local inset = self:GetBottomInset(refT)
+		if inset < 0 then
+			log_warning("MobileScreenFitLogic: bottom inset measure failed")
+			return
+		end
+		for _, path in ipairs(paths) do
+			local e = _EntityService:GetEntityByPath(path)
+			if isvalid(e) then
+				local t = e.UITransformComponent
+				if self._T.bottomOrig[path] == nil then self._T.bottomOrig[path] = t.anchoredPosition.y end
+				t.anchoredPosition = Vector2(t.anchoredPosition.x, self._T.bottomOrig[path] - inset)
+			end
+		end
+		log(string.format("MobileScreenFitLogic: bottom hud shifted down by %.0f", inset))
 	end
 
 	method table GetBackgroundPaths()
@@ -81,6 +211,21 @@ script MobileScreenFitLogic extends Logic
 			"/ui/TitleGroup/BattlePanel/Background",
 			"/ui/LoadingGroup/Screen/Bg",
 		}
+	end
+
+	method table GetTopAlignedPaths()
+		-- 화면보다 세로로 넘칠 때 가운데가 아니라 **위쪽을 기준으로** 맞출 이미지.
+		-- 로딩 화면은 타이틀 로고가 위에 있어서 가운데 정렬로 자르면 로고 윗부분이 잘린다
+		-- (2026-09-18 아이폰15 프로맥스 실기 리포트: "로딩화면은 윗쪽이 쫌 짤려").
+		return { "/ui/LoadingGroup/Screen/Bg" }
+	end
+
+	method boolean IsTopAligned(string path)
+		-- 위쪽 기준으로 맞출 이미지인지
+		for _, p in ipairs(self:GetTopAlignedPaths()) do
+			if p == path then return true end
+		end
+		return false
 	end
 
 	method table GetDimmerPaths()
@@ -185,11 +330,60 @@ script MobileScreenFitLogic extends Logic
 				badgeCount = badgeCount + 1
 			end
 		end
+		self:FitTabBar()
 		self:FitTabBarTopLine()
+		self:FitBottomHud()
 		self._applied = true
 		log(string.format("MobileScreenFitLogic: applied bg=%d/%d dim=%d/%d badge=%d/%d (screen %dx%d)",
 			bgCount, #bgPaths, dimCount, #dimPaths, badgeCount, #badgePaths,
 			self._lastScreenW, self._lastScreenH))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void FitTabBar()
+		-- 로비 하단 탭바 나무 배경(TabBar/Bg)을 좌우·아래로 화면 끝까지 넓힌다. 탭바 자체는 캔버스(=안전영역)
+		-- 폭이라 아이폰에선 좌우에 배경이 비치는 틈과 바닥 틈이 생겼다(2026-09-18 실기 스샷).
+		-- 버튼들은 TabBar 중앙 기준 고정 좌표라 Bg만 넓히면 위치가 안 흔들린다.
+		local bg = _EntityService:GetEntityByPath("/ui/TitleGroup/TabBar/Bg")
+		if not isvalid(bg) then
+			log_warning("MobileScreenFitLogic: TabBar/Bg not found")
+			return
+		end
+		-- 탭바 자체도 바닥 안전영역만큼 내린다(유저 리포트 2026-09-18: "아래 탭이 너무 올라왔다") —
+		-- 배경만 아래로 늘리면 아이콘/글씨는 안전영역 안쪽에 그대로 남아 나무판 위쪽에 떠 보인다.
+		local bar = _EntityService:GetEntityByPath("/ui/TitleGroup/TabBar")
+		if isvalid(bar) then
+			local bt = bar.UITransformComponent
+			if self._T.tabBarOrigY == nil then self._T.tabBarOrigY = bt.anchoredPosition.y end
+			bt.anchoredPosition = Vector2(bt.anchoredPosition.x, self._T.tabBarOrigY)
+			local inset = self:GetBottomInset(bt)
+			if inset > 0 then
+				-- 안전영역 전체(inset)를 내리면 글씨가 화면 맨 끝에 붙는다. 배경이 아래로 inset만큼 늘어났으므로
+				-- 그 절반만 내려야 아이콘/글씨가 "늘어난 나무판"의 한가운데에 온다(TabBarShiftRatio).
+				local shift = inset * self.TabBarShiftRatio
+				bt.anchoredPosition = Vector2(bt.anchoredPosition.x, self._T.tabBarOrigY - shift)
+				log(string.format("MobileScreenFitLogic: tab bar shifted down by %.0f (inset %.0f)", shift, inset))
+			end
+		end
+		local t = bg.UITransformComponent
+		-- ⚠ 원본 크기를 저장해두고 매번 "원본 기준"으로 다시 계산한다. 현재 RectSize를 기준으로 쓰면
+		-- 이미 넓혀둔 크기에 또 넓혀서 호출할 때마다 나무판이 커진다(2026-09-18 실측 — 탭이 점점 커짐).
+		t.OffsetMin = Vector2(0, 0)
+		t.OffsetMax = Vector2(0, 0)
+		local size = t.RectSize
+		if size.x <= 0 or size.y <= 0 then return end
+		local m = self:MeasureScreenLoose(t)
+		if m == nil then
+			log_warning("MobileScreenFitLogic: tab bar screen measure failed")
+			return
+		end
+		-- stretch 자식이라 Offset으로 넓힌다. 위쪽(OffsetMax.y)은 건드리지 않아 탭바 윗선 위치가 유지된다.
+		local left = math.min(-self.MinBleed.x, m.x0 + size.x / 2)
+		local right = math.max(self.MinBleed.x, m.x1 - size.x / 2)
+		local bottom = math.min(-self.MinBleed.y, m.y0 + size.y / 2)
+		t.OffsetMin = Vector2(left, bottom)
+		t.OffsetMax = Vector2(right, 0)
+		log(string.format("MobileScreenFitLogic: tab bar bg -> left %.0f right %.0f bottom %.0f", left, right, bottom))
 	end
 
 	@ExecSpace("ClientOnly")
@@ -204,6 +398,12 @@ script MobileScreenFitLogic extends Logic
 		end
 		local barWidth = bar.UITransformComponent.RectSize.x
 		local t = line.UITransformComponent
+		-- 탭바 배경을 화면 끝까지 넓혔으므로(FitTabBar) 윗선도 화면 폭까지 늘린다
+		local m = self:MeasureScreenLoose(t)
+		if m ~= nil then
+			local screenWidth = m.x1 - m.x0
+			if screenWidth > barWidth then barWidth = screenWidth end
+		end
 		if barWidth > t.RectSize.x then
 			t.RectSize = Vector2(barWidth, t.RectSize.y)
 		end
@@ -259,6 +459,10 @@ script MobileScreenFitLogic extends Logic
 				H = W / maxAspect
 			elseif aspect < minAspect then
 				W = H * minAspect
+			end
+			-- 세로로 넘치는 만큼은 아래쪽에서만 잘리게 위를 화면 위에 붙인다(로딩 화면 로고 보호)
+			if self:IsTopAligned(path) and H > (r.y1 - r.y0) then
+				cy = r.y1 - H / 2
 			end
 		end
 

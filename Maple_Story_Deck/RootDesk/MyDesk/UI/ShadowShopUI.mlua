@@ -36,7 +36,8 @@ script ShadowShopUI extends Logic
 
 	property integer PotionPrice = 2
 	property integer TicketPrice = 3
-	property integer SkillPrice = 2
+	-- 유저 지정(2026-09-18): 스킬 3종 가격 2 → 6개
+	property integer SkillPrice = 6
 
 	property string PotionIconRUID = "4fd08a6fa90b45448435cf22dba91c1f"
 	property string TicketIconRUID = "5d9d14a961464c0da4c2dae7ed99b8a0"
@@ -120,8 +121,47 @@ script ShadowShopUI extends Logic
 
 	@ExecSpace("ServerOnly")
 	method void RollSkillSlotsIfNeeded()
-		if self._rolledThisRun then return end
+		if self._rolledThisRun then
+			-- 유저 리포트(2026-09-18): "스킬 2개 배웠는데 상품 목록에 안 뜰 때가 있다".
+			-- 추첨은 판당 한 번뿐이라, 스킬이 1개일 때 상점을 먼저 열면 그 판 내내 빈 칸으로 남았다.
+			-- → 이미 배정된 칸은 그대로 두고 **비어 있는 칸만** 새로 배운 스킬로 채운다(재추첨이 아니라 보충).
+			self:FillEmptySkillSlots()
+			return
+		end
 		self:RollSkillSlotsServer()
+	end
+
+	@ExecSpace("ServerOnly")
+	method void FillEmptySkillSlots()
+		-- 비어 있는(0) 스킬 칸을 지금 보유 중인 스킬 중 아직 안 걸린 것으로 채운다(이미 걸린 칸/매진 칸은 그대로).
+		if self.LockedSlot3Card ~= 0 and self.LockedSlot4Card ~= 0 and self.LockedSlot5Card ~= 0 then return end
+		local candidates = self:GetShopCandidates()
+		local pool = {}
+		for _, cardIdx in ipairs(candidates) do
+			if _CardManager:IsCardUnlocked(cardIdx)
+				and cardIdx ~= self.LockedSlot3Card and cardIdx ~= self.LockedSlot4Card and cardIdx ~= self.LockedSlot5Card then
+				table.insert(pool, cardIdx)
+			end
+		end
+		if #pool == 0 then return end
+		for i = #pool, 2, -1 do
+			local j = math.floor(_UtilLogic:RandomDouble() * i) + 1
+			local tmp = pool[i] ; pool[i] = pool[j] ; pool[j] = tmp
+		end
+		local nextIdx = 1
+		if self.LockedSlot3Card == 0 and nextIdx <= #pool then
+			self.LockedSlot3Card = pool[nextIdx]
+			nextIdx = nextIdx + 1
+		end
+		if self.LockedSlot4Card == 0 and nextIdx <= #pool then
+			self.LockedSlot4Card = pool[nextIdx]
+			nextIdx = nextIdx + 1
+		end
+		if self.LockedSlot5Card == 0 and nextIdx <= #pool then
+			self.LockedSlot5Card = pool[nextIdx]
+			nextIdx = nextIdx + 1
+		end
+		log("ShadowShopUI: filled empty skill slots -> " .. self.LockedSlot3Card .. "/" .. self.LockedSlot4Card .. "/" .. self.LockedSlot5Card)
 	end
 
 	-- 다시하기(GameManager.RestartGame)에서만 호출 — 이미 뽑혀 있어도 강제로 초기화 후 재추첨한다.
