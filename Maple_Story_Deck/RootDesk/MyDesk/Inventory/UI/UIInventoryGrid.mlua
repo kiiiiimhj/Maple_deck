@@ -37,6 +37,22 @@ script UIInventoryGrid extends Component
 
 	property Vector2 ItemIconPos = Vector2(0, -8)
 
+	-- 장비가 아닌 아이템(강화 주문서 등)을 누르면 그 칸 위에 말풍선으로 이름을 잠깐 띄운다(유저 지정 2026-09-19).
+	-- 말풍선은 EquipmentGroup.ui의 Inventory/Panel/ItemNameTooltip(유저 리소스 823c09…)
+	property Entity itemNameTooltip = "783b6c15-db07-4702-886d-48d75fd308b1"
+
+	property TextGUIRendererComponent itemNameTooltipText = "0d0aa8a2-f34d-4dda-804c-a9dbf5b31ced"
+
+	property number ItemNameTooltipDuration = 1.5
+
+	-- 칸 중심에서 말풍선 중심까지 위로 띄우는 거리(칸 반높이 56 + 말풍선 반높이 + 여유)
+	property number ItemNameTooltipOffsetY = 100
+
+	-- 말풍선 꼬리(왼쪽 아래)가 칸 중앙을 가리키도록 오른쪽으로 미는 거리
+	property number ItemNameTooltipOffsetX = 80
+
+	property integer _tooltipTimerId = 0
+
 	@ExecSpace("ClientOnly")
 	method void OnInitialize()
 		self.GridView = self.Entity.GridViewComponent
@@ -64,6 +80,8 @@ script UIInventoryGrid extends Component
 	method void Update(table itemStructs, boolean resetPos)
 		table.sort(itemStructs, _InventorySortEnum:GetSortFunc(self.Inventory.SortEnum))
 		self.SortedItemStructs = itemStructs
+		-- 목록이 바뀌면 떠 있던 이름 말풍선이 엉뚱한 칸을 가리키므로 닫는다
+		if resetPos then self:HideItemNameTooltip() end
 
 		-- ⚠ 예전엔 TotalCount를 SetGridViewItem에서 InventoryCapacity(100)로 딱 한 번만 박아뒀다.
 		-- 그래서 (1) 탭별 정원이 달라져도 항상 100칸만 그렸고 (2) 보유 아이템이 정원을 넘으면
@@ -106,6 +124,7 @@ script UIInventoryGrid extends Component
 	@ExecSpace("ClientOnly")
 	method void OnRefresh(integer index, Entity entity)
 		local slot = entity.UIItemSlot
+		entity.UIInventoryGridCell.GridIndex = index
 
 		-- 맨 끝 "+" 칸 — 아이템이 아니라 확장 버튼이다
 		if self.PlusSlotIndex > 0 and index == self.PlusSlotIndex then
@@ -183,6 +202,74 @@ script UIInventoryGrid extends Component
 			local slot = comp.Entity.UIItemSlot
 			if slot ~= nil then self:ApplyEquippedMark(slot) end
 		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ShowItemNameTooltip(Entity cellEntity, string itemName)
+		-- 누른 칸 바로 위에 말풍선을 띄우고 ItemNameTooltipDuration초 뒤 닫는다(다시 누르면 시간 연장)
+		if not isvalid(self.itemNameTooltip) or not isvalid(cellEntity) then return end
+		local tooltipTr = self.itemNameTooltip.UITransformComponent
+		local parentTr = self.itemNameTooltip.Parent.UITransformComponent
+		-- ⚠ GridView 셀의 UITransform.WorldPosition은 실제 화면 위치와 다르고(셀 전부 같은 값 — 2026-09-19 실측),
+		-- 커서 좌표도 칸과 어긋났다(유저 실측 "왼쪽으로 밀림"). 그래서 그리드 배치(칸 번호 → 행/열, 칸 크기,
+		-- 간격, 패딩, 스크롤)로 칸 중심을 직접 계산한다. 말풍선 부모(Panel) 기준 좌표.
+		local center = self:GetCellCenterInTooltipParent(cellEntity.UIInventoryGridCell.GridIndex)
+		-- 말풍선 꼬리가 왼쪽 아래에 있어서 꼬리 끝이 칸을 가리키게 오른쪽으로 민다. 화면(1920 기준) 밖으로는 안 나가게 자른다
+		-- (패널 끝으로 자르면 맨 오른쪽 칸에서 꼬리가 옆 칸을 가리켰다 — 실측)
+		local x = center.x + self.ItemNameTooltipOffsetX
+		local maxX = 960 - parentTr.Position.x - tooltipTr.RectSize.x * 0.5 - 10
+		if x > maxX then x = maxX end
+		tooltipTr.anchoredPosition = Vector2(x, center.y + self.ItemNameTooltipOffsetY)
+		if isvalid(self.itemNameTooltipText) then self.itemNameTooltipText.Text = itemName end
+		self.itemNameTooltip:SetEnable(true)
+		_UILogic:SetSiblingIndex(tooltipTr, 1000000)
+
+		if self._tooltipTimerId ~= 0 then _TimerService:ClearTimer(self._tooltipTimerId) end
+		self._tooltipTimerId = _TimerService:SetTimerOnce(function()
+			self._tooltipTimerId = 0
+			self:HideItemNameTooltip()
+		end, self.ItemNameTooltipDuration)
+		log("UIInventoryGrid: item name tooltip '" .. itemName .. "' cell#" .. tostring(cellEntity.UIInventoryGridCell.GridIndex)
+			.. " at " .. tostring(center.x) .. "," .. tostring(center.y))
+	end
+
+	@ExecSpace("ClientOnly")
+	method Vector2 GetCellCenterInTooltipParent(integer index)
+		-- index(1부터)번 칸의 중심을 Panel(= 이 그리드의 부모의 부모, 말풍선 부모) 기준 좌표로 돌려준다.
+		-- 구조: Panel > InventoryPanel > Grid. UITransform.Position은 부모 기준 실제 로컬 위치(피벗 점)다
+		local gridTr = self.Entity.UITransformComponent
+		local holderTr = self.Entity.Parent.UITransformComponent
+		local gv = self.GridView
+		local cols = gv.FixedCount
+		if cols < 1 then cols = 1 end
+		local cell = gv.CellSize
+		local gap = gv.Spacing
+		local pad = gv.Padding
+
+		local col = (index - 1) % cols
+		local row = math.floor((index - 1) / cols)
+
+		-- 그리드 좌상단(Panel 기준)
+		local gridSize = gridTr.RectSize
+		local left = holderTr.Position.x + gridTr.Position.x - gridSize.x * gridTr.Pivot.x
+		local top = holderTr.Position.y + gridTr.Position.y + gridSize.y * (1 - gridTr.Pivot.y)
+
+		-- 세로 스크롤만큼 내용이 위로 올라간다(정규화 0 = 맨 위, 1 = 맨 아래)
+		local rows = math.ceil(gv.TotalCount / cols)
+		local contentH = pad.top + pad.bottom + rows * cell.y + math.max(0, rows - 1) * gap.y
+		local scrollable = math.max(0, contentH - gridSize.y)
+		local norm = gv:GetScrollNormalizedPosition(UITransformAxis.Vertical)
+		local scrollPx = scrollable * math.max(0, math.min(1, norm))
+
+		local x = left + pad.left + col * (cell.x + gap.x) + cell.x * 0.5
+		local y = top - pad.top - row * (cell.y + gap.y) - cell.y * 0.5 + scrollPx
+		return Vector2(x, y)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void HideItemNameTooltip()
+		-- 말풍선 닫기(탭 전환/목록 갱신 때도 부른다)
+		if isvalid(self.itemNameTooltip) then self.itemNameTooltip:SetEnable(false) end
 	end
 
 	@ExecSpace("ClientOnly")

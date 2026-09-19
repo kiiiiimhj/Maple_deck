@@ -40,9 +40,13 @@ script InventoryExpandLogic extends Logic
 	property any _storage = nil
 
 	@ExecSpace("ServerOnly")
-	method void OnBeginPlay()
-		-- 코인/다이아와 같은 전역 저장소를 쓰되 키만 따로 둔다(저장소를 새로 파지 않는다)
-		self._storage = _DataStorageService:GetGlobalDataStorage("PlayerCoins")
+	@EventSender("Service", "UserService")
+	handler HandleUserEnterEvent(UserEnterEvent event)
+		-- 입장한 유저의 **유저별 저장소**에서 탭별 확장 횟수를 읽는다(키는 "InvExpand*").
+		-- 출시 전 수정(2026-09-20): 예전엔 월드 시작 때 전역 저장소("PlayerCoins")라 전 유저가 확장 칸을 공유했다
+		local user = _UserService:GetUserEntityByUserId(event.UserId)
+		if user == nil then return end
+		self._storage = _DataStorageService:GetUserDataStorage(user.PlayerComponent.ProfileCode)
 		self.WeaponExpandCount = self:LoadCount("InvExpandWeapon")
 		self.ArmorExpandCount = self:LoadCount("InvExpandArmor")
 		self.EtcExpandCount = self:LoadCount("InvExpandEtc")
@@ -172,7 +176,7 @@ script InventoryExpandLogic extends Logic
 		end
 
 		-- 확장은 아주 드문 조작이라(연타 대상이 아님) 지연 flush 없이 그 자리에서 저장한다
-		self._storage:SetAndWait(key, tostring(self:GetExpandCount(tabEnum)))
+		if self._storage ~= nil then self._storage:SetAndWait(key, tostring(self:GetExpandCount(tabEnum))) end
 
 		log("InventoryExpandLogic: expanded " .. self:GetTabDisplayName(tabEnum)
 			.. " -> capacity " .. self:GetCapacity(tabEnum) .. " (paid " .. cost .. " diamond)")

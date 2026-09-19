@@ -1,0 +1,338 @@
+@Logic
+script AchievementUI extends Logic
+
+	-- 업적 팝업(ui/AchievementGroup.ui) + 로비 업적 버튼(ui/TitleGroup.ui AchievementButton) 컨트롤러.
+	-- 상태는 전부 AchievementLogic(서버)이 들고 있고, 팝업을 열 때 스냅샷(JSON)을 받아 그린다.
+	--   · 행: 네모 체크박스(달성하면 체크) / 제목·조건 / 진행도 / 보상(다이아 10) / 받기 버튼(받을 수 있을 때만)
+	--   · 정렬: 받을 수 있는 것 → 진행 중 → 받은 것
+	--   · 모두 받기: 받을 수 있는 업적 전부. 받은 다이아는 팝업을 닫을 때 로비 업적 버튼에서 날아간다
+
+	-- UI 바인딩 (UIBuilder가 UUID를 넣는다)
+	property Entity popupGroup = "c9d4b00e-77b4-4928-8d93-535d4b839822"
+	property ButtonComponent btnClose = "74f51132-2d2e-4e59-a6b9-03b5789f7089"
+	property ButtonComponent btnClaimAll = "609449b9-20b7-4745-97a0-64688778f099"
+	property GridViewComponent listGrid = "7fdc9f93-1cd7-422e-900f-47fbea43fde7"
+	property Entity rowTemplate = "06675738-c89d-45d2-81a1-348ed78d3bf7"
+	property TextGUIRendererComponent countText = "80c2845e-c026-46ee-948d-0d92c09e42d7"
+	property ButtonComponent lobbyButton = "93dc3e6a-7ae0-44f3-b989-0bdee9cfc808"
+	property Entity lobbyRedDot = "a0e468c7-fc0b-4ae3-a58f-e0993189ebdf"
+
+	property string DiamondIconRUID = "81462aeb825b4660991cef05651271cf"
+	property Color ProgressColor = Color(0.29, 0.16, 0.07, 1)
+	property Color DoneColor = Color(0.2, 0.55, 0.15, 1)
+
+	-- 내부 상태
+	property boolean _isOpen = false
+	property boolean _lobbyTabVisible = true
+	property table _progress = {}
+	property table _claimed = {}
+	property table _order = {}
+	property boolean _claimPending = false
+	property integer _pendingFlyAmount = 0
+	property integer _holdAmount = 0
+	property any _closeHandler = nil
+	property any _claimAllHandler = nil
+	property any _lobbyHandler = nil
+	property table _rowHandlers = {}
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		-- 버튼 연결 + 목록 그리드 준비(행 템플릿 복제)
+		if not isvalid(self.popupGroup) then return end
+		self.popupGroup.Enable = false
+		self._closeHandler = self.btnClose.Entity:ConnectEvent(ButtonClickEvent, self.OnCloseClicked)
+		self._claimAllHandler = self.btnClaimAll.Entity:ConnectEvent(ButtonClickEvent, self.OnClaimAllClicked)
+		if isvalid(self.lobbyButton) then
+			self._lobbyHandler = self.lobbyButton.Entity:ConnectEvent(ButtonClickEvent, self.OnLobbyButtonClicked)
+		end
+		self.listGrid.ItemEntity = self.rowTemplate
+		self.listGrid.OnRefresh = function(index, entity) self:OnRowRefresh(index + 1, entity) end
+		self.listGrid.TotalCount = 0
+		self:BuildOrder()
+		self:RefreshLobbyButton()
+		log("AchievementUI started")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		-- 이벤트 해제
+		if self._closeHandler then self.btnClose.Entity:DisconnectEvent(ButtonClickEvent, self._closeHandler) end
+		if self._claimAllHandler then self.btnClaimAll.Entity:DisconnectEvent(ButtonClickEvent, self._claimAllHandler) end
+		if self._lobbyHandler then self.lobbyButton.Entity:DisconnectEvent(ButtonClickEvent, self._lobbyHandler) end
+		for _, rec in pairs(self._rowHandlers) do
+			if isvalid(rec.entity) then rec.entity:DisconnectEvent(ButtonClickEvent, rec.h) end
+		end
+		self._rowHandlers = {}
+	end
+
+	-- ── 열기/닫기 ──────────────────────────────────────────────────────────────
+	@ExecSpace("ClientOnly")
+	method void OnLobbyButtonClicked()
+		-- 로비 업적 버튼
+		self:Open()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Open()
+		-- 먼저 기존 값으로 띄우고, 서버 스냅샷이 오면 다시 그린다
+		self.popupGroup.Enable = true
+		self._isOpen = true
+		self:RefreshList(true)
+		_AchievementLogic:RequestSnapshot()
+		log("AchievementUI: opened")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Close()
+		-- 닫을 때 이번에 받은 다이아를 로비 버튼 자리에서 날린다
+		self.popupGroup.Enable = false
+		self._isOpen = false
+		self:FlyPending()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnCloseClicked()
+		-- X 버튼
+		self:Close()
+	end
+
+	-- ── 서버 응답 ──────────────────────────────────────────────────────────────
+	@ExecSpace("Client")
+	method void OnSnapshot(string json)
+		-- AchievementLogic.RequestSnapshot 응답
+		self:ApplySnapshot(json)
+		self:RefreshList(true)
+	end
+
+	@ExecSpace("Client")
+	method void OnClaimResult(integer amount, string json)
+		-- AchievementLogic 수령 결과 — amount 0이면 받은 게 없다(보류만 풀기)
+		self._claimPending = false
+		if self._holdAmount > 0 then
+			if amount <= 0 then _RewardFlyUI:Release("diamond", self._holdAmount) end
+			self._holdAmount = 0
+		end
+		if amount > 0 then
+			if self._isOpen then
+				self._pendingFlyAmount = self._pendingFlyAmount + amount
+			else
+				self:FlyDiamond(amount)
+			end
+		end
+		self:ApplySnapshot(json)
+		-- 스크롤 위치는 유지한 채 다시 그린다(보이는 행은 RefreshList 안에서 직접 다시 칠함)
+		self:RefreshList(false)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ApplySnapshot(string json)
+		-- {p={id=진행값}, c={id=true}}
+		local t = _HttpService:JSONDecode(json)
+		if t == nil then return end
+		self._progress = t["p"] or {}
+		-- 수령 목록은 "a,b,c" 문자열로 온다(빈 테이블 JSON 인코딩 불가 때문)
+		local claimed = {}
+		if type(t["c"]) == "string" then
+			for id in string.gmatch(t["c"], "[^,]+") do claimed[id] = true end
+		end
+		self._claimed = claimed
+	end
+
+	-- ── 목록 ──────────────────────────────────────────────────────────────────
+	@ExecSpace("ClientOnly")
+	method integer GetState(table def)
+		-- 1 = 받을 수 있음, 2 = 진행 중, 3 = 받음
+		if self._claimed[def.id] then return 3 end
+		local v = self._progress[def.id] or 0
+		if v >= def.target then return 1 end
+		return 2
+	end
+
+	@ExecSpace("ClientOnly")
+	method void BuildOrder()
+		-- 받을 수 있는 것 → 진행 중 → 받은 것 순(같은 그룹 안에서는 정의 순서)
+		local defs = _AchievementLogic:GetDefs()
+		local order = {}
+		for state = 1, 3 do
+			for i, def in ipairs(defs) do
+				if self:GetState(def) == state then table.insert(order, i) end
+			end
+		end
+		self._order = order
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshList(boolean resetPos)
+		-- 정렬 다시 하고 그리드 갱신 + 상단 개수/모두 받기 버튼
+		self:BuildOrder()
+		self.listGrid.TotalCount = #self._order
+		self.listGrid:Refresh(true, resetPos)
+		if not resetPos then
+			-- force Refresh만으로 이미 그려진 행이 안 바뀌는 경우가 있어 보이는 행을 직접 다시 칠한다
+			self:RepaintVisibleRows()
+		end
+		local defs = _AchievementLogic:GetDefs()
+		local done = 0
+		local claimable = 0
+		for _, def in ipairs(defs) do
+			local s = self:GetState(def)
+			if s ~= 2 then done = done + 1 end
+			if s == 1 then claimable = claimable + 1 end
+		end
+		if isvalid(self.countText) then
+			self.countText.Text = "달성 " .. done .. " / " .. #defs
+		end
+		if claimable > 0 then
+			self.btnClaimAll.Entity.SpriteGUIRendererComponent.Color = Color(1, 1, 1, 1)
+		else
+			self.btnClaimAll.Entity.SpriteGUIRendererComponent.Color = Color(0.6, 0.6, 0.6, 1)
+		end
+		self:RefreshLobbyButton()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnRowRefresh(integer index, Entity row)
+		-- 행 하나 그리기(GridView가 행을 재활용하므로 매번 전부 다시 설정)
+		local defs = _AchievementLogic:GetDefs()
+		local def = defs[self._order[index]]
+		if def == nil then return end
+		local state = self:GetState(def)
+		local v = self._progress[def.id] or 0
+		if v > def.target then v = def.target end
+
+		row:GetChildByName("NameText").TextGUIRendererComponent.Text = def.name
+		row:GetChildByName("DescText").TextGUIRendererComponent.Text = def.desc
+		local progress = row:GetChildByName("ProgressText").TextGUIRendererComponent
+		if state == 2 then
+			progress.Text = self:FormatNumber(v) .. " / " .. self:FormatNumber(def.target)
+			progress.FontColor = self.ProgressColor
+		else
+			progress.Text = "달성!"
+			progress.FontColor = self.DoneColor
+		end
+		row:GetChildByName("Box"):GetChildByName("Check").Enable = state ~= 2
+
+		local btn = row:GetChildByName("BtnClaim")
+		btn.Enable = state == 1
+		row:GetChildByName("DoneText").Enable = state == 3
+		row:GetChildByName("Reward").Enable = state ~= 3
+		-- 받은 행은 살짝 흐리게
+		local bg = row:GetChildByName("Bg").SpriteGUIRendererComponent
+		if state == 1 then
+			bg.Color = Color(1, 0.93, 0.62, 0.55)
+		elseif state == 3 then
+			bg.Color = Color(0.55, 0.45, 0.35, 0.18)
+		else
+			bg.Color = Color(1, 1, 1, 0.35)
+		end
+
+		-- 받기 버튼 연결(행 엔티티당 1회, 누를 때 지금 그 행의 업적 id를 읽는다)
+		self:SetRowId(row, def.id, index)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetRowId(Entity row, string id, integer index)
+		-- 재활용 행의 현재 업적 id/목록 번호 기록 + 받기 버튼 핸들러 1회 연결
+		local key = row.Id
+		local rec = self._rowHandlers[key]
+		if rec == nil then
+			local btnEntity = row:GetChildByName("BtnClaim")
+			rec = { entity = btnEntity, row = row, id = id, index = index }
+			rec.h = btnEntity:ConnectEvent(ButtonClickEvent, function() self:OnRowClaimClicked(key) end)
+			self._rowHandlers[key] = rec
+		end
+		rec.id = id
+		rec.index = index
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RepaintVisibleRows()
+		-- 지금 화면에 있는 행들을 기억해둔 목록 번호로 다시 그린다
+		for _, rec in pairs(self._rowHandlers) do
+			if isvalid(rec.row) and rec.row.Enable and rec.index >= 1 and rec.index <= #self._order then
+				self:OnRowRefresh(rec.index, rec.row)
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method string FormatNumber(integer n)
+		-- 1000 단위 콤마
+		local s = tostring(math.floor(n))
+		local out = s
+		while true do
+			local k
+			out, k = string.gsub(out, "^(-?%d+)(%d%d%d)", "%1,%2")
+			if k == 0 then break end
+		end
+		return out
+	end
+
+	-- ── 수령 ──────────────────────────────────────────────────────────────────
+	@ExecSpace("ClientOnly")
+	method void OnRowClaimClicked(string rowKey)
+		-- 행의 받기 버튼
+		local rec = self._rowHandlers[rowKey]
+		if rec == nil or self._claimPending then return end
+		self:BeginClaim(1)
+		_AchievementLogic:RequestClaim(rec.id)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnClaimAllClicked()
+		-- 모두 받기
+		if self._claimPending then return end
+		local n = 0
+		for _, def in ipairs(_AchievementLogic:GetDefs()) do
+			if self:GetState(def) == 1 then n = n + 1 end
+		end
+		if n == 0 then
+			_UIToast:ShowMessage("받을 수 있는 업적 보상이 없어요")
+			return
+		end
+		self:BeginClaim(n)
+		_AchievementLogic:RequestClaimAll()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void BeginClaim(integer count)
+		-- 서버 지급 전 다이아 배지 숫자를 보류(날아가서 도착할 때 오른다)
+		self._claimPending = true
+		self._holdAmount = count * 10
+		_RewardFlyUI:Hold("diamond", self._holdAmount)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void FlyPending()
+		-- 팝업을 닫을 때 모아둔 다이아를 날린다
+		if self._pendingFlyAmount <= 0 then return end
+		local amount = self._pendingFlyAmount
+		self._pendingFlyAmount = 0
+		self:FlyDiamond(amount)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void FlyDiamond(integer amount)
+		-- 화면 중앙(RewardFly 레이어 원점) → 다이아 배지 (유저 지정 2026-09-20: 예전엔 로비 업적 버튼 자리에서 출발)
+		_RewardFlyUI:Fly("diamond", amount, self.DiamondIconRUID, Vector2(0, 0), 0)
+	end
+
+	-- ── 로비 버튼 ──────────────────────────────────────────────────────────────
+	@ExecSpace("ClientOnly")
+	method void RefreshLobbyButton()
+		-- 전투 탭에서만 보이고, 받을 보상이 있으면 레드닷
+		if not isvalid(self.lobbyButton) then return end
+		self.lobbyButton.Entity.Enable = self._lobbyTabVisible
+		if isvalid(self.lobbyRedDot) then
+			self.lobbyRedDot.Enable = _AchievementLogic:GetClaimableCount() > 0
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetLobbyTabVisible(boolean visible)
+		-- TitleUI.ShowPanelOnly가 탭을 바꿀 때 부른다(인벤토리 버튼과 같은 규칙)
+		self._lobbyTabVisible = visible
+		self:RefreshLobbyButton()
+	end
+
+end

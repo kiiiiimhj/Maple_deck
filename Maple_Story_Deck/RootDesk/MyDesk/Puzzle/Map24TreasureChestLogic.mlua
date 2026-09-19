@@ -12,7 +12,7 @@ script Map24TreasureChestLogic extends Logic
 	property integer FirstKillRelicPulls = 10
 	property string RelicPullIconRUID = "3fccc38bffbd45b68cd1fc049809de54"
 	property string StorageName = "PlayerCoins"
-	property string FirstKillStorageKey = "Map24ChestFirstReward"
+	property string FirstKillStorageKey = "Map24.ChestFirstReward"
 
 	-- 리소스팩 "진 힐라의 보물상자"
 	property string ChestStandRUID = "57fa3816f73546da93fb22b5a4df61df"
@@ -80,11 +80,23 @@ script Map24TreasureChestLogic extends Logic
 
 	-- 유저 지정(2026-09-18): 이 상자를 **계정에서 처음 잡았을 때 한 번만** 유물 무료 뽑기권 10장을 준다.
 	-- 연출은 잡템과 같은 낙하→가방 비행(ScheduleLootDrop)에 유물 뽑기권 카드 이미지를 얹는다.
-	-- "처음 1회"는 다이아 창 상태와 같은 전역 저장소("PlayerCoins")에 별도 키로 남겨 월드를 껐다 켜도 유지된다.
+	-- "처음 1회"는 **유저별 저장소**의 Map24.ChestFirstReward 키로 남겨 월드를 껐다 켜도 유지된다
+	-- (출시 전 수정 2026-09-20: 예전엔 전역 저장소라 한 명이 받으면 전 유저가 못 받았다).
 	@ExecSpace("ServerOnly")
 	method void GrantFirstKillReward(Vector3 worldPos)
 		-- 최초 처치 여부를 저장소에서 확인하고, 아직이면 유물 뽑기권을 지급한다
-		local storage = _DataStorageService:GetGlobalDataStorage(self.StorageName)
+		-- 인스턴스당 플레이어 1명 — 지금 들어와 있는 유저의 저장소를 쓴다
+		local storage = nil
+		for _, userEntity in pairs(_UserService.UserEntities) do
+			if isvalid(userEntity) and userEntity.PlayerComponent ~= nil then
+				storage = _DataStorageService:GetUserDataStorage(userEntity.PlayerComponent.ProfileCode)
+				break
+			end
+		end
+		if storage == nil then
+			log_warning("Map24TreasureChestLogic: no user — first-kill reward skipped")
+			return
+		end
 		local code, raw = storage:GetAndWait(self.FirstKillStorageKey)
 		if code == 0 and raw ~= nil and raw ~= "" then
 			log("Map24TreasureChestLogic: first-kill reward already granted")

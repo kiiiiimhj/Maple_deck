@@ -30,7 +30,41 @@ script TutorialGuideUI extends Logic
 
 	property Entity cardTooltip = "4615be3c-8628-4e55-ab57-ef285284d988"
 
-	property string StepAimText = "몬스터를 누르면 그 몬스터를 먼저 공격합니다!"
+	property string StepAimText = "다가오는 몬스터를 처치하세요!\n몬스터를 터치하면 해당 몬스터를 우선 공격합니다."
+
+	-- ── 에임 단계 시연(유저 지정 2026-09-20) ────────────────────────────────────
+	-- 실제 몬스터 대신 화면 중앙의 "가짜" 초록 달팽이(UI)를 크게 띄워 손가락으로 가리키고,
+	-- 누르면 에임 표식 → 썬더볼트 → 다이 연출까지 보여준 뒤 서버에 끝났다고 알린다.
+	-- UI 딤이 전부 덮으므로 뒤의 진짜 몬스터는 어둡게 깔리고 눌리지 않는다.
+	property Entity aimStage = "8c356b00-ef31-4b7c-92d9-997d381f7638"
+	property ButtonComponent aimMob = "f9006698-7e9c-4cab-a9af-5ee2da41c64e"
+	property Entity aimMark = "b52654ab-1eeb-412a-a195-f57783061f8f"
+	property Entity aimBolt = "89aa0128-7e51-4c12-80c0-c2149c3c66ba"
+	property string AimMobStandRUID = "2db94405cf0445f5be2b60a02c21dda5"
+	property string AimMobHitRUID = "a3feafdb656943baa3f8897a7042b21f"
+	property string AimMobDieRUID = "a25ed762135448ccb2307604f3179565"
+	property Vector2 AimMobStandSize = Vector2(40, 28)
+	property Vector2 AimMobHitSize = Vector2(44, 36)
+	property Vector2 AimMobDieSize = Vector2(38, 22)
+	-- 달팽이 확대 배율(원본 픽셀 × 이 값 = 화면 UI px)
+	property number AimMobScale = 6
+	property Vector2 AimMobPos = Vector2(0, -40)
+	property string AimMarkRUID = "47ea73beb91641cf99c982e95f7fb0d9"
+	property string AimBoltRUID = "33fc60d9910448a2b36035277b28c354"
+	property string AimBoltSoundRUID = "2a0ed76e4fd344368bad3691347a6006"
+	-- 에임 표식: 원본 71px × 이 배율, 등장할 때 PopScale배 크게 나왔다가 줄어든다(실제 PlayFocusMark와 같은 팝)
+	property number AimMarkScale = 3.2
+	property number AimMarkPopScale = 1.6
+	property number AimMarkPopDuration = 0.22
+	-- 연출 타이밍(초): 누름 → 표식 → (BoltDelay) 번개+피격 → (DieDelay) 다이 → (DieDuration) 끝
+	property number AimBoltDelay = 0.35
+	property number AimDieDelay = 0.4
+	property number AimDieDuration = 0.95
+	-- 가짜 달팽이를 가리킬 때 손가락 미세 보정(UI px) — 몬스터 손가락과 같은 규칙(y 음수 = 아래로)
+	-- 0,0이면 손바닥이 달팽이 머리를 가려서(스샷 실측) 왼쪽 아래로 뺐다
+	property Vector2 AimMobFingerNudge = Vector2(-40, -70)
+	property boolean _aimDemoPlaying = false
+	property any _aimMobHandler = nil
 
 	property string Step1Text = "몬스터를 잡아서 레벨을 올려보세요!"
 
@@ -67,9 +101,10 @@ script TutorialGuideUI extends Logic
 	property boolean ManualFingerPlacement = false
 
 	-- 손가락 "콕콕" — 쉬는 자리에서 카드 쪽으로 찍었다가 돌아오는 왕복.
-	-- 첫 번째 카드(Card6)는 화면 우측 x 660~790 / y -100~65 구간이고, 가이드는 그 **왼쪽 바깥**에서
+	-- 첫 번째 카드(Card6)는 화면 우측 x 660~790 / y -40~125 구간이고, 가이드는 그 **왼쪽 바깥**에서
 	-- 오른쪽(카드 쪽)을 가리킨다. ManualFingerPlacement=false일 때 이 값이 기준 자리다(유저 확정 2026-09-15)
-	property Vector2 FingerRestPos = Vector2(638, -57)
+	-- 2026-09-19: 선택 카드 3장을 60 올려서(다시뽑기 버튼 자리) 손가락도 (638,-57) → (638,3)
+	property Vector2 FingerRestPos = Vector2(638, 3)
 
 	-- 찍는 방향/거리. 왼쪽에서 카드를 향해 찌르므로 오른쪽 위로 움직인다
 	property Vector2 FingerTapOffset = Vector2(22, 20)
@@ -84,7 +119,8 @@ script TutorialGuideUI extends Logic
 
 	property boolean _fingerActive = false
 
-	-- 손가락이 무엇을 가리키는가: 0 = 꺼짐, 1 = 몬스터 추적(에임 단계), 2 = 카드 고정(카드 단계), 3 = 이스터에그 오브젝트
+	-- 손가락이 무엇을 가리키는가: 0 = 꺼짐, 1 = 몬스터 추적(예전 에임 단계, 지금은 안 씀), 2 = 카드 고정(카드 단계),
+	-- 3 = 이스터에그 오브젝트, 4 = 에임 시연 가짜 달팽이(2026-09-20~)
 	property integer _fingerMode = 0
 
 	-- ── 에임 단계: 손가락이 살아있는 몬스터를 따라다닌다 ─────────────────────────────
@@ -119,6 +155,10 @@ script TutorialGuideUI extends Logic
 			self._fingerBasePos = self.FingerRestPos
 		end
 
+		-- 에임 단계 가짜 달팽이 누르기
+		if isvalid(self.aimMob) then
+			self._aimMobHandler = self.aimMob.Entity:ConnectEvent(ButtonClickEvent, self.OnAimMobClicked)
+		end
 		-- 세 요소 모두 꺼진 상태로 시작한다(수동 배치 모드로 .ui에 손가락을 켜서 저장해 둔 경우에도 여기서 끈다)
 		self:HideAll()
 		log("TutorialGuideUI: ready (finger base = " .. self._fingerBasePos.x .. ", " .. self._fingerBasePos.y .. ")")
@@ -135,30 +175,136 @@ script TutorialGuideUI extends Logic
 
 	@ExecSpace("ClientOnly")
 	method void ShowStepAim()
-		-- 에임 안내. 이 시점에 서버가 게임 전체를 멈춰놨으므로 몬스터는 제자리에 서 있다.
-		-- 손가락이 가장 가까운 몬스터를 가리키며 콕콕 찍고, 플레이어가 그 몬스터를 누르면
-		-- 서버(CardManager.RequestFocusTarget → TutorialLogic.NotifyFocusTargetSet)가 정지를 푼다.
-		--
-		-- ⚠ 이 단계의 딤은 UI가 아니라 **월드 딤**이다(CardManager.ShowTutorialAimDim) —
-		-- 유저 지정 "몬스터는 딤드 위에 있어야지". UI 딤은 화면 맨 앞이라 몬스터까지 어두워지므로
-		-- 여기서는 아예 끄고, 몬스터보다 뒤에 깔리는 월드 엔티티를 서버가 대신 띄운다.
-		-- 덕분에 화면 터치도 가로채이지 않아서 몬스터를 바로 누를 수 있다.
+		-- 에임 안내(유저 지정 2026-09-20 개편). 서버가 게임 전체를 멈춘 상태에서
+		-- UI 딤(터치 차단) 위에 가짜 초록 달팽이를 화면 중앙에 크게 띄우고 손가락으로 가리킨다.
+		-- 달팽이를 누르면 PlayAimDemo가 에임 → 썬더볼트 → 다이를 보여주고 서버에 끝났다고 알린다.
+		-- (예전 방식: 월드 딤 + 진짜 몬스터를 눌러 포커스 — 진짜 몬스터는 이제 딤 아래에 깔린다)
 		self:ClearStep3Timer()
-		self.dimEntity:SetEnable(false)
+		self._aimDemoPlaying = false
+		self:SetDimBlocksTouch(true)
+		self.dimEntity:SetEnable(true)
+		_UILogic:SetSiblingIndex(self.dimEntity.UITransformComponent, 1000000)
+		self:ResetAimStage()
+		_UILogic:SetSiblingIndex(self.aimStage.UITransformComponent, 1000000)
 		self:ShowBanner(self.StepAimText)
 
 		self._fingerTime = 0
-		self._fingerMode = 1
+		self._fingerMode = 4
 		self._fingerActive = true
+		self.fingerEntity:SetEnable(true)
 		_UILogic:SetSiblingIndex(self.fingerEntity.UITransformComponent, 1000000)
-		-- 실제 노출은 OnUpdate가 결정한다 — 가리킬 몬스터가 없으면 꺼둔 채로 기다린다
+		log("TutorialGuideUI: aim demo shown")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ResetAimStage()
+		-- 가짜 달팽이를 서 있는 모습으로 되돌리고 표식/번개는 숨긴다
+		if not isvalid(self.aimStage) then return end
+		self.aimStage:SetEnable(true)
+		self:SetAimMobClip(self.AimMobStandRUID, self.AimMobStandSize, true)
+		local mobTf = self.aimMob.Entity.UITransformComponent
+		mobTf.anchoredPosition = self.AimMobPos
+		mobTf.Scale = Vector3(1, 1, 1)
+		self.aimMob.Entity.SpriteGUIRendererComponent.Color = Color(1, 1, 1, 1)
+		self.aimMob.Entity:SetEnable(true)
+		self.aimMark:SetEnable(false)
+		self.aimBolt:SetEnable(false)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetAimMobClip(string ruid, Vector2 nativeSize, boolean loop)
+		-- 액션마다 원본 크기가 달라서 RectSize도 같이 맞춘다(GachaUI.SetBossAction과 같은 방식)
+		local sprite = self.aimMob.Entity.SpriteGUIRendererComponent
+		sprite.ImageRUID = DataRef(ruid)
+		if loop then
+			sprite.AnimClipPlayType = SpriteAnimClipPlayType.Loop
+		else
+			sprite.AnimClipPlayType = SpriteAnimClipPlayType.Onetime
+		end
+		self.aimMob.Entity.UITransformComponent.RectSize = Vector2(nativeSize.x * self.AimMobScale, nativeSize.y * self.AimMobScale)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnAimMobClicked()
+		-- 가짜 달팽이를 눌렀다 — 연출은 한 번만
+		if self._fingerMode ~= 4 or self._aimDemoPlaying then return end
+		self._aimDemoPlaying = true
+		self:PlayAimDemo()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayAimDemo()
+		-- 에임 표식 팝 → 썬더볼트 + 피격 → 다이 → 서버에 완료 알림
+		self._fingerActive = false
 		self.fingerEntity:SetEnable(false)
+		local mobPos = self.AimMobPos
+		local markSize = 71 * self.AimMarkScale
+
+		-- 1) 에임 표식: 크게 나왔다가 원래 크기로(실제 포커스 표식과 같은 팝)
+		local mark = self.aimMark
+		local markTf = mark.UITransformComponent
+		markTf.anchoredPosition = mobPos
+		markTf.RectSize = Vector2(markSize, markSize)
+		mark.SpriteGUIRendererComponent.ImageRUID = DataRef(self.AimMarkRUID)
+		mark.SpriteGUIRendererComponent.AnimClipPlayType = SpriteAnimClipPlayType.Loop
+		markTf.Scale = Vector3(self.AimMarkPopScale, self.AimMarkPopScale, 1)
+		mark:SetEnable(true)
+		_TweenLogic:ScaleTo(mark, Vector2(1, 1), self.AimMarkPopDuration, EaseType.QuadEaseOut)
+		log("TutorialGuideUI: aim demo — mark")
+
+		-- 2) 썬더볼트: 번개 한 번(Onetime) + 달팽이 피격 모습 + 효과음
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) or not self._aimDemoPlaying then return end
+			local bolt = self.aimBolt
+			bolt.UITransformComponent.anchoredPosition = mobPos
+			local boltSprite = bolt.SpriteGUIRendererComponent
+			boltSprite.ImageRUID = DataRef(self.AimBoltRUID)
+			boltSprite.AnimClipPlayType = SpriteAnimClipPlayType.Onetime
+			bolt:SetEnable(true)
+			_SoundOptionLogic:PlaySfx(self.AimBoltSoundRUID, 1.0)
+			self:SetAimMobClip(self.AimMobHitRUID, self.AimMobHitSize, false)
+			log("TutorialGuideUI: aim demo — thunderbolt")
+
+			-- 3) 다이 연출: 표식을 걷고 달팽이 die1 한 번
+			_TimerService:SetTimerOnce(function()
+				if not isvalid(self) or not self._aimDemoPlaying then return end
+				self.aimMark:SetEnable(false)
+				self:SetAimMobClip(self.AimMobDieRUID, self.AimMobDieSize, false)
+				log("TutorialGuideUI: aim demo — die")
+
+				-- 4) 끝: 무대/딤 정리는 서버 ResumeFromAim → ShowStep1이 한다
+				_TimerService:SetTimerOnce(function()
+					if not isvalid(self) or not self._aimDemoPlaying then return end
+					self.aimMob.Entity:SetEnable(false)
+					self.aimBolt:SetEnable(false)
+					_TutorialLogic:RequestAimDemoDone()
+					log("TutorialGuideUI: aim demo — done")
+				end, self.AimDieDuration)
+			end, self.AimDieDelay)
+		end, self.AimBoltDelay)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void HideAimStage()
+		-- 가짜 달팽이 무대 전체를 끈다(단계 전환/종료/게임오버 공용)
+		self._aimDemoPlaying = false
+		if isvalid(self.aimStage) then self.aimStage:SetEnable(false) end
+	end
+
+	@ExecSpace("ClientOnly")
+	method any FindAimMobAnchor()
+		-- 손가락 모드 4 — 가짜 달팽이 몸통을 손끝이 가리키는 자리(UI 좌표)
+		local target = self.AimMobPos
+		local x = target.x - self.FingerTipOffset.x + self.AimMobFingerNudge.x
+		local y = target.y - self.FingerTipOffset.y + self.AimMobFingerNudge.y
+		return Vector2(x, y)
 	end
 
 	@ExecSpace("ClientOnly")
 	method void ShowStep1()
 		-- 안내 배너만. 정지가 풀려 게임이 다시 굴러가고 플레이어는 평소처럼 싸운다
 		self:ClearStep3Timer()
+		self:HideAimStage()
 		self._fingerMode = 0
 		self._fingerActive = false
 		self.fingerEntity:SetEnable(false)
@@ -268,8 +414,9 @@ script TutorialGuideUI extends Logic
 
 	@ExecSpace("ClientOnly")
 	method void HideAll()
-		-- 튜토리얼 종료(또는 게임오버) — 세 요소를 전부 끈다
+		-- 튜토리얼 종료(또는 게임오버) — 세 요소 + 에임 시연 무대를 전부 끈다
 		self:ClearStep3Timer()
+		self:HideAimStage()
 		self._fingerMode = 0
 		self._fingerActive = false
 		self.dimEntity:SetEnable(false)
@@ -326,7 +473,10 @@ script TutorialGuideUI extends Logic
 
 		-- 에임 단계에서는 기준 자리 자체가 매 프레임 몬스터를 따라간다
 		local pos = self._fingerBasePos
-		if self._fingerMode == 1 or self._fingerMode == 3 then
+		if self._fingerMode == 4 then
+			-- 에임 시연: 화면 중앙 가짜 달팽이를 가리킨다(고정 좌표)
+			pos = self:FindAimMobAnchor()
+		elseif self._fingerMode == 1 or self._fingerMode == 3 then
 			local aim = nil
 			if self._fingerMode == 3 then aim = self:FindEggAnchor() else aim = self:FindAimAnchor() end
 			if aim == nil then

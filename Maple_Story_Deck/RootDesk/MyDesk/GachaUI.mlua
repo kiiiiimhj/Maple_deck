@@ -566,11 +566,18 @@ script GachaUI extends Logic
 		local player = _UserService.LocalPlayer
 		if not isvalid(player) then return end
 		local inventory = player.PkgPlayerInventory
-		if not isvalid(inventory) then return end
+		-- 장비 정보를 못 읽어도 보기 모드는 맞춘다(장비 보기인데 계정 캐시 착장이 그대로 보이지 않게)
+		if not isvalid(inventory) then
+			_AvatarViewLogic:ApplyToCostume(costume, {})
+			return
+		end
 
 		-- CurrentJob은 UIInventory.Open()에서만 세팅돼서 인벤을 한 번도 안 열면 nil이다 — ResolveCurrentJob을 쓴다
 		local job = inventory:ResolveCurrentJob()
-		if job == nil then return end
+		if job == nil then
+			_AvatarViewLogic:ApplyToCostume(costume, {})
+			return
+		end
 		local gearGUIDByCategory = inventory.AttachedNormalGearItems[job]
 		if gearGUIDByCategory == nil then gearGUIDByCategory = {} end
 
@@ -604,18 +611,23 @@ script GachaUI extends Logic
 			end
 		end
 
+		-- 실제 입히기는 AvatarViewLogic이 보기 모드(장비 보기 / 코디 보기)에 맞춰 한다 — 장비창과 같은 규칙
 		local equippedCount = 0
+		local gearRuidByAvatarCategory = {}
 		for i, gearEnum in ipairs(_GearCategoryEnum:GetEnums()) do
 			---@type MapleAvatarItemCategory
 			local avatarCategoryEnum = _GearCategoryEnum:ToAvatarCategory(gearEnum)
 			if avatarCategoryEnum ~= _GearCategoryEnum.None then
 				local ruid = avatarEquipByCategory[gearEnum]
-				if ruid == nil then ruid = "" end
-				if ruid ~= "" then equippedCount = equippedCount + 1 end
-				costume:SetEquip(avatarCategoryEnum, ruid)
+				if ruid ~= nil and ruid ~= "" then
+					equippedCount = equippedCount + 1
+					gearRuidByAvatarCategory[avatarCategoryEnum] = ruid
+				end
 			end
 		end
-		log("GachaUI: avatar synced from inventory, job=" .. tostring(job) .. " equippedSlots=" .. tostring(equippedCount))
+		_AvatarViewLogic:ApplyToCostume(costume, gearRuidByAvatarCategory)
+		log("GachaUI: avatar synced from inventory, job=" .. tostring(job) .. " equippedSlots=" .. tostring(equippedCount)
+			.. " mode=" .. _AvatarViewLogic:GetMode())
 	end
 
 	@ExecSpace("ClientOnly")

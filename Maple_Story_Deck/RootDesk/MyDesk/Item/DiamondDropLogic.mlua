@@ -9,8 +9,8 @@ script DiamondDropLogic extends Logic
 	-- AddDiamond가 @Sync Diamond 갱신 + TitleUI.NotifyDiamondChanged까지 하므로 화면 숫자도 즉시 바뀐다.
 	--
 	-- 어뷰징 방지: 12시간 동안 WindowCap(100개)까지만 나온다. 창(window)은 "처음 다이아를 얻은 시각"부터
-	-- 12시간이고, 다 지나면 다음 획득 때 자동으로 새 창이 열린다. 누적값은 다이아 잔액과 같은
-	-- 전역 저장소("PlayerCoins")에 별도 키로 저장해서 월드를 껐다 켜도 유지된다.
+	-- 12시간이고, 다 지나면 다음 획득 때 자동으로 새 창이 열린다. 누적값은 **유저별 저장소**에
+	-- 별도 키로 저장해서 월드를 껐다 켜도 유지된다(출시 전 수정 2026-09-20: 예전엔 전역 저장소라 전 유저 공유).
 
 	property number DropChance = 0.05
 	property integer MinAmount = 5
@@ -25,13 +25,24 @@ script DiamondDropLogic extends Logic
 	property boolean _dirty = false
 	property integer _flushTimerId = 0
 
-	property string StorageKeyStart = "DiamondDropWindowStart"
-	property string StorageKeyEarned = "DiamondDropWindowEarned"
+	property string StorageKeyStart = "DiamondDrop.WindowStart"
+	property string StorageKeyEarned = "DiamondDrop.WindowEarned"
 
 	@ExecSpace("ServerOnly")
 	method void OnBeginPlay()
-		-- 저장된 12시간 창 상태를 불러오고, 코인/다이아와 같은 3초 지연 flush를 건다
-		self._storage = _DataStorageService:GetGlobalDataStorage("PlayerCoins")
+		-- 3초 지연 flush만 건다. 창 상태는 유저가 들어올 때(HandleUserEnterEvent) 그 유저 저장소에서 읽는다
+		self._flushTimerId = _TimerService:SetTimerRepeat(function()
+			if isvalid(self) then self:FlushIfDirty() end
+		end, 3.0)
+	end
+
+	@ExecSpace("ServerOnly")
+	@EventSender("Service", "UserService")
+	handler HandleUserEnterEvent(UserEnterEvent event)
+		-- 입장한 유저의 12시간 창 상태 로드
+		local user = _UserService:GetUserEntityByUserId(event.UserId)
+		if user == nil then return end
+		self._storage = _DataStorageService:GetUserDataStorage(user.PlayerComponent.ProfileCode)
 		local startCode, startRaw = self._storage:GetAndWait(self.StorageKeyStart)
 		if startCode == 0 and startRaw ~= nil and startRaw ~= "" then
 			local v = tonumber(startRaw)
@@ -43,16 +54,13 @@ script DiamondDropLogic extends Logic
 			if v ~= nil then self._windowEarned = math.floor(v) end
 		end
 		self._loaded = true
-		self._flushTimerId = _TimerService:SetTimerRepeat(function()
-			if isvalid(self) then self:FlushIfDirty() end
-		end, 3.0)
 		log(string.format("DiamondDropLogic: window start=%d earned=%d", self._windowStartSec, self._windowEarned))
 	end
 
 	@ExecSpace("ServerOnly")
 	method void FlushIfDirty()
 		-- 바뀐 창 상태를 저장한다(획득할 때마다 쓰지 않고 3초에 한 번 모아서)
-		if not self._dirty then return end
+		if not self._dirty or self._storage == nil then return end
 		self._dirty = false
 		self._storage:SetAndWait(self.StorageKeyStart, tostring(self._windowStartSec))
 		self._storage:SetAndWait(self.StorageKeyEarned, tostring(self._windowEarned))

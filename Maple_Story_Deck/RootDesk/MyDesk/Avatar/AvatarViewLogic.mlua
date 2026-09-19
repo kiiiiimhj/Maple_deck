@@ -1,0 +1,234 @@
+@Logic
+script AvatarViewLogic extends Logic
+
+	-- 게임 안 아바타(장비창 / 뽑기 캐릭터 / 방치보상 캐릭터)의 보기 모드(유저 지정 2026-09-19).
+	--   · "gear" (장비 보기, 기본값): 게임 장비만 입힌다. 외부(메이플월드 계정)에서 산 캐시 착장은
+	--     무시(UseCustomEquipOnly=true)하되, 헤어·얼굴·피부·귀는 유저 본인 것을 그대로 가져와 입힌다.
+	--   · "cash" (코디 보기): 계정 캐시 착장 그대로 보여준다(게임 장비는 입히지 않음).
+	-- 예전엔 장비 부위만 SetEquip하고 나머지를 ""로 둬서, 비어 있는 부위로 계정 캐시템이 새어 나왔다.
+	-- 저장: 유저별 UserDataStorage 키 "AvatarViewMode" — 토글 연타 대비로 dirty + 지연 flush.
+	-- 아바타에 입히는 건 반드시 ApplyToCostume 하나를 거친다(3곳이 같은 규칙을 써야 모드가 안 어긋난다).
+
+	property string StorageKey = "AvatarViewMode"
+
+	property string DefaultMode = "gear"
+
+	@Sync
+	property string ViewMode = "gear"
+
+	property boolean _loaded = false
+	property string _profileCode = ""
+	property boolean _dirty = false
+	property integer _flushTimerId = 0
+	property number FlushIntervalSeconds = 5
+
+	-- 장비 보기에서 상의/하의 장비가 없을 때 입히는 기본 옷(유저 지정 2026-09-19: "팬티랑 난닝구는 입고 있어야지")
+	-- 한벌옷(Longcoat) 장비를 끼면 상·하의 자리를 다 차지하므로 둘 다 안 입힌다
+	property string DefaultCoatRUID = "b9ff114114a2473d8a76d75de39633ed"   -- 하얀 면 나시
+
+	property string DefaultPantsRUID = "61f10ef0a6204e0ab6593bdf36fed3e5"  -- 파란 청 반바지
+
+	-- 클라 로컬: 토글 직후 @Sync가 돌아오기 전까지 누른 값으로 먼저 보여준다(""이면 ViewMode 사용)
+	property string _clientPendingMode = ""
+
+	-- 계정 것을 그대로 유지할 신체 부위(장비 보기에서도 유저 본인 헤어/얼굴/피부/귀)
+	method table GetBodyCategories()
+		-- 매번 새 테이블 — 4줄짜리라 비용 없음
+		return {
+			MapleAvatarItemCategory.Body,
+			MapleAvatarItemCategory.Hair,
+			MapleAvatarItemCategory.Face,
+			MapleAvatarItemCategory.Ear,
+		}
+	end
+
+	-- CostumeManagerComponent의 Custom*Equip 17칸 전부
+	method table GetAllCostumeCategories()
+		-- 장비 보기에서 "장비 없는 부위"를 확실히 비우려면 17칸을 다 돌아야 한다
+		return {
+			MapleAvatarItemCategory.Body, MapleAvatarItemCategory.Hair, MapleAvatarItemCategory.Face,
+			MapleAvatarItemCategory.Cap, MapleAvatarItemCategory.Cape, MapleAvatarItemCategory.Coat,
+			MapleAvatarItemCategory.Longcoat, MapleAvatarItemCategory.Pants, MapleAvatarItemCategory.Glove,
+			MapleAvatarItemCategory.Shoes, MapleAvatarItemCategory.OneHandedWeapon,
+			MapleAvatarItemCategory.TwoHandedWeapon, MapleAvatarItemCategory.SubWeapon,
+			MapleAvatarItemCategory.FaceAccessory, MapleAvatarItemCategory.EyeAccessory,
+			MapleAvatarItemCategory.EarAccessory, MapleAvatarItemCategory.Ear,
+		}
+	end
+
+	-- 클라/서버 공용 접근자 — 다른 Logic은 ViewMode 필드를 직접 읽지 말고 이걸 부를 것
+	method string GetMode()
+		-- 클라에선 방금 누른 값을 우선(동기화 지연 동안 버튼/아바타가 되돌아가 보이지 않게)
+		if self._clientPendingMode ~= "" then return self._clientPendingMode end
+		if self.ViewMode == "cash" then return "cash" end
+		return "gear"
+	end
+
+	method boolean IsGearMode()
+		-- 장비 보기인가
+		return self:GetMode() ~= "cash"
+	end
+
+	-- ── 아바타 반영 ───────────────────────────────────────────────────────────
+	-- gearRuidByAvatarCategory: MapleAvatarItemCategory → 장비 아바타 RUID(순수 Guid)
+	@ExecSpace("ClientOnly")
+	method void ApplyToCostume(CostumeManagerComponent costume, table gearRuidByAvatarCategory)
+		-- 현재 모드에 맞춰 target 아바타의 17칸 + UseCustomEquipOnly를 한 번에 맞춘다
+		if not isvalid(costume) then return end
+		if gearRuidByAvatarCategory == nil then gearRuidByAvatarCategory = {} end
+
+		-- 호출하는 쪽(_GearCategoryEnum:ToAvatarCategory)은 키를 숫자(예: 14)로 넘기고, 여기선 enum 값으로
+		-- 순회하므로 그대로 찾으면 못 찾는다(무기가 안 입혀지던 원인, 2026-09-19 실측). 이름 문자열로 통일한다
+		local gearByName = {}
+		for k, v in pairs(gearRuidByAvatarCategory) do
+			local key = k
+			if type(k) == "number" then key = MapleAvatarItemCategory.CastFrom(k) end
+			gearByName[tostring(key)] = v
+		end
+
+		if not self:IsGearMode() then
+			-- 코디 보기: 커스텀을 전부 비우고 계정 착장을 그대로 쓴다
+			costume.UseCustomEquipOnly = false
+			for _, cat in ipairs(self:GetAllCostumeCategories()) do
+				costume:SetEquip(cat, "")
+			end
+			return
+		end
+
+		-- 장비 보기: 계정 착장은 끄고, 신체(헤어/얼굴/피부/귀)만 유저 본인 것을 복사해 온다.
+		-- 월드에 있는 로컬 플레이어의 CostumeManager.GetEquip은 계정 착장 실제 값을 돌려준다(2026-09-19 실측)
+		local bodyRuids = {}
+		local player = _UserService.LocalPlayer
+		if isvalid(player) and isvalid(player.CostumeManagerComponent) then
+			for _, cat in ipairs(self:GetBodyCategories()) do
+				local ruid = player.CostumeManagerComponent:GetEquip(cat)
+				if ruid ~= nil and ruid ~= "" then bodyRuids[tostring(cat)] = ruid end
+			end
+		end
+
+		-- 상의/하의 장비가 없으면 기본 옷(맨몸 방지). 한벌옷이 있으면 상·하의 둘 다 한벌옷이 덮는다
+		local longcoatName = tostring(MapleAvatarItemCategory.Longcoat)
+		local coatName = tostring(MapleAvatarItemCategory.Coat)
+		local pantsName = tostring(MapleAvatarItemCategory.Pants)
+		local hasLongcoat = gearByName[longcoatName] ~= nil and gearByName[longcoatName] ~= ""
+		if not hasLongcoat then
+			if gearByName[coatName] == nil or gearByName[coatName] == "" then
+				gearByName[coatName] = self.DefaultCoatRUID
+			end
+			if gearByName[pantsName] == nil or gearByName[pantsName] == "" then
+				gearByName[pantsName] = self.DefaultPantsRUID
+			end
+		end
+
+		costume.UseCustomEquipOnly = true
+		for _, cat in ipairs(self:GetAllCostumeCategories()) do
+			local name = tostring(cat)
+			local ruid = gearByName[name]
+			if ruid == nil or ruid == "" then ruid = bodyRuids[name] end
+			if ruid == nil then ruid = "" end
+			costume:SetEquip(cat, ruid)
+		end
+		log("AvatarViewLogic: applied gear view (gear slots=" .. tostring(self:CountKeys(gearByName)) .. ")")
+	end
+
+	method integer CountKeys(table t)
+		-- 로그용 개수 세기
+		local n = 0
+		for _ in pairs(t) do n = n + 1 end
+		return n
+	end
+
+	-- ── 토글 ─────────────────────────────────────────────────────────────────
+	@ExecSpace("ClientOnly")
+	method void ToggleMode()
+		-- 장비창 버튼에서 부른다. 화면은 즉시 바꾸고 저장은 서버에 맡긴다
+		local nextMode = "cash"
+		if not self:IsGearMode() then nextMode = "gear" end
+		self._clientPendingMode = nextMode
+		log("AvatarViewLogic: toggle -> " .. nextMode)
+		self:RequestSetMode(nextMode)
+	end
+
+	@ExecSpace("Server")
+	method void RequestSetMode(string mode)
+		-- 저장값 갱신(바뀐 경우만 dirty)
+		if mode ~= "gear" and mode ~= "cash" then return end
+		if self.ViewMode == mode then return end
+		self.ViewMode = mode
+		self._dirty = true
+		log("AvatarViewLogic: mode set -> " .. mode)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnSyncProperty(string name, any value)
+		-- 서버 값이 도착하면 로컬 예측값을 내려놓는다(이후 GetMode는 ViewMode 기준)
+		if name == "ViewMode" then
+			if self._clientPendingMode == value then self._clientPendingMode = "" end
+		end
+	end
+
+	-- ── 로드/저장 ────────────────────────────────────────────────────────────
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		-- 토글 연타가 저장 호출로 바로 이어지지 않게 모아서 flush
+		self._flushTimerId = _TimerService:SetTimerRepeat(function() self:FlushIfDirty() end,
+			self.FlushIntervalSeconds, self.FlushIntervalSeconds)
+	end
+
+	@ExecSpace("ServerOnly")
+	@EventSender("Service", "UserService")
+	handler HandleUserEnterEvent(UserEnterEvent event)
+		-- 입장 시 1회 로드
+		local user = _UserService:GetUserEntityByUserId(event.UserId)
+		if user == nil then return end
+		self._profileCode = user.PlayerComponent.ProfileCode
+		local ds = _DataStorageService:GetUserDataStorage(self._profileCode)
+		local code, raw = ds:GetAndWait(self.StorageKey)
+		if code == 0 or code == 1000002 then
+			-- 저장한 적 없으면(nil / NotFound) 기본값(장비 보기)
+			if raw == "gear" or raw == "cash" then
+				self.ViewMode = raw
+			else
+				self.ViewMode = self.DefaultMode
+			end
+			self._loaded = true
+		else
+			log_warning("AvatarViewLogic: load failed code=" .. tostring(code))
+		end
+		log("AvatarViewLogic: loaded mode=" .. self.ViewMode)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void FlushIfDirty()
+		-- 바뀐 게 있을 때만 저장
+		if not self._dirty then return end
+		if not self._loaded or self._profileCode == "" then return end
+		self._dirty = false
+		local ds = _DataStorageService:GetUserDataStorage(self._profileCode)
+		local mode = self.ViewMode
+		ds:SetAsync(self.StorageKey, mode, function(code, key)
+			if code ~= 0 then
+				self._dirty = true
+				log_warning("AvatarViewLogic: save failed code=" .. tostring(code))
+			end
+		end)
+	end
+
+	@ExecSpace("ServerOnly")
+	@EventSender("Service", "UserService")
+	handler HandleUserLeaveEvent(UserLeaveEvent event)
+		-- 나갈 때 남은 변경을 확실히 저장
+		if not self._dirty or not self._loaded or self._profileCode == "" then return end
+		self._dirty = false
+		local ds = _DataStorageService:GetUserDataStorage(self._profileCode)
+		local code = ds:SetAndWait(self.StorageKey, self.ViewMode)
+		if code ~= 0 then log_warning("AvatarViewLogic: leave save failed code=" .. tostring(code)) end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnEndPlay()
+		-- 타이머 정리
+		if self._flushTimerId ~= 0 then _TimerService:ClearTimer(self._flushTimerId) end
+	end
+
+end

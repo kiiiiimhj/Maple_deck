@@ -11,7 +11,7 @@ script DamageSkinLogic extends Logic
 	-- 색 매칭은 아이콘 PNG 의 대표 색상을 계산해서 실제 렌더된 스킨 색과 맞춘 것이다.
 
 	property string StorageName = "PlayerCosmetic"
-	property string StorageKey = "DamageSkin"
+	property string StorageKey = "Cosmetic.DamageSkin"
 
 	-- 기본 지급 스킨. 저장된 값이 없는 유저는 이걸 보유+장착한 상태로 시작한다
 	property string DefaultSkinKey = "basic"
@@ -81,8 +81,13 @@ script DamageSkinLogic extends Logic
 	end
 
 	@ExecSpace("ServerOnly")
-	method void OnBeginPlay()
-		self._storage = _DataStorageService:GetGlobalDataStorage(self.StorageName)
+	@EventSender("Service", "UserService")
+	handler HandleUserEnterEvent(UserEnterEvent event)
+		-- 입장한 유저의 대미지 스킨 보유/장착을 **유저별 저장소**에서 읽는다.
+		-- 출시 전 수정(2026-09-20): 예전엔 월드 시작 때 전역 저장소(StorageName)라 전 유저가 스킨을 공유했다
+		local user = _UserService:GetUserEntityByUserId(event.UserId)
+		if user == nil then return end
+		self._storage = _DataStorageService:GetUserDataStorage(user.PlayerComponent.ProfileCode)
 		local errorCode, raw = self._storage:GetAndWait(self.StorageKey)
 
 		-- 저장 포맷: "<장착key>|<보유key1>,<보유key2>,..." — 플랫 문자열이라 4000바이트 근처도 안 간다
@@ -114,15 +119,18 @@ script DamageSkinLogic extends Logic
 		end
 
 		-- 코인/다이아와 동일한 지연 flush — 구매/장착이 연달아 일어나도 저장은 모아서 한 번만 쓴다
-		self._flushTimerId = _TimerService:SetTimerRepeat(function() self:FlushIfDirty() end,
-			self.FlushIntervalSeconds, self.FlushIntervalSeconds)
+		if self._flushTimerId == 0 then
+			self._flushTimerId = _TimerService:SetTimerRepeat(function() self:FlushIfDirty() end,
+				self.FlushIntervalSeconds, self.FlushIntervalSeconds)
+		end
 
 		log("DamageSkinLogic: equipped=" .. self.EquippedKey .. " owned=" .. self.OwnedKeys)
 	end
 
 	@ExecSpace("ServerOnly")
 	method void FlushIfDirty()
-		if not self._dirty then return end
+		-- 유저 입장(로드) 전이면 저장하지 않는다
+		if not self._dirty or self._storage == nil then return end
 		self._dirty = false
 		self._storage:SetAndWait(self.StorageKey, self.EquippedKey .. "|" .. self.OwnedKeys)
 	end

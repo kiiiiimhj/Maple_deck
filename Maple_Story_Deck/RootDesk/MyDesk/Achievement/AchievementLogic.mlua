@@ -1,0 +1,532 @@
+@Logic
+script AchievementLogic extends Logic
+
+	-- 업적 시스템(유저 지정 2026-09-19). 로비 업적 버튼 → 업적 팝업(AchievementUI).
+	--   · 업적 50개, 달성하면 1개당 다이아 10개(받기 / 모두 받기).
+	--   · 진행도는 "통계 키(stat) → 누적 숫자" 하나로 통일한다. 업적은 (stat, 목표치)만 가진다.
+	--     - 누적형: 몬스터 처치 수, 포션 획득 수 등(Add)
+	--     - 최고기록형: 한 판 최고 레벨, 발견한 조합 수(SetMax)
+	--     - 플래그형: "구름정원 15분 생존" 같은 조건은 달성 순간 1로 SetMax
+	--   · 게임 곳곳의 서버 코드가 On... 훅을 한 줄씩 부른다(몬스터 사망, 포션 획득, 이스터에그 등).
+	-- 저장: 유저별 UserDataStorage 키 "Achievement" JSON {s={stat=n}, c="id1,id2"}(빈 테이블은 JSONEncode 불가라 수령 목록은 문자열).
+	--   값이 자주 바뀌므로(처치마다) 더티 플래그 + 10초 주기 저장 + 나갈 때 저장.
+	-- 클라이언트: 받을 수 있는 개수(ClaimableCount)만 @Sync(로비 레드닷). 목록은 팝업을 열 때 스냅샷 RPC로 받는다.
+
+	@Sync property integer ClaimableCount = 0
+	@Sync property boolean Loaded = false
+
+	property string StorageKey = "Achievement"
+	property integer RewardDiamond = 10
+	property number SaveInterval = 10
+
+	property string _profileCode = ""
+	property string _userId = ""
+	property table _stats = {}
+	property table _claimed = {}
+	property table _defs = nil
+	property boolean _dirty = false
+	property boolean _needRecalc = false
+	property number _saveTimer = 0
+	property number _recalcTimer = 0
+
+	-- 판 단위 상태(생존 업적 판정용)
+	property integer _runEpisode = 0
+	property number _lastElapsed = 0
+	property integer _runMaxSkills = 0
+	property boolean _runContinued = false
+
+	-- ── 업적 정의(서버/클라 공용 — ExecSpace 없음) ─────────────────────────────
+	method table GetDefs()
+		-- { id, name(제목), desc(조건 설명), stat, target } 50개. 표시 순서 = 이 순서
+		if self._defs ~= nil then return self._defs end
+		local d = {}
+		local function add(id, name, desc, stat, target)
+			table.insert(d, { id = id, name = name, desc = desc, stat = stat, target = target })
+		end
+		-- 처치
+		add("kill_1000", "초보 사냥꾼", "몬스터 1,000마리 처치", "kill", 1000)
+		add("kill_10000", "숙련된 사냥꾼", "몬스터 10,000마리 처치", "kill", 10000)
+		add("kill_100000", "전설의 사냥꾼", "몬스터 100,000마리 처치", "kill", 100000)
+		add("elite_10", "엘리트 사냥꾼", "엘리트 몬스터 10마리 처치", "elite", 10)
+		add("elite_100", "엘리트 학살자", "엘리트 몬스터 100마리 처치", "elite", 100)
+		add("boss_1", "첫 보스 처치", "보스 몬스터 1회 처치", "boss", 1)
+		add("boss_10", "보스 헌터", "보스 몬스터 10회 처치", "boss", 10)
+		add("boss_50", "보스 슬레이어", "보스 몬스터 50회 처치", "boss", 50)
+		add("fly_300", "하늘의 사냥꾼", "비행 몬스터 300마리 처치", "fly", 300)
+		-- 종류별 처치
+		add("sp_snail", "달팽이 박사", "달팽이류 몬스터 100마리 처치", "sp_snail", 100)
+		add("sp_mush", "버섯 채집가", "버섯류 몬스터 100마리 처치", "sp_mush", 100)
+		add("sp_pig", "돼지 몰이꾼", "돼지·멧돼지류 몬스터 100마리 처치", "sp_pig", 100)
+		add("sp_slime", "말랑말랑", "슬라임류 몬스터 100마리 처치", "sp_slime", 100)
+		add("sp_stump", "벌목꾼", "스텀프류 몬스터 100마리 처치", "sp_stump", 100)
+		add("sp_pixie", "픽시 사냥꾼", "픽시류 몬스터 200마리 처치", "sp_pixie", 200)
+		add("sp_nep", "식물학자", "네펜데스류 몬스터 100마리 처치", "sp_nep", 100)
+		add("sp_golem", "돌깨는 자", "골렘류 몬스터 100마리 처치", "sp_golem", 100)
+		add("sp_yeti", "설원의 사냥꾼", "예티류 몬스터 100마리 처치", "sp_yeti", 100)
+		-- 이스터에그
+		add("egg_1", "숨은 비밀 발견", "이스터에그 1개 발견", "egg", 1)
+		add("egg_10", "탐험가", "이스터에그 10개 발견", "egg", 10)
+		add("egg_50", "비밀 수집가", "이스터에그 50개 발견", "egg", 50)
+		add("chest_10", "보물 사냥꾼", "보물상자 10개 열기", "chest", 10)
+		-- 포션
+		add("hpot_50", "물약 애호가", "빨간·하얀 포션 50개 획득", "hpot", 50)
+		add("elixir_10", "엘릭서 수집가", "파워 엘릭서 10개 획득", "elixir", 10)
+		add("buffpot_10", "버프 마니아", "버프 포션 10개 획득", "buffpot", 10)
+		add("buffall_3", "포션 소믈리에", "버프 포션 3종 모두 획득", "buffkinds", 3)
+		-- 플레이/생존
+		add("run_10", "모험의 시작", "게임 10판 플레이", "runs", 10)
+		add("run_100", "베테랑 모험가", "게임 100판 플레이", "runs", 100)
+		add("lv_20", "성장하는 모험가", "한 판에서 레벨 20 달성", "maxlv", 20)
+		add("lv_50", "한계 돌파", "한 판에서 레벨 50 달성", "maxlv", 50)
+		add("ep1_15", "태초의 마을 수호자", "태초의 마을에서 15분 생존", "ep1_15", 1)
+		add("ep2_15", "구름정원 수호자", "구름정원에서 15분 생존", "ep2_15", 1)
+		add("ep3_15", "엘나스 수호자", "엘나스에서 15분 생존", "ep3_15", 1)
+		add("skill5_15", "절제된 강함", "스킬 5개 이하로 15분 생존", "skill5_15", 1)
+		add("skill3_10", "미니멀리스트", "스킬 3개 이하로 10분 생존", "skill3_10", 1)
+		add("nocont_15", "불굴의 의지", "이어하기 없이 15분 생존", "nocont_15", 1)
+		add("gold_10k", "알뜰한 모험가", "게임 중 골드 누적 10,000 획득", "gold", 10000)
+		add("gold_100k", "메소 부자", "게임 중 골드 누적 100,000 획득", "gold", 100000)
+		-- 스킬
+		add("lv5_1", "스킬 마스터", "스킬 1개를 Lv5로 강화", "lv5", 1)
+		add("lv5_10", "스킬 전문가", "스킬 Lv5 달성 10회", "lv5", 10)
+		add("lv5_50", "스킬의 달인", "스킬 Lv5 달성 50회", "lv5", 50)
+		add("fusion_1", "첫 조합", "조합 스킬 1종 발견", "fusion", 1)
+		add("fusion_10", "조합 연구가", "조합 스킬 10종 발견", "fusion", 10)
+		add("fusion_20", "조합의 대가", "조합 스킬 20종 발견", "fusion", 20)
+		-- 장비
+		add("enh_10", "대장장이 견습생", "장비 강화 10회 성공", "enhance", 10)
+		add("enh_100", "명장", "장비 강화 100회 성공", "enhance", 100)
+		add("comp_5", "합성의 달인", "장비 합성 5회 성공", "compose", 5)
+		add("gear_50", "장비 수집가", "장비 50개 획득", "gearget", 50)
+		add("sell_100", "상인", "장비 100개 판매", "sell", 100)
+		-- 메타
+		add("done_30", "업적 사냥꾼", "업적 30개 달성", "done", 30)
+		self._defs = d
+		return d
+	end
+
+	method integer GetDefCount()
+		return #self:GetDefs()
+	end
+
+	method integer GetClaimableCount()
+		return self.ClaimableCount
+	end
+
+	-- ── 서버: 로드/저장 ──────────────────────────────────────────────────────
+	@ExecSpace("ServerOnly")
+	@EventSender("Service", "UserService")
+	handler HandleUserEnterEvent(UserEnterEvent event)
+		-- 입장 시 1회 로드
+		local user = _UserService:GetUserEntityByUserId(event.UserId)
+		if user == nil then return end
+		self._userId = event.UserId
+		self:LoadFor(user)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void LoadFor(Entity user)
+		-- 처음 보는 유저(NotFound)는 빈 상태로 시작
+		self._profileCode = user.PlayerComponent.ProfileCode
+		self._stats = {}
+		self._claimed = {}
+		local ds = _DataStorageService:GetUserDataStorage(self._profileCode)
+		local code, raw = ds:GetAndWait(self.StorageKey)
+		if code == 0 and raw ~= nil and raw ~= "" then
+			local t = _HttpService:JSONDecode(raw)
+			if t ~= nil then
+				if t["s"] ~= nil then
+					for k, v in pairs(t["s"]) do self._stats[k] = math.floor(tonumber(v) or 0) end
+				end
+				if t["c"] ~= nil and type(t["c"]) == "string" then
+					for id in string.gmatch(t["c"], "[^,]+") do self._claimed[id] = true end
+				end
+			end
+		elseif code ~= 0 and code ~= 1000002 then
+			log_warning("AchievementLogic: load failed code=" .. tostring(code))
+		end
+		self.Loaded = true
+		self:Recalc()
+		log("AchievementLogic: loaded claimable=" .. self.ClaimableCount)
+	end
+
+	@ExecSpace("ServerOnly")
+	method string EncodeState()
+		-- 저장용 JSON. ⚠ 빈 Lua 테이블은 JSONEncode가 못 다룬다(LEA-3001 UnknownType) —
+		-- 통계에는 항상 버전 키를 넣고, 수령 목록은 콤마 문자열로 저장한다
+		local s = {}
+		for k, v in pairs(self._stats) do s[k] = v end
+		s["_v"] = 1
+		local t = {}
+		t["s"] = s
+		t["c"] = self:GetClaimedCsv()
+		return _HttpService:JSONEncode(t)
+	end
+
+	@ExecSpace("ServerOnly")
+	method string GetClaimedCsv()
+		-- 수령한 업적 id 목록을 "a,b,c" 문자열로
+		local ids = {}
+		for id, v in pairs(self._claimed) do
+			if v then table.insert(ids, id) end
+		end
+		return table.concat(ids, ",")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void Save()
+		-- 더티일 때만 비동기 저장(실패하면 다음 주기에 다시)
+		if not self._dirty or not self.Loaded or self._profileCode == "" then return end
+		self._dirty = false
+		local ds = _DataStorageService:GetUserDataStorage(self._profileCode)
+		ds:SetAsync(self.StorageKey, self:EncodeState(), function(code, key)
+			if code ~= 0 then
+				self._dirty = true
+				log_warning("AchievementLogic: save failed code=" .. tostring(code))
+			end
+		end)
+	end
+
+	@ExecSpace("ServerOnly")
+	@EventSender("Service", "UserService")
+	handler HandleUserLeaveEvent(UserLeaveEvent event)
+		-- 나갈 때 남은 변경을 확실히 저장
+		if not self._dirty or not self.Loaded or self._profileCode == "" then return end
+		self._dirty = false
+		local ds = _DataStorageService:GetUserDataStorage(self._profileCode)
+		local code = ds:SetAndWait(self.StorageKey, self:EncodeState())
+		if code ~= 0 then log_warning("AchievementLogic: leave save failed code=" .. tostring(code)) end
+	end
+
+	-- ── 서버: 통계 갱신 ──────────────────────────────────────────────────────
+	@ExecSpace("ServerOnly")
+	method integer GetStat(string stat)
+		-- 통계 값(없으면 0). "done"은 저장하지 않고 달성 개수로 계산한다
+		if stat == "done" then return self:CountAchieved(false) end
+		local v = self._stats[stat]
+		if v == nil then return 0 end
+		return v
+	end
+
+	@ExecSpace("ServerOnly")
+	method void Add(string stat, integer amount)
+		-- 누적형 통계 증가
+		if not self.Loaded or amount <= 0 then return end
+		self._stats[stat] = self:GetStat(stat) + amount
+		self._dirty = true
+		self._needRecalc = true
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SetMax(string stat, integer value)
+		-- 최고기록/플래그형 통계 — 더 클 때만 갱신
+		if not self.Loaded then return end
+		if value <= self:GetStat(stat) then return end
+		self._stats[stat] = value
+		self._dirty = true
+		self._needRecalc = true
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean IsAchieved(table def)
+		-- 목표치 도달 여부
+		return self:GetStat(def.stat) >= def.target
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer CountAchieved(boolean includeMeta)
+		-- 달성한 업적 수(메타 업적 자신은 제외해야 순환 판정이 안 생긴다)
+		local n = 0
+		for _, def in ipairs(self:GetDefs()) do
+			if def.stat ~= "done" or includeMeta then
+				local v = self._stats[def.stat]
+				if def.stat == "done" then v = 0 end
+				if v ~= nil and v >= def.target then n = n + 1 end
+			end
+		end
+		return n
+	end
+
+	@ExecSpace("ServerOnly")
+	method void Recalc()
+		-- 받을 수 있는 개수 재계산(레드닷용 @Sync)
+		local n = 0
+		for _, def in ipairs(self:GetDefs()) do
+			if not self._claimed[def.id] and self:IsAchieved(def) then n = n + 1 end
+		end
+		if n ~= self.ClaimableCount then
+			self.ClaimableCount = n
+			log("AchievementLogic: claimable=" .. n)
+		end
+	end
+
+	-- ── 서버: 게임 곳곳에서 부르는 훅 ──────────────────────────────────────────
+	@ExecSpace("ServerOnly")
+	method void OnMonsterKilled(boolean isElite, boolean isFlying, string lootItemId)
+		-- MonsterAI.Die — 사망 1회당 1(보스 횟수는 OnBossDefeated가 따로 센다)
+		self:Add("kill", 1)
+		if isElite then self:Add("elite", 1) end
+		if isFlying then self:Add("fly", 1) end
+		local sp = self:GetSpeciesStat(lootItemId)
+		if sp ~= "" then self:Add(sp, 1) end
+	end
+
+	@ExecSpace("ServerOnly")
+	method string GetSpeciesStat(string lootItemId)
+		-- 몬스터 종류 = 그 몬스터의 잡템 이름으로 분류(GameManager.GetMonsterLootItemId)
+		if lootItemId == nil or lootItemId == "" then return "" end
+		local s = lootItemId
+		if string.find(s, "snail", 1, true) then return "sp_snail" end
+		if string.find(s, "mushroom", 1, true) or string.find(s, "mushmom", 1, true) or string.find(s, "spore", 1, true) then return "sp_mush" end
+		if string.find(s, "pig_tail", 1, true) or s == "ribbon" or s == "old_leather" then return "sp_pig" end
+		if string.find(s, "slime", 1, true) then return "sp_slime" end
+		if string.find(s, "stump", 1, true) then return "sp_stump" end
+		if string.find(s, "pixie", 1, true) then return "sp_pixie" end
+		if string.find(s, "nepenthes", 1, true) then return "sp_nep" end
+		if string.find(s, "golem", 1, true) then return "sp_golem" end
+		if string.find(s, "yeti", 1, true) then return "sp_yeti" end
+		return ""
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnBossDefeated()
+		-- GameManager.OnBossDefeated
+		self:Add("boss", 1)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnEasterEgg()
+		-- EasterEggBonusLogic.RollBonus(모든 이스터에그 보상 지점의 공통 한 줄)
+		self:Add("egg", 1)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnTreasureChestOpened()
+		-- TreasureChestEgg.RequestOpen
+		self:Add("chest", 1)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnHealPotion(integer potionType)
+		-- GameManager.ApplyPotionDrop 획득 순간 — 1 빨강 / 2 하양 / 3 파워 엘릭서
+		if potionType == 3 then
+			self:Add("elixir", 1)
+		else
+			self:Add("hpot", 1)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnBuffPotion(integer potionType)
+		-- BuffPotionLogic.ApplyBuffPotion — 1 흡혈 / 2 크리 / 3 파워. 종류별 획득 여부는 bp1~3에 남긴다
+		self:Add("buffpot", 1)
+		if potionType >= 1 and potionType <= 3 then
+			self:SetMax("bp" .. potionType, 1)
+			self:SetMax("buffkinds", self:GetStat("bp1") + self:GetStat("bp2") + self:GetStat("bp3"))
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnRunStarted()
+		-- GameManager.StartGame(새 판)/RestartGame
+		self:Add("runs", 1)
+		self._runContinued = false
+		self._runMaxSkills = 0
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnContinued()
+		-- GameManager.RequestContinue — 이어하기를 쓴 판은 "이어하기 없이" 업적에서 제외
+		self._runContinued = true
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnLevelUp(integer level)
+		-- GameManager.LevelUp
+		self:SetMax("maxlv", level)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnGoldGained(integer amount)
+		-- GameManager.AddGold(런 골드)
+		self:Add("gold", amount)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnSkillMaxLevel()
+		-- CardManager.ApplyCardUpgrade — 스킬이 Lv5에 막 도달했을 때
+		self:Add("lv5", 1)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnGearLeveled(integer count)
+		-- PkgPlayerInventory.LevelUpGear 성공(일괄 강화는 올린 레벨 수만큼)
+		self:Add("enhance", count)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnGearComposed()
+		-- PkgPlayerInventory.ComposeItem 성공
+		self:Add("compose", 1)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnGearAcquired()
+		-- GameManager.GrantWeaponItemDrop 성공(몬스터 장비 드롭)
+		self:Add("gearget", 1)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnGearSold(integer count)
+		-- GearSellLogic.RequestSellGears
+		self:Add("sell", count)
+	end
+
+	-- ── 서버: 주기 처리(생존 판정 + 저장) ──────────────────────────────────────
+	@ExecSpace("ServerOnly")
+	method void OnUpdate(number delta)
+		-- 생존 업적 판정은 EpisodeRewardLogic과 같은 방식(스포너 경과 시간, 0으로 돌아가면 새 판)
+		if not self.Loaded then return end
+		local elapsed = _MonsterSpawner:GetElapsedPlayTime()
+		if elapsed < 1.0 or elapsed < self._lastElapsed then
+			self._runEpisode = _GameManager:GetSelectedEpisode()
+			if elapsed < self._lastElapsed then
+				self._runMaxSkills = 0
+				self._runContinued = false
+			end
+		end
+		self._lastElapsed = elapsed
+
+		self._recalcTimer = self._recalcTimer + delta
+		if self._recalcTimer >= 0.5 then
+			self._recalcTimer = 0
+			self:CheckSurvival(elapsed)
+			-- 조합 발견 수는 FusionDiscoveryLogic이 들고 있다 — 최고기록으로 따라간다
+			self:SetMax("fusion", _FusionDiscoveryLogic:GetDiscoveredCount())
+			if self._needRecalc then
+				self._needRecalc = false
+				self:Recalc()
+			end
+		end
+
+		self._saveTimer = self._saveTimer + delta
+		if self._saveTimer >= self.SaveInterval then
+			self._saveTimer = 0
+			self:Save()
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void CheckSurvival(number elapsed)
+		-- 판 도중 스킬 개수 최대치를 기록하고, 10/15분을 넘긴 순간 조건 업적을 켠다
+		if elapsed < 1.0 then return end
+		local skills = _CardManager:GetFilledSlotCount()
+		if skills > self._runMaxSkills then self._runMaxSkills = skills end
+		if elapsed >= 600 and self._runMaxSkills <= 3 then self:SetMax("skill3_10", 1) end
+		if elapsed >= 900 then
+			local ep = self._runEpisode
+			if ep >= 1 and ep <= 3 then self:SetMax("ep" .. ep .. "_15", 1) end
+			if self._runMaxSkills <= 5 then self:SetMax("skill5_15", 1) end
+			if not self._runContinued then self:SetMax("nocont_15", 1) end
+		end
+	end
+
+	-- ── 서버: 클라 요청 ──────────────────────────────────────────────────────
+	@ExecSpace("Server")
+	method void RequestSnapshot()
+		-- 팝업을 열 때 — 현재 통계/수령 상태를 JSON으로 내려준다
+		if not self.Loaded then return end
+		self:SetMax("fusion", _FusionDiscoveryLogic:GetDiscoveredCount())
+		self:Recalc()
+		_AchievementUI:OnSnapshot(self:BuildSnapshot(), senderUserId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method string BuildSnapshot()
+		-- 클라 표시용: 업적별 진행값(p)과 수령 여부(c)
+		local p = {}
+		for _, def in ipairs(self:GetDefs()) do
+			p[def.id] = self:GetStat(def.stat)
+		end
+		local t = {}
+		t["p"] = p
+		t["c"] = self:GetClaimedCsv()
+		return _HttpService:JSONEncode(t)
+	end
+
+	@ExecSpace("Server")
+	method void RequestClaim(string id)
+		-- 업적 1개 수령
+		local count = self:ClaimInner(id)
+		self:FinishClaim(count, senderUserId)
+	end
+
+	@ExecSpace("Server")
+	method void RequestClaimAll()
+		-- 받을 수 있는 업적 전부 수령
+		local count = 0
+		for _, def in ipairs(self:GetDefs()) do
+			count = count + self:ClaimInner(def.id)
+		end
+		self:FinishClaim(count, senderUserId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer ClaimInner(string id)
+		-- 달성 + 미수령이면 수령 처리하고 1, 아니면 0
+		if not self.Loaded then return 0 end
+		if self._claimed[id] then return 0 end
+		for _, def in ipairs(self:GetDefs()) do
+			if def.id == id then
+				if not self:IsAchieved(def) then return 0 end
+				self._claimed[id] = true
+				return 1
+			end
+		end
+		return 0
+	end
+
+	@ExecSpace("ServerOnly")
+	method void FinishClaim(integer count, string userId)
+		-- 다이아 지급 + 즉시 저장 + 클라에 결과/새 스냅샷
+		local amount = count * self.RewardDiamond
+		if count > 0 then
+			_GameManager:AddDiamond(amount)
+			self._dirty = true
+			self:Save()
+			self:Recalc()
+			log("AchievementLogic: claimed " .. count .. " -> diamond +" .. amount)
+		end
+		_AchievementUI:OnClaimResult(amount, self:BuildSnapshot(), userId)
+	end
+
+	-- 테스트 전용(서버 스크립트에서 직접 호출) — 통계 강제 설정
+	@ExecSpace("ServerOnly")
+	method void DebugSetStat(string stat, integer value)
+		self._stats[stat] = value
+		self._dirty = true
+		self:Recalc()
+		log("AchievementLogic: debug " .. stat .. "=" .. value .. " claimable=" .. self.ClaimableCount)
+	end
+
+	-- 테스트 전용 — 통계/수령 전부 초기화
+	@ExecSpace("ServerOnly")
+	method void DebugReset()
+		self._stats = {}
+		self._claimed = {}
+		self._dirty = true
+		self:Save()
+		self:Recalc()
+		log("AchievementLogic: debug reset")
+	end
+
+	-- ── 클라: 레드닷 갱신 ──────────────────────────────────────────────────────
+	@ExecSpace("ClientOnly")
+	method void OnSyncProperty(string name, any value)
+		-- 받을 수 있는 개수가 바뀌면 로비 버튼 레드닷 갱신
+		if name == "ClaimableCount" or name == "Loaded" then
+			_AchievementUI:RefreshLobbyButton()
+		end
+	end
+
+end

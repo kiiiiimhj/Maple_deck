@@ -167,9 +167,19 @@ script SkillInventory extends Logic
 
 	@ExecSpace("ServerOnly")
 	method void OnBeginPlay()
-		-- 월드 시작 시 저장된 스킬 조각/레벨을 전역 저장소에서 불러온다
-		self._storage = _DataStorageService:GetGlobalDataStorage("SkillInventory")
-		local errorCode, raw = self._storage:GetAndWait("Counts")
+		-- 저장 주기 타이머만 건다. 데이터는 유저가 들어올 때(HandleUserEnterEvent) 그 유저 저장소에서 읽는다
+		self._flushTimerId = _TimerService:SetTimerRepeat(function() self:FlushIfDirty() end, 3.0)
+	end
+
+	@ExecSpace("ServerOnly")
+	@EventSender("Service", "UserService")
+	handler HandleUserEnterEvent(UserEnterEvent event)
+		-- 입장한 유저의 저장된 스킬 조각/레벨을 **유저별 저장소**에서 불러온다
+		-- 출시 전 수정(2026-09-20): 예전엔 월드 시작 때 전역 저장소("SkillInventory")라 전 유저가 스킬을 공유했다
+		local user = _UserService:GetUserEntityByUserId(event.UserId)
+		if user == nil then return end
+		self._storage = _DataStorageService:GetUserDataStorage(user.PlayerComponent.ProfileCode)
+		local errorCode, raw = self._storage:GetAndWait("Skill.Counts")
 		if errorCode == 0 and raw ~= nil and raw ~= "" then
 			local loaded = _UtilLogic:StringToTable(raw)
 			if loaded ~= nil then
@@ -181,7 +191,7 @@ script SkillInventory extends Logic
 				end
 			end
 		end
-		local levelErrorCode, levelRaw = self._storage:GetAndWait("Levels")
+		local levelErrorCode, levelRaw = self._storage:GetAndWait("Skill.Levels")
 		if levelErrorCode == 0 and levelRaw ~= nil and levelRaw ~= "" then
 			local loadedLevels = _UtilLogic:StringToTable(levelRaw)
 			if loadedLevels ~= nil then
@@ -194,7 +204,7 @@ script SkillInventory extends Logic
 			end
 		end
 		-- 레드닷 상태도 재시작 사이에 유지한다(확인 안 한 새 스킬은 다음 접속에도 계속 표시)
-		local newErrorCode, newRaw = self._storage:GetAndWait("NewSet")
+		local newErrorCode, newRaw = self._storage:GetAndWait("Skill.NewSet")
 		if newErrorCode == 0 and newRaw ~= nil and newRaw ~= "" then
 			local loadedNew = _UtilLogic:StringToTable(newRaw)
 			if loadedNew ~= nil then
@@ -206,8 +216,7 @@ script SkillInventory extends Logic
 				end
 			end
 		end
-		-- 5초마다 변경이 있을 때만 저장한다 (RelicInventory와 동일한 dirty-flag 패턴)
-		self._flushTimerId = _TimerService:SetTimerRepeat(function() self:FlushIfDirty() end, 3.0)
+		-- 저장은 OnBeginPlay의 3초 타이머가 변경이 있을 때만 한다(RelicInventory와 동일한 dirty-flag 패턴)
 		log("SkillInventory started")
 	end
 
@@ -382,7 +391,8 @@ script SkillInventory extends Logic
 
 	@ExecSpace("ServerOnly")
 	method void FlushIfDirty()
-		if not self._dirty then return end
+		-- 유저 입장(로드) 전이면 저장하지 않는다 — 빈 값으로 유저 데이터를 덮으면 안 된다
+		if not self._dirty or self._storage == nil then return end
 		self._dirty = false
 		local plainCounts = {}
 		local plainLevels = {}
@@ -395,9 +405,9 @@ script SkillInventory extends Logic
 			if self.Levels[key] ~= nil and self.Levels[key] > 0 then plainLevels[key] = self.Levels[key] end
 			if self.NewSet[key] == true then plainNew[key] = true end
 		end
-		self._storage:SetAndWait("Counts", _UtilLogic:TableToString(plainCounts))
-		self._storage:SetAndWait("Levels", _UtilLogic:TableToString(plainLevels))
-		self._storage:SetAndWait("NewSet", _UtilLogic:TableToString(plainNew))
+		self._storage:SetAndWait("Skill.Counts", _UtilLogic:TableToString(plainCounts))
+		self._storage:SetAndWait("Skill.Levels", _UtilLogic:TableToString(plainLevels))
+		self._storage:SetAndWait("Skill.NewSet", _UtilLogic:TableToString(plainNew))
 	end
 
 	@ExecSpace("ClientOnly")

@@ -27,19 +27,32 @@ script CharacterUnlockLogic extends Logic
 	property boolean _progressDirty = false
 	property integer _flushTimerId = 0
 	-- 진행도는 {g,k,s,r} JSON 1개 키로 모아서 저장한다(출석/방치 보상과 같은 패턴 — 키당 1크레딧).
-	property string ProgressKey = "Progress"
+	property string ProgressKey = "Unlock.Progress"
 	property number FlushInterval = 10.0
 
 	@ExecSpace("ServerOnly")
 	method void OnBeginPlay()
-		-- GameManager.TotalCoins(PlayerCoins 글로벌 스토리지)와 동일한 패턴 — 이 게임은 월드 인스턴스당
-		-- 플레이어가 1명이라 계정 단위 값도 전역 스토리지로 관리한다.
-		self._unlockStorage = _DataStorageService:GetGlobalDataStorage("CharacterUnlocks")
-		local errorCode, raw = self._unlockStorage:GetAndWait("SylphUnlocked")
+		-- 킬/장비 카운터는 판을 도는 내내 오르므로 매번 저장하지 않고 10초마다 모아서 한 번 쓴다
+		-- (DataStorage 크레딧 — 둘 다 해금되면 카운트 자체를 멈춰서 쓰기가 0이 된다).
+		self._flushTimerId = _TimerService:SetTimerRepeat(function()
+			self:FlushProgressIfDirty()
+		end, self.FlushInterval)
+	end
+
+	@ExecSpace("ServerOnly")
+	@EventSender("Service", "UserService")
+	handler HandleUserEnterEvent(UserEnterEvent event)
+		-- 입장한 유저의 해금 상태/진행도를 **유저별 저장소**에서 읽는다(키 "Unlock.*").
+		-- 출시 전 수정(2026-09-20): 예전엔 "인스턴스당 1명이니 전역이면 된다"고 보고 전역 저장소("CharacterUnlocks")를
+		-- 썼는데, 전역 저장소는 인스턴스와 무관하게 월드 전체가 하나라 한 명이 해금하면 전 유저가 해금됐다
+		local user = _UserService:GetUserEntityByUserId(event.UserId)
+		if user == nil then return end
+		self._unlockStorage = _DataStorageService:GetUserDataStorage(user.PlayerComponent.ProfileCode)
+		local errorCode, raw = self._unlockStorage:GetAndWait("Unlock.Sylph")
 		if errorCode == 0 and raw == "1" then
 			self.SylphUnlocked = true
 		end
-		local leionErrorCode, leionRaw = self._unlockStorage:GetAndWait("LeionUnlocked")
+		local leionErrorCode, leionRaw = self._unlockStorage:GetAndWait("Unlock.Leion")
 		if leionErrorCode == 0 and leionRaw == "1" then
 			self.LeionUnlocked = true
 		end
@@ -54,12 +67,6 @@ script CharacterUnlockLogic extends Logic
 			_Map21RelicEasterEgg:ApplyAlreadyUnlockedState()
 			_Map21TreePuzzleLogic:ApplyAlreadyUnlockedState()
 		end
-
-		-- 킬/장비 카운터는 판을 도는 내내 오르므로 매번 저장하지 않고 10초마다 모아서 한 번 쓴다
-		-- (DataStorage 크레딧 — 둘 다 해금되면 카운트 자체를 멈춰서 쓰기가 0이 된다).
-		self._flushTimerId = _TimerService:SetTimerRepeat(function()
-			self:FlushProgressIfDirty()
-		end, self.FlushInterval)
 	end
 
 	-- ── 접근자(다른 Logic/UI에서 property 직접 읽기 금지 — 이걸로 읽는다) ────────
@@ -92,6 +99,8 @@ script CharacterUnlockLogic extends Logic
 	@ExecSpace("ServerOnly")
 	method void SaveProgress(boolean blocking)
 		-- blocking=true는 해금 순간/월드 종료처럼 반드시 남아야 하는 시점에만 쓴다(마지막 기회 저장).
+		-- 유저 입장(로드) 전이면 저장하지 않는다 — 0으로 유저 진행도를 덮으면 안 된다
+		if self._unlockStorage == nil then return end
 		self._progressDirty = false
 		local t = {}
 		t["g"] = self._gearCollected
@@ -202,7 +211,7 @@ script CharacterUnlockLogic extends Logic
 	method void UnlockSylph()
 		if self.SylphUnlocked then return end
 		self.SylphUnlocked = true
-		self._unlockStorage:SetAndWait("SylphUnlocked", "1")
+		if self._unlockStorage ~= nil then self._unlockStorage:SetAndWait("Unlock.Sylph", "1") end
 		log("CharacterUnlockLogic: Sylph unlocked and saved")
 	end
 
@@ -210,7 +219,7 @@ script CharacterUnlockLogic extends Logic
 	method void UnlockLeion()
 		if self.LeionUnlocked then return end
 		self.LeionUnlocked = true
-		self._unlockStorage:SetAndWait("LeionUnlocked", "1")
+		if self._unlockStorage ~= nil then self._unlockStorage:SetAndWait("Unlock.Leion", "1") end
 		log("CharacterUnlockLogic: Leion unlocked and saved")
 	end
 
@@ -219,7 +228,7 @@ script CharacterUnlockLogic extends Logic
 	@ExecSpace("ServerOnly")
 	method void DebugResetSylphUnlock()
 		self.SylphUnlocked = false
-		self._unlockStorage:SetAndWait("SylphUnlocked", "0")
+		if self._unlockStorage ~= nil then self._unlockStorage:SetAndWait("Unlock.Sylph", "0") end
 		log("CharacterUnlockLogic: [DEBUG] Sylph unlock reset")
 	end
 
@@ -227,7 +236,7 @@ script CharacterUnlockLogic extends Logic
 	@ExecSpace("ServerOnly")
 	method void DebugResetLeionUnlock()
 		self.LeionUnlocked = false
-		self._unlockStorage:SetAndWait("LeionUnlocked", "0")
+		if self._unlockStorage ~= nil then self._unlockStorage:SetAndWait("Unlock.Leion", "0") end
 		log("CharacterUnlockLogic: [DEBUG] Leion unlock reset")
 	end
 

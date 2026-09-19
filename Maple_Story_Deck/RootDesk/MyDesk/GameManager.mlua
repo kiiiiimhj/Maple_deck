@@ -57,7 +57,7 @@ script GameManager extends Logic
 	@Sync
 	property integer Diamond = 0
 
-	-- 뽑기 전용 재화(다이아) — TotalCoins/ShadowVoucher와 완전히 동일한 패턴(전역 저장소 "PlayerCoins",
+	-- 뽑기 전용 재화(다이아) — TotalCoins/ShadowVoucher와 완전히 동일한 패턴(유저별 저장소 "Wallet.Diamond",
 	-- dirty-flag 지연 flush)으로 런과 무관하게 영구 보존된다. 아직 인게임 획득처가 없으므로, 저장된
 	-- 값이 아예 없는 신규 유저에게만 DiamondStartingAmount를 1회 지급한다(획득처가 생기면 이 지급은
 	-- 빼면 된다). 잔액 표시는 로비 우상단 배지(TitleGroup/DiamondBadge)와 뽑기 팝업 두 곳.
@@ -2392,32 +2392,45 @@ script GameManager extends Logic
 		self.GameOver = false
 		self:NotifyExpChanged(self.Exp, self.ExpNeeded, self.Level, false)
 		
-		-- 누적 코인은 런과 무관하게 전역 저장소에서 불러온다 (RelicInventory와 동일한 dirty-flag 패턴)
-		self._coinStorage = _DataStorageService:GetGlobalDataStorage("PlayerCoins")
-		local errorCode, raw = self._coinStorage:GetAndWait("TotalCoins")
-		if errorCode == 0 and raw ~= nil and raw ~= "" then
-			local loaded = tonumber(raw)
-			if loaded ~= nil then self.TotalCoins = loaded end
-		end
+		-- ⚠ 코인/교환권/다이아는 **유저별 저장소**에서 읽는다 — 출시 전 수정(2026-09-20): 예전엔 전역 저장소
+		-- (GetGlobalDataStorage("PlayerCoins"))에 고정 키로 저장해서 월드의 모든 유저가 한 지갑을 공유했다.
+		-- 월드 시작(여기)엔 아직 유저가 없으므로 실제 로드는 HandleUserEnterEvent → LoadWalletFor에서 한다.
 		self._coinFlushTimerId = _TimerService:SetTimerRepeat(function()
 			self:FlushCoinsIfDirty()
 			self:FlushVoucherIfDirty()
 			self:FlushDiamondIfDirty()
 		end, 3.0)
 		
-		-- 야누스의 검 교환권도 TotalCoins와 동일하게 전역 저장소에서 불러온다
-		self._voucherStorage = _DataStorageService:GetGlobalDataStorage("PlayerCoins")
-		local voucherErrorCode, voucherRaw = self._voucherStorage:GetAndWait("ShadowVoucher")
+		log("GameManager started")
+	end
+
+	@ExecSpace("ServerOnly")
+	@EventSender("Service", "UserService")
+	handler HandleUserEnterEvent(UserEnterEvent event)
+		-- 입장한 유저의 지갑(코인/교환권/다이아)을 유저별 저장소에서 읽는다
+		local user = _UserService:GetUserEntityByUserId(event.UserId)
+		if user == nil then return end
+		self:LoadWalletFor(user.PlayerComponent.ProfileCode)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void LoadWalletFor(string profileCode)
+		-- 유저별 저장소 1개에 키를 "Wallet.*"로 나눠 담는다(다른 시스템 키와 안 겹치게).
+		-- 세 저장소 핸들은 같은 유저 저장소를 가리킨다 — 로드 전(nil)엔 Flush*가 저장을 건너뛴다
+		local ds = _DataStorageService:GetUserDataStorage(profileCode)
+		local errorCode, raw = ds:GetAndWait("Wallet.TotalCoins")
+		if errorCode == 0 and raw ~= nil and raw ~= "" then
+			local loaded = tonumber(raw)
+			if loaded ~= nil then self.TotalCoins = loaded end
+		end
+		-- 야누스의 검 교환권
+		local voucherErrorCode, voucherRaw = ds:GetAndWait("Wallet.ShadowVoucher")
 		if voucherErrorCode == 0 and voucherRaw ~= nil and voucherRaw ~= "" then
 			local loadedVoucher = tonumber(voucherRaw)
 			if loadedVoucher ~= nil then self.ShadowVoucher = loadedVoucher end
 		end
-		
-		-- 다이아도 같은 스토리지("PlayerCoins")에 별도 키로 얹는다. 저장된 값이 아예 없을 때만
-		-- (= 이 월드에서 다이아를 처음 만나는 유저) 시작 지급을 하고 즉시 dirty로 찍어 저장되게 한다 —
-		-- 이미 0으로 저장된 유저(다 써버린 유저)에게 다시 지급되면 안 되므로 "값 없음"과 "0"을 구분한다
-		self._diamondStorage = _DataStorageService:GetGlobalDataStorage("PlayerCoins")
-		local diamondErrorCode, diamondRaw = self._diamondStorage:GetAndWait("Diamond")
+		-- 다이아: 저장된 값이 아예 없을 때만(= 처음 온 유저) 시작 지급 — "값 없음"과 "0"(다 써버린 유저)을 구분한다
+		local diamondErrorCode, diamondRaw = ds:GetAndWait("Wallet.Diamond")
 		if diamondErrorCode == 0 and diamondRaw ~= nil and diamondRaw ~= "" then
 			local loadedDiamond = tonumber(diamondRaw)
 			if loadedDiamond ~= nil then self.Diamond = loadedDiamond end
@@ -2426,8 +2439,21 @@ script GameManager extends Logic
 			self._diamondDirty = true
 			log("GameManager: first-time diamond grant = " .. self.Diamond)
 		end
-		
-		log("GameManager started")
+		self._coinStorage = ds
+		self._voucherStorage = ds
+		self._diamondStorage = ds
+		_TitleUI:NotifyCoinsChanged(self.TotalCoins)
+		_TitleUI:NotifyDiamondChanged(self.Diamond)
+		log("GameManager: wallet loaded coins=" .. self.TotalCoins .. " dia=" .. self.Diamond .. " voucher=" .. self.ShadowVoucher)
+	end
+
+	@ExecSpace("ServerOnly")
+	@EventSender("Service", "UserService")
+	handler HandleUserLeaveEvent(UserLeaveEvent event)
+		-- 나갈 때 3초 타이머에 아직 안 실린 변경분을 확실히 저장
+		self:FlushCoinsIfDirty()
+		self:FlushVoucherIfDirty()
+		self:FlushDiamondIfDirty()
 	end
 
 	@ExecSpace("Server")
@@ -2445,25 +2471,26 @@ script GameManager extends Logic
 	method void FlushCoinsIfDirty()
 		-- SetAndWait를 쓴다 — Async 콜백을 기다리지 않고 OnEndPlay가 먼저 끝나버리면(에디터/월드 종료 시)
 		-- 저장이 씹힐 수 있어서, 드물게 호출되는 이 경로는 블로킹 저장으로 확실히 반영되게 한다
-		if not self._coinDirty then return end
+		if not self._coinDirty or self._coinStorage == nil then return end
 		self._coinDirty = false
-		self._coinStorage:SetAndWait("TotalCoins", tostring(self.TotalCoins))
+		self._coinStorage:SetAndWait("Wallet.TotalCoins", tostring(self.TotalCoins))
 	end
 
 	@ExecSpace("ServerOnly")
 	method void FlushVoucherIfDirty()
-		if not self._voucherDirty then return end
+		if not self._voucherDirty or self._voucherStorage == nil then return end
 		self._voucherDirty = false
-		self._voucherStorage:SetAndWait("ShadowVoucher", tostring(self.ShadowVoucher))
+		self._voucherStorage:SetAndWait("Wallet.ShadowVoucher", tostring(self.ShadowVoucher))
 	end
 
 	@ExecSpace("ServerOnly")
 	method void FlushDiamondIfDirty()
 		-- 코인/교환권과 동일한 지연 flush. 뽑기는 연타될 수 있어서 차감할 때마다 저장하지 않고
 		-- 3초 타이머에 모아서 한 번만 쓴다
-		if not self._diamondDirty then return end
+		-- 로드 전(유저 입장 전)이면 저장하지 않는다 — dirty는 남겨서 로드 후 다음 주기에 저장
+		if not self._diamondDirty or self._diamondStorage == nil then return end
 		self._diamondDirty = false
-		self._diamondStorage:SetAndWait("Diamond", tostring(self.Diamond))
+		self._diamondStorage:SetAndWait("Wallet.Diamond", tostring(self.Diamond))
 	end
 
 	@ExecSpace("Server")
@@ -2713,6 +2740,11 @@ script GameManager extends Logic
 	-- 두 경로(Multicast / @Sync 프로퍼티)는 서버가 같은 프레임에 보내도 도착 순서가 보장되지 않는다.
 	property number _bossShakeUntil = 0
 
+	-- 일반 피격 화면 흔들림 세기/시간 — 유저 지정 2026-09-20 "조금만 더 흔들리게"(예전 0.2 / 0.15초).
+	-- 보스 피격(BossHitShake 0.65 / 0.35초)보다는 항상 약하게 둘 것
+	property number HitShakeIntensity = 0.3
+	property number HitShakeDuration = 0.2
+
 	-- 플레이어 피격 시 화면을 살짝 흔든다
 	@ExecSpace("ClientOnly")
 	method void ShakeCameraOnHit()
@@ -2720,7 +2752,7 @@ script GameManager extends Logic
 		if cam == nil then return end
 		-- 보스 전용 강한 흔들림이 아직 도는 중이면 건너뛴다(약한 흔들림으로 덮어쓰기 방지)
 		if _UtilLogic.ElapsedSeconds < self._bossShakeUntil then return end
-		cam:ShakeCamera(0.2, 0.15)
+		cam:ShakeCamera(self.HitShakeIntensity, self.HitShakeDuration)
 		log("ShakeCameraOnHit triggered")
 	end
 
@@ -2915,6 +2947,7 @@ script GameManager extends Logic
 	@ExecSpace("ServerOnly")
 	method void OnBossDefeated(Vector3 worldPos, number fallHeight, number groundWorldY, number dropScale)
 		self.BossDefeated = true
+		_AchievementLogic:OnBossDefeated()
 		_MonsterSpawner:ClearCurrentBoss()
 		-- 보스 처치는 큰 보상으로 확정 레벨업 1회를 보장한다(그 시점 누적 Exp와 무관하게). 뺄셈이 아니라
 		-- 필요경험치만큼을 그대로 더해서(기존에 쌓아둔 Exp는 보존) 문턱을 확실히 넘기고, 그 뒤로는 일반
@@ -5686,6 +5719,7 @@ script GameManager extends Logic
 	@ExecSpace("ServerOnly")
 	method void LevelUp()
 		self.Level = self.Level + 1
+		_AchievementLogic:OnLevelUp(self.Level)
 		-- OnBossDefeated()는 그 시점의 누적 경험치가 ExpNeeded 미만이어도 강제로 LevelUp()을 호출한다.
 		-- 그냥 빼기만 하면 음수 Exp가 남는데, 경험치 바 갱신(NotifyExpChanged)의 ratio 계산이
 		-- math.max(0, ...)로 음수를 0에 고정시켜서, 그 뒤로 몬스터를 잡아 조금씩 채워도 다시 0을
@@ -5893,6 +5927,8 @@ script GameManager extends Logic
 			_MapManager:SilentMoveToMap(_MapManager.CurrentMapIndex, _MapManager.DesiredStartMapIndex)
 		end
 		self.GameStarted = true
+		-- 업적: 플레이 판 수
+		_AchievementLogic:OnRunStarted()
 		-- 신규 유저 첫 무기 보장 — 에피1 판 수를 센다(유저 지정 2026-09-17, FirstWeaponGuaranteeLogic 헤더 참고)
 		_FirstWeaponGuaranteeLogic:OnRunStarted(episode)
 		-- DPS 미터 집계를 새 판 기준으로 초기화(DpsMeterLogic 헤더 참고)
@@ -5973,6 +6009,7 @@ script GameManager extends Logic
 			return
 		end
 		self.ContinueCount = self.ContinueCount + 1
+		_AchievementLogic:OnContinued()
 		self._gaveUp = false
 		self:ContinueGame()
 	end
@@ -5980,6 +6017,7 @@ script GameManager extends Logic
 	@ExecSpace("ServerOnly")
 	method void RestartGame(boolean timeAttack, integer characterIndex, string userId, integer episode)
 		-- 처음부터 다시 시작: 모든 상태를 초기화
+		_AchievementLogic:OnRunStarted()
 		self.SelectedCharacter = characterIndex
 		self.SelectedEpisode = episode
 		_MapManager:SetEpisodeRange(episode)
@@ -6468,6 +6506,7 @@ script GameManager extends Logic
 		end
 		-- 쉐이드 해금 조건(누적 장비 250개) — 인벤에 실제로 들어간 것만 센다(위 정원 초과 분기는 이미 return)
 		_CharacterUnlockLogic:AddGearCollected(1)
+		_AchievementLogic:OnGearAcquired()
 		-- 무기가 실제로 들어왔으면 신규 유저 첫 무기 보장은 더 필요 없다
 		_FirstWeaponGuaranteeLogic:OnGearGranted(itemId)
 
@@ -8426,6 +8465,7 @@ script GameManager extends Logic
 		log("HealPotion dropped: type=" .. potionType .. " heal=" .. healAmount)
 		
 		local applyEffect = function()
+			_AchievementLogic:OnHealPotion(potionType)
 			self:HealPlayer(healAmount)
 			if potionType == 3 then _CardManager:ResetAllCooldowns() end
 		end
@@ -8638,6 +8678,7 @@ script GameManager extends Logic
 		-- 우측 상단 누적 코인(영구 저장, TotalCoins)을 항상 같이 늘린다 — 골드를 지급하는 모든
 		-- 지점은 이 메서드를 거쳐야 두 값이 어긋나지 않는다
 		self.Gold = self.Gold + amount
+		_AchievementLogic:OnGoldGained(amount)
 		self.TotalCoins = self.TotalCoins + amount
 		self._coinDirty = true
 		_TitleUI:NotifyCoinsChanged(self.TotalCoins)
@@ -8672,6 +8713,7 @@ script GameManager extends Logic
 		if self._coinFlushTimerId then _TimerService:ClearTimer(self._coinFlushTimerId) end
 		self:FlushCoinsIfDirty()
 		self:FlushVoucherIfDirty()
+		self:FlushDiamondIfDirty()
 	end
 
 end
