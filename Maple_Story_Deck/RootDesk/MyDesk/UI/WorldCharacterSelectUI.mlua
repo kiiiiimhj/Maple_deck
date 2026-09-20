@@ -17,6 +17,9 @@ script WorldCharacterSelectUI extends Logic
 	property ButtonComponent btnWorldNext = "a37c4cb1-3e23-4a89-a230-38a538517378"
 	-- 가운데 프레임 아래에 표시되는 맵 이름
 	property TextComponent worldNameText = "e42ea462-d466-4a65-91fb-7dcec94effe2"
+	-- 잠긴 월드 표시(유저 지정 2026-09-20: 이전 에피소드 10분 생존 시 열림) — 가운데 사진 위 어두운 판 + 자물쇠 + 안내 문구
+	property Entity lockOverlay = "65701534-7a57-459b-a4e2-cb2c900b44d6"
+	property TextGUIRendererComponent lockHintText = "af36acce-bbe3-473e-b03d-03d00ad5cf58"
 	property Entity charList = "e268de69-d6c8-43ae-8eeb-20758c36bfc5"
 	property TextComponent charDescNameText = "39cc8743-5098-45f8-91e1-00177775d7c4"
 	property TextComponent charDescText = "3b71b228-4884-40e8-80ba-3d89f487661d"
@@ -169,6 +172,8 @@ script WorldCharacterSelectUI extends Logic
 	method void SetWorldSlotImage(SpriteGUIRendererComponent img, integer worldIdx)
 		local w = self._worlds[worldIdx]
 		img.ImageRUID = DataRef(w.imageRuid)
+		-- 양옆 미리보기도 잠긴 월드는 어둡게(가운데는 RefreshWorld가 다시 칠한다)
+		img.Color = w.enterable and Color(1, 1, 1, 1) or Color(0.5, 0.5, 0.5, 1)
 		self:SetWorldSlotPartBadges(img.Entity, w)
 		self:SetWorldSlotStatText(img.Entity, worldIdx)
 	end
@@ -232,15 +237,31 @@ script WorldCharacterSelectUI extends Logic
 	-- 색상만 현재 _worldIndex 기준으로 갱신한다. 슬라이드/스케일 애니메이션은 없다
 	@ExecSpace("ClientOnly")
 	method void RefreshWorld()
+		-- 에피소드 해금(유저 지정 2026-09-20): 이전 에피소드에서 10분 버텨야 열린다. 기록은 서버 @Sync라
+		-- 팝업을 열거나 넘길 때마다 최신 값으로 다시 판정한다(EpisodeRewardLogic.IsEpisodeUnlocked)
+		for i, w in ipairs(self._worlds) do
+			w.enterable = _EpisodeRewardLogic:IsEpisodeUnlocked(i)
+		end
 		self:SetWorldSlotImage(self.worldImageLeftPhoto, self:WrapWorldIndex(self._worldIndex - 1))
 		self:SetWorldSlotImage(self.worldImageCenterPhoto, self._worldIndex)
 		self:SetWorldSlotImage(self.worldImageRightPhoto, self:WrapWorldIndex(self._worldIndex + 1))
 
 		local w = self._worlds[self._worldIndex]
+		log("WorldCharacterSelectUI: world " .. tostring(self._worldIndex) .. " (" .. w.name .. ") enterable=" .. tostring(w.enterable))
 		local centerColor = w.enterable and Color(1, 1, 1, 1) or Color(0.5, 0.5, 0.5, 1)
 		self.worldImageCenter.Color = centerColor
 		self.worldImageCenterPhoto.Color = centerColor
 		self.worldNameText.Text = w.name
+
+		-- 잠긴 월드면 사진 위에 자물쇠 + "이전 맵 10분 생존 시 열림"
+		if isvalid(self.lockOverlay) then
+			self.lockOverlay.Enable = not w.enterable
+			if not w.enterable and isvalid(self.lockHintText) then
+				local prev = self._worlds[self._worldIndex - 1]
+				local prevName = prev ~= nil and prev.name or ""
+				self.lockHintText.Text = _EpisodeRewardLogic:GetUnlockHint(prevName)
+			end
+		end
 	end
 
 	-- </> 클릭 — 프레임은 그대로 두고, 가운데(그리고 양옆 미리보기)의 스샷만 다음/이전 월드로 갱신한다

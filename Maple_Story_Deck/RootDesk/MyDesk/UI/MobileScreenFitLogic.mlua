@@ -231,6 +231,8 @@ script MobileScreenFitLogic extends Logic
 	method table GetDimmerPaths()
 		-- 비율 무관하게 화면 끝까지 넓힐 단색 딤/플래시 — 자식 없는 1920×1080 엔티티만 골랐다.
 		return {
+			-- 업적 팝업(2026-09-20 유저 리포트 "모바일에서 딤드 잘림") — 목록에 빠져 있었다
+			"/ui/AchievementGroup/Dimmer",
 			"/ui/AttendanceGroup/Dimmer",
 			"/ui/CharacterUnlockGroup/Dimmer",
 			"/ui/DefaultGroup/FreezeScreenBack",
@@ -364,6 +366,7 @@ script MobileScreenFitLogic extends Logic
 				bt.anchoredPosition = Vector2(bt.anchoredPosition.x, self._T.tabBarOrigY - shift)
 				log(string.format("MobileScreenFitLogic: tab bar shifted down by %.0f (inset %.0f)", shift, inset))
 			end
+			self:FitLobbyPanels(inset)
 		end
 		local t = bg.UITransformComponent
 		-- ⚠ 원본 크기를 저장해두고 매번 "원본 기준"으로 다시 계산한다. 현재 RectSize를 기준으로 쓰면
@@ -384,6 +387,47 @@ script MobileScreenFitLogic extends Logic
 		t.OffsetMin = Vector2(left, bottom)
 		t.OffsetMax = Vector2(right, 0)
 		log(string.format("MobileScreenFitLogic: tab bar bg -> left %.0f right %.0f bottom %.0f", left, right, bottom))
+	end
+
+	method table GetLobbyPanelPaths()
+		-- 하단 탭으로 여는 로비 탭 화면(전체 stretch 판넬, 내용물은 가운데 기준)
+		return {
+			"/ui/TitleGroup/RelicPanel",
+			"/ui/TitleGroup/SkillPanel",
+			"/ui/TitleGroup/ShopPanel",
+			"/ui/TitleGroup/RankPanel",
+		}
+	end
+
+	-- 유저 리포트 2026-09-20(아이폰 스샷): "하단 탭으로 유물/스킬 화면에 가면 PC보다 판넬이 위로 올라가 있다".
+	-- 원인 두 가지가 겹친다 — ① 캔버스가 PC(1080)보다 세로로 짧아서 가운데 기준 내용물이 위로 (1080-H)/2만큼 붙고,
+	-- ② 탭바는 FitTabBar가 바닥 안전영역(inset)만큼 내렸는데 판넬은 그대로라 탭바와의 틈이 벌어진다.
+	-- 판넬을 inset - (1080-H)/2 만큼 내리면 위 여백과 탭바까지의 틈이 둘 다 PC와 같아진다(PC는 inset=0, H=1080이라 0).
+	@ExecSpace("ClientOnly")
+	method void FitLobbyPanels(number inset)
+		-- 로비 탭 판넬 4개를 같은 양만큼 아래로 옮긴다(stretch라 OffsetMin/Max의 y를 같이 뺀다). 원본은 한 번만 저장
+		local root = _EntityService:GetEntityByPath("/ui/TitleGroup")
+		if not isvalid(root) then return end
+		local canvasH = root.UITransformComponent.RectSize.y
+		local shift = inset - (1080 - canvasH) / 2
+		if shift < 0 then shift = 0 end
+		if self._T.lobbyPanelOrig == nil then self._T.lobbyPanelOrig = {} end
+		local count = 0
+		for _, path in ipairs(self:GetLobbyPanelPaths()) do
+			local e = _EntityService:GetEntityByPath(path)
+			if isvalid(e) then
+				local t = e.UITransformComponent
+				local o = self._T.lobbyPanelOrig[path]
+				if o == nil then
+					o = { minY = t.OffsetMin.y, maxY = t.OffsetMax.y }
+					self._T.lobbyPanelOrig[path] = o
+				end
+				t.OffsetMin = Vector2(t.OffsetMin.x, o.minY - shift)
+				t.OffsetMax = Vector2(t.OffsetMax.x, o.maxY - shift)
+				count = count + 1
+			end
+		end
+		log(string.format("MobileScreenFitLogic: lobby panels shifted down by %.0f (inset %.0f, canvas h %.0f, %d panels)", shift, inset, canvasH, count))
 	end
 
 	@ExecSpace("ClientOnly")

@@ -74,6 +74,22 @@ script UIComposePopup extends Component
 
 	property ButtonComponent BtnClose = "334deb82-2aec-438b-8954-85dae52ec58f"
 
+	-- 합성 성공 연출(유저 지정 2026-09-20): 베이스 슬롯 위에 겹친 스프라이트에서 강화와 같은 이펙트를 한 번 재생.
+	-- 프레임 목록/재생은 UIEquipPopup.PlayFrameFx를 같이 쓴다(프레임 수동 재생 — 이유는 그쪽 주석)
+	property SpriteGUIRendererComponent ComposeFx = "fe0e20c6-fd85-4987-826d-f3067b96343c"
+
+	-- 베이스 슬롯 연출 크기 배율(원본 최대 264px → 약 240px, 아이콘 140 칸을 덮는 정도)
+	property number ComposeFxScale = 0.9
+
+	-- 합성 요청을 보낸 뒤 서버 응답이 오기 전까지 true. 예전엔 연출이 끝나자마자 버튼을 다시 켜서, 응답 전에
+	-- 한 번 더 누르면 이미 지워진 재료 GUID로 두 번째 요청이 가 "아이템을 찾을 수 없어요"가 떴다(유저 리포트 2026-09-20)
+	property boolean _composePending = false
+
+	property any _pendingTimerId = nil
+
+	-- 응답(성공 이벤트)이 이 시간 안에 안 오면 실패로 보고 잠금을 푼다 — 서버 거절은 에러 토스트만 오고 이벤트가 없다
+	property number ComposePendingTimeout = 3
+
 	property TextComponent CapacityText = "1d86768a-e487-468e-b897-e10b475cda0e"
 
 	property Entity TabHolder = "f8ee4e33-b7fd-4a9e-b534-a4be279f5e56"
@@ -251,6 +267,9 @@ script UIComposePopup extends Component
 		local baseItemStruct = self.BaseItemStruct
 		self.BaseItemStruct = nil
 		self.Entity.Enable = false
+		self._composePending = false
+		self:ClearPendingTimer()
+		self:HideComposeFx()
 
 		if baseItemStruct ~= nil then
 			local playerInventory = _UserService.LocalPlayer.PkgPlayerInventory
@@ -429,6 +448,8 @@ script UIComposePopup extends Component
 
 	@ExecSpace("ClientOnly")
 	method void OnCandidateClicked(any itemStruct)
+		-- 합성 응답 대기 중엔 재료를 바꾸지 않는다(보낸 재료와 화면이 어긋나지 않게)
+		if self._composePending then return end
 		---@type ItemStruct
 		local candidate = itemStruct
 
@@ -467,6 +488,8 @@ script UIComposePopup extends Component
 
 	@ExecSpace("ClientOnly")
 	method void OnMaterialSlotClicked(integer slotIndex)
+		-- 합성 응답 대기 중엔 재료를 빼지 않는다
+		if self._composePending then return end
 		if slotIndex == 1 then
 			self.Material1Struct = nil
 		else
@@ -649,7 +672,7 @@ script UIComposePopup extends Component
 			return
 		end
 
-		self.ComposeButton.Enable = self:HasEnoughMaterials()
+		self.ComposeButton.Enable = self:HasEnoughMaterials() and not self._composePending
 		-- 두 줄 형식(유저 지정): 화살표를 아래 줄 앞에 붙인다. 레퍼런스는 ↓ 세로 배치였지만
 		-- 이 부분만 다르게 가기로 확정 — "레어 / → 에픽"
 		self.GradeText.Text = _GearGradeEnum:GetKoreanName(grade) .. "\n → " .. _GearGradeEnum:GetKoreanName(nextGrade)
@@ -774,10 +797,87 @@ script UIComposePopup extends Component
 			return
 		end
 
+		-- 응답 대기 중이면 무시(연타/재클릭으로 같은 재료를 두 번 보내던 버그 방지)
+		if self._composePending then
+			log("UIComposePopup: compose ignored (waiting for server)")
+			return
+		end
+
+		-- 보내기 직전에 클라 인벤에 실제로 남아 있는지 확인 — 없으면 슬롯을 비우고 보내지 않는다
+		local items = _UserService.LocalPlayer.PkgPlayerInventory.Items
+		if items[baseItemStruct.GUID] == nil then
+			-- 이미 없어진 장비(예: 다른 합성의 재료로 소모됨)를 베이스로 잡은 경우 — 조용히 닫지 말고 알린다
+			log("UIComposePopup: base item " .. baseItemStruct.GUID .. " no longer exists, closing")
+			_UIToast:ShowMessage("이미 사용된 장비예요. 다시 선택해 주세요.")
+			self:Close()
+			return
+		end
+		for _, guid in ipairs(materialGUIDs) do
+			if items[guid] == nil then
+				log("UIComposePopup: stale material " .. guid .. ", reselect required")
+				self:DropStaleMaterials()
+				return
+			end
+		end
+
+		self._composePending = true
 		self.ComposeButton.Enable = false
 		self:PlayComposeEffect(function()
 			_UserService.LocalPlayer.PkgPlayerInventory:RequestComposeItem(baseItemStruct.GUID, materialGUIDs)
+			log("UIComposePopup: compose requested (" .. tostring(#materialGUIDs) .. " materials)")
+			self:StartPendingTimeout()
 		end)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayComposeFx()
+		-- 베이스 슬롯 위 연출 칸에서 합성 성공 이펙트를 한 번 재생(재생 로직은 장비 정보창과 공유)
+		if self.EquipPopup == nil then return end
+		self.EquipPopup:PlayFrameFx(self.ComposeFx, self.ComposeFxScale)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void HideComposeFx()
+		-- 합성 연출 중단 + 끄기
+		if self.EquipPopup == nil then
+			if isvalid(self.ComposeFx) then self.ComposeFx.Entity.Enable = false end
+			return
+		end
+		self.EquipPopup:StopFrameFx(self.ComposeFx)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void StartPendingTimeout()
+		-- 서버가 거절하면(에러 토스트만 옴) 성공 이벤트가 없어서 잠금이 안 풀린다 — 일정 시간 뒤 스스로 푼다
+		self:ClearPendingTimer()
+		self._pendingTimerId = _TimerService:SetTimerOnce(function()
+			self._pendingTimerId = nil
+			if not self._composePending then return end
+			self._composePending = false
+			log("UIComposePopup: no compose result in time, unlocking")
+			self:DropStaleMaterials()
+		end, self.ComposePendingTimeout)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ClearPendingTimer()
+		-- 대기 타이머 정리
+		if self._pendingTimerId ~= nil then
+			_TimerService:ClearTimer(self._pendingTimerId)
+			self._pendingTimerId = nil
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void DropStaleMaterials()
+		-- 클라 인벤에서 사라진 재료는 슬롯에서 빼고, 남은 재료 기준으로 슬롯/후보/버튼을 다시 그린다
+		if self.BaseItemStruct == nil then return end
+		local items = _UserService.LocalPlayer.PkgPlayerInventory.Items
+		if self.Material1Struct ~= nil and items[self.Material1Struct.GUID] == nil then self.Material1Struct = nil end
+		if self.Material2Struct ~= nil and items[self.Material2Struct.GUID] == nil then self.Material2Struct = nil end
+		self:RefreshMaterialSlots()
+		self:RefreshCandidates()
+		self:UpdateResultPreview()
 	end
 
 	-- 이번 합성에 들어가는 품질값들(베이스 + 선택된 재료) — 서버 ComposeItem의 계산과 동일한 규칙
@@ -828,7 +928,7 @@ script UIComposePopup extends Component
 	method void FlyMaterialSequential(table materials, integer index, any onDone)
 		if index > #materials then
 			_TweenLogic:ScaleTo(self.BaseSlotIcon.Entity, Vector2(1, 1), 0.15, EaseType.QuadEaseOut)
-			self.ComposeButton.Enable = self:HasEnoughMaterials()
+			-- 버튼은 여기서 다시 켜지 않는다 — 서버 응답(성공 이벤트 → Open, 또는 대기 타임아웃)이 켠다
 			if onDone ~= nil then
 				onDone()
 			end
@@ -912,12 +1012,16 @@ script UIComposePopup extends Component
 				-- 합성 성공: 토스트만 띄우고 팝업은 안 닫고 그대로 머문다(유저 지정) — 최신 아이템 struct로
 				-- 다시 Open()해서 등급/스탯/테두리/재료 슬롯을 갱신, 이어서 바로 다음 합성을 계속할 수 있다
 				_UIToast:ShowMessage("합성 성공!")
+				self._composePending = false
+				self:ClearPendingTimer()
 
 				local playerInventory = _UserService.LocalPlayer.PkgPlayerInventory
 				local freshItemStruct = playerInventory.Items[baseItemStruct.GUID]
 				if freshItemStruct ~= nil then
 					self:Open(freshItemStruct)
 				end
+				self:PlayComposeFx()
+				log("UIComposePopup: compose success, fx played")
 				return
 			end
 		end

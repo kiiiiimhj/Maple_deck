@@ -78,6 +78,10 @@ script ShadowShopUI extends Logic
 	@Sync property boolean TicketSoldOut = false
 	@Sync property boolean _rolledThisRun = false
 
+	-- 서버가 NotifyVoucherChanged로 보내준 마지막 교환권 수(-1 = 아직 못 받음). GameManager.ShadowVoucher(@Sync)는
+	-- 알림보다 늦게 올 수 있어서, 알림 직후 그 값으로 다시 그리면 옛 숫자가 남는다(2026-09-20 갱신 감사)
+	property integer _lastVoucher = -1
+
 	@ExecSpace("ClientOnly")
 	method void OnBeginPlay()
 		self.shopGroup.Enable = false
@@ -104,7 +108,7 @@ script ShadowShopUI extends Logic
 	-- 같이 보낸다 — 이미 뽑혀 있으면 서버에서 즉시 no-op하고, 화면은 지금 동기화된 값으로 우선 채운다.
 	@ExecSpace("ClientOnly")
 	method void Open()
-		self.currencyCountText.Text = tostring(_GameManager.ShadowVoucher)
+		self.currencyCountText.Text = tostring(self:GetLastVoucher())
 		self:RequestRollIfNeeded()
 		self:RefreshSlotDisplay()
 		self:RefreshPotionTicketDisplay()
@@ -112,6 +116,16 @@ script ShadowShopUI extends Logic
 		self._selectedSlotIndex = 0
 		self:RefreshItemSelection()
 		self:RefreshPurchaseButtonState()
+	end
+
+	@ExecSpace("ClientOnly")
+	method integer GetLastVoucher()
+		-- 클라 화면용 교환권 수: 서버 알림값을 우선 쓰고, 아직 한 번도 못 받았으면 @Sync 값으로 대체한다.
+		-- 인게임 가방(InventoryUI)도 같은 값을 쓴다
+		if self._lastVoucher >= 0 then
+			return self._lastVoucher
+		end
+		return _GameManager.ShadowVoucher
 	end
 
 	@ExecSpace("Server")
@@ -416,15 +430,15 @@ script ShadowShopUI extends Logic
 	method void RefreshPurchaseButtonState()
 		local canBuy = false
 		if self._selectedSlotIndex == 1 then
-			canBuy = not self.PotionSoldOut and _GameManager.ShadowVoucher >= self.PotionPrice
+			canBuy = not self.PotionSoldOut and self:GetLastVoucher() >= self.PotionPrice
 		elseif self._selectedSlotIndex == 2 then
-			canBuy = not self.TicketSoldOut and _GameManager.ShadowVoucher >= self.TicketPrice
+			canBuy = not self.TicketSoldOut and self:GetLastVoucher() >= self.TicketPrice
 		elseif self._selectedSlotIndex == 3 then
-			canBuy = self.LockedSlot3Card ~= 0 and not self.Slot3SoldOut and _GameManager.ShadowVoucher >= self.SkillPrice
+			canBuy = self.LockedSlot3Card ~= 0 and not self.Slot3SoldOut and self:GetLastVoucher() >= self.SkillPrice
 		elseif self._selectedSlotIndex == 4 then
-			canBuy = self.LockedSlot4Card ~= 0 and not self.Slot4SoldOut and _GameManager.ShadowVoucher >= self.SkillPrice
+			canBuy = self.LockedSlot4Card ~= 0 and not self.Slot4SoldOut and self:GetLastVoucher() >= self.SkillPrice
 		elseif self._selectedSlotIndex == 5 then
-			canBuy = self.LockedSlot5Card ~= 0 and not self.Slot5SoldOut and _GameManager.ShadowVoucher >= self.SkillPrice
+			canBuy = self.LockedSlot5Card ~= 0 and not self.Slot5SoldOut and self:GetLastVoucher() >= self.SkillPrice
 		end
 		self.btnPurchase.Enable = canBuy
 		local sprite = self.btnPurchase.Entity.SpriteGUIRendererComponent
@@ -435,12 +449,12 @@ script ShadowShopUI extends Logic
 	@ExecSpace("ClientOnly")
 	method void OnPurchaseClicked()
 		if self._selectedSlotIndex == 1 then
-			if self.PotionSoldOut or _GameManager.ShadowVoucher < self.PotionPrice then return end
+			if self.PotionSoldOut or self:GetLastVoucher() < self.PotionPrice then return end
 			self:QueueReward(self.PotionIconRUID, _GameManager.HpBarFlyTargetUI, "potion", 0)
 			self:RequestBuyPotion()
 			self:PlayPurchaseToast()
 		elseif self._selectedSlotIndex == 2 then
-			if self.TicketSoldOut or _GameManager.ShadowVoucher < self.TicketPrice then return end
+			if self.TicketSoldOut or self:GetLastVoucher() < self.TicketPrice then return end
 			self:QueueReward(self.TicketIconRUID, _GameManager.LootFlyTargetUI, "ticket", 0)
 			self:RequestBuyTicket()
 			self:PlayPurchaseToast()
@@ -460,7 +474,7 @@ script ShadowShopUI extends Logic
 	@ExecSpace("ClientOnly")
 	method void OnBuySkillSlot(integer cardIdx, boolean soldOut)
 		if cardIdx == 0 or soldOut then return end
-		if _GameManager.ShadowVoucher < self.SkillPrice then return end
+		if self:GetLastVoucher() < self.SkillPrice then return end
 		self:QueueReward(self:GetCardIconRUID(cardIdx), self:GetSkillFlyTargetUI(cardIdx), "skill", cardIdx)
 		self:RequestBuySkill(cardIdx)
 		self:PlayPurchaseToast()
@@ -705,6 +719,7 @@ script ShadowShopUI extends Logic
 		-- GameManager.AddShadowVoucher/SpendShadowVoucher가 호출 — ShadowVoucher의 @Sync 전파와
 		-- 이 Multicast 호출은 서로 다른 채널이라 순서 보장이 없어서, 파라미터로 직접 받은 값을 쓴다
 		if not self:IsClient() then return end
+		self._lastVoucher = newTotal
 		self.currencyCountText.Text = tostring(newTotal)
 		_InventoryUI:NotifyInventoryChanged()
 		self:RefreshPurchaseButtonState()

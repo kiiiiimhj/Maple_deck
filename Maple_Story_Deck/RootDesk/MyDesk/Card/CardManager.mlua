@@ -541,7 +541,7 @@ script CardManager extends Logic
 	@Sync property integer IceCutterLevel = 0
 	property number Card11Damage = 110
 	property string Card11Name = "아이스 커터"
-	property string Card11IconRUID = "d30a5f73b62f48619ed6c5031a5a95d6"
+	property string Card11IconRUID = "8eda518d79264701b88aecb228328f9d"
 	property string Card11EffectRUID = "37b23bb1579e441b89e1f04e5e8afc64"
 	-- 유저 지정: 사운드 없는 스킬 전수조사 후 일괄 보강 — 전용 팩에 번들 오디오가 없어 같은 얼음 계열
 	-- 콜드빔(Card3) 사운드 재사용
@@ -595,7 +595,7 @@ script CardManager extends Logic
 	@Sync property integer ThunderCutterLevel = 0
 	property number Card13Damage = 100
 	property string Card13Name = "썬더 커터"
-	property string Card13IconRUID = "ae6f34808c9e478583209c30935233b4"
+	property string Card13IconRUID = "4fdc26aaf3144929a1f0d643da97e40a"
 	property string Card13EffectRUID = "da5de39494464b469f66b4e65544eae0"
 	-- 유저 지정: 사운드 없는 스킬 전수조사 후 일괄 보강 — 전용 리소스팩 번들 오디오(_audio/Use) 사용
 	property string Card13SoundRUID = "3533266a70c24471bedfc773569fdd8f"
@@ -626,7 +626,7 @@ script CardManager extends Logic
 	-- 출혈, 썬더 쪽 경로는 넉백을 그대로 적용.
 	@Sync property integer DoubleCutterLevel = 0
 	property string Card20Name = "더블 커터"
-	property string Card20IconRUID = "f1af72d7a9fe463db574a4afc1bc7a40"
+	property string Card20IconRUID = "d6d3e9ffbb6d4d43a96f6c63876d0c2e"
 	property number Card20Cooldown = 4.0  -- 레벨 무관 고정
 	property number Card20StationaryDuration = 1.0  -- 1단계(제자리 겹침 연출) 지속시간
 	property number Card20HitRadius = 0.96  -- 아이스 커터와 동일 반경
@@ -24008,7 +24008,10 @@ script CardManager extends Logic
 		end
 		if cardIdx == 0 then return end
 
-		self:ApplyCardUpgrade(cardIdx, upgradeType)
+		-- 선택지가 떠 있는 동안 드롭 카드가 먼저 도착해 같은 스킬이 만렙이 되는 반대 케이스가 있다 —
+		-- 그대로 적용하면 플레이어가 누른 선택이 통째로 무효가 되므로 드롭과 같은 대체 규칙을 탄다
+		-- (ApplyUpgradeOrSubstitute 주석 참고)
+		self:ApplyUpgradeOrSubstitute(cardIdx, upgradeType, "choice")
 		self._choiceCard1 = 0 ; self._choiceCard2 = 0 ; self._choiceCard3 = 0
 		self:HideLevelUpChoices()
 
@@ -24045,6 +24048,111 @@ script CardManager extends Logic
 	method void NotifyCardLevelUpdated(integer cardIdx)
 		if self:IsServer() then return end
 		self:RefreshSlotIfHoldsCard(cardIdx)
+	end
+
+	-- 엘리트/이스터에그/상자/보스 드롭 카드가 슬롯에 "도착한 시점"에 타는 적용 경로.
+	-- 올릴 카드는 드롭되는 순간에 정해지는데 실제 강화는 낙하+대기+비행 연출이 끝난 2~4초 뒤에
+	-- 적용된다. 그 사이에 레벨업 선택창에서 플레이어가 같은 스킬을 골라 만렙이 되면
+	-- ApplyCardUpgradeInner의 "Level < 5" 조건에 걸려 드롭이 아무 일도 못 하고 조용히 사라졌다
+	-- (유저 리포트 2026-09-20: "썬더볼트 4에서 드롭 떴는데 마침 레벨업에서 내가 먼저 골라버리면
+	-- 드롭된 썬더볼트가 날아감"). 날아가는 아이콘의 목적지/이미지는 그대로 둔다(연출 도중에 다른
+	-- 스킬로 갈아끼우면 더 혼란스럽다는 유저 판단) — 대신 도착 시점에 올릴 수 없는 카드였으면
+	-- 아직 올릴 수 있는 다른 슬롯 카드로 대체하고, 어떤 스킬이 올랐는지 토스트로 알려준다.
+	@ExecSpace("ServerOnly")
+	method void ApplyDroppedCardUpgrade(integer cardIdx, string upgradeType)
+		self:ApplyUpgradeOrSubstitute(cardIdx, upgradeType, "drop")
+	end
+
+	-- 중복 처리의 단일 통로 — 드롭 도착(ApplyDroppedCardUpgrade)과 레벨업 선택(SelectLevelUpChoice)이
+	-- 같은 규칙을 쓴다. 두 경로는 서로의 반대 케이스다(드롭이 날아오는 동안 선택으로 만렙 / 드롭이
+	-- 먼저 도착해 만렙이 된 뒤 열려 있던 선택지를 누름) — 어느 쪽이든 보상이 통째로 증발하지 않게 한다.
+	-- 대체 순서(유저 지정 2026-09-20): 올릴 수 있는 액티브 → 없으면 패시브 → 그것도 없으면 골드 500.
+	@ExecSpace("ServerOnly")
+	method void ApplyUpgradeOrSubstitute(integer cardIdx, string upgradeType, string source)
+		if self:CanUpgradeCard(cardIdx, upgradeType) then
+			self:ApplyCardUpgrade(cardIdx, upgradeType)
+			return
+		end
+		local pool = self:BuildActiveUpgradePool()
+		if #pool == 0 then pool = self:BuildPassiveUpgradePool() end
+		if #pool == 0 then
+			_GameManager:AddGold(500)
+			log("CardManager: " .. source .. " card=" .. cardIdx .. " already maxed, no alt -> gold 500")
+			self:NotifyDuplicateSkillDrop("")
+			return
+		end
+		local altIdx = pool[_UtilLogic:RandomIntegerRange(1, #pool)]
+		log("CardManager: " .. source .. " card=" .. cardIdx .. " already maxed -> substitute card=" .. altIdx)
+		self:ApplyCardUpgrade(altIdx, self:GetEliteUpgradeType(altIdx))
+		self:NotifyDuplicateSkillDrop(self:GetSlotBaseName(altIdx))
+	end
+
+	-- 슬롯 없이 획득 즉시 영구 적용되는 패시브 카드 중 아직 올릴 수 있는 것들.
+	-- 중복 대체(ApplyUpgradeOrSubstitute) / 엘리트·미니빈 빈 풀 대체 / 보스 확정 패시브 보상
+	-- (GrantBossCardRewards)이 전부 이 한 목록을 쓴다 — 캐릭터를 추가하면 여기만 채우면 된다.
+	method table BuildPassiveUpgradePool()
+		local pool = {}
+		-- 아르카나
+		if self:IsCardUnlocked(7) and self.MagicBoosterLevel < 5 then table.insert(pool, 7) end
+		if self:IsCardUnlocked(8) and self.MagicCriticalLevel < 5 then table.insert(pool, 8) end
+		if self:IsCardUnlocked(10) and self.FreezingEffectLevel < 5 then table.insert(pool, 10) end
+		if self:IsCardUnlocked(18) and self.MagicArmorLevel < 5 then table.insert(pool, 18) end
+		if self:IsCardUnlocked(22) and self.MeditationLevel < 5 then table.insert(pool, 22) end
+		-- 실피드
+		if self:IsCardUnlocked(109) and self.BowAccelerationLevel < 5 then table.insert(pool, 109) end
+		if self:IsCardUnlocked(110) and self.PiercingWillLevel < 5 then table.insert(pool, 110) end
+		if self:IsCardUnlocked(111) and self.CriticalShotLevel < 5 then table.insert(pool, 111) end
+		if self:IsCardUnlocked(112) and self.FinalAttackBowLevel < 5 then table.insert(pool, 112) end
+		if self:IsCardUnlocked(113) and self.RapidFireLevel < 5 then table.insert(pool, 113) end
+		-- 레이온
+		if self:IsCardUnlocked(151) and self.ComboAttackLevel < 5 then table.insert(pool, 151) end
+		if self:IsCardUnlocked(161) and self.ChanceAttackLevel < 5 then table.insert(pool, 161) end
+		if self:IsCardUnlocked(162) and self.ComaLevel < 5 then table.insert(pool, 162) end
+		if self:IsCardUnlocked(163) and self.SelfRecoveryLevel < 5 then table.insert(pool, 163) end
+		if self:IsCardUnlocked(164) and self.WarriorMasteryLevel < 5 then table.insert(pool, 164) end
+		-- 쉐이드
+		if self:IsCardUnlocked(180) and self.DaggerAccelLevel < 5 then table.insert(pool, 180) end
+		if self:IsCardUnlocked(181) and self.CriticalEdgeLevel < 5 then table.insert(pool, 181) end
+		if self:IsCardUnlocked(182) and self.KarmaLevel < 5 then table.insert(pool, 182) end
+		if self:IsCardUnlocked(183) and self.PhysicalTrainingLevel < 5 then table.insert(pool, 183) end
+		if self:IsCardUnlocked(184) and self.DarkSightLevel < 5 then table.insert(pool, 184) end
+		-- 린
+		if self:IsCardUnlocked(209) and self.ThrowingAccelLevel < 5 then table.insert(pool, 209) end
+		if self:IsCardUnlocked(210) and self.JavelinMasteryLevel < 5 then table.insert(pool, 210) end
+		if self:IsCardUnlocked(211) and self.SpiritJavelinLevel < 5 then table.insert(pool, 211) end
+		if self:IsCardUnlocked(212) and self.RadicalDarknessLevel < 5 then table.insert(pool, 212) end
+		if self:IsCardUnlocked(213) and self.ThiefCunningLevel < 5 then table.insert(pool, 213) end
+		if self:IsCardUnlocked(214) and self.ShurikenMasteryLevel < 5 then table.insert(pool, 214) end
+		return pool
+	end
+
+	-- 지금 이 카드에 강화를 적용하면 실제로 레벨이 오르는지. 카드별 레벨 프로퍼티를 또 나열하지 않고
+	-- 후보 목록(BuildActiveUpgradePoolRaw = 해금됨 + 레벨 상한 미달)에 들어있는지로 판단한다.
+	method boolean CanUpgradeCard(integer cardIdx, string upgradeType)
+		-- 해금 드롭(신규 스킬 획득)과 구식 배율 누적(dmg/cd)은 레벨 상한 개념이 없어 항상 적용된다
+		if upgradeType == "unlock" or upgradeType == "dmg" or upgradeType == "cd" then return true end
+		for _, idx in ipairs(self:BuildActiveUpgradePoolRaw()) do
+			if idx == cardIdx then return true end
+		end
+		-- 레벨업 선택지에는 슬롯 없는 패시브도 올라오므로 패시브 후보도 같이 본다
+		for _, idx in ipairs(self:BuildPassiveUpgradePool()) do
+			if idx == cardIdx then return true end
+		end
+		-- 아직 해금 전인 카드는 "만렙이라 못 올림"이 아니다 — 예전 동작(그대로 적용) 유지
+		if not self:IsCardUnlocked(cardIdx) then return true end
+		return false
+	end
+
+	-- 드롭 카드가 중복(이미 만렙)이라 다른 스킬로 대체됐음을 알리는 토스트. skillName이 비어 있으면
+	-- 대체할 스킬조차 없어 골드로 지급된 경우다.
+	@ExecSpace("Multicast")
+	method void NotifyDuplicateSkillDrop(string skillName)
+		if self:IsServer() then return end
+		if skillName == "" then
+			_UIToast:ShowMessage("중복 스킬을 획득해 골드 500을 얻었습니다!")
+		else
+			_UIToast:ShowMessage("중복 스킬을 획득해 " .. skillName .. " 스킬의 레벨이 올랐습니다!")
+		end
 	end
 
 	@ExecSpace("ServerOnly")
@@ -26634,8 +26742,9 @@ script CardManager extends Logic
 				if fallHeight > 0 then fallDuration = math.min(0.6, 0.15 + fallHeight / 500) end
 				-- 실제 강화 적용은 "카드가 슬롯에 실제로 도착하는 시점"에 맞춘다
 				local arrivalDelay = fallDuration + self.DropPopDuration + groundDelay + self.DropFlyDuration
+				-- 도착 시점에 이미 만렙이 된 카드였으면 다른 카드로 대체 + 토스트(ApplyDroppedCardUpgrade 주석 참고)
 				_TimerService:SetTimerOnce(function()
-					if isvalid(self) then self:ApplyCardUpgrade(cardIdx, upgradeType) end
+					if isvalid(self) then self:ApplyDroppedCardUpgrade(cardIdx, upgradeType) end
 				end, arrivalDelay)
 
 				self:ScheduleCardDropVisual(worldPos, cardIdx, slotIdx, groundDelay, i + dropIdxOffset, fallHeight, groundWorldY, dropScale)
@@ -26647,13 +26756,15 @@ script CardManager extends Logic
 	end
 
 	-- Ep2MiniBeanEasterEggLogic 전용 — 노란 미니빈을 잡으면 엘리트와 동일한 액티브 카드 강화 풀에서
-	-- 딱 1개만 확정 지급한다(유저 지정: "잡으면 스킬 1개"). 강화할 카드가 없으면(전부 만렙/미해금)
-	-- 엘리트와 동일하게 골드 100으로 대체한다.
+	-- 딱 1개만 확정 지급한다(유저 지정: "잡으면 스킬 1개"). 강화할 액티브가 없으면 패시브로,
+	-- 패시브도 없으면 골드 500으로 대체한다(2026-09-20 유저 지정 — 중복 대체 규칙과 동일).
 	@ExecSpace("ServerOnly")
 	method void OnYellowMiniBeanCaught(Vector3 worldPos, number fallHeight, number groundWorldY, number dropScale)
 		local pool = self:BuildActiveUpgradePool()
+		if #pool == 0 then pool = self:BuildPassiveUpgradePool() end
 		if #pool == 0 then
-			_GameManager:AddGold(100)
+			_GameManager:AddGold(500)
+			log("CardManager: minibean drop — nothing to upgrade, gold 500")
 			return
 		end
 		self:GrantCardUpgradesFromPool(pool, worldPos, fallHeight, groundWorldY, dropScale, 1, 0)
@@ -26689,15 +26800,18 @@ script CardManager extends Logic
 
 	@ExecSpace("ServerOnly")
 	method void OnEliteKilled(Vector3 worldPos, number fallHeight, number groundWorldY, number dropScale, boolean isBossSummoned)
-		-- 슬롯에 배치된 카드 중에서 무작위로 1~2개(RollDropCount)를 강화. 강화할 카드가 없으면 골드 100 지급.
+		-- 슬롯에 배치된 카드 중에서 무작위로 1~2개(RollDropCount)를 강화. 강화할 액티브가 없으면 패시브로,
+		-- 패시브도 없으면 골드 500(2026-09-20 유저 지정 — 중복 대체 규칙과 동일, 예전엔 골드 100 고정).
 		-- isBossSummoned: 보스가 소환한 엘리트급(엔젤슬라임 분열체)만 true — 보스 웨이브 슬롯 드롭 상한에 들어간다.
 		-- 일반 엘리트(레벨5·3분 시계)는 보스와 겹쳐 죽어도 상한과 무관하게 항상 드롭한다(유저 지정 2026-09-12:
 		-- "엘리트랑 보스 소환 엘리트는 별개로 나눠야").
 		local pool = self:BuildActiveUpgradePool()
 		local dropCount = self:RollDropCount()
 		log("CardManager: elite drop pool=" .. #pool .. " count=" .. dropCount .. " bossSummoned=" .. tostring(isBossSummoned) .. " bossCapOn=" .. tostring(self._bossWaveDropCapOn))
+		if #pool == 0 then pool = self:BuildPassiveUpgradePool() end
 		if #pool == 0 then
-			_GameManager:AddGold(100)
+			_GameManager:AddGold(500)
+			log("CardManager: elite drop — nothing to upgrade, gold 500")
 			return
 		end
 		self:GrantCardUpgradesFromPoolEx(pool, worldPos, fallHeight, groundWorldY, dropScale, dropCount, 0, isBossSummoned)
@@ -26757,22 +26871,10 @@ script CardManager extends Logic
 			self:GrantCardUpgradesFromPool(activePool, worldPos, fallHeight, groundWorldY, dropScale, activeCount, 0)
 		end
 
-		local passivePool = {}
-		if self:IsCardUnlocked(7) and self.MagicBoosterLevel < 5 then table.insert(passivePool, 7) end
-		if self:IsCardUnlocked(8) and self.MagicCriticalLevel < 5 then table.insert(passivePool, 8) end
-		if self:IsCardUnlocked(18) and self.MagicArmorLevel < 5 then table.insert(passivePool, 18) end
-		if self:IsCardUnlocked(22) and self.MeditationLevel < 5 then table.insert(passivePool, 22) end
-		if self:IsCardUnlocked(109) and self.BowAccelerationLevel < 5 then table.insert(passivePool, 109) end
-		if self:IsCardUnlocked(110) and self.PiercingWillLevel < 5 then table.insert(passivePool, 110) end
-		if self:IsCardUnlocked(111) and self.CriticalShotLevel < 5 then table.insert(passivePool, 111) end
-		if self:IsCardUnlocked(112) and self.FinalAttackBowLevel < 5 then table.insert(passivePool, 112) end
-		if self:IsCardUnlocked(113) and self.RapidFireLevel < 5 then table.insert(passivePool, 113) end
-		-- 레이온 슬롯없는 패시브(2026-08-02 추가 — BuildActiveUpgradePool과 동일한 이유로 빠져있었음)
-		if self:IsCardUnlocked(151) and self.ComboAttackLevel < 5 then table.insert(passivePool, 151) end
-		if self:IsCardUnlocked(161) and self.ChanceAttackLevel < 5 then table.insert(passivePool, 161) end
-		if self:IsCardUnlocked(162) and self.ComaLevel < 5 then table.insert(passivePool, 162) end
-		if self:IsCardUnlocked(163) and self.SelfRecoveryLevel < 5 then table.insert(passivePool, 163) end
-		if self:IsCardUnlocked(164) and self.WarriorMasteryLevel < 5 then table.insert(passivePool, 164) end
+		-- 2026-09-20: 여기 인라인으로 있던 패시브 목록을 BuildPassiveUpgradePool()로 합쳤다. 인라인
+		-- 목록엔 쉐이드(180~184)/린(209~214) 패시브가 빠져 있어서 두 캐릭터는 보스 확정 패시브 보상이
+		-- 한 번도 안 나오고 있었다(레이온이 2026-08-02에 같은 이유로 고쳐진 전례와 동일한 누락).
+		local passivePool = self:BuildPassiveUpgradePool()
 		if #passivePool > 0 then
 			self:GrantCardUpgradesFromPool(passivePool, worldPos, fallHeight, groundWorldY, dropScale, 1, 1)
 		end
