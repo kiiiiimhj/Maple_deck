@@ -17,6 +17,15 @@ script ShadowShopUI extends Logic
 	property SpriteGUIRendererComponent item3Icon = "bb2b6a39-8db4-4be9-b432-50bc597ffda1"
 	property SpriteGUIRendererComponent item4Icon = "b30e582c-08ba-4474-b576-92dececef3e7"
 	property SpriteGUIRendererComponent item5Icon = "32cbacd0-87c6-49fb-8a46-c55e2c58b932"
+	-- 상품별 가격 글자(List/ItemN/PriceText). ⚠ .ui에는 만들 당시 값("2")이 그대로 박혀 있어서
+	-- 코드의 가격(PotionPrice/TicketPrice/SkillPrice)을 올려도 화면 숫자가 안 바뀌었다
+	-- (2026-09-21 유저 리포트). 이제 Open()마다 RefreshPriceTexts가 코드 값으로 다시 쓴다.
+	property TextComponent priceText1 = "79759c23-8eae-4708-b718-6aa0efd56b94"
+	property TextComponent priceText2 = "5d719baa-158c-4b38-af0f-774eba974b66"
+	property TextComponent priceText3 = "d48cb1ec-518f-4591-876d-39852fdcba95"
+	property TextComponent priceText4 = "b8f65cee-0e6a-44f9-a129-5e78bbb7d4c6"
+	property TextComponent priceText5 = "a6bc68ea-c3ab-4105-a398-f6260f06003d"
+
 	property TextComponent item3Name = "e9d62e51-fa83-459d-a084-04c882224582"
 	property TextComponent item4Name = "a8f7088d-6220-4bc0-9bc1-0d529794451e"
 	property TextComponent item5Name = "d63862b8-c56c-42ad-9516-f040caff25da"
@@ -38,6 +47,11 @@ script ShadowShopUI extends Logic
 	property integer TicketPrice = 3
 	-- 유저 지정(2026-09-18): 스킬 3종 가격 2 → 6개
 	property integer SkillPrice = 6
+
+	-- 스킬 최대 강화 레벨. 이 레벨에 도달한 스킬은 상점에서 더 살 수 없다(유저 지정 2026-09-21)
+	property integer SkillMaxLevel = 5
+
+	property string MaxLevelToastText = "스킬 레벨이 최대치입니다!"
 
 	property string PotionIconRUID = "4fd08a6fa90b45448435cf22dba91c1f"
 	property string TicketIconRUID = "5d9d14a961464c0da4c2dae7ed99b8a0"
@@ -110,12 +124,42 @@ script ShadowShopUI extends Logic
 	method void Open()
 		self.currencyCountText.Text = tostring(self:GetLastVoucher())
 		self:RequestRollIfNeeded()
+		self:RefreshPriceTexts()
 		self:RefreshSlotDisplay()
 		self:RefreshPotionTicketDisplay()
 		self.shopGroup.Enable = true
 		self._selectedSlotIndex = 0
 		self:RefreshItemSelection()
 		self:RefreshPurchaseButtonState()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshPriceTexts()
+		-- 가격 글자를 코드 값으로 다시 쓴다. .ui에 박힌 숫자를 믿으면 가격을 올려도 화면이 안 바뀐다
+		-- (2026-09-21 유저 리포트: SkillPrice를 2 → 6으로 올렸는데 상점엔 계속 2로 표시됐다)
+		if isvalid(self.priceText1) then self.priceText1.Text = tostring(self.PotionPrice) end
+		if isvalid(self.priceText2) then self.priceText2.Text = tostring(self.TicketPrice) end
+		if isvalid(self.priceText3) then self.priceText3.Text = tostring(self.SkillPrice) end
+		if isvalid(self.priceText4) then self.priceText4.Text = tostring(self.SkillPrice) end
+		if isvalid(self.priceText5) then self.priceText5.Text = tostring(self.SkillPrice) end
+	end
+
+	@ExecSpace("ClientOnly")
+	method integer GetSlotCardIdx(integer slotIndex)
+		-- 상품 슬롯(3~5) → 이번 런에 배정된 스킬 카드 번호. 1·2번(포션/티켓)은 0
+		if slotIndex == 3 then return self.LockedSlot3Card end
+		if slotIndex == 4 then return self.LockedSlot4Card end
+		if slotIndex == 5 then return self.LockedSlot5Card end
+		return 0
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean IsSlotSkillMaxLevel(integer slotIndex)
+		-- 그 칸의 스킬을 이미 최대(Lv5)까지 올렸는가 — 더 사봐야 의미가 없으므로 구매를 막는다
+		-- (유저 지정 2026-09-21). 카드 레벨은 @Sync라 클라에서 바로 읽을 수 있다.
+		local cardIdx = self:GetSlotCardIdx(slotIndex)
+		if cardIdx == 0 then return false end
+		return _CardManager:GetSlotLevelNum(cardIdx) >= self.SkillMaxLevel
 	end
 
 	@ExecSpace("ClientOnly")
@@ -440,7 +484,12 @@ script ShadowShopUI extends Logic
 		elseif self._selectedSlotIndex == 5 then
 			canBuy = self.LockedSlot5Card ~= 0 and not self.Slot5SoldOut and self:GetLastVoucher() >= self.SkillPrice
 		end
-		self.btnPurchase.Enable = canBuy
+		-- 이미 최대 레벨인 스킬은 살 수 없다(유저 지정 2026-09-21).
+		-- ⚠ 이때 버튼을 Enable=false로 꺼버리면 ButtonClickEvent 자체가 안 와서 안내 토스트를 못 띄운다.
+		--   그래서 "최대 레벨" 경우만 버튼은 켜 두고 색만 죽인 뒤, OnPurchaseClicked에서 토스트로 돌려보낸다.
+		local maxed = self:IsSlotSkillMaxLevel(self._selectedSlotIndex)
+		if maxed then canBuy = false end
+		self.btnPurchase.Enable = canBuy or maxed
 		local sprite = self.btnPurchase.Entity.SpriteGUIRendererComponent
 		sprite.Color = canBuy and Color(1, 1, 1, 1) or Color(0.4, 0.4, 0.4, 1)
 	end
@@ -448,6 +497,11 @@ script ShadowShopUI extends Logic
 	-- 구매 버튼을 눌렀을 때 실제로 결제+지급 예약을 실행한다(예전엔 아이템을 누르는 즉시 여기가 실행됐다)
 	@ExecSpace("ClientOnly")
 	method void OnPurchaseClicked()
+		-- 최대 레벨 스킬은 구매 대신 안내만 한다(버튼이 꺼져 있으면 클릭이 안 와서 여기서 거른다)
+		if self:IsSlotSkillMaxLevel(self._selectedSlotIndex) then
+			_UIToast:ShowMessage(self.MaxLevelToastText)
+			return
+		end
 		if self._selectedSlotIndex == 1 then
 			if self.PotionSoldOut or self:GetLastVoucher() < self.PotionPrice then return end
 			self:QueueReward(self.PotionIconRUID, _GameManager.HpBarFlyTargetUI, "potion", 0)

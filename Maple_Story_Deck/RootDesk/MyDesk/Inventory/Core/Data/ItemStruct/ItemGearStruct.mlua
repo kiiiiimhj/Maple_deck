@@ -57,6 +57,24 @@ script ItemGearStruct
 	-- 유저 지정: 등급업(합성)해도 레벨은 리셋되지 않고 그대로 유지되고 상한만 올라간다
 	property integer Level = 1
 
+	-- 반지 전용 "메인 옵션 종류"(유저 지정 2026-09-21) — 1 = 공격력 / 2 = 최대 체력.
+	-- 반지는 이름·등급·아이콘이 전부 같고 **메인 옵션만 둘 중 하나로 갈린다**. 드롭 시 1회 확정해
+	-- 영구 저장하고, 합성(등급업/품질)으로도 바뀌지 않는다. 안 쓰는 쪽의 수치(Atk 또는 Hp)와
+	-- 등급별 표(AtkByGrade/HpByGrade)는 생성 시점에 통째로 0으로 눌러둔다 — 등급업이 표에서
+	-- 값을 꺼내 쓰기만 하므로 이렇게 해두면 이후 어느 경로로도 반대쪽 스탯이 살아나지 않는다.
+	-- 0 = 미지정(반지가 아닌 장비 / 이 필드 추가 이전에 드롭된 반지).
+	-- 옛 반지는 PkgPlayerInventory.BackfillMissingGearStats가 로그인 때 한 번 굴려서 채운다.
+	property integer MainStatType = 0
+
+	-- 반지 전용 "등급별" 등급 스킬 변형(유저 지정 2026-09-21 정정) — AtkByGrade와 같은 패턴으로
+	-- 정수 키 0~5(GearGradeEnum)에 각각 1~5(공격력/치확/치피/최대체력/쿨타임)가 들어간다.
+	-- ⚠ 처음엔 아이템 하나에 SkillVariant 하나였는데, 그러면 장비 정보 팝업의 등급 표 5줄이
+	--   **전부 같은 효과**로 나온다(유저 지적). 등급마다 따로 굴려야 "매직은 치확, 레어는 쿨감…"
+	--   처럼 등급별로 다른 효과가 나온다.
+	-- 드롭 시 전 등급을 한 번에 굴려 영구 저장 — 등급업해도 재굴림하지 않아 미리 본 값이 그대로 온다.
+	-- 빈 테이블 = 이 필드 추가 이전 아이템 → GetSkillVariantForGrade가 SkillVariant로 폴백한다.
+	property table SkillVariantByGrade = {}
+
 	method void CopyFrom(ItemGearStruct other)
 		self.IsAttached = other.IsAttached
 		self.Grade = other.Grade
@@ -68,6 +86,7 @@ script ItemGearStruct
 		self.ProcChancePerMille = other.ProcChancePerMille
 		self.BonusPercentPerMille = other.BonusPercentPerMille
 		self.Level = other.Level
+		self.MainStatType = other.MainStatType
 
 		local atkByGrade = {}
 		for grade, v in pairs(other.AtkByGrade) do
@@ -86,6 +105,12 @@ script ItemGearStruct
 			bonusByGrade[grade] = v
 		end
 		self.BonusPercentPerMilleByGrade = bonusByGrade
+
+		local variantByGrade = {}
+		for grade, v in pairs(other.SkillVariantByGrade) do
+			variantByGrade[grade] = v
+		end
+		self.SkillVariantByGrade = variantByGrade
 	end
 
 	method ItemGearStruct Clone()
@@ -160,6 +185,16 @@ script ItemGearStruct
 				self.Level = 1
 			end
 
+			-- strs[13](MainStatType) — 이 필드 추가 이전 데이터엔 없다. 0(미지정)으로 두면
+			-- BackfillMissingGearStats가 반지에 한해 로그인 때 굴려서 채운다
+			self.MainStatType = math.tointeger(tonumber(strs[13]))
+			if self.MainStatType == nil then
+				self.MainStatType = 0
+			end
+
+			-- strs[14](SkillVariantByGrade) — 없으면 빈 테이블(폴백은 GetSkillVariantForGrade가 처리)
+			self.SkillVariantByGrade = self:DeserializeByGradeTable(strs[14])
+
 			hasDeserializedData = true
 		end
 
@@ -201,7 +236,7 @@ script ItemGearStruct
 
 	method boolean Serialize(table dbItem)
 		-- Level도 판정에 포함해야 한다 — 다른 값이 전부 기본값인 장비를 강화만 해둔 경우에도 저장되어야 하므로
-		if self.Grade ~= 0 or self.ComposeCount ~= 0 or self.Quality ~= 0 or self.Atk ~= 0 or self.Hp ~= 0 or self.SkillVariant ~= 1 or self.ProcChancePerMille ~= 0 or self.BonusPercentPerMille ~= 0 or self.Level ~= 1 then
+		if self.Grade ~= 0 or self.ComposeCount ~= 0 or self.Quality ~= 0 or self.Atk ~= 0 or self.Hp ~= 0 or self.SkillVariant ~= 1 or self.ProcChancePerMille ~= 0 or self.BonusPercentPerMille ~= 0 or self.Level ~= 1 or self.MainStatType ~= 0 then
 			local strs = {}
 			table.insert(strs, tostring(self.Grade))
 			table.insert(strs, tostring(self.ComposeCount))
@@ -215,6 +250,8 @@ script ItemGearStruct
 			table.insert(strs, tostring(self.Hp))
 			table.insert(strs, self:SerializeByGradeTable(self.HpByGrade))
 			table.insert(strs, tostring(self.Level))
+			table.insert(strs, tostring(self.MainStatType))
+			table.insert(strs, self:SerializeByGradeTable(self.SkillVariantByGrade))
 
 			local str = table.concat(strs, ',')
 			dbItem['G'] = str

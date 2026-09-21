@@ -24,6 +24,17 @@ script DpsMeterLogic extends Logic
 	property number _snapshotTimer = 0
 	property boolean _dirty = false
 
+	-- ── 주간 레이드용 "최고 구간 DPS"(유저 지정 2026-09-20) ────────────────────────
+	-- 레이드는 판마다 그 판의 DPS를 보스 피해량에 더하는데, 누적 DPS(총대미지÷총시간)를 쓰면 화력이
+	-- 약한 런 초반이 그대로 희석돼 "빌드를 잘 만들었는데 점수가 낮다"가 된다. 그래서 1초 버킷
+	-- 링버퍼로 최근 PeakWindowSeconds(30초) 이동 평균을 재고, 그 최고치를 이번 판의 대표 DPS로 쓴다.
+	-- 표본이 한 바퀴(30초) 차기 전에는 창이 덜 찬 상태라 값이 튀므로 누적 DPS를 대신 쓴다.
+	property number PeakWindowSeconds = 30
+	property any _buckets = nil
+	property integer _bucketIdx = 1
+	property number _bucketTimer = 0
+	property number _peakDps = 0
+
 	-- ── CardManager / MonsterAI 훅(서버에서만 불린다) ─────────────────────────────
 	method any Tag(integer cardIdx, any target)
 		-- 바로 다음 피격의 출처 카드를 기록하고 대상을 그대로 돌려준다(호출부를 한 줄로 감싸기 위함)
@@ -44,6 +55,51 @@ script DpsMeterLogic extends Logic
 		if self._totals == nil then self._totals = {} end
 		self._totals[cardIdx] = (self._totals[cardIdx] or 0) + damage
 		self._dirty = true
+		-- 레이드용 이동 평균 버킷에도 같은 대미지를 넣는다
+		if self._buckets == nil then self:ResetBuckets() end
+		self._buckets[self._bucketIdx] = self._buckets[self._bucketIdx] + damage
+	end
+
+	method void ResetBuckets()
+		-- 1초 버킷 링버퍼를 0으로 채운다
+		local slots = math.floor(self.PeakWindowSeconds)
+		local t = {}
+		for i = 1, slots do t[i] = 0 end
+		self._buckets = t
+		self._bucketIdx = 1
+		self._bucketTimer = 0
+	end
+
+	method void TickBuckets(number delta)
+		-- 1초마다 다음 버킷으로 넘기고, 창이 다 찼으면 이동 평균 최고치를 갱신한다
+		if self._buckets == nil then self:ResetBuckets() end
+		self._bucketTimer = self._bucketTimer + delta
+		if self._bucketTimer < 1.0 then return end
+		self._bucketTimer = self._bucketTimer - 1.0
+		local slots = #self._buckets
+		if self._elapsed >= self.PeakWindowSeconds then
+			local sum = 0
+			for i = 1, slots do sum = sum + self._buckets[i] end
+			local avg = sum / self.PeakWindowSeconds
+			if avg > self._peakDps then self._peakDps = avg end
+		end
+		self._bucketIdx = self._bucketIdx + 1
+		if self._bucketIdx > slots then self._bucketIdx = 1 end
+		self._buckets[self._bucketIdx] = 0
+	end
+
+	-- 이번 판의 대표 DPS — RaidLogic이 판마다 이 값을 보스 피해량에 더한다.
+	-- 30초가 안 되는 짧은 판은 창이 덜 차서 이동 평균이 과대평가되므로 누적 DPS로 대체한다.
+	method number GetRunDps()
+		if self._elapsed < self.PeakWindowSeconds then
+			if self._elapsed <= 0 then return 0 end
+			local total = 0
+			if self._totals ~= nil then
+				for _, dmg in pairs(self._totals) do total = total + dmg end
+			end
+			return total / self._elapsed
+		end
+		return self._peakDps
 	end
 
 	@ExecSpace("ServerOnly")
@@ -55,6 +111,8 @@ script DpsMeterLogic extends Logic
 		self._snapshotTimer = 0
 		self._dirty = false
 		self.Snapshot = "0|"
+		self._peakDps = 0
+		self:ResetBuckets()
 		log("DpsMeterLogic: reset for new run")
 	end
 
@@ -64,6 +122,7 @@ script DpsMeterLogic extends Logic
 		if not _GameManager.GameStarted or _GameManager.GameOver then return end
 		if _GameManager:IsGamePaused() then return end
 		self._elapsed = self._elapsed + delta
+		self:TickBuckets(delta)
 		self._snapshotTimer = self._snapshotTimer + delta
 		if self._snapshotTimer < self.SnapshotInterval then return end
 		self._snapshotTimer = 0

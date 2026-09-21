@@ -1,0 +1,850 @@
+@Logic
+script RaidLogic extends Logic
+
+	-- 주간 레이드(마왕 발록) — 2026-09-21 유저 지정으로 **방치형**으로 재설계.
+	--
+	-- 컨셉: 본게임을 플레이해 키운 캐릭터들이, 내가 접속하지 않는 동안에도 보스를 계속 두들긴다.
+	--   · 본게임 한 판이 끝나면 그 판의 대표 DPS(DpsMeterLogic.GetRunDps — 최근 30초 이동 평균의
+	--     최고치)가 그 캐릭터의 "이번 시즌 누적 DPS"에 더해진다. 많이 플레이할수록 화력이 오른다.
+	--   · 누적 DPS 합(TotalDps)은 그대로 **초당 보스 피해량**이다. 실시간이 흐르는 만큼 보스 체력이
+	--     계속 깎인다(방치형) — 접속 중이든 아니든 똑같이 흐른다.
+	--   · 시즌은 **KST 월요일 0시 ~ 금요일 0시(4일)**. 금~일은 정산 구간이라 피해가 더 쌓이지 않고
+	--     등급이 확정되며, 그 사이 아무 때나 보상을 받을 수 있다.
+	--   · 24시간 이상 접속 기록이 없으면 캐릭터들이 **유령**이 된다 — 그 시점부터 피해 누적이 멈추고,
+	--     레이드 화면 중앙의 "부활!" 버튼을 눌러야 다시 때리기 시작한다.
+	--   · **지난 시즌 보상을 받아야 새 시즌이 시작된다**(유저 지정 2026-09-21). 미수령분이 남아 있으면
+	--     레이드 화면에 딤드가 깔리고 전투/피해 누적이 통째로 멈춘다. 중앙의 "보상 받기"를 누르는
+	--     순간 딤드가 걷히고 그 시점부터 새 시즌 시계가 돈다.
+	--     ⚠ 잠겨 있는 동안에도 **본게임 판의 누적 DPS는 그대로 쌓인다**(플레이한 판이 날아가지 않게).
+	--     쌓인 화력은 보상을 받은 순간부터 보스에게 들어가기 시작한다.
+	--
+	-- ── 보스 체력 역산(유저 지정 2026-09-21) ──────────────────────────────────────
+	-- 기준 두 개를 만족하도록 BossHp를 잡았다.
+	--   (S) 캐릭터 5개 × 하루 2판 × 15분 = 하루 10판 15분을 4일 → S(피해율 75%)
+	--   (F) 캐릭터 1개로 3~5분 1판만 하고 3일 방치 → F
+	--
+	-- 하루치를 그날 한가운데(정오)에 몰아서 한다고 보면, 누적 DPS는 10D → 20D → 30D → 40D로 오른다
+	-- (D = 15분 런 1판의 대표 DPS). 시즌 4일(345,600초) 동안 쌓이는 피해는
+	--     10D×86400 + 20D×86400 + 30D×86400 + 40D×43200 = 6,912,000 × D
+	-- 이게 S컷(75%)이 되어야 하므로  BossHp = 6,912,000 × D ÷ 0.75 = **9,216,000 × D**.
+	-- D는 실측값이 필요해 유저에게 물었고 **5,000**으로 확정 → BossHp = 46,080,000,000.
+	--
+	-- 이 기준으로 "하루에 15분 런을 몇 판 하느냐"에 따른 최종 등급은 이렇게 갈린다:
+	--     10판/일 → S(75%) · 6.7판 → A(50%) · 4.7판 → B(35%) · 2.7판 → C(20%)
+	--     1.3판 → D(10%) · 0.7판 → E(5%) · 그 미만 → F
+	-- (F 검산) 4분 런 1판(대표 DPS를 넉넉히 D와 같다고 쳐도) 3일 방치 = 259,200×D
+	--          → 259,200 ÷ 9,216,000 = 2.8% → E컷(5%) 미만이라 F. 실제로는 훨씬 더 낮다.
+	--
+	-- 재보정은 RefRunDps 한 줄만 고치면 전부 따라온다(로그의 "RaidLogic: +N DPS"가 실측 D다).
+	--
+	-- 저장: 유저별 저장소 1개 키("Raid")에 JSON으로 모아 담는다(계정 데이터는 전역 저장소 금지).
+
+	property string StorageKey = "Raid"
+
+	@Sync
+	property boolean Loaded = false
+
+	-- 현재 시즌(= KST 월요일 기준 주 번호)
+	@Sync
+	property integer SeasonIndex = 0
+
+	-- 이번 시즌 캐릭터 누적 DPS 합 = **초당 보스 피해량**
+	@Sync
+	property number TotalDps = 0
+
+	-- 지금까지 보스에게 넣은 누적 피해량(서버가 1초마다 내려준다 — 클라는 이 값만 보고 그린다)
+	@Sync
+	property number BossDamage = 0
+
+	-- 캐릭터별 누적 DPS — "0:120.5,3:80" (SyncTable 대신 CSV 문자열 한 줄로 내린다)
+	@Sync
+	property string CharDpsCsv = ""
+
+	-- 이번 시즌 보상을 이미 받았는가(받으면 로비 아이콘을 숨긴다)
+	@Sync
+	property boolean ClaimedThisSeason = false
+
+	-- 24시간 넘게 접속 기록이 없어 캐릭터들이 유령이 된 상태(부활 버튼을 눌러야 풀린다)
+	@Sync
+	property boolean IsGhost = false
+
+	-- 아직 안 받은 "지난 시즌" 보상 — 시즌이 넘어갈 때 그 시즌 최종 등급을 여기에 옮겨둔다
+	@Sync
+	property integer PendingSeason = -1
+
+	@Sync
+	property integer PendingGrade = -1
+
+	-- ── 해금 / 온보딩(유저 지정 2026-09-21) ───────────────────────────────────
+	-- 레이드는 **일반 게임 한 판을 끝내고 게임오버 팝업을 본 시점**에 열린다. 그전에는 로비
+	-- 우측 아이콘 자체가 없다(IsIconVisible). 열리는 순간 AnnouncePending을 켜서, 다음에 로비에
+	-- 서면 RaidTutorialUI가 "레이드가 생성되었습니다!" 배너를 한 번 띄우고 이 플래그를 끈다.
+	-- TutorialSeen은 이미지 튜토리얼(4단계)을 봤는지 — 보기 전까지는 재접속해도 로비 딤+손가락이 계속 뜬다.
+	--
+	-- ⚠ 로드 전 기본값 주의: Unlocked/AnnouncePending은 false(= 아무것도 안 뜸),
+	--   TutorialSeen은 true(= 안내 안 뜸)로 둬야 저장값을 읽기 전에 잘못 뜨지 않는다.
+	@Sync
+	property boolean Unlocked = false
+
+	@Sync
+	property boolean TutorialSeen = true
+
+	@Sync
+	property boolean AnnouncePending = false
+
+	-- ── 역산 파라미터(위 헤더의 계산식 그대로) ────────────────────────────────
+	-- 15분 버티는 한 판의 대표 DPS. **여기만 고치면 보스 체력/등급 컷이 전부 재보정된다.**
+	property number RefRunDps = 5000
+
+	-- BossHp = RefRunDps × 이 값. 9,216,000 = (10+20+30)×86400 + 40×43200 ÷ 0.75
+	property number HpPerRefDps = 9216000
+
+	-- 시즌 길이(일) — 유저 지정 2026-09-21 "월~목 4일"
+	property integer SeasonDays = 4
+
+	-- 이 시간 동안 접속 기록이 없으면 유령이 된다(유저 지정: 24시간)
+	property integer GhostSeconds = 86400
+
+	-- 접속 중에 "마지막 접속 시각"을 갱신(저장)하는 주기. 너무 짧으면 DataStorage 비용이 든다
+	property integer HeartbeatSeconds = 900
+
+	-- 클라에 누적 피해량을 내려주는 주기
+	property number DamagePushInterval = 1.0
+
+	-- 캐릭터 수(0=아르카나 1=실피드 2=레이온 3=쉐이드 4=린)
+	property integer CharacterCount = 5
+
+	-- 등급 컷(피해율 %) — F는 0부터. 인덱스 0=F … 6=S
+	property table GradeCuts = { 0, 5, 10, 20, 35, 50, 75 }
+
+	property table GradeNames = { "F", "E", "D", "C", "B", "A", "S" }
+
+	-- 레이드 보상 = 반지 라인(2026-09-21 유저 지정으로 나무 스태프 임시 보상에서 교체).
+	-- 반지는 레이드에서만 나온다 — 몬스터 드롭/방치 보상 풀(GearItemIdsByEpisode)엔 넣지 않았다.
+	property integer RewardItemId = 110002
+
+	-- 반지 강화 주문서도 같이 준다(2026-09-21 유저 지정). 반지 본체와 마찬가지로 **레이드에서만**
+	-- 나온다 — GameManager.TryDropEnhanceScroll의 몬스터 드롭 표엔 일부러 넣지 않았다.
+	-- 수량 = 보스 체력 등급 한 칸당 1장: F 1 / E 2 / D 3 / C 4 / B 5 / A 6 / S 7 (= gradeIndex + 1).
+	property integer RewardScrollItemId = 510006
+
+	-- 레이드 보상 품질 확률(1000분율) — 유저 지정 "최대 C, C는 약 7%". 나머지는 기존 드롭 표
+	-- (F35/E25/D18…)의 내림 곡선을 유지하면서 F~C 네 칸에 100%를 채웠다. 합 = 1000
+	property integer RewardQualityFPerMille = 450
+
+	property integer RewardQualityEPerMille = 300
+
+	property integer RewardQualityDPerMille = 180
+
+	property integer RewardQualityCPerMille = 70
+
+	property any _charDps = nil
+
+	property any _storage = nil
+
+	-- 마지막으로 정산(적분)을 끊은 시각과 그때까지의 누적 피해량
+	property number _damage = 0
+	property integer _lastTickSec = 0
+
+	-- _damage / _lastTickSec이 속한 시즌의 종료 시각(KST 금 0시). **저장해 두어야** 주를 건너뛰고
+	-- 접속했을 때 "지난 시즌 마감 시점"까지만 정산해 최종 등급을 올바로 낼 수 있다.
+	property integer _seasonEndSec = 0
+
+	-- 마지막 접속 시각(유령 판정 기준)
+	property integer _lastSeenSec = 0
+
+	-- 유령이라 피해 누적이 멈춘 시각(= 마지막 접속 + GhostSeconds). 0이면 접속 중이라 상한 없음
+	property integer _awayCapSec = 0
+
+	property number _pushTimer = 0
+	property number _beatTimer = 0
+
+	-- ── 입장 시 로드 ──────────────────────────────────────────────────────────
+	@ExecSpace("ServerOnly")
+	@EventSender("Service", "UserService")
+	handler HandleUserEnterEvent(UserEnterEvent event)
+		-- 유저별 저장소에서 시즌/누적/수령 상태를 읽고 시즌 경계와 유령 여부를 정리한다
+		local user = _UserService:GetUserEntityByUserId(event.UserId)
+		if user == nil then return end
+		self:LoadFor(user)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void LoadFor(Entity user)
+		-- 저장된 JSON을 복원 → 시즌 경계 정리 → 유령 판정 → 그 시점까지 피해를 정산한다
+		local ds = _DataStorageService:GetUserDataStorage(user.PlayerComponent.ProfileCode)
+		self._storage = ds
+		self._charDps = {}
+		local errorCode, raw = ds:GetAndWait(self.StorageKey)
+		-- 저장값이 아예 없는 신규 유저는 "아직 레이드가 없는" 상태로 시작한다(첫 게임오버에 열린다)
+		self.Unlocked = false
+		self.TutorialSeen = false
+		self.AnnouncePending = false
+		if errorCode == 0 and raw ~= nil and raw ~= "" then
+			local t = _HttpService:JSONDecode(raw)
+			if t ~= nil then
+				-- 이 필드들이 생기기 전(2026-09-21 이전) 저장분은 이미 레이드를 쓰던 유저다 —
+				-- 갑자기 잠기거나 안내가 뜨지 않도록 "해금 + 튜토리얼 봤음"으로 올려준다
+				if t["unl"] == nil then
+					self.Unlocked = true
+					self.TutorialSeen = true
+				else
+					self.Unlocked = t["unl"] == true
+					self.TutorialSeen = t["tut"] == true
+					self.AnnouncePending = t["ann"] == true
+				end
+				self.SeasonIndex = math.floor(tonumber(t["season"]) or 0)
+				self.ClaimedThisSeason = t["claimed"] == true
+				self.PendingSeason = math.floor(tonumber(t["pseason"]) or -1)
+				self.PendingGrade = math.floor(tonumber(t["pgrade"]) or -1)
+				self._damage = tonumber(t["dmg"]) or 0
+				self._lastTickSec = math.floor(tonumber(t["tick"]) or 0)
+				self._lastSeenSec = math.floor(tonumber(t["seen"]) or 0)
+				self._seasonEndSec = math.floor(tonumber(t["send"]) or 0)
+				local dpsCsv = t["dps"]
+				if dpsCsv ~= nil and dpsCsv ~= "" then self:ParseCharDps(dpsCsv) end
+			end
+		end
+		self.Loaded = true
+		-- 예전 저장분(시즌 마감 시각이 없던 형식)은 이번 시즌 기준으로 채운다 — 그때는 누적 피해가 0이라 안전하다
+		if self._seasonEndSec <= 0 then self._seasonEndSec = self:GetSeasonEndSec() end
+		-- 순서가 중요하다: 유령 상한을 먼저 정하고 → **지난 시즌 마감 시각까지** 정산한 뒤 → 시즌을 넘긴다.
+		-- 먼저 EnsureSeason을 부르면 누적 피해가 0으로 지워진 채 지난 시즌 최종 등급을 매기게 된다.
+		self:ResolveGhost()
+		self:SettleDamage()
+		self:PushDamage()
+		self:EnsureSeason()
+		self:PublishTotals()
+		self:Save()
+		log("RaidLogic: loaded season=" .. self.SeasonIndex
+			.. " dps=" .. string.format("%.1f", self.TotalDps)
+			.. " damage=" .. string.format("%.0f", self.BossDamage)
+			.. " (" .. string.format("%.2f", self:GetRatio() * 100) .. "%, " .. self:GetGradeName(self:GetGradeIndex()) .. ")"
+			.. " ghost=" .. tostring(self.IsGhost)
+			.. " claimed=" .. tostring(self.ClaimedThisSeason)
+			.. " pending=" .. self.PendingSeason .. "/" .. self.PendingGrade
+			.. " unlocked=" .. tostring(self.Unlocked)
+			.. " tutSeen=" .. tostring(self.TutorialSeen)
+			.. " announce=" .. tostring(self.AnnouncePending))
+	end
+
+	@ExecSpace("ServerOnly")
+	method void Save()
+		-- 로드 전(저장소 핸들 nil)에는 저장하지 않는다 — 빈 값으로 덮어쓰는 사고 방지
+		if self._storage == nil then return end
+		local t = {}
+		t["season"] = self.SeasonIndex
+		t["claimed"] = self.ClaimedThisSeason
+		t["pseason"] = self.PendingSeason
+		t["pgrade"] = self.PendingGrade
+		t["dps"] = self:BuildCharDpsCsv()
+		t["dmg"] = self._damage
+		t["tick"] = self._lastTickSec
+		t["seen"] = self._lastSeenSec
+		t["send"] = self._seasonEndSec
+		t["unl"] = self.Unlocked
+		t["tut"] = self.TutorialSeen
+		t["ann"] = self.AnnouncePending
+		self._storage:SetAsync(self.StorageKey, _HttpService:JSONEncode(t), function(code, key)
+			if code ~= 0 then log_warning("RaidLogic: save failed code=" .. tostring(code)) end
+		end)
+	end
+
+	-- ── 시각 / 시즌(월~목 4일) ────────────────────────────────────────────────
+	@ExecSpace("ServerOnly")
+	method integer NowSec()
+		-- 서버 UTC 현재 시각(초). DateTime.Elapsed = 0001-01-01부터의 밀리초 (IdleRewardLogic과 동일 기준)
+		return DateTime.UtcNow.Elapsed // 1000
+	end
+
+	method integer GetKstWeekElapsed()
+		-- KST 기준 "이번 주 월요일 0시"부터 지금까지 흐른 초. 율리우스 적일(JDN)은 월요일에 7의 배수다.
+		local kst = DateTime.UtcNow + TimeSpan.FromHours(9)
+		local a = (14 - kst.Month) // 12
+		local y = kst.Year + 4800 - a
+		local m = kst.Month + 12 * a - 3
+		local jdn = kst.Day + (153 * m + 2) // 5 + 365 * y + y // 4 - y // 100 + y // 400 - 32045
+		local dayOfWeek = jdn % 7 -- 0 = 월요일
+		return dayOfWeek * 86400 + kst.Hour * 3600 + kst.Minute * 60 + kst.Second
+	end
+
+	method integer GetCurrentSeason()
+		-- 시즌 번호 = KST 월요일 기준 주 번호(JDN//7)
+		local kst = DateTime.UtcNow + TimeSpan.FromHours(9)
+		local a = (14 - kst.Month) // 12
+		local y = kst.Year + 4800 - a
+		local m = kst.Month + 12 * a - 3
+		local jdn = kst.Day + (153 * m + 2) // 5 + 365 * y + y // 4 - y // 100 + y // 400 - 32045
+		return jdn // 7
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer GetSeasonEndSec()
+		-- 이번 시즌이 끝나는 시각(KST 금요일 0시)을 NowSec과 같은 기준으로 돌려준다.
+		-- KST 보정(+9h)은 "주 시작 시각"을 구할 때 서로 상쇄되므로 그대로 빼면 된다.
+		return self:NowSec() - self:GetKstWeekElapsed() + self.SeasonDays * 86400
+	end
+
+	-- 이번 시즌 종료까지 남은 초(레이드 화면의 "남은시간"). 끝났으면 0 — 서버/클라 공용
+	method integer GetSeasonRemainSeconds()
+		local remain = self.SeasonDays * 86400 - self:GetKstWeekElapsed()
+		if remain < 0 then return 0 end
+		return remain
+	end
+
+	-- 지금이 공격 가능한 구간인가(월~목). 금~일은 정산 구간이라 누적도 피해도 멈춘다
+	method boolean IsSeasonActive()
+		return self:GetKstWeekElapsed() < self.SeasonDays * 86400
+	end
+
+	@ExecSpace("ServerOnly")
+	method void EnsureSeason()
+		-- 주가 넘어갔으면: 지난 시즌을 미수령 보상으로 옮기고(이미 받았으면 버린다) 누적/피해를 0으로 되돌린다
+		local now = self:GetCurrentSeason()
+		if self.SeasonIndex == now then return end
+		if self.SeasonIndex > 0 and not self.ClaimedThisSeason then
+			-- 지난 시즌 최종 등급은 "그 시즌 마감 시각까지" 정산한 피해로 매긴다(_seasonEndSec이 상한)
+			self:SettleDamage()
+			self:PushDamage()
+			local grade = self:GetGradeIndex()
+			self.PendingSeason = self.SeasonIndex
+			self.PendingGrade = grade
+			log("RaidLogic: season " .. self.SeasonIndex .. " closed, pending reward grade=" .. self:GetGradeName(grade))
+		end
+		self.SeasonIndex = now
+		self.ClaimedThisSeason = false
+		self._charDps = {}
+		self._damage = 0
+		self._lastTickSec = self:NowSec()
+		self._seasonEndSec = self:GetSeasonEndSec()
+		self:PublishTotals()
+		self:Save()
+		log("RaidLogic: new season " .. now .. " started (accumulation reset)")
+	end
+
+	-- ── 방치형 누적 피해 ───────────────────────────────────────────────────────
+	@ExecSpace("ServerOnly")
+	method integer GetEffectiveNowSec()
+		-- 피해 적분의 상한 시각. 시즌 종료(금 0시)와 유령이 된 시각 중 먼저 오는 쪽에서 멈춘다.
+		-- ⚠ 시즌 종료는 "지금 주"가 아니라 **누적 피해가 속한 시즌**의 마감 시각(_seasonEndSec)이다.
+		local now = self:NowSec()
+		-- 지난 시즌 미수령 보상이 남아 있으면 새 시즌은 아직 "시작 전"이다(유저 지정 2026-09-21).
+		-- 보상을 받는 순간 RequestClaim이 _lastTickSec를 현재로 당겨 시계가 비로소 돌기 시작한다.
+		if self:HasPendingReward() and self._lastTickSec > 0 then return self._lastTickSec end
+		if self._seasonEndSec > 0 and now > self._seasonEndSec then now = self._seasonEndSec end
+		if self._awayCapSec > 0 and now > self._awayCapSec then now = self._awayCapSec end
+		return now
+	end
+
+	@ExecSpace("ServerOnly")
+	method number ComputeDamage()
+		-- 저장된 누적 + (현재 DPS × 마지막 정산 이후 흐른 시간). 저장을 안 해도 값이 정확하다
+		local eff = self:GetEffectiveNowSec()
+		if self._lastTickSec <= 0 then return self._damage end
+		if eff <= self._lastTickSec then return self._damage end
+		return self._damage + self.TotalDps * (eff - self._lastTickSec)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SettleDamage()
+		-- 적분 구간을 지금까지로 끊는다. **TotalDps가 바뀌기 직전에 반드시 먼저 불러야 한다**
+		-- (안 그러면 이미 흘러간 시간까지 새 DPS로 소급 계산된다).
+		local eff = self:GetEffectiveNowSec()
+		if self._lastTickSec <= 0 then
+			self._lastTickSec = eff
+			return
+		end
+		if eff <= self._lastTickSec then return end
+		self._damage = self._damage + self.TotalDps * (eff - self._lastTickSec)
+		self._lastTickSec = eff
+	end
+
+	@ExecSpace("ServerOnly")
+	method void PushDamage()
+		-- 클라가 보는 누적 피해량 갱신(HP바/등급이 전부 이 값을 읽는다)
+		self.BossDamage = self:ComputeDamage()
+	end
+
+	-- ── 유령 / 부활 ───────────────────────────────────────────────────────────
+	@ExecSpace("ServerOnly")
+	method void ResolveGhost()
+		-- 접속 시 1회. 마지막 접속으로부터 GhostSeconds가 지났으면 유령이 되고, 피해 누적의 상한을
+		-- "유령이 된 순간"으로 막는다. (정산 자체는 호출부가 바로 뒤에 SettleDamage로 한다)
+		local now = self:NowSec()
+		if self._lastSeenSec <= 0 then
+			-- 처음 보는 유저 — 지금부터 센다
+			self._lastSeenSec = now
+			self._awayCapSec = 0
+			self.IsGhost = false
+		elseif now - self._lastSeenSec > self.GhostSeconds then
+			self._awayCapSec = self._lastSeenSec + self.GhostSeconds
+			self.IsGhost = true
+			log("RaidLogic: ghost — away for " .. tostring((now - self._lastSeenSec) // 3600) .. "h")
+		else
+			self._awayCapSec = 0
+			self._lastSeenSec = now
+			self.IsGhost = false
+		end
+	end
+
+	@ExecSpace("Server")
+	method void RequestRevive()
+		-- 레이드 화면 중앙 "부활!" 버튼 — 여기서부터 다시 때리기 시작한다
+		if not self.Loaded then return end
+		if not self.IsGhost then return end
+		self:SettleDamage()
+		local now = self:NowSec()
+		self._awayCapSec = 0
+		self._lastSeenSec = now
+		self._lastTickSec = now
+		self.IsGhost = false
+		self:PushDamage()
+		self:Save()
+		log("RaidLogic: revived")
+		self:NotifyRevived()
+	end
+
+	@ExecSpace("Client")
+	method void NotifyRevived()
+		-- 클라 토스트(레이드 화면 밖에서도 보이도록 UI가 아니라 토스트로 알린다)
+		_UIToast:ShowMessage("캐릭터들이 부활했어요! 다시 보스를 공격합니다")
+	end
+
+	-- ── 서버 틱 ───────────────────────────────────────────────────────────────
+	@ExecSpace("ServerOnly")
+	method void OnUpdate(number delta)
+		-- 1초마다 누적 피해를 클라에 내려주고, 15분마다 "마지막 접속 시각"을 저장한다.
+		-- ⚠ 피해 계산 자체는 시간 적분이라 틱이 끊겨도(오프라인) 값이 정확하다 — 이 틱은 표시/생존신고용.
+		if not self.Loaded then return end
+		self._pushTimer = self._pushTimer + delta
+		if self._pushTimer >= self.DamagePushInterval then
+			self._pushTimer = 0
+			self:PushDamage()
+		end
+		if self.IsGhost then return end
+		self._beatTimer = self._beatTimer + delta
+		if self._beatTimer >= self.HeartbeatSeconds then
+			self._beatTimer = 0
+			-- 접속 중에는 계속 "지금 접속해 있다"고 찍어 둔다(장시간 접속 후 재방문 때 억울한 유령 방지)
+			self._lastSeenSec = self:NowSec()
+			self:Save()
+		end
+	end
+
+	-- ── 누적 DPS ─────────────────────────────────────────────────────────────
+	@ExecSpace("ServerOnly")
+	method void AddRunDps(integer characterIndex, number dps)
+		-- 본게임 한 판이 끝날 때 GameManager가 호출한다(이어하기로 판이 이어지면 늘어난 만큼만 들어온다)
+		if not self.Loaded then return end
+		if dps <= 0 then return end
+		self:EnsureSeason()
+		if not self:IsSeasonActive() then
+			log("RaidLogic: run ignored — season closed (Fri~Sun)")
+			return
+		end
+		-- ⚠ DPS(=피해 속도)를 바꾸기 전에 먼저 지금까지를 정산해야 한다
+		self:SettleDamage()
+		if self._charDps == nil then self._charDps = {} end
+		self._charDps[characterIndex] = (self._charDps[characterIndex] or 0) + dps
+		self:PublishTotals()
+		self:Save()
+		log("RaidLogic: +" .. string.format("%.1f", dps) .. " DPS (char " .. characterIndex .. ") -> rate "
+			.. string.format("%.1f", self.TotalDps) .. "/s, damage " .. string.format("%.0f", self.BossDamage)
+			.. " (" .. string.format("%.2f", self:GetRatio() * 100) .. "%, "
+			.. self:GetGradeName(self:GetGradeIndex()) .. ")")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void PublishTotals()
+		-- 캐릭터별 누적을 합산해 @Sync 값으로 내려준다
+		local total = 0
+		if self._charDps ~= nil then
+			for _, dps in pairs(self._charDps) do total = total + dps end
+		end
+		self.TotalDps = total
+		self.CharDpsCsv = self:BuildCharDpsCsv()
+		self:PushDamage()
+	end
+
+	method string BuildCharDpsCsv()
+		-- "0:120.5,3:80.0" — 캐릭터 인덱스 오름차순
+		if self._charDps == nil then return "" end
+		local parts = {}
+		for i = 0, self.CharacterCount - 1 do
+			local dps = self._charDps[i]
+			if dps ~= nil and dps > 0 then
+				table.insert(parts, tostring(i) .. ":" .. string.format("%.1f", dps))
+			end
+		end
+		return table.concat(parts, ",")
+	end
+
+	method void ParseCharDps(string csv)
+		-- BuildCharDpsCsv의 역변환(서버 로드용)
+		self._charDps = {}
+		for token in string.gmatch(csv, "[^,]+") do
+			local colon = string.find(token, ":", 1, true)
+			if colon ~= nil then
+				local idx = math.floor(tonumber(string.sub(token, 1, colon - 1)) or -1)
+				local dps = tonumber(string.sub(token, colon + 1)) or 0
+				if idx >= 0 and dps > 0 then self._charDps[idx] = dps end
+			end
+		end
+	end
+
+	-- 클라이언트도 쓰는 파서 — { {char=, dps=}, ... } 내림차순
+	method table ParseCharDpsCsv()
+		local rows = {}
+		local raw = self.CharDpsCsv
+		if raw == nil or raw == "" then return rows end
+		for token in string.gmatch(raw, "[^,]+") do
+			local colon = string.find(token, ":", 1, true)
+			if colon ~= nil then
+				local idx = math.floor(tonumber(string.sub(token, 1, colon - 1)) or -1)
+				local dps = tonumber(string.sub(token, colon + 1)) or 0
+				if idx >= 0 then table.insert(rows, { char = idx, dps = dps }) end
+			end
+		end
+		table.sort(rows, function(a, b) return a.dps > b.dps end)
+		return rows
+	end
+
+	-- 캐릭터 고유 아트(캐릭터 선택 팝업과 같은 리소스) — 레이드 화면/DPS창이 쓴다.
+	-- ⚠ 유저 계정 아바타가 아니라 캐릭터 그 자체 이미지다(유저 지정 2026-09-20).
+	method string GetCharacterIcon(integer charIdx)
+		if charIdx == 0 then return "f13366e4ab0c4523b3f96f131aafbe85"
+		elseif charIdx == 1 then return "c8d5851228a844da80c8c94586b06aa7"
+		elseif charIdx == 2 then return "c26beb96e46e41289ecd838a62c60da1"
+		elseif charIdx == 3 then return "a8348a83ab4343409cd461ddd83c6730"
+		elseif charIdx == 4 then return "e64d2ef49017475b925f18c98510ee7f"
+		end
+		return ""
+	end
+
+	-- ── 등급 ────────────────────────────────────────────────────────────────
+	method number GetBossHp()
+		-- 역산 결과(헤더 주석 참고). RefRunDps만 바꾸면 전부 따라온다
+		return self.RefRunDps * self.HpPerRefDps
+	end
+
+	method number GetRatio()
+		-- 보스 HP 대비 피해율(0~1). 100%를 넘겨도 1로 자른다
+		local hp = self:GetBossHp()
+		if hp <= 0 then return 0 end
+		local r = self.BossDamage / hp
+		if r > 1 then return 1 end
+		return r
+	end
+
+	method integer GetGradeIndex()
+		-- 현재 피해율의 등급(0=F … 6=S)
+		local percent = self:GetRatio() * 100
+		local grade = 0
+		for i = 1, #self.GradeCuts do
+			if percent >= self.GradeCuts[i] then grade = i - 1 end
+		end
+		return grade
+	end
+
+	method string GetGradeName(integer gradeIndex)
+		if gradeIndex < 0 or gradeIndex >= #self.GradeNames then return "-" end
+		return self.GradeNames[gradeIndex + 1]
+	end
+
+	method integer GetMaxGradeIndex()
+		return #self.GradeNames - 1
+	end
+
+	-- ── 수령 ────────────────────────────────────────────────────────────────
+	method boolean HasPendingReward()
+		return self.PendingSeason >= 0 and self.PendingGrade >= 0
+	end
+
+	method boolean CanClaimNow()
+		-- 지난 시즌 미수령분은 언제든. 이번 시즌은 (1) 정산 구간(금~일)에 들어갔거나
+		-- (2) 진행 중이라도 S를 찍었으면 조기 수령할 수 있다.
+		if not self.Loaded then return false end
+		if self:HasPendingReward() then return true end
+		if self.ClaimedThisSeason then return false end
+		if not self:IsSeasonActive() then return true end
+		return self:GetGradeIndex() >= self:GetMaxGradeIndex()
+	end
+
+	-- 로비 아이콘 노출 여부 — 수령까지 끝낸 시즌에는 숨긴다(유저 지정)
+	method boolean IsIconVisible()
+		if not self.Loaded then return false end
+		-- 첫 판을 끝내기 전에는 레이드 자체가 없다(유저 지정 2026-09-21)
+		if not self.Unlocked then return false end
+		if self:HasPendingReward() then return true end
+		return not self.ClaimedThisSeason
+	end
+
+	-- ── 해금 / 온보딩 ────────────────────────────────────────────────────────
+	@ExecSpace("ServerOnly")
+	method void NotifyGameOverUnlock()
+		-- GameManager.TriggerGameOver가 호출 — 첫 게임오버(= 게임오버 팝업을 본 시점)에 레이드가 열린다.
+		-- 두 번째부터는 아무 일도 하지 않는다
+		if not self.Loaded then return end
+		if self.Unlocked then return end
+		self.Unlocked = true
+		self.TutorialSeen = false
+		-- 다음에 로비에 서면 "레이드가 생성되었습니다!" 배너를 띄우라는 표시
+		self.AnnouncePending = true
+		self:Save()
+		log("RaidLogic: raid unlocked by first game over")
+	end
+
+	@ExecSpace("Server")
+	method void MarkAnnounceShown()
+		-- 클라(RaidTutorialUI)가 배너를 실제로 띄운 뒤 호출 — 다음 접속에 또 뜨지 않게 저장한다
+		if not self.Loaded then return end
+		if not self.AnnouncePending then return end
+		self.AnnouncePending = false
+		self:Save()
+		log("RaidLogic: unlock banner marked as shown")
+	end
+
+	@ExecSpace("Server")
+	method void MarkTutorialSeen()
+		-- 이미지 튜토리얼을 닫은 순간 호출 — 이후로는 아이콘을 누르면 바로 레이드로 들어간다
+		if not self.Loaded then return end
+		if self.TutorialSeen then return end
+		self.TutorialSeen = true
+		self.AnnouncePending = false
+		self:Save()
+		log("RaidLogic: raid tutorial marked as seen")
+	end
+
+	@ExecSpace("Server")
+	method void RequestClaim()
+		-- 클라 "받기" 버튼 → 서버에서 등급 확정 후 보상 지급
+		if not self.Loaded then return end
+		self:EnsureSeason()
+		self:PushDamage()
+		if not self:CanClaimNow() then
+			log("RaidLogic: claim rejected (nothing to claim)")
+			self:NotifyClaimResult(false, -1)
+			return
+		end
+		local grade = self.PendingGrade
+		local fromPending = self:HasPendingReward()
+		if not fromPending then grade = self:GetGradeIndex() end
+		if not self:GrantReward(grade, senderUserId) then
+			self:NotifyClaimResult(false, grade)
+			return
+		end
+		if fromPending then
+			self.PendingSeason = -1
+			self.PendingGrade = -1
+			-- 지난 시즌 보상을 받는 순간이 곧 **새 시즌 시작 시점**이다(유저 지정 2026-09-21).
+			-- 여기서 시계를 현재로 당겨야 "잠겨 있던 동안"이 피해로 소급 계산되지 않는다.
+			self._lastTickSec = self:NowSec()
+			self:PushDamage()
+		else
+			self.ClaimedThisSeason = true
+		end
+		self:Save()
+		log("RaidLogic: claimed grade=" .. self:GetGradeName(grade) .. " (pending=" .. tostring(fromPending) .. ")")
+		self:NotifyClaimResult(true, grade)
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer RollRewardQuality()
+		-- 레이드 보상 품질 — 유저 지정으로 **C가 상한**이다(B/A/S는 나오지 않는다).
+		-- 몬스터 드롭용 공용 품질표를 쓰면 S까지 나와버리므로 여기서 따로 굴린다.
+		local roll = _UtilLogic:RandomIntegerRange(1, 1000)
+		local cut = self.RewardQualityFPerMille
+		if roll <= cut then return _QualityEnum.F end
+		cut = cut + self.RewardQualityEPerMille
+		if roll <= cut then return _QualityEnum.E end
+		cut = cut + self.RewardQualityDPerMille
+		if roll <= cut then return _QualityEnum.D end
+		return _QualityEnum.C
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean GrantReward(integer gradeIndex, string userId)
+		-- 레이드 등급(F~S)이 높을수록 좋은 **장비 등급**의 반지를 준다. 품질은 등급과 무관하게
+		-- RollRewardQuality()로 따로 굴리고 C가 상한이다(유저 지정).
+		local grades = { _GearGradeEnum.None, _GearGradeEnum.Magic, _GearGradeEnum.Rare, _GearGradeEnum.Rare,
+			_GearGradeEnum.Epic, _GearGradeEnum.Unique, _GearGradeEnum.Legendary }
+		local slot = gradeIndex + 1
+		if slot < 1 then slot = 1 end
+		if slot > #grades then slot = #grades end
+		if not _InventoryExpandLogic:HasRoomFor(userId, self.RewardItemId) then
+			log("RaidLogic: reward blocked — inventory tab full")
+			return false
+		end
+		-- 주문서는 반지(정원 판정 없는 액세서리)와 달리 기타 탭 정원을 쓴다. 여기서 먼저 막아야
+		-- 수령이 "성공"으로 소모되면서 주문서만 조용히 사라지는 일이 없다 — false로 돌려주면
+		-- PendingGrade가 그대로 남아 인벤을 정리한 뒤 다시 받을 수 있다.
+		if not _InventoryExpandLogic:HasRoomFor(userId, self.RewardScrollItemId) then
+			log("RaidLogic: reward blocked — etc tab full (ring scroll)")
+			return false
+		end
+		local quality = self:RollRewardQuality()
+		local createParam = _GameManager:BuildGearCreateParamForGradeQuality(self.RewardItemId, grades[slot], quality)
+		local errorCode = _ItemFactoryLogic:TryAddItem(userId, createParam, ItemCreateResultStruct())
+		if errorCode ~= _ErrorCodeEnum.Success then
+			log_error("RaidLogic: reward add failed err=" .. tostring(errorCode))
+			return false
+		end
+		_CharacterUnlockLogic:AddGearCollected(1)
+		_FirstWeaponGuaranteeLogic:OnGearGranted(self.RewardItemId)
+
+		-- 반지 강화 주문서 — 등급 한 칸당 1장(F 1 … S 7). 반지는 이미 들어갔으니 여기서 실패해도
+		-- 수령 자체는 성공으로 둔다(로그만 남긴다)
+		local scrollCount = self:GetRewardScrollCount(gradeIndex)
+		local scrollParam = ItemCreateParamStruct()
+		scrollParam.ItemId = self.RewardScrollItemId
+		scrollParam.ItemCount = scrollCount
+		local scrollError = _ItemFactoryLogic:TryAddItem(userId, scrollParam, ItemCreateResultStruct())
+		if scrollError ~= _ErrorCodeEnum.Success then
+			log_error("RaidLogic: reward scroll add failed err=" .. tostring(scrollError))
+		else
+			log("RaidLogic: reward scroll x" .. scrollCount .. " granted (grade=" .. self:GetGradeName(gradeIndex) .. ")")
+		end
+		return true
+	end
+
+	method integer GetRewardScrollCount(integer gradeIndex)
+		-- 보스 체력 등급이 한 칸 오를 때마다 1장씩(F 1 / E 2 / D 3 / C 4 / B 5 / A 6 / S 7)
+		if gradeIndex == nil or gradeIndex < 0 then
+			return 1
+		end
+
+		local maxIndex = self:GetMaxGradeIndex()
+		if gradeIndex > maxIndex then
+			gradeIndex = maxIndex
+		end
+
+		return gradeIndex + 1
+	end
+
+	@ExecSpace("Client")
+	method void NotifyClaimResult(boolean success, integer gradeIndex)
+		-- 수령 결과 토스트(팝업 쪽 표시는 RaidUI가 매 프레임 갱신하며 알아서 따라온다)
+		if success then
+			_UIToast:ShowMessage("주간 레이드 " .. self:GetGradeName(gradeIndex) .. " 등급 보상 + 반지 강화 주문서 "
+				.. self:GetRewardScrollCount(gradeIndex) .. "장을 받았어요!")
+		else
+			_UIToast:ShowMessage("지금은 받을 수 있는 레이드 보상이 없어요")
+		end
+	end
+
+	-- ── 레이드 맵 입출입 ──────────────────────────────────────────────────────
+	-- 전투는 월드(Raid_1)에서 실제로 벌어지므로 플레이어를 그 맵으로 옮긴다. 화면 위에는 RaidUI가
+	-- 액자 HUD를 덮어 "팝업 안에서 보는" 그림을 만든다.
+	property string RaidMapName = "Raid_1"
+
+	-- 카메라가 플레이어를 따라가므로, 캐릭터들(x 2.2~5.8)과 보스(x 7.4)의 가운데에 세운다
+	property Vector3 RaidEnterPosition = Vector3(4.6, -2.5, 0)
+
+	@ExecSpace("Server")
+	method void RequestEnterRaid()
+		local user = _UserService:GetUserEntityByUserId(senderUserId)
+		if not isvalid(user) then return end
+		_TeleportService:TeleportToMapPosition(user, self.RaidEnterPosition, self.RaidMapName)
+		log("RaidLogic: user entered raid map")
+	end
+
+	-- 복귀 맵을 못 받았을 때의 폴백(레이드 맵에 갇히지 않게)
+	property string LobbyMapName = "map01"
+
+	@ExecSpace("Server")
+	method void RequestExitRaid(string returnMap, Vector3 returnPos)
+		-- 들어오기 전 맵/좌표로 그대로 되돌린다(로비면 로비, 인게임이면 그 자리)
+		local user = _UserService:GetUserEntityByUserId(senderUserId)
+		if not isvalid(user) then return end
+		if returnMap == nil or returnMap == "" or returnMap == self.RaidMapName then
+			returnMap = self.LobbyMapName
+			returnPos = Vector3(0, 0, 0)
+		end
+		_TeleportService:TeleportToMapPosition(user, returnPos, returnMap)
+		log("RaidLogic: user left raid map -> " .. returnMap)
+	end
+
+	-- ── 테스트 전용 ───────────────────────────────────────────────────────────
+	-- Maker 콘솔 스크립트는 클라 컨텍스트에서 돌아가므로 ServerOnly면 조용히 무시된다.
+	-- 그래서 디버그용만 @ExecSpace("Server")로 열어 둔다(클라에서 부르면 서버로 넘어간다).
+	@ExecSpace("Server")
+	method void DebugAddDps(integer characterIndex, number dps)
+		self:AddRunDps(characterIndex, dps)
+	end
+
+	@ExecSpace("Server")
+	method void DebugAddHours(number hours)
+		-- 그만큼 방치한 것처럼 만든다(마지막 정산/접속 시각을 과거로 당긴다).
+		-- 유령 테스트는 24시간 이상을 넣고 다시 LoadFor/ResolveGhost를 태우면 된다.
+		local shift = math.floor(hours * 3600)
+		self._lastTickSec = self._lastTickSec - shift
+		self._lastSeenSec = self._lastSeenSec - shift
+		if self._awayCapSec > 0 then self._awayCapSec = self._awayCapSec - shift end
+		self:PushDamage()
+		self:Save()
+		log("RaidLogic: debug +" .. string.format("%.2f", hours) .. "h -> damage="
+			.. string.format("%.0f", self.BossDamage) .. " (" .. string.format("%.2f", self:GetRatio() * 100)
+			.. "%, " .. self:GetGradeName(self:GetGradeIndex()) .. ")")
+	end
+
+	@ExecSpace("Server")
+	method void DebugMakePending(integer grade)
+		-- 지난 시즌 미수령 보상이 남은 상태를 만든다(새 시즌 잠금/딤드 테스트용)
+		self.PendingSeason = self.SeasonIndex - 1
+		self.PendingGrade = grade
+		self:PushDamage()
+		self:Save()
+		log("RaidLogic: debug pending=" .. self.PendingSeason .. "/" .. self:GetGradeName(grade))
+	end
+
+	@ExecSpace("Server")
+	method void DebugMakeGhost()
+		-- 마지막 접속을 25시간 전으로 밀고 유령 판정을 다시 돌린다
+		self._lastSeenSec = self:NowSec() - (self.GhostSeconds + 3600)
+		self:ResolveGhost()
+		self:SettleDamage()
+		self:PushDamage()
+		self:Save()
+		log("RaidLogic: debug ghost=" .. tostring(self.IsGhost))
+	end
+
+	@ExecSpace("Server")
+	method void DebugLockRaid()
+		-- 레이드를 "아직 안 열린" 상태로 되돌린다(해금 배너 → 로비 딤/손가락 → 이미지 튜토리얼 전체 재현용).
+		-- 이 상태에서 일반 게임을 한 판 끝내면 NotifyGameOverUnlock이 다시 돈다
+		self.Unlocked = false
+		self.TutorialSeen = false
+		self.AnnouncePending = false
+		self:Save()
+		log("RaidLogic: debug raid locked (unlocked=false, tutSeen=false)")
+	end
+
+	@ExecSpace("Server")
+	method void DebugResetTutorial()
+		-- 해금은 유지한 채 안내만 다시 보게 한다(배너 + 딤/손가락 + 이미지 튜토리얼)
+		self.Unlocked = true
+		self.TutorialSeen = false
+		self.AnnouncePending = true
+		self:Save()
+		log("RaidLogic: debug tutorial reset (announce + guide will show again)")
+	end
+
+	@ExecSpace("Server")
+	method void DebugResetSeason()
+		-- 이번 시즌 누적/피해/수령 상태를 싹 비운다(지난 시즌 미수령분도 제거)
+		self._charDps = {}
+		self._damage = 0
+		self._lastTickSec = self:NowSec()
+		self._lastSeenSec = self:NowSec()
+		self._seasonEndSec = self:GetSeasonEndSec()
+		self._awayCapSec = 0
+		self.IsGhost = false
+		self.ClaimedThisSeason = false
+		self.PendingSeason = -1
+		self.PendingGrade = -1
+		self:PublishTotals()
+		self:Save()
+		log("RaidLogic: debug reset")
+	end
+
+end

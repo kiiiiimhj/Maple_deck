@@ -25,6 +25,12 @@ script GearEffectLogic extends Logic
 	property integer CapeGrade = -1
 	property integer GloveGrade = -1
 
+	-- 반지(2026-09-21 신설, 레이드 보상). 다른 부위와 달리 등급 스킬이 등급마다 고정이 아니라
+	-- 드롭 시 확정된 RingStatType(1~5 = 공격력/치명타 확률/치명타 피해/최대 체력/스킬 쿨타임)
+	-- 1종에 RingBonus(1~3%)가 붙는다. 노말(스킬 없음)은 RingStatType을 보지 않는다.
+	property integer RingGrade = -1
+	property integer RingStatType = 0
+
 	-- 장착 중인 무기의 ATK(고정값) — 유저 지정: 배율이 아니라 모든 공격 대미지에 그대로 더한다.
 	-- 미장착이면 0. 방어구 라인은 ATK가 0이라 자연히 영향 없음
 	property integer WeaponAtk = 0
@@ -38,6 +44,10 @@ script GearEffectLogic extends Logic
 	property number HelmBonus = 0
 	property number CapeBonus = 0
 	property number GloveBonus = 0
+	property number RingBonus = 0
+
+	-- 반지 ATK(무기/투구와 같은 고정값 가산). 반지는 ATK와 HP를 동시에 갖는 유일한 부위다
+	property integer RingAtk = 0
 
 	-- 자마다르 레전더리의 "{C}% 확률" 부분(ProcChancePerMille 환산) / 활 레전더리의 추가공격 확률
 	property number WeaponProcChance = 0
@@ -113,6 +123,10 @@ script GearEffectLogic extends Logic
 		self.ShieldRemain = 0
 		self.GloveKillBuffReady = false
 		self.GlovePowerAttackReady = false
+		self.RingGrade = -1
+		self.RingStatType = 0
+		self.RingBonus = 0
+		self.RingAtk = 0
 	end
 
 	-- 런 시작 시 1회 — 장착 중인 5부위를 읽어 이번 런 동안 고정한다. userId는 CardManager
@@ -186,6 +200,28 @@ script GearEffectLogic extends Logic
 			end
 		end
 
+		-- 반지 — 등급 스킬 종류(SkillVariant)까지 같이 읽어야 어떤 스탯에 붙일지 정해진다.
+		-- 메인 옵션은 공격력/최대 체력 중 **한쪽뿐**이라(유저 지정 2026-09-21) 강화 레벨 보너스도
+		-- 그 한쪽에만 얹는다. 체력형이면 아래 HP 합산에 ringHp로 넘긴다.
+		local ring = inventory:GetAttachedGearItemStruct(job, _GearCategoryEnum.Ring)
+		local ringHp = 0
+		if ring ~= nil and ring.ItemId == _WeaponTierDataLogic.RingItemId then
+			local s = ring:GetGearStruct()
+			if s ~= nil then
+				self.RingGrade = s.Grade
+				-- 등급 스킬 변형은 등급마다 따로 굴려져 있다 — 지금 등급의 것을 꺼낸다
+				-- (옛 아이템은 헬퍼가 기존 SkillVariant 한 값으로 폴백)
+				self.RingStatType = _WeaponTierDataLogic:GetSkillVariantForGrade(s, s.Grade)
+				self.RingBonus = s.BonusPercentPerMille / 1000.0
+				local ringLevelBonus = _EnhanceScrollLogic:GetStatBonusForLevel(s.Level)
+				if s.MainStatType == _WeaponTierDataLogic.RingMainStatHp then
+					ringHp = s.Hp + ringLevelBonus
+				else
+					self.RingAtk = s.Atk + ringLevelBonus
+				end
+			end
+		end
+
 		-- 슈트의 HP 스탯(고정값) — 유저 지정: 공격력과 동일하게 런 시작 시 최대 체력에 그대로 더한다.
 		-- 망토 유니크의 체력 %는 이 가산이 끝난 뒤에 곱해야 "장비로 올린 체력에도 %가 붙는" 자연스러운
 		-- 순서가 된다(가산 → 배율 순).
@@ -206,6 +242,13 @@ script GearEffectLogic extends Logic
 				end
 			end
 		end
+		-- 반지 HP는 위 루프에 넣지 않고 따로 더한다 — 루프는 "HP 라인" 전용이라 StatField이 Atk로
+		-- 등록된 반지를 걸러내고, 강화 레벨 보너스도 이미 위에서 ringHp에 얹어뒀다(이중 적용 방지).
+		-- 공격력형 반지면 ringHp가 0이라 아무 영향이 없다
+		if ringHp > 0 then
+			suitHp = suitHp + ringHp
+		end
+
 		if suitHp > 0 then
 			_GameManager.PlayerMaxHp = _GameManager.PlayerMaxHp + suitHp
 		end
@@ -228,12 +271,24 @@ script GearEffectLogic extends Logic
 		log("GearEffectLogic.InitForRun: weapon=" .. self.WeaponItemId .. "/g" .. self.WeaponGrade
 			.. " suit=" .. self.SuitItemId .. "/g" .. self.SuitGrade
 			.. " helm=g" .. self.HelmGrade .. " glove=g" .. self.GloveGrade .. " cape=g" .. self.CapeGrade
+			.. " ring=g" .. self.RingGrade .. "/skill" .. self.RingStatType
+			.. "/atk" .. self.RingAtk .. "/hp" .. ringHp .. "/" .. string.format("%.1f", self.RingBonus * 100) .. "%"
 			.. " shield=" .. self.ShieldRemain)
 	end
 
 	-- ── 장착 판정 헬퍼 ───────────────────────────────────────────────────
 	-- "그 부위에 그 라인이, 정확히 그 등급으로 장착돼 있는가". 등급 스킬은 상위 등급이 하위 등급
 	-- 효과를 포함하지 않고 등급마다 완전히 교체되므로(유저 표) 전부 정확히 일치 비교다.
+
+	-- 반지 전용 판정 — 다른 부위는 "등급"으로 효과가 갈리지만 반지는 **그 등급에 굴려져 있는**
+	-- 스킬 종류(1~5)로 갈린다(InitForRun이 현재 등급의 값을 RingStatType에 담아둔다).
+	-- 노말(스킬 없음)과 미장착(-1)은 항상 false.
+	method boolean HasRingStat(integer statType)
+		if self.RingGrade < _GearGradeEnum.Magic then
+			return false
+		end
+		return self.RingStatType == statType
+	end
 
 	method boolean IsWeapon(integer itemId, integer grade)
 		return self.WeaponItemId == itemId and self.WeaponGrade == grade
@@ -325,7 +380,8 @@ script GearEffectLogic extends Logic
 	method number GetFlatAtk()
 		-- 무기 + 투구. 둘 다 스킬 기본값에 "더해지는" 고정 공격력이라 그냥 합산한다
 		-- (배율보다 먼저 더해지므로 모든 스킬에 동일하게 반영된다 — CardManager.GetCardDamage 참고)
-		return self.WeaponAtk + self.HelmAtk
+		-- 반지 ATK도 같은 성격(고정값 가산)이라 그대로 합산한다
+		return self.WeaponAtk + self.HelmAtk + self.RingAtk
 	end
 
 	method number GetDamageMult()
@@ -349,6 +405,10 @@ script GearEffectLogic extends Logic
 		end
 		if self.DamageBuffTimer > 0 then
 			mult = mult * (1.0 + self.DamageBuffValue)
+		end
+		-- 반지 스탯1: 공격력%
+		if self:HasRingStat(1) then
+			mult = mult * (1.0 + self.RingBonus)
 		end
 
 		return mult
@@ -419,6 +479,10 @@ script GearEffectLogic extends Logic
 		if self.HelmCooldownUnlocked then
 			reduction = reduction + self.HelmBonus
 		end
+		-- 반지 스탯5: 스킬 쿨타임 감소%
+		if self:HasRingStat(5) then
+			reduction = reduction + self.RingBonus
+		end
 		if reduction > 0.9 then reduction = 0.9 end
 		return reduction
 	end
@@ -432,6 +496,10 @@ script GearEffectLogic extends Logic
 		end
 		if self.CritChanceBuffTimer > 0 then
 			bonus = bonus + self.CritChanceBuffValue
+		end
+		-- 반지 스탯2: 치명타 확률%
+		if self:HasRingStat(2) then
+			bonus = bonus + self.RingBonus
 		end
 		return bonus
 	end
@@ -456,6 +524,10 @@ script GearEffectLogic extends Logic
 		end
 		if self.CritDamageBuffTimer > 0 then
 			bonus = bonus + self.CritDamageBuffValue
+		end
+		-- 반지 스탯3: 치명타 피해%
+		if self:HasRingStat(3) then
+			bonus = bonus + self.RingBonus
 		end
 		return bonus
 	end
@@ -546,10 +618,15 @@ script GearEffectLogic extends Logic
 	-- 망토 유니크: 최대 체력 % 증가 — GameManager가 최대 체력을 계산할 때 곱한다
 	@ExecSpace("ServerOnly")
 	method number GetMaxHpMult()
+		local mult = 1.0
 		if self:IsCape(_GearGradeEnum.Unique) then
-			return 1.0 + self.CapeBonus
+			mult = mult * (1.0 + self.CapeBonus)
 		end
-		return 1.0
+		-- 반지 스탯4: 최대 체력% — 망토 유니크와 같은 관문이라 곱연산으로 합친다
+		if self:HasRingStat(4) then
+			mult = mult * (1.0 + self.RingBonus)
+		end
+		return mult
 	end
 
 	-- ── 트리거(처치 / 기본 공격) ─────────────────────────────────────────

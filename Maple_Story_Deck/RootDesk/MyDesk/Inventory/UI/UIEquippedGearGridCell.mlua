@@ -5,6 +5,22 @@ script UIEquippedGearGridCell extends Component
 
 	property UIEquipPopup EquipPopup = nil
 
+	-- ── 장비창 전용 위치 보정(유저 지정 2026-09-21) ──────────────────────────
+	-- UIItemSlot 모델은 인벤토리 그리드와 **공유**한다. 그리드 쪽은 칸 그림이 rect를 꽉 채워서
+	-- 모델 기본값 그대로도 멀쩡한데, 장비창 6칸은 90x90 rect 안에 그림이 안쪽으로 들어가 있어
+	-- 같은 값이 테두리 밖으로 삐져나온다. 그래서 모델을 고치지 않고 여기서만 덮어쓴다.
+	--   · 아이콘: 모델 기본값이 y -8(아래로 내려가 있음) → 장비창 프레임은 위아래 대칭이라 0으로 중앙 정렬
+	--   · 품질 배지: 모델 기본 x가 슬롯 오른쪽 끝(72+17=89 ≒ 90)이라 테두리를 넘음 → 왼쪽으로 당긴다
+	-- 수치만 만지면 되도록 프로퍼티로 빼뒀다.
+	property number IconOffsetY = 0
+
+	-- 2026-09-21: -11로는 배지가 아직 테두리를 조금 넘어서 유저 지정으로 3px 더 당겼다
+	property number QualityShiftX = -14
+
+	property number _qualityTextBaseX = 69
+
+	property number _qualityBgBaseX = 72
+
 	@ExecSpace("ClientOnly")
 	method void OnBeginPlay()
 		local itemSlotEntity = _SpawnService:SpawnByModelId(_EntryService:GetModelIdByName("UIItemSlot"), "ItemSlot", Vector3.zero, self.Entity)
@@ -19,6 +35,33 @@ script UIEquippedGearGridCell extends Component
 		self.ItemSlot:Set(itemStruct)
 		self.ItemSlot.ImageDim.Enable = false
 		self.ItemSlot.Entity.Enable = true
+		self:ApplyEquipPanelLayout()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ApplyEquipPanelLayout()
+		-- Set()마다 부른다 — 모델 기본값은 슬롯이 다시 그려질 때 되살아날 수 있어서
+		-- OnBeginPlay에서 한 번만 옮겨두면 어긋난 채로 돌아오는 경우가 생긴다.
+		local slot = self.ItemSlot.Entity
+		if not isvalid(slot) then return end
+
+		local icon = slot:GetChildByName("IconItem")
+		if isvalid(icon) then
+			local t = icon.UITransformComponent
+			t.anchoredPosition = Vector2(t.anchoredPosition.x, self.IconOffsetY)
+		end
+
+		local qualityText = slot:GetChildByName("QualityText")
+		if isvalid(qualityText) then
+			local t = qualityText.UITransformComponent
+			t.anchoredPosition = Vector2(self._qualityTextBaseX + self.QualityShiftX, t.anchoredPosition.y)
+		end
+
+		local qualityBg = slot:GetChildByName("QualityBg")
+		if isvalid(qualityBg) then
+			local t = qualityBg.UITransformComponent
+			t.anchoredPosition = Vector2(self._qualityBgBaseX + self.QualityShiftX, t.anchoredPosition.y)
+		end
 	end
 
 	@ExecSpace("ClientOnly")

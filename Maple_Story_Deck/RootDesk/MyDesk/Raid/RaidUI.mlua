@@ -1,0 +1,424 @@
+@Logic
+script RaidUI extends Logic
+
+	-- 주간 레이드 HUD(유저 지정 2026-09-20).
+	-- 전투는 월드(Raid_1 = 발록의 무덤)에서 실제로 벌어지고(RaidScene), 화면에는 액자 프레임 +
+	-- 액자 바깥을 가리는 딤을 덮어 "팝업 안에서 전투를 보는" 그림을 만든다.
+	--   · 엔진에 렌더 텍스처가 없어 월드를 UI 안에 그릴 수는 없다 — 그래서 이 방식이다.
+	--   · 액자 안쪽 창(실측 비율 가로 0.74S / 세로 0.46S)으로만 월드가 보인다.
+	-- HUD 값(보스 체력·등급·남은시간·캐릭터 화력·받기 버튼)은 전부 RaidLogic의 @Sync 값을 읽어 그린다.
+	--
+	-- 2026-09-21 방치형 개편:
+	--   · 보스 체력은 실시간으로 계속 깎인다(RaidLogic이 누적 DPS × 흐른 시간으로 적분).
+	--   · 시즌은 월~목 4일. 금~일은 "정산 중"으로 표시되고 그 사이 보상을 받을 수 있다.
+	--   · 24시간 미접속 → 캐릭터 유령화. 화면 중앙 RevivePanel의 "부활!" 버튼으로 되살린다.
+	--   · 지난 시즌 미수령 보상이 남아 있으면 LockDim(딤드) + LockPanel이 깔리고 전투가 멈춘다.
+	--     "보상 받기"를 눌러야 딤드가 걷히고 새 시즌이 시작된다. 이때는 구석 BtnClaim을 감춘다.
+
+	-- ── 바인딩 ────────────────────────────────────────────────────────────────
+	property Entity raidGroup = "ec6e5708-6e46-4d59-9b12-c9e5e0e77b00"
+
+	property Entity panel = "817305c2-47b6-4369-872d-53b257a4028c"
+
+	property ButtonComponent btnClose = "90a71eaf-08c9-47ff-8b68-4646caadb1c5"
+
+	property ButtonComponent btnClaim = "4c103edf-5f3a-48cf-9279-375283d5b37c"
+
+	property TextGUIRendererComponent hpText = "c6828b1c-1e66-4e87-a2af-1a269c9cf484"
+
+	property TextGUIRendererComponent gradeText = "0f00d032-01dd-440c-85eb-cd0317bd5460"
+
+	property TextGUIRendererComponent hintText = "998fa391-e9b0-4876-b490-7175455df94a"
+
+	property SpriteGUIRendererComponent hpFill = "de1b71f2-1951-4f7e-b04a-a6db46493565"
+
+	property Entity members = "3210c962-347a-43b8-af13-574a23107266"
+
+	-- 유령 상태일 때 화면 중앙에 뜨는 "부활!" 창(유저 지정 2026-09-21)
+	property Entity revivePanel = "2c498237-9ebc-4847-8d95-e3a77eb6e8fe"
+
+	property ButtonComponent btnRevive = "bebdf3c5-a2ac-4bcc-b23a-6244d04c7780"
+
+	-- 지난 시즌 미수령 보상이 남아 새 시즌이 잠긴 상태(유저 지정 2026-09-21).
+	-- 딤드를 깔고 전투를 멈춘 뒤, 중앙 창에서 보상을 받아야 새 시즌이 시작된다.
+	property Entity lockDim = "03a9edb4-4ba5-42ab-bb86-7d6937ef7691"
+
+	property Entity lockPanel = "77688268-71b5-4e5c-8f7f-2839853bf238"
+
+	property ButtonComponent btnClaimPending = "c1f4c4e9-09d2-4d1c-bc10-f69d8a4ffbf0"
+
+	property TextGUIRendererComponent lockGradeText = "22bc2d4f-ff9a-4be6-a355-59c730c8d7ea"
+
+	-- 누적 대미지 창 접기/펴기
+	property ButtonComponent dpsToggleBtn = "d80905e1-f181-4bd0-baa9-7a7dcc857430"
+
+	property TextGUIRendererComponent dpsArrow = "4833716b-4051-42cd-9b97-0abd1862fad1"
+
+	property number DpsWindowHeight = 240
+
+	property number DpsWindowCollapsedHeight = 42
+
+	property boolean _dpsCollapsed = false
+
+	-- 펼친 상태의 창 y(접을 때 윗변을 고정하는 기준). 0이면 아직 측정 전
+	property number _expandedY = 0
+
+	-- 로비 우측 아이콘(TitleGroup/RaidButton)
+	property Entity lobbyButton = "cd6375e8-cc7d-43ae-bb10-6f90f9d5f465"
+
+	property Entity lobbyRedDot = "b40718ab-031a-43dd-89f1-3fbb0bdebfbf"
+
+	property ButtonComponent lobbyButtonComp = "cd6375e8-cc7d-43ae-bb10-6f90f9d5f465"
+
+	property number HpBarWidth = 886
+
+	-- 레이드 관전 줌(100 = 기본). 낮출수록 넓게 보인다 — 액자 안에 보스+캐릭터가 다 들어오게.
+	-- 이 값은 **PC 기준**이다. 모바일은 Open()에서 화면비 배율을 곱한 뒤 실측으로 재보정한다.
+	property number RaidZoomPercent = 70
+
+	-- 실측 보정을 거는 주기/횟수. 한 번만 재면 안 된다 — 레이드 입장은 **맵 전환 + 줌 트윈**이 겹쳐서
+	-- 카메라가 언제 자리를 잡는지 일정하지 않다(2026-09-21 실측: 0.45초 뒤에 쟀더니 아직 로비 줌이라
+	-- 가로 11.09가 잡혀 범위 가드에 걸려 보정이 통째로 건너뛰어졌다). 잠깐 동안 여러 번 확인한다.
+	-- FitCameraForZoom은 이미 맞으면 아무것도 안 하므로(허용 오차 가드) 반복 호출이 안전하다.
+	property number RaidCameraFitDelay = 0.45
+	property number RaidCameraFitInterval = 0.35
+	property integer RaidCameraFitTries = 8
+	property integer _raidFitTimerId = 0
+	property integer _raidFitLeft = 0
+
+	-- 관전 카메라 오프셋(월드 유닛). x를 음수로 두면 화면이 왼쪽으로 밀려 보스가 가운데로 오고,
+	-- y를 음수로 두면 카메라가 내려가 바닥 타일이 더 보인다.
+	property Vector2 RaidCameraOffset = Vector2(-0.2, -1.0)
+
+	property table GradeColors = {
+		"#9aa0a6", "#9aa0a6", "#6fcf97", "#56ccf2", "#9b8cff", "#ffb340", "#ff5d5d",
+	}
+
+	-- 레이드에 들어가기 전 있던 자리(나가기로 그대로 돌아간다)
+	property boolean _open = false
+	property string _returnMap = ""
+	property Vector3 _returnPos = Vector3(0, 0, 0)
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		if isvalid(self.raidGroup) then self.raidGroup.Enable = false end
+		if isvalid(self.btnClose) then
+			self.btnClose.Entity:ConnectEvent(ButtonClickEvent, function() self:Close() end)
+		end
+		if isvalid(self.btnClaim) then
+			self.btnClaim.Entity:ConnectEvent(ButtonClickEvent, function() self:OnClaimClicked() end)
+		end
+		if isvalid(self.lobbyButtonComp) then
+			self.lobbyButtonComp.Entity:ConnectEvent(ButtonClickEvent, function()
+				-- 2026-09-21 모바일 실기 리포트("아이콘이 안 눌린다") 진단용 — 이 로그가 없으면
+				-- 탭이 버튼까지 오지도 못한 것(딤/네이티브 UI가 먹음), 있으면 그 뒤 처리 문제다
+				log("RaidUI: lobby raid icon clicked")
+				-- 아직 레이드 튜토리얼을 안 본 유저는 입장 대신 4단계 이미지 안내부터 본다
+				-- (RaidTutorialUI가 true를 돌려주면 자기가 처리했다는 뜻 — 여기서 멈춘다)
+				if _RaidTutorialUI:TryHandleLobbyClick() then return end
+				self:Open()
+			end)
+		end
+		if isvalid(self.dpsToggleBtn) then
+			self.dpsToggleBtn.Entity:ConnectEvent(ButtonClickEvent, function() self:ToggleDpsWindow() end)
+		end
+		if isvalid(self.btnRevive) then
+			self.btnRevive.Entity:ConnectEvent(ButtonClickEvent, function() self:OnReviveClicked() end)
+		end
+		if isvalid(self.btnClaimPending) then
+			self.btnClaimPending.Entity:ConnectEvent(ButtonClickEvent, function() self:OnClaimClicked() end)
+		end
+		if isvalid(self.revivePanel) then self.revivePanel.Enable = false end
+		if isvalid(self.lockDim) then self.lockDim.Enable = false end
+		if isvalid(self.lockPanel) then self.lockPanel.Enable = false end
+		log("RaidUI started")
+	end
+
+	-- ── 입장 / 퇴장 ───────────────────────────────────────────────────────────
+	@ExecSpace("ClientOnly")
+	method void Open()
+		-- 돌아올 자리를 기억해두고 레이드 맵으로 이동한다
+		local player = _UserService.LocalPlayer
+		if isvalid(player) and isvalid(player.CurrentMap) then
+			-- ⚠ 이미 레이드 맵에 있는 상태에서 다시 열면 복귀 지점이 Raid_1로 덮여 로비로 못 돌아간다 —
+			--   레이드 맵일 때는 기억해 둔 복귀 지점을 그대로 유지한다.
+			if player.CurrentMap.Name ~= _RaidLogic.RaidMapName then
+				self._returnMap = player.CurrentMap.Name
+				self._returnPos = player.TransformComponent.WorldPosition
+			end
+		end
+		self._open = true
+		if isvalid(self.raidGroup) then self.raidGroup.Enable = true end
+		self:SetLobbyUIVisible(false)
+		_RaidLogic:RequestEnterRaid()
+		-- 액자 안에 보스+캐릭터가 한 번에 들어오도록 줌아웃하고, 관전이므로 내 캐릭터는 감춘다.
+		-- ⚠ 줌 값을 양쪽에 똑같이 주면 안 된다 — 모바일은 네이티브 시야가 PC보다 좁아서 같은 70이어도
+		--   훨씬 확대돼 보이고, 키 큰 마왕 발록의 위아래가 잘린다(유저 리포트 2026-09-21
+		--   "레이드 pc랑 모바일 버전 해상도가 달라서 보스잡는게 짤려보여"). 인게임과 같은 방식으로
+		--   ① 화면비에서 구한 배율을 곱해 근삿값을 맞추고 ② 줌 트윈이 끝난 뒤 실측으로 재보정한다.
+		--   PC는 GetZoomMultiplier()가 1, FitCameraForZoom이 즉시 빠져나가므로 완전히 그대로다.
+		_CameraService:ZoomTo(self.RaidZoomPercent * _MobileScreenFitLogic:GetZoomMultiplier(), 0.3)
+		self:SetCameraOffset(self.RaidCameraOffset)
+		self:StartCameraFit()
+		self:SetPlayerVisible(false)
+		self:Refresh()
+		log("RaidUI: entering raid (return=" .. self._returnMap .. ")")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Close()
+		-- 들어오기 전 맵/좌표로 복귀
+		self._open = false
+		if isvalid(self.raidGroup) then self.raidGroup.Enable = false end
+		self:SetLobbyUIVisible(true)
+		-- 보정 타이머가 남아 있으면 로비로 돌아간 뒤에도 레이드 구도로 줌을 끌어당긴다 — 먼저 끈다
+		self:StopCameraFit()
+		_CameraService:ZoomReset()
+		self:SetCameraOffset(Vector2(0, 0))
+		self:SetPlayerVisible(true)
+		if self._returnMap ~= "" then
+			_RaidLogic:RequestExitRaid(self._returnMap, self._returnPos)
+		end
+		log("RaidUI: left raid")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void StartCameraFit()
+		-- 모바일에서 레이드 구도를 PC와 같게 맞추는 실측 보정을 잠깐 동안 반복해서 건다.
+		-- 카메라가 자리를 잡기 전에 잰 값은 FitCameraForZoom이 범위 가드로 스스로 걸러낸다.
+		self:StopCameraFit()
+		self._raidFitLeft = self.RaidCameraFitTries
+		self._raidFitTimerId = _TimerService:SetTimerRepeat(function()
+			-- 레이드를 이미 닫았으면(빠르게 나갔다면) 로비 줌을 건드리지 않는다
+			if not isvalid(self) or not self._open then
+				self:StopCameraFit()
+				return
+			end
+			self._raidFitLeft = self._raidFitLeft - 1
+			_MobileScreenFitLogic:FitCameraForZoom(self.RaidZoomPercent)
+			if self._raidFitLeft <= 0 then self:StopCameraFit() end
+		end, self.RaidCameraFitInterval, self.RaidCameraFitDelay)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void StopCameraFit()
+		-- 반복 보정 타이머를 정리한다(레이드를 나갈 때 반드시 불러야 로비 줌을 안 건드린다)
+		if self._raidFitTimerId ~= 0 then
+			_TimerService:ClearTimer(self._raidFitTimerId)
+			self._raidFitTimerId = 0
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetCameraOffset(Vector2 offset)
+		-- 레이드 화면 구도 맞추기 — 플레이어를 따라가는 기본 카메라를 그대로 쓰되 오프셋만 준다
+		local player = _UserService.LocalPlayer
+		if not isvalid(player) then return end
+		local cam = player.CameraComponent
+		if cam == nil then return end
+		cam.CameraOffset = offset
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetPlayerVisible(boolean visible)
+		-- 레이드는 관전 화면이라 내 캐릭터는 안 보이게 한다(카메라는 여전히 플레이어를 따라간다)
+		local player = _UserService.LocalPlayer
+		if not isvalid(player) then return end
+		local renderer = player.AvatarRendererComponent
+		if renderer ~= nil then renderer.Enable = visible end
+		local nameTag = player.NameTagComponent
+		if nameTag ~= nil then nameTag.Enable = visible end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetLobbyUIVisible(boolean visible)
+		-- 레이드 화면에서는 로비/인게임 HUD를 감춘다(액자 안쪽만 보이게)
+		for _, name in ipairs({ "TitleGroup", "DefaultGroup" }) do
+			local g = _EntityService:GetEntityByPath("/ui/" .. name)
+			if isvalid(g) then g.Enable = visible end
+		end
+	end
+
+	method boolean IsOpen()
+		return self._open
+	end
+
+	-- ── HUD 갱신 ──────────────────────────────────────────────────────────────
+	@ExecSpace("ClientOnly")
+	method void Refresh()
+		-- 보스 체력(남은 체력 = 1 - 피해율) / 등급 / 남은시간 / DPS창 / 받기 버튼
+		local ratio = _RaidLogic:GetRatio()
+		local gradeIdx = _RaidLogic:GetGradeIndex()
+		if isvalid(self.hpFill) then
+			local w = self.HpBarWidth * (1 - ratio)
+			if w < 2 then w = 2 end
+			self.hpFill.Entity.UITransformComponent.RectSize = Vector2(w, 36)
+		end
+		if isvalid(self.hpText) then
+			self.hpText.Text = "보스 체력  " .. string.format("%.1f", (1 - ratio) * 100) .. "%"
+		end
+		if isvalid(self.gradeText) then
+			self.gradeText.Text = _RaidLogic:GetGradeName(gradeIdx)
+			self.gradeText.FontColor = self:HexColor(self.GradeColors[gradeIdx + 1])
+		end
+		if isvalid(self.hintText) then
+			-- 시즌은 월~목 4일. 금~일은 정산 구간이라 남은시간 대신 상태를 보여준다
+			if _RaidLogic:IsSeasonActive() then
+				self.hintText.Text = self:FormatRemain(_RaidLogic:GetSeasonRemainSeconds())
+			else
+				self.hintText.Text = "정산 중"
+			end
+		end
+		self:RefreshLock()
+		self:RefreshRevive()
+		self:RefreshDpsWindow()
+		self:RefreshClaim()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshLock()
+		-- 지난 시즌 미수령 보상이 남아 있으면 새 시즌이 아직 시작되지 않은 상태다 —
+		-- 딤드를 깔고(전투는 RaidScene이 멈춘다) 중앙 창에서 보상을 받게 한다.
+		local locked = _RaidLogic:HasPendingReward()
+		if isvalid(self.lockDim) then self.lockDim.Enable = locked end
+		if isvalid(self.lockPanel) then self.lockPanel.Enable = locked end
+		if locked and isvalid(self.lockGradeText) then
+			local grade = _RaidLogic.PendingGrade
+			self.lockGradeText.Text = _RaidLogic:GetGradeName(grade)
+			self.lockGradeText.FontColor = self:HexColor(self.GradeColors[grade + 1])
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshRevive()
+		-- 24시간 넘게 미접속이면 캐릭터들이 유령이 된다 — 화면 중앙에 "부활!" 창을 띄운다.
+		-- 단 시즌 잠금(지난 시즌 미수령)이 걸려 있으면 그쪽이 우선이라 부활 창은 감춘다.
+		if not isvalid(self.revivePanel) then return end
+		self.revivePanel.Enable = _RaidLogic.IsGhost and not _RaidLogic:HasPendingReward()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnReviveClicked()
+		if not _RaidLogic.IsGhost then return end
+		_RaidLogic:RequestRevive()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ToggleDpsWindow()
+		-- 누적 대미지 창 접기/펴기 — 접으면 제목 줄만 남기고 창 높이를 줄인다
+		self._dpsCollapsed = not self._dpsCollapsed
+		if isvalid(self.members) then
+			local tr = self.members.UITransformComponent
+			-- ⚠ 창은 중앙 기준이라 높이만 줄이면 위아래가 같이 좁아져 제목 줄이 아래로 내려간다 —
+			--   줄어든 높이의 절반만큼 위로 올려서 "펼쳤을 때의 윗변"을 그대로 유지한다.
+			if self._expandedY == 0 then self._expandedY = tr.anchoredPosition.y end
+			local h = self._dpsCollapsed and self.DpsWindowCollapsedHeight or self.DpsWindowHeight
+			tr.RectSize = Vector2(tr.RectSize.x, h)
+			local topKeepY = self._expandedY + (self.DpsWindowHeight - h) / 2
+			tr.anchoredPosition = Vector2(tr.anchoredPosition.x, topKeepY)
+		end
+		if isvalid(self.dpsArrow) then
+			self.dpsArrow.Text = self._dpsCollapsed and "▶" or "▼"
+		end
+		self:RefreshDpsWindow()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshDpsWindow()
+		-- 누적 대미지 내림차순, 기여 없는 줄은 숨김. 접혀 있으면 줄 자체를 감춘다
+		if not isvalid(self.members) then return end
+		if self._dpsCollapsed then
+			for i = 0, 4 do
+				local row = self.members:GetChildByName("Row" .. tostring(i))
+				if isvalid(row) then row.Enable = false end
+			end
+			return
+		end
+		local rows = _RaidLogic:ParseCharDpsCsv()
+		for i = 0, 4 do
+			local row = self.members:GetChildByName("Row" .. tostring(i))
+			if isvalid(row) then
+				local data = rows[i + 1]
+				if data == nil then
+					row.Enable = false
+				else
+					row.Enable = true
+					local icon = row:GetChildByName("Icon")
+					if isvalid(icon) then
+						icon.SpriteGUIRendererComponent.ImageRUID = DataRef(_RaidLogic:GetCharacterIcon(data.char))
+					end
+					local value = row:GetChildByName("Value")
+					if isvalid(value) then
+						value.TextGUIRendererComponent.Text = self:Comma(math.floor(data.dps))
+					end
+				end
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshClaim()
+		-- 받기 버튼은 보상이 있을 때만 생긴다(유저 지정).
+		-- 지난 시즌 미수령분은 중앙 잠금 창의 "보상 받기"가 대신 처리하므로 구석 버튼은 감춘다.
+		if not isvalid(self.btnClaim) then return end
+		self.btnClaim.Entity.Enable = _RaidLogic:CanClaimNow() and not _RaidLogic:HasPendingReward()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnClaimClicked()
+		if not _RaidLogic:CanClaimNow() then return end
+		_RaidLogic:RequestClaim()
+	end
+
+	-- ── 로비 아이콘 ───────────────────────────────────────────────────────────
+	@ExecSpace("ClientOnly")
+	method void RefreshLobbyIcon()
+		-- 수령까지 끝낸 시즌에는 아이콘을 숨긴다 — 다음 시즌이 시작되면 다시 보인다
+		if isvalid(self.lobbyButton) then self.lobbyButton.Enable = _RaidLogic:IsIconVisible() end
+		-- 받을 보상이 있을 때 + 캐릭터가 유령이 됐을 때(부활하러 들어가야 한다) 빨간점을 켠다
+		if isvalid(self.lobbyRedDot) then
+			self.lobbyRedDot.Enable = _RaidLogic:CanClaimNow() or _RaidLogic.IsGhost
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUpdate(number delta)
+		if not self._open then
+			self:RefreshLobbyIcon()
+			return
+		end
+		self:Refresh()
+	end
+
+	-- ── 유틸 ─────────────────────────────────────────────────────────────────
+	method string FormatRemain(integer seconds)
+		-- "5d 22h" / 하루 미만이면 "22h 13m"
+		if seconds < 0 then seconds = 0 end
+		local days = seconds // 86400
+		local hours = (seconds % 86400) // 3600
+		if days > 0 then return tostring(days) .. "d " .. tostring(hours) .. "h" end
+		local minutes = (seconds % 3600) // 60
+		return tostring(hours) .. "h " .. tostring(minutes) .. "m"
+	end
+
+	method string Comma(integer value)
+		local s = tostring(value)
+		local out = ""
+		local count = 0
+		for i = string.len(s), 1, -1 do
+			out = string.sub(s, i, i) .. out
+			count = count + 1
+			if count % 3 == 0 and i > 1 then out = "," .. out end
+		end
+		return out
+	end
+
+	method Color HexColor(string hex)
+		if hex == nil or string.len(hex) < 7 then return Color(1, 1, 1, 1) end
+		local r = tonumber(string.sub(hex, 2, 3), 16) or 255
+		local g = tonumber(string.sub(hex, 4, 5), 16) or 255
+		local b = tonumber(string.sub(hex, 6, 7), 16) or 255
+		return Color(r / 255, g / 255, b / 255, 1)
+	end
+
+end

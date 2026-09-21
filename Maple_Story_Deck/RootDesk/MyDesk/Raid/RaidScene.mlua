@@ -1,0 +1,747 @@
+@Component
+script RaidScene extends Component
+
+	-- 주간 레이드 전투 씬(Raid_1 = 발록의 무덤, TileMapMode 0 MapleTile).
+	-- 유저 지정 2026-09-20: "진짜 마왕발록 애니메이션 + 캐릭터들이 실제로 스킬 쓰면서 공격".
+	--   · 마왕 발록: stand / attack1 / hit1 animationclip을 SpriteRendererComponent로 직접 재생
+	--     (월드 스프라이트는 UI와 달리 animationclip을 그대로 재생한다)
+	--   · 캐릭터: RaidHero 아바타 엔티티 — AvatarBodyActionSelectorComponent.ActionState로
+	--     실제 메이플 공격 모션을 재생한다(PNG 흔들기 아님)
+	--   · 스킬: 본게임과 같은 이펙트 모델("skilleffect")을 보스 위치에 스폰해 각 캐릭터 대표 스킬을 재생
+	--   · 대미지: _DamageSkinService — 유저가 착용 중인 대미지 스킨 그대로 뜬다
+	--
+	-- 이 컴포넌트는 맵 스코프다(맵을 떠나면 같이 정리). 레이드 진행/점수는 전부 RaidLogic이 가진다.
+	--
+	-- 2026-09-21 방치형 개편:
+	--   · 실제 보스 피해는 RaidLogic이 **시간 적분**(누적 DPS × 흐른 시간)으로 계산한다. 여긴 그걸
+	--     눈에 보이게 만드는 연출 레이어라, 화면에 뜨는 대미지 숫자를 그 속도와 정확히 맞춰 둔다
+	--     (PlayNextHeroAttack의 row.damage 계산 참고).
+	--   · 24시간 넘게 미접속이면 RaidLogic.IsGhost가 켜진다 → 캐릭터가 창백한 반투명 유령이 되고
+	--     전투(공격 모션·대미지 숫자·보스 모션)가 통째로 멈춘다. 부활 버튼을 눌러야 재개된다.
+
+	property string BossStandRUID = "9846138384c745dbaabb6f7e062bbb48"
+
+	property string BossAttackRUID = "5af63d14c4014754905e424246894d7a"
+
+	property string BossHitRUID = "0773166c08be4d6097101a09359b1aa4"
+
+	property number BossAttackInterval = 8.0
+
+	property number BossAttackDuration = 1.8
+
+	property number BossHitDuration = 0.35
+
+	property number HeroAttackInterval = 0.65
+
+	property number EffectScale = 1.6
+
+	-- 캐릭터별 스킬 연출(본게임에서 쓰는 이펙트 그대로 — 유저 지정 2026-09-21
+	-- "진짜 메이플 직업이 스킬 쓰는 것처럼"):
+	--   아르카나(법사)   : 썬더볼트 — 시전 모션 직후 보스 머리 위에서 바로 낙뢰(투사체 없음)
+	--   실피드(궁수)     : 폭풍의 시 — 화살 3발을 보스 쪽으로 비스듬히 연사
+	--   레이온(히어로)   : 근접 3연타
+	--   쉐이드(시프마스터): 연기와 함께 파고들어 5연타 다단히트(세이비지 블로우) 후 연기로 복귀
+	--   린(표창)         : 럭키 세븐 — 회전하는 표창 4발이 날아가 꽂힌다
+	property string ArcanaEffectRUID = "33fc60d9910448a2b36035277b28c354"  -- 썬더볼트
+
+	property string SylphArrowRUID = "574a2f0fbe124b81aa24c534726d6956"    -- 폭풍의 시 화살
+
+	property string SylphEffectRUID = "9b958d5cd4454585b3580ccd959428af"   -- 폭풍의 시 착탄
+
+	-- 근접 2명(레이온/쉐이드)은 **스킬 연출 + 타격 연출 2종**을 겹쳐 쓴다(유저 지정 RUID 2026-09-21).
+	-- 발록이 워낙 커서 정확한 판정 위치가 필요 없다 — 보스 앞쪽에 터지기만 하면 된다.
+	property string LeionSkillRUID = "ffaf507b148744f49715a8253477fec0"
+
+	property string LeionHitRUID = "9674832552bc479da4bce8858754c5d3"
+
+	property string ShadeSkillRUID = "895ac1e384ea42ca8dd084f54ff3346b"
+
+	property string ShadeHitRUID = "f342e1d9953f46e9ab003ba0e363ee2a"
+
+	-- 근접 타격 연출이 터지는 자리 — 보스 몸통 중앙에서 앞쪽(캐릭터 쪽)으로 당긴다
+	property number MeleeFxOffsetX = -0.9
+
+	-- 근접 2명(레이온/쉐이드)의 스킬 연출은 **캐릭터 기준**으로 자기 공격 앞쪽에 뜬다(유저 지정 2026-09-21).
+	-- 쉐이드 연출만 기본 크기에서 30% 축소.
+	property number ShadeSkillScale = 1.12
+
+	-- 쉐이드 연출만 기본 자리에서 미세 보정(유저 지정 2026-09-21: x +1/-0.2 → 추가로 x +1, y -0.4)
+	property Vector2 ShadeFxAdjust = Vector2(2.0, -0.6)
+
+	property number LeionFxForward = 0.9
+
+	property number LeionFxHeight = 0.55
+
+	-- 린 표창(유저 지정 리소스팩 "표창"): stand = 날아가며 회전하는 표창, special = 꽂히는 순간
+	property string RinShurikenRUID = "2b6de5c42f9e4741b9cd705eb710b5f7"
+
+	property string RinEffectRUID = "7b616d5e0bcd41e7bdfc265709f9e4eb"
+
+	-- 캐릭터별 고정 착장(유저 지정 2026-09-20: "아바타샵에서 똑같은 거 찾아서 적용" — 유저 계정
+	-- 아바타를 쓰지 않는다). 각 줄은 { 카테고리, 아이템RUID } 이고 UseCustomEquipOnly=true로 강제한다.
+	-- 아르카나 — 유저 착장 스크린샷 기준(2026-09-21)
+	property table ArcanaCostume = {
+		{ 3, "c1372d54dbec4805bbca1d42b7de464c" },  -- 헤어(유저 지정 RUID)
+		{ 4, "5b0a317ee7844f1393b4a4edf7e3aa17" },  -- 매서운 얼굴
+		{ 16, "4d7540bd62cc43008e1af943805e7483" }, -- 얼굴장식: 스윗 메르헨
+		{ 17, "db72120928734b11b8e2638feee7126f" }, -- 눈장식: 모범생 안경
+		{ 18, "81cbcf3b47ee492e9efd6b7239a7d506" }, -- 귀장식: 딸기 귀고리
+		{ 9, "1dceedd8747746a69c92706d27b04357" },  -- 한벌옷: 류드의 로브
+		{ 6, "a067e5118c44440eb7f3a173cf4eddbd" },  -- 망토: 방독면 망토
+		{ 12, "df437bf7e0854bc58bee7f27a1a1e42e" }, -- 신발: 붉은 고요 구두
+		{ 8, "28f6ef23777d460a99bcee73a8120253" },  -- 장갑: 실버 와이어스
+		{ 11, "5385076d95004d45902bb4d42343e10c" }, -- 방패: Stone Shield
+		{ 13, "02f27532696c4f39b7fc8d48254b2310" }, -- 한손무기: 디그너티 셉터
+	}
+
+	-- 실피드 — 유저 착장 스크린샷 기준
+	property table SylphCostume = {
+		{ 3, "b525cf37f9734cc988b0dbe3e1f1e63b" },  -- 보라색 블링 블레이 헤어(유저 지정)
+		{ 4, "81e537b12496424fa4d286ac16ca81e7" },  -- 반짝이 얼굴
+		{ 18, "740d5e54e193487ebc6c8b0a534fad85" }, -- 귀장식: Lv.5 Eluna Earrings
+		{ 9, "b6c25d1f0d5843d1865d55b9642de89d" },  -- 한벌옷: 나이트 매지션
+		{ 6, "4d86b172653c498f9cb1da045e955872" },  -- 망토: 듄켈의 망토
+		{ 12, "df437bf7e0854bc58bee7f27a1a1e42e" }, -- 신발: 붉은 고요 구두
+		{ 8, "28f6ef23777d460a99bcee73a8120253" },  -- 장갑: 실버 와이어스
+		{ 14, "a45e048165614b3e9294545e2360ba61" }, -- 두손무기: 메투스 블루
+	}
+
+	-- 레이온 — 유저 착장 스크린샷 기준
+	property table LeionCostume = {
+		{ 3, "ed5bfaaf8b9d49428495a658caa0cec2" },  -- 노란색 투블럭 헤어
+		{ 4, "6cdb36dec575487e85bdf1497a3ae2ba" },  -- 도도한 얼굴
+		{ 17, "e3846cade85f4a04a603a9a8f5f705d4" }, -- 눈장식: 견습 도사의 흉터
+		{ 18, "740d5e54e193487ebc6c8b0a534fad85" }, -- 귀장식: Lv.5 Eluna Earrings
+		{ 9, "1fe811e0ea2645fc9b571e2400995250" },  -- 한벌옷: 다크 데모닉 슈트
+		{ 6, "485ea4533010432391b27d54cfb6aa92" },  -- 망토: 암흑의 망토
+		{ 12, "df437bf7e0854bc58bee7f27a1a1e42e" }, -- 신발: 붉은 고요 구두
+		{ 8, "28f6ef23777d460a99bcee73a8120253" },  -- 장갑: 실버 와이어스
+		{ 14, "b79afc6648d740638c2d9290a603d87b" }, -- 두손무기: 쟈이힌 투핸드소드
+	}
+
+	-- 쉐이드 — 유저 착장 스크린샷 기준
+	property table ShadeCostume = {
+		{ 3, "f0991be2d1514a0490d0dcb81fd84f6d" },  -- 헤어(유저 지정 RUID)
+		{ 16, "add5ae0bf9074a20ad596a9e81e3237c" }, -- 얼굴장식: 잎사귀
+		{ 18, "740d5e54e193487ebc6c8b0a534fad85" }, -- 귀장식: Lv.5 Eluna Earrings
+		{ 9, "7cb173d302ea432bb686d6fb9725f055" },  -- 한벌옷: 전신옷(홍)
+		{ 6, "eae67f93ecf94875b10e0a231981acd6" },  -- 망토: 막스 반 레온 망토
+		{ 12, "df437bf7e0854bc58bee7f27a1a1e42e" }, -- 신발: 붉은 고요 구두
+		{ 8, "28f6ef23777d460a99bcee73a8120253" },  -- 장갑: 실버 와이어스
+		{ 14, "1742263d69244b56b883a29cbc828ee3" }, -- 두손무기: 블랙 크샤마
+	}
+
+	-- 린 — 유저가 아바타샵에서 직접 맞춘 착장 스크린샷 기준(2026-09-21)
+	property table RinCostume = {
+		{ 3, "722f5cca71ac41dc87c02521bcf33d2b" },  -- 검은색 퐁당 헤어
+		{ 4, "06cefc613a3a4954abe1c3155954f3e5" },  -- 오드아이 얼굴
+		{ 16, "fb70006994bf4421b677fcb1464dda4c" }, -- 얼굴장식: 식은땀
+		{ 18, "42998039a9db44c3a4fb866967748ee8" }, -- 귀장식: 한쪽 은 귀고리
+		{ 9, "32b917cb05f8484da6742fa6a4012157" },  -- 한벌옷: 세인트 루미너스
+		{ 6, "6522b8f8473949529af8559e7660c2f3" },  -- 망토: Luminous
+		{ 12, "f5d96ebcb251432b8d0b9bb24ce779fd" }, -- 신발: 빨간색 가죽 부츠
+		{ 8, "28f6ef23777d460a99bcee73a8120253" },  -- 장갑: 실버 와이어스
+		{ 14, "4b7980b180f24c9ebac35c102558b11e" }, -- 두손무기: 템페스트 저스티스
+	}
+
+	-- 캐릭터별 전투 스타일(유저 지정 2026-09-21: "아르카나 법사 / 실피드 궁수 / 레이온 전사 /
+	-- 린 표창 / 쉐이드 단도 — 직업에 맞는 연출로"):
+	--   melee=true  → 보스 앞까지 달려가 무기를 휘두르고 제자리로 복귀
+	--   melee=false → 제자리에서 시전하고, 투사체가 보스까지 날아간 뒤 착탄
+	--   action      → 아바타 Body에 보낼 액션 이름(한손 스윙 swingO1 / 두손 스윙 swingT1 /
+	--                 찌르기 stabO1 / 발사 shoot1)
+	property number MeleeStepSeconds = 0.08
+
+	property number ProjectileSeconds = 0.18
+
+	-- 시전형(아르카나) — 휘두르는 모션이 나간 뒤 낙뢰가 꽂히기까지의 간격
+	property number CastDelaySeconds = 0.08
+
+	-- 린 표창 리소스는 108px짜리라 그대로 쓰면 캐릭터보다 크다 — 투사체/착탄 모두 줄인다
+	-- 린: 휘두르는 모션이 나간 뒤 표창이 날아가기까지의 간격(유저 지정 2026-09-21)
+	property number RinShotDelay = 0.5
+
+	property number RinShurikenScale = 0.225
+
+	property number RinEffectScale = 0.35
+
+	-- 발록 스프라이트는 Transform 기준점보다 한참 위로 그려진다(기준점 = 하반신).
+	-- 이 오프셋 없이 Transform 좌표에 이펙트를 스폰하면 보스 몸이 아니라 발밑 바닥에서 터진다.
+	property Vector2 BossBodyOffset = Vector2(0.15, 1.15)
+
+	-- 유령 색(24시간 넘게 미접속 — RaidLogic.IsGhost). 창백한 푸른빛 + 반투명
+	property Color GhostColor = Color(0.55, 0.78, 1.0, 0.45)
+
+	-- 유령 색은 @ExecSpace("Client") RPC라 매 프레임 쏘면 낭비다 — 상태가 바뀔 때와
+	-- 이 주기마다만 다시 칠한다(레이드 맵에 늦게 들어온 클라도 결국 같은 색을 받게).
+	property number GhostRepaintInterval = 5.0
+
+	property any _boss = nil
+	property any _heroes = nil
+	property any _dressed = nil
+	property number _heroTimer = 0
+	property number _bossTimer = 0
+	property number _bossBusy = 0
+	property integer _turn = 0
+	property number _refreshTimer = 0
+	property boolean _ghostApplied = false
+	property number _ghostRepaintTimer = 0
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		-- 맵에 미리 배치해 둔 보스/캐릭터 엔티티를 잡아두고, 참여 캐릭터만 남긴다
+		self._boss = self:FindInMap("RaidBoss")
+		self._heroes = {}
+		for i = 0, 4 do
+			self._heroes[i] = self:FindInMap("RaidHero" .. tostring(i))
+		end
+		self:RefreshHeroes()
+		log("RaidScene: begin (boss=" .. tostring(isvalid(self._boss)) .. ")")
+	end
+
+	@ExecSpace("ServerOnly")
+	method any FindInMap(string name)
+		local map = self.Entity.CurrentMap
+		if not isvalid(map) then return nil end
+		return map:GetChildByName(name)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void RefreshHeroes()
+		-- 이번 시즌에 기여한 캐릭터만 무대에 세운다(3명 플레이했으면 3명). 나머지는 꺼둔다.
+		local rows = _RaidLogic:ParseCharDpsCsv()
+		local active = {}
+		for _, r in ipairs(rows) do active[r.char] = true end
+		if self._heroes == nil then self._heroes = {} end
+		if self._dressed == nil then self._dressed = {} end
+		-- 24시간 넘게 접속 기록이 없으면 유령이 된다(유저 지정 2026-09-21) — 색만 바꾸는 게 아니라
+		-- 공격도 멈춘다(PlayNextHeroAttack/PlayBossAttack에서 차단).
+		local ghost = _RaidLogic.IsGhost
+		local repaint = ghost ~= self._ghostApplied or self._ghostRepaintTimer <= 0
+		if repaint then
+			self._ghostApplied = ghost
+			self._ghostRepaintTimer = self.GhostRepaintInterval
+		end
+		for i = 0, 4 do
+			-- ⚠ property any에 담아둔 테이블 캐시는 프레임을 넘기면 비어 있을 수 있다(hero0만 켜지던 원인) —
+			--   매번 맵에서 직접 찾는다.
+			local hero = self:FindInMap("RaidHero" .. tostring(i))
+			self._heroes[i] = hero
+			if isvalid(hero) then
+				hero.Enable = active[i] == true
+				if active[i] == true then
+					if self._dressed[i] ~= true then
+						self:DressHero(hero, i)
+						self._dressed[i] = true
+						self:PaintHero(hero, ghost)
+					elseif repaint then
+						self:PaintHero(hero, ghost)
+					end
+					self:SetHeroStand(hero)
+				end
+			end
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void PaintHero(Entity hero, boolean ghost)
+		-- 유령이면 창백한 푸른빛 반투명, 부활했으면 원래 색으로 되돌린다.
+		-- AvatarRendererComponent.SetColor는 @ExecSpace("Client") 네이티브라 서버에서 부르면 클라로 전파된다.
+		local renderer = hero.AvatarRendererComponent
+		if renderer == nil then return end
+		if ghost then
+			renderer:SetColor(self.GhostColor.r, self.GhostColor.g, self.GhostColor.b, self.GhostColor.a)
+		else
+			renderer:SetColor(1, 1, 1, 1)
+		end
+	end
+
+	method table GetCostume(integer charIdx)
+		if charIdx == 0 then return self.ArcanaCostume
+		elseif charIdx == 1 then return self.SylphCostume
+		elseif charIdx == 2 then return self.LeionCostume
+		elseif charIdx == 3 then return self.ShadeCostume
+		elseif charIdx == 4 then return self.RinCostume
+		end
+		return self.ArcanaCostume
+	end
+
+	@ExecSpace("ServerOnly")
+	method void DressHero(Entity hero, integer charIdx)
+		-- 캐릭터 고유 착장을 입힌다. UseCustomEquipOnly=true여야 계정 아바타(유저 착장)가 섞이지 않는다
+		-- ⚠ StateComponent(플레이어용 상태머신, IDLE)가 매 프레임 아바타 자세를 Stand로 되돌려서
+		--   AvatarBodyActionSelector로 넣은 Attack 모션이 한 프레임도 안 보였다 — 관전용 아바타라
+		--   상태머신이 필요 없으므로 꺼버린다(모델이 아니라 런타임에서 끈다: 맵은 유저가 편집 중).
+		local state = hero.StateComponent
+		if state ~= nil then state.Enable = false end
+
+		-- ⚠ RigidbodyComponent(MapleTile 물리)가 매 프레임 Position을 시뮬레이션 결과로 덮어써서
+		--   근접 캐릭터를 보스 앞으로 옮겨도 그 자리에 다시 붙어 있었다. 관전용 아바타라 물리가
+		--   필요 없으므로 꺼서 좌표를 코드가 온전히 쥔다(유저가 하이어라키에 배치한 자리도 그대로 유지된다).
+		local body = hero.RigidbodyComponent
+		if body ~= nil then body.Enable = false end
+
+		local costume = hero.CostumeManagerComponent
+		if costume == nil then return end
+		costume.UseCustomEquipOnly = true
+		for _, entry in ipairs(self:GetCostume(charIdx)) do
+			costume:SetEquip(MapleAvatarItemCategory.CastFrom(entry[1]), entry[2])
+		end
+		log("RaidScene: hero " .. charIdx .. " dressed")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnUpdate(number delta)
+		-- 보스 모션 / 캐릭터 공격 순번을 굴린다.
+		-- ⚠ 맵(=이 컴포넌트)은 월드 시작 때 한 번 로드되므로 OnBeginPlay 시점엔 아직 이번 시즌 기여
+		--   데이터가 비어 있을 수 있다. 참여 캐릭터 목록은 1초마다 다시 맞춘다.
+		self._ghostRepaintTimer = self._ghostRepaintTimer - delta
+		self._refreshTimer = self._refreshTimer + delta
+		if self._refreshTimer >= 1.0 then
+			self._refreshTimer = 0
+			self:RefreshHeroes()
+		end
+		-- 전투가 멈추는 두 경우 — 대미지 숫자도, 보스 모션도 나오지 않는다.
+		--   · 유령(24시간 미접속) → 부활해야 재개
+		--   · 지난 시즌 미수령 보상이 남아 새 시즌이 아직 시작되지 않음 → 보상을 받아야 재개
+		if _RaidLogic.IsGhost or _RaidLogic:HasPendingReward() then
+			if self._bossBusy > 0 then
+				self._bossBusy = 0
+				self:SetBossClip(self.BossStandRUID)
+			end
+			return
+		end
+		if self._bossBusy > 0 then
+			self._bossBusy = self._bossBusy - delta
+			if self._bossBusy <= 0 then self:SetBossClip(self.BossStandRUID) end
+		end
+		self._bossTimer = self._bossTimer + delta
+		if self._bossTimer >= self.BossAttackInterval then
+			self._bossTimer = 0
+			self:PlayBossAttack()
+		end
+		self._heroTimer = self._heroTimer + delta
+		if self._heroTimer >= self.HeroAttackInterval then
+			self._heroTimer = 0
+			self:PlayNextHeroAttack()
+		end
+	end
+
+	-- ── 보스 ─────────────────────────────────────────────────────────────────
+	@ExecSpace("ServerOnly")
+	method void PlayBossAttack()
+		-- 실제 공격 모션(attack1). 대미지는 들어가지 않는 연출 전용이다
+		if not isvalid(self._boss) then return end
+		self:SetBossClip(self.BossAttackRUID)
+		self._bossBusy = self.BossAttackDuration
+	end
+
+	@ExecSpace("ServerOnly")
+	method void PlayBossHit()
+		-- 캐릭터에게 맞는 순간 hit1을 잠깐 끼워 넣는다(공격 모션 중이면 건드리지 않는다)
+		if not isvalid(self._boss) then return end
+		if self._bossBusy > self.BossHitDuration then return end
+		self:SetBossClip(self.BossHitRUID)
+		self._bossBusy = self.BossHitDuration
+	end
+
+	@ExecSpace("ServerOnly")
+	method Vector3 GetBossHitPos()
+		-- 타격/착탄이 일어나야 하는 지점 = 보스 몸통 중앙(Transform 기준점 + BossBodyOffset)
+		local p = self._boss.TransformComponent.WorldPosition
+		return Vector3(p.x + self.BossBodyOffset.x, p.y + self.BossBodyOffset.y, p.z)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SetBossClip(string ruid)
+		if not isvalid(self._boss) then return end
+		local renderer = self._boss.SpriteRendererComponent
+		if renderer == nil then return end
+		renderer.SpriteRUID = ruid
+	end
+
+	-- ── 캐릭터 ───────────────────────────────────────────────────────────────
+	@ExecSpace("ServerOnly")
+	method void PlayNextHeroAttack()
+		-- 참여 캐릭터가 차례로 자기 스킬을 쓴다
+		local rows = _RaidLogic:ParseCharDpsCsv()
+		if #rows == 0 then return end
+		self._turn = self._turn + 1
+		if self._turn > #rows then self._turn = 1 end
+		local row = rows[self._turn]
+		-- 이 차례에 띄울 대미지(유저 지정 2026-09-21 "누적 DPS를 역산해서 1번 때리면 얼마인지 보여줘").
+		-- 보스 피해는 RaidLogic이 시간 적분으로 계산하므로(방치형), 화면 숫자는 그 속도와 맞아야 한다:
+		--   참여 캐릭터가 N명이면 각자 N차례에 한 번 돌아오니 (자기 DPS × N × 차례간격)을 넣어야
+		--   "초당 화면에 뜨는 대미지 합 = 누적 DPS = 실제 보스 피해 속도"가 된다.
+		row.damage = row.dps * #rows * self.HeroAttackInterval
+		-- ⚠ property any에 담은 _heroes 캐시는 프레임을 넘기면 비어 있다(RefreshHeroes와 같은 함정) —
+		--   여기서 캐시를 믿으면 hero가 nil이라 공격 차례가 통째로 조용히 스킵된다. 매번 맵에서 찾는다.
+		local hero = self:FindInMap("RaidHero" .. string.format("%d", row.char))
+		if not isvalid(hero) or not hero.Enable then return end
+
+		if self:IsMelee(row.char) then
+			self:PlayMeleeAttack(hero, row)
+		elseif self:IsCaster(row.char) then
+			self:PlayCastAttack(hero, row)
+		else
+			self:PlayRangedAttack(hero, row)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void PlayMeleeAttack(Entity hero, table row)
+		-- 히어로/시프마스터: 제자리에서 연타한다.
+		-- ⚠ 유저 지정 2026-09-21 — 보스 앞으로 달려갔다 돌아오는 이동 연출과 쉐이드 연막은 **제거**했다.
+		--   되살리지 말 것.
+		if not isvalid(self._boss) then return end
+
+		local hits = self:GetHitCount(row.char)
+		local interval = self:GetHitInterval(row.char)
+		local perHit = row.damage / hits
+
+		for i = 0, hits - 1 do
+			local hitIndex = i
+			_TimerService:SetTimerOnce(function()
+				if not isvalid(self) or not isvalid(hero) then return end
+				self:SetHeroAttack(hero, row.char)
+				-- 타격마다 위치를 조금씩 흩어 다단히트처럼 보이게.
+				-- 근접은 보스 앞쪽에 스킬 연출 + 타격 연출을 겹쳐 터뜨린다(보스 전체가 타격 지점).
+				local spread = (hitIndex % 3) * 0.35 - 0.35
+				self:SpawnSkillEffectAt(row.char, self:GetSkillFxPos(row.char, hero, spread))
+				self:SpawnMeleeHit(row.char, spread)
+				self:PlayBossHit()
+				self:ShowDamage(perHit)
+			end, self.MeleeStepSeconds + hitIndex * interval)
+		end
+
+	end
+
+	@ExecSpace("ServerOnly")
+	method void FireProjectile(Entity hero, integer charIdx, integer shotIndex, number damage)
+		-- 투사체 1발 — 캐릭터에서 보스까지 날아간 뒤 착탄 이펙트 + 대미지
+		if not isvalid(self._boss) then return end
+		local map = self.Entity.CurrentMap
+		if not isvalid(map) then return end
+		local from = hero.TransformComponent.Position
+		local to = self:GetBossHitPos()
+		-- 연발이 한 줄로 겹치지 않게 착탄 높이를 살짝 흩는다(부채꼴)
+		local spread = (shotIndex % 3) * 0.22 - 0.22
+		local target = Vector3(to.x, to.y + spread, to.z)
+		-- ⚠ 보스가 캐릭터 왼쪽에 있을 수도 있다 — 항상 +x로 쏘면 뒤로 발사된다. 보스 쪽으로 낸다.
+		local dirX = 1
+		if target.x < from.x then dirX = -1 end
+		local startPos = Vector3(from.x + 0.45 * dirX, from.y + 0.45, from.z)
+
+		local shot = _SpawnService:SpawnByModelId("skilleffect", "RaidShot", startPos, map)
+		if shot ~= nil then
+			local renderer = shot.SpriteRendererComponent
+			if renderer ~= nil then renderer.SpriteRUID = self:GetProjectileRUID(charIdx) end
+			-- 화살은 날아가는 방향으로 눕혀야 한다(안 돌리면 높이만 내려가고 수평으로 보인다).
+			-- 표창은 제자리에서 회전하는 클립이라 각도를 주지 않는다.
+			if self:AimsProjectile(charIdx) then
+				shot.TransformComponent.ZRotation = self:AngleBetween(startPos, target)
+			end
+			local shotScale = self:GetProjectileScale(charIdx)
+			shot.TransformComponent.Scale = Vector3(shotScale, shotScale, 1.0)
+			local steps = 6
+			for i = 1, steps do
+				local t = i / steps
+				_TimerService:SetTimerOnce(function()
+					if not isvalid(shot) then return end
+					shot.TransformComponent.Position = Vector3(
+						startPos.x + (target.x - startPos.x) * t,
+						startPos.y + (target.y - startPos.y) * t,
+						startPos.z)
+				end, self.ProjectileSeconds * t)
+			end
+		end
+
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) then return end
+			self:SpawnSkillEffect(charIdx, spread)
+			self:PlayBossHit()
+			self:ShowDamage(damage)
+		end, self.ProjectileSeconds)
+	end
+
+	method number GetProjectileScale(integer charIdx)
+		if charIdx == 4 then return self.RinShurikenScale end
+		return 1.0
+	end
+
+	method number GetEffectScale(integer charIdx)
+		if charIdx == 4 then return self.RinEffectScale end
+		return self.EffectScale
+	end
+
+	method boolean AimsProjectile(integer charIdx)
+		-- 실피드 화살만 진행 방향으로 눕힌다(표창은 회전 클립이라 그대로 둔다)
+		return charIdx == 1
+	end
+
+	method float AngleBetween(Vector3 from, Vector3 to)
+		-- 두 점을 잇는 선의 각도(도). ZRotation에 그대로 넣는다.
+		local dx = to.x - from.x
+		local dy = to.y - from.y
+		if dx == 0 then
+			if dy >= 0 then return 90 end
+			return -90
+		end
+		local angle = math.deg(math.atan(dy / dx))
+		if dx < 0 then angle = angle + 180 end
+		return angle
+	end
+
+	@ExecSpace("ServerOnly")
+	method void PlayCastAttack(Entity hero, table row)
+		-- 마법사: 투사체가 날아가는 게 아니라 시전 모션 직후 보스 자리에 바로 낙뢰가 떨어진다
+		-- (유저 지정 2026-09-21 "썬더볼트는 투사체가 아니라 휘두르면 바로 발록한테 쏴지는 것").
+		if not isvalid(self._boss) then return end
+		local hits = self:GetHitCount(row.char)
+		local interval = self:GetHitInterval(row.char)
+		local perHit = row.damage / hits
+
+		for i = 0, hits - 1 do
+			local hitIndex = i
+			_TimerService:SetTimerOnce(function()
+				if not isvalid(self) or not isvalid(hero) then return end
+				self:SetHeroAttack(hero, row.char)
+				-- 시전 모션이 한 박자 나간 뒤 낙뢰가 꽂힌다
+				_TimerService:SetTimerOnce(function()
+					if not isvalid(self) then return end
+					self:SpawnSkillEffect(row.char, (hitIndex % 3) * 0.4 - 0.4)
+					self:PlayBossHit()
+					self:ShowDamage(perHit)
+				end, self.CastDelaySeconds)
+			end, hitIndex * interval)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void PlayRangedAttack(Entity hero, table row)
+		-- 마법사/궁수/표창: 제자리에서 시전하고 투사체를 연달아 날린다(슈슈슝)
+		if not isvalid(self._boss) then return end
+		local hits = self:GetHitCount(row.char)
+		local interval = self:GetHitInterval(row.char)
+		local perHit = row.damage / hits
+
+		for i = 0, hits - 1 do
+			local shotIndex = i
+			_TimerService:SetTimerOnce(function()
+				if not isvalid(self) or not isvalid(hero) then return end
+				self:SetHeroAttack(hero, row.char)
+				-- 린은 휘두르는 모션이 먼저 나가고 한 박자 뒤에 표창이 날아간다(유저 지정 0.5초)
+				local delay = self:GetShotDelay(row.char)
+				if delay <= 0 then
+					self:FireProjectile(hero, row.char, shotIndex, perHit)
+					return
+				end
+				_TimerService:SetTimerOnce(function()
+					if not isvalid(self) or not isvalid(hero) then return end
+					self:FireProjectile(hero, row.char, shotIndex, perHit)
+				end, delay)
+			end, shotIndex * interval)
+		end
+	end
+
+	method number GetShotDelay(integer charIdx)
+		-- 공격 모션 시작 → 투사체가 실제로 나가기까지의 간격
+		if charIdx == 4 then return self.RinShotDelay end
+		return 0
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SetHeroAttack(Entity hero, integer charIdx)
+		-- 서버는 연출 신호만 보낸다 — 실제 모션 재생은 클라에서(아래 PlayHeroSwing)
+		self:PlayHeroSwing(hero.Name, self:GetSwingAction(charIdx))
+	end
+
+	@ExecSpace("Multicast")
+	method void PlayHeroSwing(string heroName, string actionName)
+		-- 뽑기 화면(GachaUI.PlayAvatarAttack)과 동일한 방식: 아바타의 Body 엔티티에
+		-- ActionStateChangedEvent("swingO1")를 보내 무기 휘두르기 모션을 1회 재생한다.
+		-- ⚠ AvatarBodyActionSelector.ActionState만 바꾸는 방식은 화면에 아무 변화가 없었다.
+		if self:IsServer() then return end
+		local map = self.Entity.CurrentMap
+		if not isvalid(map) then return end
+		local hero = map:GetChildByName(heroName)
+		if not isvalid(hero) then return end
+		local renderer = hero.AvatarRendererComponent
+		if renderer == nil then return end
+		local body = renderer:GetBodyEntity()
+		if not isvalid(body) then return end
+		local swing = ActionStateChangedEvent()
+		swing.CoreActionName = actionName
+		swing.PartsActionName = actionName
+		swing.PlayRate = 1.4
+		swing.PlayType = SpriteAnimClipPlayType.Onetime
+		body:SendEvent(swing)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SetHeroStand(Entity hero)
+		local selector = hero.AvatarBodyActionSelectorComponent
+		if selector == nil then return end
+		selector.ActionState = MapleAvatarBodyActionState.Stand
+	end
+
+	method boolean IsMelee(integer charIdx)
+		-- 레이온(히어로) / 쉐이드(시프마스터)만 근접
+		return charIdx == 2 or charIdx == 3
+	end
+
+	method boolean IsCaster(integer charIdx)
+		-- 아르카나(법사)는 투사체 없이 보스 자리에 바로 낙뢰를 꽂는다
+		return charIdx == 0
+	end
+
+	method integer GetHitCount(integer charIdx)
+		-- 직업별 타격 횟수 — 시프마스터는 다단히트, 표창은 연발
+		if charIdx == 0 then return 2       -- 아르카나: 낙뢰 2연타
+		elseif charIdx == 1 then return 3   -- 실피드: 화살 3발
+		elseif charIdx == 2 then return 3   -- 레이온: 콤보 3연타
+		elseif charIdx == 3 then return 5   -- 쉐이드: 다단히트 5연타
+		elseif charIdx == 4 then return 4   -- 린: 표창 4발
+		end
+		return 1
+	end
+
+	method number GetHitInterval(integer charIdx)
+		-- 타격 간격(초) — 시프마스터/표창은 촘촘하게. 유저 지정 2026-09-21로 전반적으로 더 빠르게 조였다.
+		if charIdx == 3 then return 0.06
+		elseif charIdx == 4 then return 0.075
+		elseif charIdx == 1 then return 0.085
+		end
+		return 0.1
+	end
+
+	method string GetProjectileRUID(integer charIdx)
+		-- 날아가는 투사체(궁수 화살 / 표창). 없으면 착탄 이펙트를 그대로 쓴다
+		if charIdx == 1 then return self.SylphArrowRUID
+		elseif charIdx == 4 then return self.RinShurikenRUID
+		end
+		return self:GetEffectRUID(charIdx)
+	end
+
+	method string GetSwingAction(integer charIdx)
+		-- 무기에 맞는 아바타 액션. 없는 이름을 보내면 모션이 안 나오므로 무기 계열별로 맞춘다
+		if charIdx == 0 then return "swingO1"       -- 아르카나: 한손 지팡이 시전
+		elseif charIdx == 1 then return "shoot1"     -- 실피드: 활 발사
+		elseif charIdx == 2 then return "swingT1"    -- 레이온: 두손 대검 스윙
+		elseif charIdx == 3 then return "swingT1"    -- 쉐이드: 두손무기(블랙 크샤마) 스윙
+		elseif charIdx == 4 then return "swingO1"    -- 린: 한손무기 휘두르기(유저 지정)
+		end
+		return "swingO1"
+	end
+
+	@ExecSpace("ServerOnly")
+	method string GetEffectRUID(integer charIdx)
+		-- 스킬 연출(근접 2명은 아래 GetHitRUID의 타격 연출과 짝을 이룬다)
+		if charIdx == 0 then return self.ArcanaEffectRUID
+		elseif charIdx == 1 then return self.SylphEffectRUID
+		elseif charIdx == 2 then return self.LeionSkillRUID
+		elseif charIdx == 3 then return self.ShadeSkillRUID
+		elseif charIdx == 4 then return self.RinEffectRUID
+		end
+		return self.ArcanaEffectRUID
+	end
+
+	@ExecSpace("ServerOnly")
+	method string GetHitRUID(integer charIdx)
+		-- 근접 2명만 갖는 별도 타격 연출. 없으면 빈 문자열(스킬 연출만 나간다)
+		if charIdx == 2 then return self.LeionHitRUID
+		elseif charIdx == 3 then return self.ShadeHitRUID
+		end
+		return ""
+	end
+
+	@ExecSpace("ServerOnly")
+	method Vector3 GetSkillFxPos(integer charIdx, Entity hero, number spread)
+		-- 근접 스킬 연출이 터질 자리. 캐릭터마다 기준점이 다르다.
+		local bossPos = self._boss.TransformComponent.Position
+		if charIdx == 2 or charIdx == 3 then
+			-- 레이온 / 쉐이드: 자기가 공격하는 바로 앞(보스 쪽 방향)에 뜬다.
+			-- ⚠ 유저 지정 2026-09-21 — 보스 쪽 고정 좌표(발록 뿔 등)로 두면 "엉뚱한 데 뜬다".
+			local p = hero.TransformComponent.Position
+			local dir = 1
+			if bossPos.x < p.x then dir = -1 end
+			local x = p.x + (self.LeionFxForward + spread) * dir
+			local y = p.y + self.LeionFxHeight
+			if charIdx == 3 then
+				x = x + self.ShadeFxAdjust.x
+				y = y + self.ShadeFxAdjust.y
+			end
+			return Vector3(x, y, p.z)
+		end
+		local hit = self:GetBossHitPos()
+		return Vector3(hit.x + self.MeleeFxOffsetX + spread, hit.y, hit.z)
+	end
+
+	method number GetSkillScale(integer charIdx)
+		if charIdx == 3 then return self.ShadeSkillScale end
+		return self:GetEffectScale(charIdx)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SpawnSkillEffectAt(integer charIdx, Vector3 pos)
+		-- 스킬 연출을 지정한 좌표에 그대로 띄운다(위치 계산은 GetSkillFxPos가 한다)
+		local map = self.Entity.CurrentMap
+		if not isvalid(map) then return end
+		local fx = _SpawnService:SpawnByModelId("skilleffect", "RaidFX", pos, map)
+		if fx == nil then return end
+		local renderer = fx.SpriteRendererComponent
+		if renderer ~= nil then renderer.SpriteRUID = self:GetEffectRUID(charIdx) end
+		local scale = self:GetSkillScale(charIdx)
+		fx.TransformComponent.Scale = Vector3(scale, scale, 1.0)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SpawnMeleeHit(integer charIdx, number xOffset)
+		-- 근접 타격 연출 — 스킬 연출 위에 겹쳐 보스 앞쪽에서 터진다
+		local ruid = self:GetHitRUID(charIdx)
+		if ruid == "" then return end
+		if not isvalid(self._boss) then return end
+		local map = self.Entity.CurrentMap
+		if not isvalid(map) then return end
+		local pos = self:GetBossHitPos()
+		local fx = _SpawnService:SpawnByModelId("skilleffect", "RaidHitFX",
+			Vector3(pos.x + self.MeleeFxOffsetX + xOffset, pos.y, pos.z), map)
+		if fx == nil then return end
+		local renderer = fx.SpriteRendererComponent
+		if renderer ~= nil then renderer.SpriteRUID = ruid end
+		local scale = self:GetEffectScale(charIdx)
+		fx.TransformComponent.Scale = Vector3(scale, scale, 1.0)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SpawnSkillEffect(integer charIdx, number xOffset)
+		-- 본게임과 동일한 방식 — "skilleffect" 모델을 스폰하고 SpriteRUID만 갈아끼운다(SkillEffectAI가 수명 관리)
+		if not isvalid(self._boss) then return end
+		local map = self.Entity.CurrentMap
+		if not isvalid(map) then return end
+		local pos = self:GetBossHitPos()
+		local fx = _SpawnService:SpawnByModelId("skilleffect", "RaidFX", Vector3(pos.x - 0.5 + xOffset, pos.y, pos.z), map)
+		if fx == nil then return end
+		local renderer = fx.SpriteRendererComponent
+		if renderer ~= nil then renderer.SpriteRUID = self:GetEffectRUID(charIdx) end
+		local scale = self:GetEffectScale(charIdx)
+		fx.TransformComponent.Scale = Vector3(scale, scale, 1.0)
+	end
+
+	-- ── 대미지 숫자(착용 중인 대미지 스킨 그대로) ─────────────────────────────
+	@ExecSpace("Multicast")
+	method void ShowDamage(number amount)
+		-- Multicast = 각 클라에서 실행 → 클라마다 자기가 장착한 스킨으로 숫자가 뜬다(MonsterAI와 동일 규칙).
+		-- ⚠ self._boss는 @Sync가 아니라 서버에만 채워져 있다(MonsterAI의 _hitRUID 함정과 같음) —
+		--   클라에서는 맵에서 다시 찾아야 한다.
+		if self:IsServer() then return end
+		local map = self.Entity.CurrentMap
+		if not isvalid(map) then return end
+		local boss = map:GetChildByName("RaidBoss")
+		if not isvalid(boss) then return end
+		local skinId = _DamageSkinLogic:GetEquippedRuid()
+		if skinId == nil or skinId == "" then return end
+		_DamageSkinService:Play(boss, skinId, 0.05, { math.floor(amount) }, DamageSkinTweenType.Default, false)
+	end
+
+end

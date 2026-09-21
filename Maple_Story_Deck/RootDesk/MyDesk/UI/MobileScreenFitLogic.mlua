@@ -30,6 +30,11 @@ script MobileScreenFitLogic extends Logic
 	-- 그대로 쓰면 가로가 11.15칸으로 목표(12.8)보다 좁았다. 이 값은 첫 근삿값이고, 최종 보정은 FitCameraWidth가 실측으로 한다.
 	property number MobileNativeVerticalUnits = 4.7
 	property number PcViewWidthUnits = 12.8
+
+	-- PC가 줌 100에서 보여주는 세로 범위(월드 유닛). 인게임은 "가로를 PC와 동일하게"가 유저 지정이라
+	-- 세로를 안 썼는데, 레이드 관전 화면처럼 **구도가 고정된 장면**은 가로만 맞추면 세로가 잘린다
+	-- (2026-09-21 유저 리포트 "레이드 PC랑 모바일 해상도가 달라 보스가 짤려 보여"). FitCameraForZoom 참고.
+	property number PcViewHeightUnits = 7.2
 	property number ZoomMultiplierMin = 0.5
 	property number ZoomMultiplierMax = 1.5
 	-- 보이는 가로가 이 값(월드 유닛) 이내로 목표에 붙어 있으면 더 건드리지 않는다
@@ -47,7 +52,10 @@ script MobileScreenFitLogic extends Logic
 	-- 배경 이미지 비율 허용 오차(원본 대비 ±배율). 벗어나면 넘치는 쪽을 잘라 비율을 지킨다.
 	property number BackgroundMaxStretch = 1.08
 
-	-- 로비 재화 배지를 모바일에서 왼쪽으로 미는 양(MSW 기본 버튼 2개 폭 ≈ 180 + 여유)
+	-- 로비 재화 배지를 왼쪽으로 미는 양(MSW 기본 버튼 2개 폭 ≈ 180 + 여유).
+	-- ⚠ 2026-09-21 유저 리포트: MSW 기본 버튼(친구/⋯)은 **PC에서도** 우상단에 2개 뜬다 —
+	--   모바일에서만 밀고 있어서 PC에서는 배지가 그대로 가려져 있었다. 그래서 이 보정만
+	--   IsActive() 게이트 밖으로 빼서 플랫폼과 무관하게 적용한다(나머지 보정은 여전히 모바일 전용).
 	property number LobbyBadgeShiftX = 200
 
 	-- 로비 탭바를 바닥 안전영역의 몇 배만큼 내릴지. 계산상 1.0이 "아래로 늘어난 나무판의 한가운데"다
@@ -64,8 +72,14 @@ script MobileScreenFitLogic extends Logic
 
 	@ExecSpace("ClientOnly")
 	method void OnBeginPlay()
-		-- 모바일일 때만 화면 맞춤을 예약한다(PC는 아무것도 안 함).
-		if not self:IsActive() then return end
+		-- 로비 재화 배지 비키기는 PC/모바일 공통이다(MSW 기본 버튼이 양쪽 다 우상단에 뜬다).
+		-- 나머지 화면 맞춤(배경/딤/탭바/하단 HUD/줌)은 모바일일 때만 돈다.
+		if not self:IsActive() then
+			_TimerService:SetTimerOnce(function()
+				if isvalid(self) then self:FitLobbyBadges() end
+			end, self.ApplyDelay)
+			return
+		end
 		log(string.format("MobileScreenFitLogic: mobile fit scheduled (screen %dx%d)", _UILogic.ScreenWidth, _UILogic.ScreenHeight))
 		_TimerService:SetTimerOnce(function()
 			if isvalid(self) then self:ApplyAll() end
@@ -140,6 +154,59 @@ script MobileScreenFitLogic extends Logic
 		if newZoom < 1 then newZoom = 1 end
 		cam.ZoomRatio = newZoom
 		log(string.format("MobileScreenFitLogic: camera width %.2f -> zoom %.2f (target %.2f)", width, newZoom, self.PcViewWidthUnits))
+	end
+
+	@ExecSpace("ClientOnly")
+	method number GetVisibleWorldHeight()
+		-- 지금 카메라가 보여주는 세로 범위(월드 유닛). 화면 위아래 끝을 월드 좌표로 변환해서 잰다.
+		local sh = _UILogic.ScreenHeight
+		local sw = _UILogic.ScreenWidth
+		if sw <= 0 or sh <= 0 then return -1 end
+		local top = _UILogic:ScreenToWorldPosition(Vector2(sw / 2, 0))
+		local bottom = _UILogic:ScreenToWorldPosition(Vector2(sw / 2, sh))
+		if top == nil or bottom == nil then return -1 end
+		return math.abs(top.y - bottom.y)
+	end
+
+	-- 구도가 고정된 연출 화면(레이드 관전 등)을 PC와 같게 맞춘다 — 유저 지정 2026-09-21
+	-- "레이드 pc랑 모바일 버전 해상도가 달라서 보스 잡는게 짤려보여, 똑같이좀 만들어줘".
+	--
+	-- ⚠ 인게임(FitCameraWidth)과 목표가 다르다. 인게임은 "가로를 PC와 동일하게"가 유저 지정이라 가로만
+	--   맞추는데, 그 규칙을 그대로 쓰면 PC(16:9)보다 길쭉한 폰에서는 **세로가 PC보다 좁아져** 키 큰 발록의
+	--   위아래가 잘린다. 그래서 여기서는 가로·세로 둘 다 "PC가 보여주는 만큼은 반드시 보이게"(contain)
+	--   맞춘다 — 모자란 쪽 기준으로 줌아웃하므로 화면비가 남는 축은 배경이 더 보일 뿐, 잘리지 않는다.
+	--
+	-- pcZoomPercent = PC에서 쓰는 줌 값(레이드는 RaidUI.RaidZoomPercent = 70).
+	-- PC가 그 줌에서 보여주는 범위 = PcView{Width,Height}Units × 100 / pcZoomPercent (보이는 범위 ∝ 1/줌).
+	@ExecSpace("ClientOnly")
+	method void FitCameraForZoom(number pcZoomPercent)
+		if not self:IsActive() then return end
+		if pcZoomPercent <= 0 then return end
+		local cam = _CameraService:GetCurrentCameraComponent()
+		if cam == nil then return end
+		local width = self:GetVisibleWorldWidth()
+		local height = self:GetVisibleWorldHeight()
+		if width <= 0 or height <= 0 then return end
+		local targetW = self.PcViewWidthUnits * 100 / pcZoomPercent
+		local targetH = self.PcViewHeightUnits * 100 / pcZoomPercent
+		-- 카메라가 아직 자리를 못 잡았으면(전환 중/줌 트윈 중) 건드리지 않는다 — FitCameraWidth와 같은 가드
+		if width > targetW * self.CameraWidthMaxCorrection or width < targetW / self.CameraWidthMaxCorrection then
+			log_warning(string.format("MobileScreenFitLogic: raid camera width %.2f out of range (target %.2f), skip", width, targetW))
+			return
+		end
+		-- 여유가 가장 적은 축(비율이 작은 쪽)에 맞춘다 = contain. 그 축은 목표와 정확히 같아지고
+		-- 나머지 축은 목표보다 넓게 남으므로, 어느 쪽도 PC보다 좁아지지(잘리지) 않는다.
+		-- ⚠ 1보다 클 때도 그대로 적용해야 한다 — 1차 배율이 과하게 줌아웃된 경우(둘 다 목표보다 넓음)
+		--   되돌리지 않으면 PC보다 한참 작게 보인 채로 남는다. 이때 줌인해도 좁은 축이 목표에
+		--   "딱 맞을" 뿐이라 잘리지 않는다.
+		local ratio = math.min(width / targetW, height / targetH)
+		if math.abs(1 - ratio) * targetW <= self.CameraWidthTolerance then return end
+		local newZoom = cam.ZoomRatio * ratio
+		if newZoom > cam.ZoomRatioMax then newZoom = cam.ZoomRatioMax end
+		if newZoom < 1 then newZoom = 1 end
+		cam.ZoomRatio = newZoom
+		log(string.format("MobileScreenFitLogic: raid view %.2fx%.2f -> zoom %.2f (target %.2fx%.2f)",
+			width, height, newZoom, targetW, targetH))
 	end
 
 	-- 화면 아래 안전영역(홈 바) 두께를 UI 단위로 잰다. 아이폰은 UI 캔버스가 안전영역 안쪽에만 깔려서
@@ -253,17 +320,41 @@ script MobileScreenFitLogic extends Logic
 			"/ui/RunStartConfirmGroup/Dimmer",
 			"/ui/ShadowShopGroup/Dimmer",
 			"/ui/SkillUpgradeGroup/Dimmer",
+			-- 레이드 온보딩(2026-09-21) — 로비 유도 딤 + 이미지 튜토리얼 딤
+			"/ui/TitleGroup/RaidGuideDim",
+			"/ui/TitleGroup/RaidTutorial/Dim",
 			"/ui/ToastGroup/BossAlertFlash",
 			"/ui/WorldCharacterSelectGroup/Dimmer",
 		}
 	end
 
 	method table GetLobbyBadgePaths()
-		-- 모바일에서 MSW 기본 버튼을 피해 왼쪽으로 옮길 로비 우상단 배지들.
+		-- MSW 기본 버튼(친구/⋯)을 피해 왼쪽으로 옮길 로비 우상단 배지들.
 		return {
 			"/ui/TitleGroup/CoinBadge",
 			"/ui/TitleGroup/DiamondBadge",
 		}
+	end
+
+	@ExecSpace("ClientOnly")
+	method integer FitLobbyBadges()
+		-- 로비 우상단 재화 배지를 MSW 기본 버튼 2개만큼 왼쪽으로 민다(PC/모바일 공통).
+		-- 원본 좌표는 한 번만 저장하고 매번 원본 기준으로 다시 계산한다 — 여러 번 불러도 두 번 밀리지 않는다.
+		if self._T.badgeOrig == nil then self._T.badgeOrig = {} end
+		local count = 0
+		for _, path in ipairs(self:GetLobbyBadgePaths()) do
+			local e = _EntityService:GetEntityByPath(path)
+			if isvalid(e) then
+				local t = e.UITransformComponent
+				if self._T.badgeOrig[path] == nil then self._T.badgeOrig[path] = t.anchoredPosition end
+				local orig = self._T.badgeOrig[path]
+				t.anchoredPosition = Vector2(orig.x - self.LobbyBadgeShiftX, orig.y)
+				count = count + 1
+			end
+		end
+		log(string.format("MobileScreenFitLogic: lobby badges shifted left by %.0f (%d badges, mobile=%s)",
+			self.LobbyBadgeShiftX, count, tostring(self:IsActive())))
+		return count
 	end
 
 	-- 화면 전체 사각형을 "요소 자신의 pivot 기준 로컬 좌표"로 잰다. 측정 불가/비정상이면 nil.
@@ -311,7 +402,6 @@ script MobileScreenFitLogic extends Logic
 		self._lastScreenH = _UILogic.ScreenHeight
 		local bgCount = 0
 		local dimCount = 0
-		local badgeCount = 0
 		local bgPaths = self:GetBackgroundPaths()
 		local dimPaths = self:GetDimmerPaths()
 		local badgePaths = self:GetLobbyBadgePaths()
@@ -321,17 +411,7 @@ script MobileScreenFitLogic extends Logic
 		for _, path in ipairs(dimPaths) do
 			if self:FitToScreen(path, false) then dimCount = dimCount + 1 end
 		end
-		if self._T.badgeOrig == nil then self._T.badgeOrig = {} end
-		for _, path in ipairs(badgePaths) do
-			local e = _EntityService:GetEntityByPath(path)
-			if isvalid(e) then
-				local t = e.UITransformComponent
-				if self._T.badgeOrig[path] == nil then self._T.badgeOrig[path] = t.anchoredPosition end
-				local orig = self._T.badgeOrig[path]
-				t.anchoredPosition = Vector2(orig.x - self.LobbyBadgeShiftX, orig.y)
-				badgeCount = badgeCount + 1
-			end
-		end
+		local badgeCount = self:FitLobbyBadges()
 		self:FitTabBar()
 		self:FitTabBarTopLine()
 		self:FitBottomHud()

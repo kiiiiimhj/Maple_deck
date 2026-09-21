@@ -857,7 +857,40 @@ script PkgPlayerInventory extends Component
 		local filled = 0
 		for guid, itemStruct in pairs(self.Items) do
 			local gearStruct = itemStruct:GetGearStruct()
-			if gearStruct ~= nil and _WeaponTierDataLogic:IsWeaponItem(itemStruct.ItemId) then
+			if gearStruct ~= nil and _WeaponTierDataLogic:IsRing(itemStruct.ItemId) then
+				-- 반지는 2026-09-21에 규칙이 두 번 바뀌어서 옛 아이템 보정이 두 갈래다.
+				-- 둘 다 한 번만 돌고(값이 채워지면 조건이 거짓이 된다) 서로 독립이다.
+				local ringFixed = false
+
+				-- ① 메인 옵션 단일화 — 옛 반지는 ATK와 HP를 동시에 갖고 있다.
+				--    한쪽을 굴려 확정하고 반대쪽 수치/표를 0으로 눌러 정리한다.
+				if gearStruct.MainStatType == 0 then
+					gearStruct.MainStatType = _WeaponTierDataLogic:RollRingMainStatType()
+					if gearStruct.MainStatType == _WeaponTierDataLogic.RingMainStatHp then
+						gearStruct.Atk = 0
+						gearStruct.AtkByGrade = _WeaponTierDataLogic:ZeroByGradeTable()
+					else
+						gearStruct.Hp = 0
+						gearStruct.HpByGrade = _WeaponTierDataLogic:ZeroByGradeTable()
+					end
+					ringFixed = true
+				end
+
+				-- ② 등급 스킬 등급별화 — 옛 반지는 아이템당 1종이라 등급 표 5줄이 전부 같았다.
+				--    전 등급을 새로 굴리고 지금 등급의 것을 SkillVariant에 반영한다.
+				if not _WeaponTierDataLogic:HasSkillVariantByGrade(gearStruct) then
+					gearStruct.SkillVariantByGrade = _WeaponTierDataLogic:RollRingStatTypeByGrade()
+					gearStruct.SkillVariant = _WeaponTierDataLogic:GetSkillVariantForGrade(gearStruct, gearStruct.Grade)
+					ringFixed = true
+				end
+
+				if ringFixed then
+					filled = filled + 1
+				end
+			elseif gearStruct ~= nil and _WeaponTierDataLogic:IsWeaponItem(itemStruct.ItemId)
+				and not _WeaponTierDataLogic:IsRing(itemStruct.ItemId) then
+				-- ⚠ 반지는 여기서 제외해야 한다 — StatFieldTable엔 "Atk"로 등록돼 있어서, 체력형 반지
+				--   (Atk가 의도적으로 0)가 들어오면 "스탯이 빠졌다"고 보고 ATK를 다시 굴려버린다
 				local statField = _WeaponTierDataLogic:GetStatField(itemStruct.ItemId)
 				if statField == "Atk" and gearStruct.Atk <= 0 then
 					gearStruct.Atk = _WeaponTierDataLogic:RollAtk(itemStruct.ItemId, gearStruct.Grade, gearStruct.Quality)
@@ -1164,6 +1197,17 @@ script PkgPlayerInventory extends Component
 			gearStruct.AtkByGrade = _WeaponTierDataLogic:RollAtkByGrade(baseItem.ItemId, gearStruct.Quality)
 			gearStruct.HpByGrade = _WeaponTierDataLogic:RollHpByGrade(baseItem.ItemId, gearStruct.Quality)
 			gearStruct.BonusPercentPerMilleByGrade = _WeaponTierDataLogic:RollBonusPercentPerMilleByGrade(baseItem.ItemId, gearStruct.Quality)
+
+			-- 반지는 표를 새로 굴리면 눌러뒀던 반대쪽 축이 같이 살아난다 — 베이스의 메인 옵션
+			-- (MainStatType)은 합성으로 바뀌지 않으므로 여기서 다시 눌러준다(재료가 반대 종류여도
+			-- 베이스 종류가 그대로 유지된다)
+			if _WeaponTierDataLogic:IsRing(baseItem.ItemId) then
+				if gearStruct.MainStatType == _WeaponTierDataLogic.RingMainStatHp then
+					gearStruct.AtkByGrade = _WeaponTierDataLogic:ZeroByGradeTable()
+				else
+					gearStruct.HpByGrade = _WeaponTierDataLogic:ZeroByGradeTable()
+				end
+			end
 		end
 
 		-- 등급이 실제로 올랐으면(또는 품질이 바뀌어 표가 새로 갱신됐으면) ATK/BonusPercentPerMille을
@@ -1188,6 +1232,12 @@ script PkgPlayerInventory extends Component
 				newBonusPercentPerMille = _WeaponTierDataLogic:RollBonusPercentPerMille(baseItem.ItemId, gearStruct.Grade, gearStruct.Quality)
 			end
 			gearStruct.BonusPercentPerMille = newBonusPercentPerMille
+
+			-- 등급 스킬 변형도 등급마다 다르므로(반지) 새 등급의 것으로 갱신한다. 재굴림이 아니라
+			-- 드롭 때 굴려둔 SkillVariantByGrade 조회일 뿐이라 미리 본 값 그대로 온다.
+			-- ⚠ 클라는 이 값을 따로 받지 않지만, 표가 아이템에 이미 있고 Grade는 동기화되므로
+			--   GetSkillVariantForGrade로 같은 값을 스스로 뽑아낸다(RPC 추가 불필요)
+			gearStruct.SkillVariant = _WeaponTierDataLogic:GetSkillVariantForGrade(gearStruct, gearStruct.Grade)
 		end
 
 		self.IsSaveDB = true
