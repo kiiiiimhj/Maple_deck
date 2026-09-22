@@ -49,7 +49,7 @@ function collectUsed() {
       if (f.isDirectory()) { walk(p); continue; }
       if (!f.name.endsWith(".mlua")) continue;
       const src = fs.readFileSync(p, "utf8");
-      for (const m of src.matchAll(/"(MLUA_[A-Z0-9_]+|UI_[A-Z0-9_]+|FMT_[A-Z0-9_]+)"/g)) used.add(m[1]);
+      for (const m of src.matchAll(/"(MLUA_[A-Z0-9_]+|UI_[A-Z0-9_]+|FMT_[A-Z0-9_]+)["|]/g)) used.add(m[1]);
     }
   })("RootDesk/MyDesk");
   for (const f of fs.readdirSync("ui").filter((x) => x.endsWith(".ui"))) {

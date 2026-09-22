@@ -1,0 +1,78 @@
+@Logic
+script LocText extends Logic
+
+	-- 로컬라이제이션 공용 해석기 (2026-09-22).
+	-- _LocalizationService는 ClientOnly라 서버 코드는 문구를 풀 수 없다. 그래서 서버는 **키만** 보내고
+	-- 화면에 찍는 클라 쪽에서 이걸로 푼다. 받는 형태는 세 가지:
+	--   "MLUA_XXX_001"            → GetText
+	--   "FMT_XXX_001|인자1|인자2"  → GetTextFormat(키, 인자...) — 인자가 키면 그것도 푼다
+	--   그 외("+8%", "", 이미 풀린 문장) → 그대로 통과
+	-- @ExecSpace가 없어서 어디서 불러도 안전하다 — 서버에서는 받은 값을 그대로 돌려준다.
+
+	method string Resolve(string value)
+		-- 키/포맷 문자열을 현재 언어 문구로 푼다(서버에서는 그대로 반환)
+		if value == nil or value == "" then return value end
+		if not self:IsClient() then return value end
+		if string.match(value, "^[A-Z][A-Z0-9_]*$") ~= nil then
+			return _LocalizationService:GetText(value)
+		end
+		local key = string.match(value, "^([A-Z][A-Z0-9_]*)|")
+		if key == nil then return value end
+		local rest = string.sub(value, #key + 2)
+		local args = {}
+		local pos = 1
+		while true do
+			local s, e = string.find(rest, "|", pos, true)
+			if s == nil then
+				table.insert(args, self:Resolve(string.sub(rest, pos)))
+				break
+			end
+			table.insert(args, self:Resolve(string.sub(rest, pos, s - 1)))
+			pos = e + 1
+		end
+		local n = #args
+		if n == 1 then return _LocalizationService:GetTextFormat(key, args[1]) end
+		if n == 2 then return _LocalizationService:GetTextFormat(key, args[1], args[2]) end
+		if n == 3 then return _LocalizationService:GetTextFormat(key, args[1], args[2], args[3]) end
+		return _LocalizationService:GetTextFormat(key, args[1], args[2], args[3], args[4])
+	end
+
+	method string ResolveList(string value, string sep)
+		-- "키·키" 처럼 구분자로 이어 붙인 목록을 항목별로 풀어 같은 구분자로 다시 잇는다
+		if value == nil or value == "" then return value end
+		local out = {}
+		local pos = 1
+		while true do
+			local s, e = string.find(value, sep, pos, true)
+			if s == nil then
+				table.insert(out, self:Resolve(string.sub(value, pos)))
+				break
+			end
+			table.insert(out, self:Resolve(string.sub(value, pos, s - 1)))
+			pos = e + 1
+		end
+		return table.concat(out, sep)
+	end
+
+	@ExecSpace("Multicast")
+	method void LocalizeWorldText(Entity fx)
+		-- 서버가 스폰한 월드 텍스트(damagenumber 모델)의 Text에는 키가 들어 있다 — 각 클라가 자기 언어로 바꿔 쓴다.
+		-- 스폰 복제보다 이 호출이 먼저 도착할 수 있어서, 아직 엔티티가 없으면 잠깐 뒤에 한 번 더 본다
+		if not self:IsClient() then return end
+		if isvalid(fx) then
+			self:ApplyWorldText(fx)
+			return
+		end
+		_TimerService:SetTimerOnce(function()
+			if isvalid(fx) then self:ApplyWorldText(fx) end
+		end, 0.2)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ApplyWorldText(Entity fx)
+		-- 월드 텍스트 한 개를 현재 언어로 바꾼다
+		local r = fx.TextRendererComponent
+		if r == nil then return end
+		r.Text = self:Resolve(r.Text)
+	end
+end
