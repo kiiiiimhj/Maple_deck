@@ -94,6 +94,23 @@ script RaidUI extends Logic
 		"#9aa0a6", "#9aa0a6", "#6fcf97", "#56ccf2", "#9b8cff", "#ffb340", "#ff5d5d",
 	}
 
+	-- HUD 갱신 주기(초). 0이면 매 프레임 — 레이드 화면은 보스 체력/남은시간/DPS창이 전부 느리게
+	-- 변하는 값이라 매 프레임 다시 쓸 이유가 없다. Refresh() 한 번에 UI 쓰기가 20~30개라
+	-- 60fps면 초당 1500회가 넘는다(유저 리포트 2026-09-22 "레이드 들어가면 렉이 너무 심해").
+	property number RefreshInterval = 0.1
+	property number _refreshTimer = 0
+
+	-- 성능 계측용 — true면 2초마다 평균 fps를 로그로 찍는다. 배포 시 false.
+	property boolean DebugFps = false
+	property number _fpsAccum = 0
+	property integer _fpsFrames = 0
+	property number _fpsWorst = 0
+	property integer _fpsHitches = 0
+
+	-- 로비 전투 탭에 있는 동안만 레이드 아이콘을 보여준다(스킬/랭킹/유물/상점 탭에서는 숨긴다).
+	-- TitleUI.ShowPanelOnly가 SetLobbyTabVisible로 바꿔준다 — 인벤토리/출석/업적 버튼과 같은 규칙.
+	property boolean _lobbyTabVisible = true
+
 	-- 레이드에 들어가기 전 있던 자리(나가기로 그대로 돌아간다)
 	property boolean _open = false
 	property string _returnMap = ""
@@ -255,7 +272,7 @@ script RaidUI extends Logic
 			self.hpFill.Entity.UITransformComponent.RectSize = Vector2(w, 36)
 		end
 		if isvalid(self.hpText) then
-			self.hpText.Text = "보스 체력  " .. string.format("%.1f", (1 - ratio) * 100) .. "%"
+			self.hpText.Text = _LocalizationService:GetTextFormat("FMT_RAIDUI_001", string.format("%.1f", (1 - ratio) * 100))
 		end
 		if isvalid(self.gradeText) then
 			self.gradeText.Text = _RaidLogic:GetGradeName(gradeIdx)
@@ -266,7 +283,7 @@ script RaidUI extends Logic
 			if _RaidLogic:IsSeasonActive() then
 				self.hintText.Text = self:FormatRemain(_RaidLogic:GetSeasonRemainSeconds())
 			else
-				self.hintText.Text = "정산 중"
+				self.hintText.Text = _LocalizationService:GetText("MLUA_RAIDUI_002")
 			end
 		end
 		self:RefreshLock()
@@ -373,8 +390,13 @@ script RaidUI extends Logic
 	-- ── 로비 아이콘 ───────────────────────────────────────────────────────────
 	@ExecSpace("ClientOnly")
 	method void RefreshLobbyIcon()
-		-- 수령까지 끝낸 시즌에는 아이콘을 숨긴다 — 다음 시즌이 시작되면 다시 보인다
-		if isvalid(self.lobbyButton) then self.lobbyButton.Enable = _RaidLogic:IsIconVisible() end
+		-- 수령까지 끝낸 시즌에는 아이콘을 숨긴다 — 다음 시즌이 시작되면 다시 보인다.
+		-- ⚠ 여기에 탭 조건을 같이 걸어야 한다 — 이 메서드는 OnUpdate에서 **매 프레임** 불리므로,
+		--   TitleUI가 탭을 바꾸며 아이콘을 꺼도 다음 프레임에 도로 켜진다(유저 리포트 2026-09-22
+		--   "탭 누르면 레이드 버튼은 여전히 남아있네").
+		if isvalid(self.lobbyButton) then
+			self.lobbyButton.Enable = self._lobbyTabVisible and _RaidLogic:IsIconVisible()
+		end
 		-- 받을 보상이 있을 때 + 캐릭터가 유령이 됐을 때(부활하러 들어가야 한다) 빨간점을 켠다
 		if isvalid(self.lobbyRedDot) then
 			self.lobbyRedDot.Enable = _RaidLogic:CanClaimNow() or _RaidLogic.IsGhost
@@ -382,12 +404,47 @@ script RaidUI extends Logic
 	end
 
 	@ExecSpace("ClientOnly")
+	method void SetLobbyTabVisible(boolean visible)
+		-- TitleUI.ShowPanelOnly가 탭을 바꿀 때 부른다(인벤토리/출석/업적 버튼과 같은 규칙)
+		self._lobbyTabVisible = visible
+		self:RefreshLobbyIcon()
+	end
+
+	@ExecSpace("ClientOnly")
 	method void OnUpdate(number delta)
+		self:TickFpsProbe(delta)
 		if not self._open then
 			self:RefreshLobbyIcon()
 			return
 		end
+		-- HUD는 주기적으로만 다시 그린다(RefreshInterval 주석 참고). 0이면 예전처럼 매 프레임.
+		if self.RefreshInterval > 0 then
+			self._refreshTimer = self._refreshTimer + delta
+			if self._refreshTimer < self.RefreshInterval then return end
+			self._refreshTimer = 0
+		end
 		self:Refresh()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void TickFpsProbe(number delta)
+		-- 성능 계측 — DebugFps가 켜져 있을 때만 2초마다 평균 fps를 찍는다
+		-- ⚠ 평균 fps만 보면 안 된다 — 끊김(hitch)은 평균에 묻힌다.
+		--   2026-09-22 실측: 평균은 57~58fps로 멀쩡한데 유저는 "렉이 심하다"고 했다.
+		--   그래서 구간 최악 프레임(_fpsWorst)과 33ms 넘은 프레임 수(_fpsHitches)를 같이 본다.
+		if not self.DebugFps then return end
+		self._fpsAccum = self._fpsAccum + delta
+		self._fpsFrames = self._fpsFrames + 1
+		if delta > self._fpsWorst then self._fpsWorst = delta end
+		if delta > 0.033 then self._fpsHitches = self._fpsHitches + 1 end
+		if self._fpsAccum < 2.0 then return end
+		local fps = self._fpsFrames / self._fpsAccum
+		log(string.format("RaidUI FPS %.1f worst=%.0fms hitch>33ms=%d (open=%s, interval=%.2f)",
+			fps, self._fpsWorst * 1000, self._fpsHitches, tostring(self._open), self.RefreshInterval))
+		self._fpsAccum = 0
+		self._fpsFrames = 0
+		self._fpsWorst = 0
+		self._fpsHitches = 0
 	end
 
 	-- ── 유틸 ─────────────────────────────────────────────────────────────────

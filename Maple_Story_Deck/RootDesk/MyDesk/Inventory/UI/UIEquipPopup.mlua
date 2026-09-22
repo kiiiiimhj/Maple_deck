@@ -267,7 +267,7 @@ script UIEquipPopup extends Component
 			-- 바로 아래 등급 스킬 표에 같은 줄이 또 나와서 중복이었다
 			local descText = _WeaponTierDataLogic:GetDescription(itemStruct.ItemId, gearStruct.Grade)
 			if descText == "" then
-				descText = "아이템 설명이 아직 등록되지 않았습니다."
+				descText = _LocalizationService:GetText("MLUA_UIEQUIPPOPUP_001")
 			end
 			self.DescText.Text = descText
 			self.QualityText.Text = _QualityEnum:GetKoreanName(gearStruct.Quality)
@@ -276,7 +276,7 @@ script UIEquipPopup extends Component
 			local placeholderHp = 10 + (gearStruct ~= nil and gearStruct.Grade or 0) * 10
 			self.StatValueText.Text = tostring(placeholderHp)
 			self:SetStatIcon(false)
-			self.DescText.Text = "아이템 설명이 아직 등록되지 않았습니다."
+			self.DescText.Text = _LocalizationService:GetText("MLUA_UIEQUIPPOPUP_001")
 
 			-- 아이템 품질(D~SS, 기존 Rare/Epic 같은 Grade와는 별개 축) — 무기 외에는 실제 산출 로직/데이터가
 			-- 아직 없어서 유저 지정대로 우선 전부 "A" 고정 표시
@@ -292,6 +292,14 @@ script UIEquipPopup extends Component
 			self.ComposeCountBadge.Entity.Enable = false
 		end
 
+		-- 최고 등급(레전더리)은 더 올릴 곳이 없으니 합성 버튼 자체를 잠근다(유저 지정 2026-09-22).
+		-- 회색 처리는 ButtonComponent의 DisabledColor가 자동으로 입혀준다 — 판매 버튼과 같은 방식.
+		-- 판정은 GetNextGrade(-1) 단일 기준으로, 합성팝업/진행도 뱃지와 같은 규칙을 쓴다
+		local canCompose = gearStruct ~= nil and _GearGradeEnum:GetNextGrade(gearStruct.Grade) ~= -1
+		self.ComposeButton.Enable = canCompose
+		log("UIEquipPopup: composeButton enable=" .. tostring(canCompose)
+			.. " grade=" .. tostring(gearStruct ~= nil and gearStruct.Grade or -1))
+
 		self:UpdateLevelUpBox(itemStruct, gearStruct)
 
 		-- 같은 장비가 다시 그려졌는데 레벨이 올랐으면 = 강화 성공 → 아이콘 칸에 연출(유저 지정 2026-09-20)
@@ -304,7 +312,7 @@ script UIEquipPopup extends Component
 		self._shownGUID = itemStruct.GUID
 		self._shownLevel = newLevel
 
-		local mainKeyword = itemStruct:IsAttached() and "장착 해제" or "장착"
+		local mainKeyword = itemStruct:IsAttached() and _LocalizationService:GetText("MLUA_UIEQUIPPOPUP_002") or _LocalizationService:GetText("MLUA_UIEQUIPPOPUP_003")
 		self.ButtonEquipLabel.Text = mainKeyword
 
 		-- 장착 중이거나 잠긴 장비는 팔 수 없다 — 인벤토리 그리드와 같은 규칙(GearSellLogic.CanSell).
@@ -600,6 +608,14 @@ script UIEquipPopup extends Component
 	@ExecSpace("ClientOnly")
 	method void OnComposeButtonClicked()
 		if self.Entity.Enable == false or self.ItemStruct == nil then
+			return
+		end
+
+		-- 버튼이 꺼져 있으면 클릭 자체가 안 오지만, 등급이 최고치인 장비로 합성 팝업이 열리는 경로를
+		-- 코드 쪽에서도 한 번 더 막는다(Open() 갱신 전에 눌리는 타이밍 방어)
+		local gearStruct = self.ItemStruct:GetGearStruct()
+		if gearStruct == nil or _GearGradeEnum:GetNextGrade(gearStruct.Grade) == -1 then
+			log("UIEquipPopup: compose blocked — max grade")
 			return
 		end
 
