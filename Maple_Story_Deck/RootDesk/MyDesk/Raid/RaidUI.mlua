@@ -421,6 +421,8 @@ script RaidUI extends Logic
 		-- 액자 이미지 로딩까지 끝나면 그때 로비를 감추고 액자 HUD를 한 번에 보여준다
 		self._open = true
 		self._revealing = true
+		-- 들어올 때마다 캐릭터 자세(유령/서기)를 다시 건다
+		self._heroPoseState = ""
 		self:SnapCamera(true)
 		-- 줌은 트윈 없이 즉시(0초) — 트윈이 공개 뒤까지 이어지면 액자 안에서 화면이 움직여 보인다
 		_CameraService:ZoomTo(self.RaidZoomPercent * _MobileScreenFitLogic:GetZoomMultiplier(), 0)
@@ -698,6 +700,52 @@ script RaidUI extends Logic
 		-- 단 시즌 잠금(지난 시즌 미수령)이 걸려 있으면 그쪽이 우선이라 부활 창은 감춘다.
 		if not isvalid(self.revivePanel) then return end
 		self.revivePanel.Enable = _RaidLogic.IsGhost and not _RaidLogic:HasPendingReward()
+		self:RefreshHeroPoses()
+	end
+
+	-- 유령 자세(유저 지정 2026-09-23 "진짜 메이플에서 죽으면 되는 유령" = Maker 아바타 "사망").
+	-- 공식 문서 표: MapleAvatarBodyActionState.Dead = Core "dead" + Parts "stand1" + Loop
+	-- (몸통만 유령, 머리·얼굴은 그대로). ⚠ 서버에서 AvatarBodyActionSelector.ActionState=Dead로 바꾸는 것만으로는
+	-- 화면이 안 바뀌었다(실측) — 몸통 엔티티에 이벤트를 클라에서 직접 보내야 한다. Parts를 "dead"로 주면 머리가 사라진다.
+	property number HeroPoseReapplySeconds = 2.0
+	property string _heroPoseState = ""
+	property number _heroPoseTimer = 0
+
+	@ExecSpace("ClientOnly")
+	method void RefreshHeroPoses()
+		-- 유령이면 사망 자세를 주기적으로 다시 건다(늦게 켜진 캐릭터도 잡히게), 부활하면 한 번만 서기로 되돌린다
+		local ghost = _RaidLogic.IsGhost == true
+		local want = ghost and "dead" or "alive"
+		local now = _UtilLogic.ElapsedSeconds
+		if want == self._heroPoseState and (not ghost or now < self._heroPoseTimer) then return end
+		self._heroPoseState = want
+		self._heroPoseTimer = now + self.HeroPoseReapplySeconds
+		local user = _UserService.LocalPlayer
+		if not isvalid(user) then return end
+		local map = user.CurrentMap
+		if not isvalid(map) then return end
+		for i = 0, 4 do
+			local hero = map:GetChildByName("RaidHero" .. tostring(i))
+			if isvalid(hero) and hero.Enable and hero.AvatarRendererComponent ~= nil then
+				local body = hero.AvatarRendererComponent:GetBodyEntity()
+				if isvalid(body) then
+					local ev = ActionStateChangedEvent()
+					if ghost then
+						ev.CoreActionName = "dead"
+						ev.PartsActionName = "stand1"
+						ev.PlayType = SpriteAnimClipPlayType.Loop
+					else
+						-- 두손무기(레이온·쉐이드)는 stand2 — RaidScene.GetSwingAction의 무기 계열과 같다
+						local stand = (i == 2 or i == 3) and "stand2" or "stand1"
+						ev.CoreActionName = stand
+						ev.PartsActionName = stand
+						ev.PlayType = SpriteAnimClipPlayType.ZigzagLoop
+					end
+					ev.PlayRate = 1
+					body:SendEvent(ev)
+				end
+			end
+		end
 	end
 
 	@ExecSpace("ClientOnly")
