@@ -14,6 +14,17 @@ script LoadingUI extends Logic
 	property Entity loadingScreen = "4e3f744a-329a-4aa7-9e36-a0ec50fb2906"
 	property CanvasGroupComponent screenCanvas = "4e3f744a-329a-4aa7-9e36-a0ec50fb2906"
 	property SpriteGUIRendererComponent bgSprite = "4a7dbbce-a4e0-4168-a001-e93a0443194a"
+	-- 배경 위의 UFO 장식 — 다른 배경 이미지로 덮을 때(레이드 입장) 같이 숨긴다
+	property Entity ufoDeco = "263bbba6-a056-457e-bae7-299438d639ff"
+	-- 전용 로딩 그림을 쓸 때만 켜는 제목(ui/LoadingGroup.ui의 Screen/RaidTitle).
+	-- 글자를 그림에 구워 넣지 않고 UI 텍스트로 얹는 이유: 번역표(ko/en/zh-TW/ja)가 그대로 따라오고,
+	-- 색·크기·위치를 이미지 재업로드 없이 고칠 수 있다
+	property Entity titleText = "6da9c879-fd9b-4d79-ae7f-a2d50276f434"
+
+	-- CoverNowWithImage로 배경을 잠깐 바꿨을 때 원래 값(걷힐 때 되돌린다)
+	property any _origBgRuid = nil
+	property boolean _bgOverridden = false
+	property boolean _origUfoEnable = true
 
 	-- "Loading..." 글자들을 담은 컨테이너. 파도 연출은 글자마다 위상이 달라야 해서 한 덩어리
 	-- TextComponent로는 안 되고, Char_0..Char_N 자식 엔티티를 각각 위아래로 흔든다.
@@ -223,6 +234,85 @@ script LoadingUI extends Logic
 	end
 
 	@ExecSpace("ClientOnly")
+	method void CoverNow()
+		-- 페이드 없이 즉시 덮는다 — 레이드 입장처럼 "누르는 즉시 팝업이 떠야" 하는 곳에서 쓴다.
+		-- 자동으로 걷히지 않으므로 호출한 쪽이 준비가 끝나면 PlayReveal()을 불러야 한다
+		if not isvalid(self.loadingScreen) or not isvalid(self.screenCanvas) then return end
+		self._playing = true
+		self._covered = true
+		self.loadingScreen.Enable = true
+		self.screenCanvas.GroupAlpha = 1
+	end
+
+	@ExecSpace("ClientOnly")
+	method void CoverNowWithImage(string ruid)
+		-- CoverNow와 같지만 배경을 ruid 이미지로 바꾸고 UFO 장식을 숨긴다(레이드 전용 로딩 그림).
+		-- 걷히고 나면(PlayReveal 끝) 원래 게임 입장 로딩 그림으로 되돌린다
+		if isvalid(self.bgSprite) and ruid ~= nil and ruid ~= "" then
+			if not self._bgOverridden then
+				self._origBgRuid = self.bgSprite.ImageRUID
+				if isvalid(self.ufoDeco) then self._origUfoEnable = self.ufoDeco.Enable end
+				self._bgOverridden = true
+			end
+			self.bgSprite.ImageRUID = DataRef(ruid)
+			if isvalid(self.ufoDeco) then self.ufoDeco.Enable = false end
+		end
+		self:CoverNow()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void CoverNowWithImageTitled(string ruid)
+		-- CoverNowWithImage에 제목까지 띄운다(레이드 입장). 제목은 .ui에 번역 키로 박혀 있어서
+		-- 여기서는 켜기만 하면 되고, 걷힐 때 RestoreBackground가 다시 끈다.
+		-- WarmImage(예열)는 제목 없이 CoverNowWithImage를 쓴다 — 예열 중에 글자가 비치면 안 되니까
+		if isvalid(self.titleText) then self.titleText.Enable = true end
+		log("LoadingUI: titled cover (title=" .. tostring(isvalid(self.titleText)) .. ")")
+		self:CoverNowWithImage(ruid)
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean IsIdle()
+		-- 로딩 화면이 지금 아무 데도 안 쓰이는가(부팅 커버/입장 연출/덮기 모두 끝난 상태)
+		return not self._playing and not self._covered and isvalid(self.loadingScreen) and not self.loadingScreen.Enable
+	end
+
+	@ExecSpace("ClientOnly")
+	method void WarmImage(string ruid, number seconds)
+		-- 큰 배경 이미지는 미리 불러와도 **처음 그릴 때** 한 번 더 걸려서, 첫 CoverNowWithImage 때 원래 로딩 그림이
+		-- 잠깐 보였다가 바뀌었다(2026-09-23 실측). 로딩 화면이 쉬고 있을 때 거의 투명(0.01)·터치 통과로
+		-- 그 이미지를 seconds초 그려 두고 원래대로 돌린다. 그 사이 진짜로 덮으면(CoverNow) 그쪽이 이긴다
+		if not self:IsIdle() or not isvalid(self.bgSprite) then return end
+		self:CoverNowWithImage(ruid)
+		self._playing = false
+		self._covered = false
+		self.screenCanvas.GroupAlpha = 0.01
+		self.screenCanvas.BlocksRaycasts = false
+		self.screenCanvas.Interactable = false
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) then return end
+			self.screenCanvas.BlocksRaycasts = true
+			self.screenCanvas.Interactable = true
+			-- 그 사이 누가 실제로 덮었으면(CoverNow가 알파 1로 올림) 건드리지 않는다
+			if self._playing or self._covered then return end
+			self.screenCanvas.GroupAlpha = 0
+			if isvalid(self.loadingScreen) then self.loadingScreen.Enable = false end
+			self:RestoreBackground()
+			log("LoadingUI: image warmed (" .. ruid .. ")")
+		end, seconds)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RestoreBackground()
+		-- CoverNowWithImage로 바꾼 배경/장식을 원래대로.
+		-- 제목은 _bgOverridden 가드보다 먼저 끈다 — 배경 복구가 이미 끝난 뒤에도 글자만 남는 일이 없게
+		if isvalid(self.titleText) then self.titleText.Enable = false end
+		if not self._bgOverridden then return end
+		self._bgOverridden = false
+		if isvalid(self.bgSprite) and self._origBgRuid ~= nil then self.bgSprite.ImageRUID = self._origBgRuid end
+		if isvalid(self.ufoDeco) then self.ufoDeco.Enable = self._origUfoEnable end
+	end
+
+	@ExecSpace("ClientOnly")
 	method void PlayReveal()
 		-- 검은 화면을 걷어낸다. 이 시점엔 서버가 이미 스폰을 시작했으므로(EntryDelaySeconds와 맞춤)
 		-- 화면이 밝아지면서 몬스터가 저 멀리서 다가오는 게 보인다
@@ -242,6 +332,7 @@ script LoadingUI extends Logic
 			if isvalid(self.loadingScreen) then self.loadingScreen.Enable = false end
 			self._playing = false
 			self._covered = false
+			self:RestoreBackground()
 			log("LoadingUI: revealed")
 		end, self.FadeOutSeconds)
 	end

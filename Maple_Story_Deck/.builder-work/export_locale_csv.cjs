@@ -25,7 +25,7 @@ const OUT_DIR = "Docs/Localization";
 const OUT_CSV = path.join(OUT_DIR, "locale_strings.csv");
 
 // 언어 컬럼. ko/en은 문서로 확인된 지원 코드, 나머지는 유저 요청분 + 여유(빈 칸).
-const LOCALES = ["ko", "en", "zh-TW", "ja"];
+const LOCALES = ["ko", "en", "zh-tw", "ja"];
 
 // ── .mlua 문자열 리터럴 스캐너 ────────────────────────────────────────────
 // Lua 주석(--, --[[ ]])과 문자열("", '', [[ ]])을 구분하며 훑는다.

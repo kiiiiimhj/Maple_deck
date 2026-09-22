@@ -515,6 +515,11 @@ script MonsterAI extends Component
 	-- 절대 간섭하지 않는다.
 	property number DepthOverlayMaxAlpha = 0.5
 
+	-- UpdateDepth 전송 절감(2026-09-22 폰 렉 점검) — 깊이(Z)/그림자 알파가 이만큼 이상 변했을 때만 다시 보낸다.
+	-- 이펙트는 몬스터보다 EffectDepthEpsilon(0.2) 앞에 놓이므로 0.02 오차로는 순서가 안 바뀐다. 0 = 매 프레임 전송(예전 동작)
+	property number DepthSyncThreshold = 0.02
+	property number OverlayAlphaSyncThreshold = 0.02
+
 	property SpriteRendererComponent _depthOverlayRenderer = nil
 
 	-- 같은 종/같은 웨이브로 스폰된 몬스터는 스폰 직후 스케일이 완전히 동일해서(ApproachSpeedVariance가
@@ -3279,10 +3284,16 @@ script MonsterAI extends Component
 	method void UpdateDepth()
 		-- 스케일이 작을수록(멀리 있을수록) Z를 크게 해서 뒤로 깔리고,
 		-- 스케일이 커질수록(가까이 다가올수록) Z를 작게 해서 앞으로 나오게 한다
+		-- ⚠ 성능(2026-09-22, 폰 렉 점검): Position/Color는 @Sync라 쓸 때마다 폰으로 전송된다. 다가오는 몬스터마다
+		--   매 프레임 보내던 걸, 값이 기준치 이상 변했을 때만 보낸다(DepthSyncThreshold / OverlayAlphaSyncThreshold).
+		--   도달 순간(최종 깊이)은 항상 정확히 보낸다. 기준치를 0으로 두면 예전처럼 매 프레임 보낸다.
+		local reached = self._currentScale >= self._reachedScaleThreshold
 		local pos = self.Entity.TransformComponent.Position
 		local depth = 1.5 - self._currentScale - self._depthTieBreak
-		self.Entity.TransformComponent.Position = Vector3(pos.x, pos.y, depth)
-		
+		if reached or math.abs(depth - pos.z) >= self.DepthSyncThreshold then
+			self.Entity.TransformComponent.Position = Vector3(pos.x, pos.y, depth)
+		end
+
 		-- 깊이 오버레이 알파도 같이 갱신: 스폰(0.3) 시점엔 DepthOverlayMaxAlpha(가장 어두움),
 		-- 도달 임계값(_reachedScaleThreshold — 근접/원거리 몬스터마다 다름)에 가까워질수록 0(원래 색)으로 선형 보간
 		local overlay = self:GetDepthOverlayRenderer()
@@ -3291,7 +3302,10 @@ script MonsterAI extends Component
 			local t = 0
 			if span > 0 then t = (self._currentScale - 0.3) / span end
 			if t < 0 then t = 0 elseif t > 1 then t = 1 end
-			overlay.Color = Color(0, 0, 0, self.DepthOverlayMaxAlpha * (1 - t))
+			local alpha = self.DepthOverlayMaxAlpha * (1 - t)
+			if reached or math.abs(alpha - overlay.Color.a) >= self.OverlayAlphaSyncThreshold then
+				overlay.Color = Color(0, 0, 0, alpha)
+			end
 		end
 	end
 

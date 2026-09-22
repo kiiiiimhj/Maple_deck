@@ -23,7 +23,7 @@ const rows = parseCsv(fs.readFileSync(FILE, "utf8").replace(/^﻿/, ""));
 const head = rows.shift();
 console.log("헤더:", head.join(" | "), "/ 행", rows.length);
 const iK = head.indexOf("Key"), iKo = head.findIndex((h) => /한국어|Source/.test(h));
-const LANGS = ["en", "zh-TW", "ja"].map((l) => [l, head.indexOf(l)]);
+const LANGS = ["en", "zh-tw", "ja"].map((l) => [l, head.indexOf(l)]);
 for (const [l, i] of LANGS) if (i < 0) console.log(`  ⚠ 컬럼 없음: ${l}`);
 
 const game = parseCsv(fs.readFileSync(GAME, "utf8").replace(/^﻿/, ""));
@@ -58,8 +58,8 @@ for (const r of rows) {
     if (nl(t) !== nl(ko)) add(`${l} 줄바꿈 수 다름(ko ${nl(ko)} / ${l} ${nl(t)})`, `${key}: "${t.slice(0, 50).replace(/\n/g, "⏎")}"`);
     if (l === "en" && (HAN.test(t) || KANA.test(t))) add("en에 한자/가나", `${key}: "${t.slice(0, 40)}"`);
     if (l === "ja" && !KANA.test(t) && !HAN.test(t) && /[a-z]{3}/i.test(t) && t.length > 6) add("ja가 영어로 보임", `${key}: "${t.slice(0, 40)}"`);
-    if (l === "zh-TW" && KANA.test(t)) add("zh-TW에 가나(일본어 섞임?)", `${key}: "${t.slice(0, 40)}"`);
-    if (l === "zh-TW" && !HAN.test(t) && /[a-z]{3}/i.test(t) && t.length > 6) add("zh-TW가 영어로 보임", `${key}: "${t.slice(0, 40)}"`);
+    if (l === "zh-tw" && KANA.test(t)) add("zh-TW에 가나(일본어 섞임?)", `${key}: "${t.slice(0, 40)}"`);
+    if (l === "zh-tw" && !HAN.test(t) && /[a-z]{3}/i.test(t) && t.length > 6) add("zh-TW가 영어로 보임", `${key}: "${t.slice(0, 40)}"`);
     const ratio = t.length / Math.max(1, ko.length);
     if (l === "en" && ko.length >= 4 && ratio > 3.2) add("en이 원문보다 3배 이상 김(UI 넘침 후보)", `${key}: ko ${ko.length}자 → en ${t.length}자  "${t.slice(0, 50)}"`);
   }

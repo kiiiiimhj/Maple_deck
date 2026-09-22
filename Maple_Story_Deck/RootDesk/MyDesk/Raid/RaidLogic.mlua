@@ -26,14 +26,16 @@ script RaidLogic extends Logic
 	-- 하루치를 그날 한가운데(정오)에 몰아서 한다고 보면, 누적 DPS는 10D → 20D → 30D → 40D로 오른다
 	-- (D = 15분 런 1판의 대표 DPS). 시즌 4일(345,600초) 동안 쌓이는 피해는
 	--     10D×86400 + 20D×86400 + 30D×86400 + 40D×43200 = 6,912,000 × D
-	-- 이게 S컷(75%)이 되어야 하므로  BossHp = 6,912,000 × D ÷ 0.75 = **9,216,000 × D**.
-	-- D는 실측값이 필요해 유저에게 물었고 **5,000**으로 확정 → BossHp = 46,080,000,000.
+	-- 이게 S컷(75%)이 되어야 하므로  BossHp = 6,912,000 × D ÷ 0.75 = 9,216,000 × D (최초안).
+	-- ⭐ 2026-09-23 유저 지정 "S는 하루 7판으로, 나머지도 그에 맞게 낮춰" → 체력을 7/10로:
+	--     BossHp = 9,216,000 × 0.7 = **6,451,200 × D**. 등급 컷 %는 그대로라 전 등급이 같은 비율로 쉬워진다.
+	-- D는 실측값이 필요해 유저에게 물었고 **5,000**으로 확정 → BossHp = 32,256,000,000.
 	--
-	-- 이 기준으로 "하루에 15분 런을 몇 판 하느냐"에 따른 최종 등급은 이렇게 갈린다:
-	--     10판/일 → S(75%) · 6.7판 → A(50%) · 4.7판 → B(35%) · 2.7판 → C(20%)
-	--     1.3판 → D(10%) · 0.7판 → E(5%) · 그 미만 → F
+	-- 이 기준으로 "하루에 15분 런을 몇 판 하느냐"에 따른 최종 등급은 이렇게 갈린다(하루 n판 → 피해율 10.71n %):
+	--     7판/일 → S(75%) · 4.7판 → A(50%) · 3.3판 → B(35%) · 1.9판 → C(20%)
+	--     0.9판 → D(10%) · 0.5판 → E(5%) · 그 미만 → F
 	-- (F 검산) 4분 런 1판(대표 DPS를 넉넉히 D와 같다고 쳐도) 3일 방치 = 259,200×D
-	--          → 259,200 ÷ 9,216,000 = 2.8% → E컷(5%) 미만이라 F. 실제로는 훨씬 더 낮다.
+	--          → 259,200 ÷ 6,451,200 = 4.0% → E컷(5%) 미만이라 F. 실제로는 훨씬 더 낮다.
 	--
 	-- 재보정은 RefRunDps 한 줄만 고치면 전부 따라온다(로그의 "RaidLogic: +N DPS"가 실측 D다).
 	--
@@ -96,8 +98,8 @@ script RaidLogic extends Logic
 	-- 15분 버티는 한 판의 대표 DPS. **여기만 고치면 보스 체력/등급 컷이 전부 재보정된다.**
 	property number RefRunDps = 5000
 
-	-- BossHp = RefRunDps × 이 값. 9,216,000 = (10+20+30)×86400 + 40×43200 ÷ 0.75
-	property number HpPerRefDps = 9216000
+	-- BossHp = RefRunDps × 이 값. 최초 9,216,000(하루 10판 S) × 0.7 = 6,451,200(하루 7판 S, 2026-09-23 유저 지정)
+	property number HpPerRefDps = 6451200
 
 	-- 시즌 길이(일) — 유저 지정 2026-09-21 "월~목 4일"
 	property integer SeasonDays = 4
@@ -555,6 +557,22 @@ script RaidLogic extends Logic
 		return #self.GradeNames - 1
 	end
 
+	method number GetGradeCutPercent(integer gradeIndex)
+		-- 그 등급에 들어가려면 필요한 보스 체력 피해율(%). 보상 안내 표가 GradeCuts를 직접 읽지 않게 한다
+		local cut = self.GradeCuts[gradeIndex + 1]
+		if cut == nil then return 0 end
+		return cut
+	end
+
+	method integer GetRewardGearGrade(integer gradeIndex)
+		-- 레이드 등급(F~S) → 반지의 **장비 등급**. GrantReward(서버)와 보상 안내 UI(클라)가 같은 표를
+		-- 봐야 해서 여기로 뺐다 — 예전엔 GrantReward 안의 지역 테이블이라 UI에서 알 방법이 없었다
+		-- F 노멀 / E·D 매직 / C·B·A 레어 / S 에픽 (유저 지정 2026-09-23 — 예전 표는 S가 레전더리였다)
+		local grades = { _GearGradeEnum.None, _GearGradeEnum.Magic, _GearGradeEnum.Magic, _GearGradeEnum.Rare,
+			_GearGradeEnum.Rare, _GearGradeEnum.Rare, _GearGradeEnum.Epic }
+		return grades[self:ClampGradeIndex(gradeIndex) + 1]
+	end
+
 	-- ── 수령 ────────────────────────────────────────────────────────────────
 	method boolean HasPendingReward()
 		return self.PendingSeason >= 0 and self.PendingGrade >= 0
@@ -623,14 +641,15 @@ script RaidLogic extends Logic
 		self:PushDamage()
 		if not self:CanClaimNow() then
 			log("RaidLogic: claim rejected (nothing to claim)")
-			self:NotifyClaimResult(false, -1)
+			self:NotifyClaimResult(false, -1, "MLUA_RAIDLOGIC_005")
 			return
 		end
 		local grade = self.PendingGrade
 		local fromPending = self:HasPendingReward()
 		if not fromPending then grade = self:GetGradeIndex() end
-		if not self:GrantReward(grade, senderUserId) then
-			self:NotifyClaimResult(false, grade)
+		local failKey = self:GrantReward(grade, senderUserId)
+		if failKey ~= "" then
+			self:NotifyClaimResult(false, grade, failKey)
 			return
 		end
 		if fromPending then
@@ -645,7 +664,7 @@ script RaidLogic extends Logic
 		end
 		self:Save()
 		log("RaidLogic: claimed grade=" .. self:GetGradeName(grade) .. " (pending=" .. tostring(fromPending) .. ")")
-		self:NotifyClaimResult(true, grade)
+		self:NotifyClaimResult(true, grade, "")
 	end
 
 	@ExecSpace("ServerOnly")
@@ -663,37 +682,42 @@ script RaidLogic extends Logic
 	end
 
 	@ExecSpace("ServerOnly")
-	method boolean GrantReward(integer gradeIndex, string userId)
+	method string GrantReward(integer gradeIndex, string userId)
 		-- 레이드 등급(F~S)이 높을수록 좋은 **장비 등급**의 반지를 준다. 품질은 등급과 무관하게
 		-- RollRewardQuality()로 따로 굴리고 C가 상한이다(유저 지정).
-		local grades = { _GearGradeEnum.None, _GearGradeEnum.Magic, _GearGradeEnum.Rare, _GearGradeEnum.Rare,
-			_GearGradeEnum.Epic, _GearGradeEnum.Unique, _GearGradeEnum.Legendary }
-		local slot = gradeIndex + 1
-		if slot < 1 then slot = 1 end
-		if slot > #grades then slot = #grades end
+		-- 반환값 = 실패 사유의 번역 키(클라가 토스트로 띄운다). 성공이면 빈 문자열 —
+		-- 예전엔 boolean이라 "왜 못 받았는지"를 알려줄 수 없었다(유저 지정 2026-09-23).
+		local gearGrade = self:GetRewardGearGrade(gradeIndex)
+		-- 반지도 주문서도 인벤 **기타 탭** 정원을 쓴다(2026-09-23 반지를 기타 탭으로 옮긴 뒤로 —
+		-- 그 전까지 반지는 어느 탭에도 안 붙어 정원 판정이 없었다).
+		-- 둘 다 여기서 먼저 막아야 수령이 "성공"으로 소모되면서 아이템만 조용히 사라지는 일이 없다 —
+		-- 실패 키를 돌려주면 PendingGrade가 그대로 남아 인벤을 정리한 뒤 다시 받을 수 있다.
 		if not _InventoryExpandLogic:HasRoomFor(userId, self.RewardItemId) then
-			log("RaidLogic: reward blocked — inventory tab full")
-			return false
+			log("RaidLogic: reward blocked — inventory tab full (ring)")
+			return "MLUA_RAIDLOGIC_006"
 		end
-		-- 주문서는 반지(정원 판정 없는 액세서리)와 달리 기타 탭 정원을 쓴다. 여기서 먼저 막아야
-		-- 수령이 "성공"으로 소모되면서 주문서만 조용히 사라지는 일이 없다 — false로 돌려주면
-		-- PendingGrade가 그대로 남아 인벤을 정리한 뒤 다시 받을 수 있다.
 		if not _InventoryExpandLogic:HasRoomFor(userId, self.RewardScrollItemId) then
 			log("RaidLogic: reward blocked — etc tab full (ring scroll)")
-			return false
+			return "MLUA_RAIDLOGIC_006"
 		end
 		local quality = self:RollRewardQuality()
-		local createParam = _GameManager:BuildGearCreateParamForGradeQuality(self.RewardItemId, grades[slot], quality)
+		local createParam = _GameManager:BuildGearCreateParamForGradeQuality(self.RewardItemId, gearGrade, quality)
 		local errorCode = _ItemFactoryLogic:TryAddItem(userId, createParam, ItemCreateResultStruct())
 		if errorCode ~= _ErrorCodeEnum.Success then
 			log_error("RaidLogic: reward add failed err=" .. tostring(errorCode))
-			return false
+			return "MLUA_RAIDLOGIC_007"
 		end
 		_CharacterUnlockLogic:AddGearCollected(1)
 		_FirstWeaponGuaranteeLogic:OnGearGranted(self.RewardItemId)
 
-		-- 반지 강화 주문서 — 등급 한 칸당 1장(F 1 … S 7). 반지는 이미 들어갔으니 여기서 실패해도
-		-- 수령 자체는 성공으로 둔다(로그만 남긴다)
+		-- 다이아(F는 0이라 건너뛴다). 인벤 정원과 무관한 재화라 실패할 일이 없어 반지 다음에 준다
+		local dia = self:GetRewardDiamond(gradeIndex)
+		if dia > 0 then
+			_GameManager:AddDiamond(dia)
+			log("RaidLogic: reward diamond +" .. dia .. " (grade=" .. self:GetGradeName(gradeIndex) .. ")")
+		end
+
+		-- 반지 강화 주문서. 반지는 이미 들어갔으니 여기서 실패해도 수령 자체는 성공으로 둔다(로그만 남긴다)
 		local scrollCount = self:GetRewardScrollCount(gradeIndex)
 		local scrollParam = ItemCreateParamStruct()
 		scrollParam.ItemId = self.RewardScrollItemId
@@ -704,30 +728,61 @@ script RaidLogic extends Logic
 		else
 			log("RaidLogic: reward scroll x" .. scrollCount .. " granted (grade=" .. self:GetGradeName(gradeIndex) .. ")")
 		end
-		return true
+		return ""
+	end
+
+	-- 보상표(유저 지정 2026-09-23). 세 표의 인덱스는 전부 gradeIndex+1로 같이 읽는다 —
+	-- 한 줄만 고치면 표/패널/실제 지급이 어긋나므로 여기 세 개를 항상 같이 본다.
+	--   F 노멀반지            주문서 1
+	--   E 매직반지  다이아 100  주문서 2
+	--   D 매직반지  다이아 200  주문서 4
+	--   C 레어반지  다이아 300  주문서 6
+	--   B 레어반지  다이아 500  주문서 8
+	--   A 레어반지  다이아 700  주문서 10
+	--   S 에픽반지  다이아 1000 주문서 15
+	property table RewardScrollCounts = { 1, 2, 4, 6, 8, 10, 15 }
+
+	property table RewardDiamonds = { 0, 100, 200, 300, 500, 700, 1000 }
+
+	method integer ClampGradeIndex(integer gradeIndex)
+		-- 보상표를 읽기 전에 인덱스를 0~최대 등급으로 자른다
+		if gradeIndex == nil or gradeIndex < 0 then return 0 end
+		local maxIndex = self:GetMaxGradeIndex()
+		if gradeIndex > maxIndex then return maxIndex end
+		return gradeIndex
 	end
 
 	method integer GetRewardScrollCount(integer gradeIndex)
-		-- 보스 체력 등급이 한 칸 오를 때마다 1장씩(F 1 / E 2 / D 3 / C 4 / B 5 / A 6 / S 7)
-		if gradeIndex == nil or gradeIndex < 0 then
-			return 1
-		end
+		local count = self.RewardScrollCounts[self:ClampGradeIndex(gradeIndex) + 1]
+		if count == nil then return 1 end
+		return count
+	end
 
-		local maxIndex = self:GetMaxGradeIndex()
-		if gradeIndex > maxIndex then
-			gradeIndex = maxIndex
-		end
-
-		return gradeIndex + 1
+	method integer GetRewardDiamond(integer gradeIndex)
+		-- F는 다이아가 없다(0). 0이면 UI에서 줄 자체를 숨긴다
+		local dia = self.RewardDiamonds[self:ClampGradeIndex(gradeIndex) + 1]
+		if dia == nil then return 0 end
+		return dia
 	end
 
 	@ExecSpace("Client")
-	method void NotifyClaimResult(boolean success, integer gradeIndex)
-		-- 수령 결과 토스트(팝업 쪽 표시는 RaidUI가 매 프레임 갱신하며 알아서 따라온다)
+	method void NotifyClaimResult(boolean success, integer gradeIndex, string reasonKey)
+		-- 수령 결과 토스트(팝업 쪽 표시는 RaidUI가 매 프레임 갱신하며 알아서 따라온다).
+		-- ⚠ 전역 _UIToast(ToastGroup, GroupOrder 3)는 레이드 화면(RaidGroup, 24) 뒤에 깔려 안 보인다.
+		-- 그래서 레이드 화면이 떠 있으면 RaidUI의 자체 토스트로 보낸다(GroupOrder는 건드리면 안 된다 —
+		-- 2026-08-31에 Maker가 다른 .ui 순서까지 뒤바꿔 저장한 사고가 있었다)
 		if success then
-			_UIToast:ShowMessage(_LocalizationService:GetTextFormat("FMT_RAIDLOGIC_001", self:GetGradeName(gradeIndex), self:GetRewardScrollCount(gradeIndex)))
+			-- F는 다이아가 없어서 문구를 따로 쓴다(0개를 써 두면 "다이아 0개"로 읽힌다)
+			local dia = self:GetRewardDiamond(gradeIndex)
+			if dia > 0 then
+				_RaidUI:ShowClaimToast(_LocalizationService:GetTextFormat("FMT_RAIDLOGIC_002",
+					self:GetGradeName(gradeIndex), dia, self:GetRewardScrollCount(gradeIndex)), true)
+			else
+				_RaidUI:ShowClaimToast(_LocalizationService:GetTextFormat("FMT_RAIDLOGIC_001",
+					self:GetGradeName(gradeIndex), self:GetRewardScrollCount(gradeIndex)), true)
+			end
 		else
-			_UIToast:ShowMessage(_LocalizationService:GetText("MLUA_RAIDLOGIC_005"))
+			_RaidUI:ShowClaimToast(_LocalizationService:GetText(reasonKey), false)
 		end
 	end
 

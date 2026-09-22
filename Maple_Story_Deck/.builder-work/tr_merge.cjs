@@ -23,7 +23,7 @@ function cell(v) { const s = String(v == null ? "" : v); return /[",\r\n]/.test(
 
 const rows = parseCsv(fs.readFileSync(CSV, "utf8").replace(/^﻿/, ""));
 const head = rows.shift();
-const iK = 0, iKo = 1, iEn = head.indexOf("en"), iZh = head.indexOf("zh-TW"), iJa = head.indexOf("ja");
+const iK = 0, iKo = 1, iEn = head.indexOf("en"), iZh = head.indexOf("zh-tw"), iJa = head.indexOf("ja");
 
 const tr = new Map(); const dup = [];
 for (const f of fs.readdirSync(".builder-work/tr").filter((x) => /^out_\d+\.tsv$/.test(x)).sort()) {
@@ -54,7 +54,7 @@ for (const r of rows) {
   if (!t) { add("번역 누락", key); continue; }
   used.add(key);
   const [en, zh, ja] = t;
-  for (const [l, s] of [["en", en], ["zh-TW", zh], ["ja", ja]]) {
+  for (const [l, s] of [["en", en], ["zh-tw", zh], ["ja", ja]]) {
     if (!s.trim()) add(`${l} 빈칸`, key);
     if (phSet(s) !== phSet(ko)) add(`${l} {n} 자리표시자 불일치`, `${key}: ko[${phSet(ko)}] ${l}[${phSet(s)}]`);
     if (pctSeq(s) !== pctSeq(ko)) add(`${l} %s/%d 순서 불일치`, `${key}: ko[${pctSeq(ko)}] ${l}[${pctSeq(s)}]`);
@@ -79,7 +79,7 @@ for (const [ko, list] of byKo) {
   if (list.length < 2) continue;
   for (let li = 0; li < 3; li++) {
     const vals = new Set(list.map((x) => x[1][li]));
-    if (vals.size > 1) add(`같은 원문 다른 번역(${["en", "zh-TW", "ja"][li]})`, `"${ko.slice(0, 20)}" → ${[...vals].map((v) => JSON.stringify(v.slice(0, 30))).join(" / ")}`);
+    if (vals.size > 1) add(`같은 원문 다른 번역(${["en", "zh-tw", "ja"][li]})`, `"${ko.slice(0, 20)}" → ${[...vals].map((v) => JSON.stringify(v.slice(0, 30))).join(" / ")}`);
   }
 }
 

@@ -1,0 +1,79 @@
+@Logic
+script Slot6FreeLogic extends Logic
+
+	-- 인게임 6번 카드 슬롯 최초 1회 무료 해금(유저 지정 2026-09-23).
+	--   · 평소엔 판마다 다이아 10으로 연다(CardManager.RequestUnlockSlot6).
+	--   · 계정당 딱 한 번은 다이아 없이 열린다 — "매판 공짜가 아니라 설치 후 최초 1회".
+	--   · 무료가 남아 있으면 잠긴 슬롯의 가격 칸에 숫자 대신 "무료"를 쓴다(다이아 아이콘은 그대로).
+	-- 저장: 유저별 UserDataStorage 키 "Slot6.FreeUsed" ("1"이면 이미 씀).
+	-- ⚠ 로드 전에는 FreeAvailable=false(= 유료로 보임) — 로드가 안 됐는데 공짜로 열리는 일이 없게 한다.
+
+	property string StorageKey = "Slot6.FreeUsed"
+
+	@Sync property boolean FreeAvailable = false
+
+	property boolean _loaded = false
+	property string _profileCode = ""
+
+	-- ── 로드/저장 ────────────────────────────────────────────────────────────
+	@ExecSpace("ServerOnly")
+	@EventSender("Service", "UserService")
+	handler HandleUserEnterEvent(UserEnterEvent event)
+		local user = _UserService:GetUserEntityByUserId(event.UserId)
+		if user == nil then return end
+		self:LoadFor(user)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void LoadFor(Entity user)
+		-- 입장 시 1회만 읽는다. 키가 없으면(1000002) 아직 안 쓴 신규 유저
+		self._profileCode = user.PlayerComponent.ProfileCode
+		local ds = _DataStorageService:GetUserDataStorage(self._profileCode)
+		local code, raw = ds:GetAndWait(self.StorageKey)
+		if code == 0 or code == 1000002 then
+			self.FreeAvailable = raw ~= "1"
+			self._loaded = true
+			log("Slot6FreeLogic: loaded freeAvailable=" .. tostring(self.FreeAvailable))
+		else
+			log_warning("Slot6FreeLogic: load failed code=" .. tostring(code) .. " (free unlock disabled this session)")
+		end
+	end
+
+	-- ── CardManager가 부르는 접근자 ────────────────────────────────────────────
+	method boolean IsFreeAvailable()
+		-- 클라/서버 어디서나(다른 Logic의 필드 직접 읽기는 nil이라 메서드로 노출)
+		return self.FreeAvailable == true
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean ConsumeFree()
+		-- 무료 해금을 쓴다. 썼으면 true — 이 순간 바로 저장해 재접속해도 다시 공짜가 되지 않게 한다
+		if not self._loaded or not self.FreeAvailable then return false end
+		self.FreeAvailable = false
+		local ds = _DataStorageService:GetUserDataStorage(self._profileCode)
+		ds:SetAsync(self.StorageKey, "1", function(code, key)
+			if code ~= 0 then log_warning("Slot6FreeLogic: save failed code=" .. tostring(code)) end
+		end)
+		log("Slot6FreeLogic: free slot6 unlock consumed")
+		return true
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnSyncProperty(string name, any value)
+		-- 무료 여부가 바뀌면 잠긴 슬롯의 가격 표시("무료" ↔ 10)를 다시 그린다
+		if name == "FreeAvailable" then _CardManager:RefreshSlot6Lock() end
+	end
+
+	-- 테스트 전용(콘솔 스크립트는 클라 컨텍스트라 Server로 열어 둔다)
+	@ExecSpace("Server")
+	method void DebugResetFree()
+		-- 무료 해금을 다시 쓸 수 있게 되돌린다
+		if self._profileCode == "" then return end
+		self.FreeAvailable = true
+		self._loaded = true
+		local ds = _DataStorageService:GetUserDataStorage(self._profileCode)
+		ds:SetAsync(self.StorageKey, "0", function(code, key) end)
+		log("Slot6FreeLogic: debug reset -> freeAvailable=true")
+	end
+
+end

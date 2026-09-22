@@ -351,6 +351,45 @@ script RaidTutorialUI extends Logic
 		log("RaidTutorialUI: image tutorial opened")
 	end
 
+	-- 레이드 팝업 안에서 연 경우(좌측 상단 i 버튼, 유저 지정 2026-09-23)의 복구 정보.
+	-- 튜토리얼 엔티티는 TitleGroup 안에 있고 RaidGroup(24)이 TitleGroup(6)보다 위라서, 레이드에서 열 땐
+	-- ① 레이드 팝업을 잠깐 숨기고 ② 꺼져 있던 TitleGroup을 켜되 튜토리얼 말고 나머지 자식은 전부 숨긴다.
+	-- 닫을 때 그대로 되돌린다.
+	property boolean _fromRaid = false
+	property table _raidHiddenChildren = {}
+
+	@ExecSpace("ClientOnly")
+	method void OpenFromRaid()
+		-- 레이드 화면에서 이미지 튜토리얼을 다시 본다(봤음 여부와 상관없이)
+		if self._tutorialOpen then return end
+		if not isvalid(self.titleGroup) or not isvalid(self.tutorialRoot) then return end
+		self._fromRaid = true
+		self._raidHiddenChildren = {}
+		for _, c in ipairs(self.titleGroup.Children) do
+			if isvalid(c) and c.Id ~= self.tutorialRoot.Id and c.Enable then
+				table.insert(self._raidHiddenChildren, c)
+				c.Enable = false
+			end
+		end
+		self.titleGroup.Enable = true
+		_RaidUI:SetRaidGroupVisible(false)
+		self:OpenTutorial()
+		log("RaidTutorialUI: opened from raid (hidden lobby children " .. tostring(#self._raidHiddenChildren) .. ")")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RestoreAfterRaidTutorial()
+		-- OpenFromRaid에서 바꾼 것들을 되돌린다(로비 자식 복구 → 로비 다시 숨김 → 레이드 팝업 다시 표시)
+		if not self._fromRaid then return end
+		self._fromRaid = false
+		for _, c in ipairs(self._raidHiddenChildren) do
+			if isvalid(c) then c.Enable = true end
+		end
+		self._raidHiddenChildren = {}
+		if isvalid(self.titleGroup) then self.titleGroup.Enable = false end
+		_RaidUI:SetRaidGroupVisible(true)
+	end
+
 	@ExecSpace("ClientOnly")
 	method void TickTutorial(number delta)
 		-- 다음 덩이가 나타날 때가 됐는지만 본다(전부 나오면 유저가 누를 때까지 그대로 둔다)
@@ -504,6 +543,7 @@ script RaidTutorialUI extends Logic
 		self._tutorialOpen = false
 		self._seenLocal = true
 		if isvalid(self.tutorialRoot) then self.tutorialRoot.Enable = false end
+		self:RestoreAfterRaidTutorial()
 		_RaidLogic:MarkTutorialSeen()
 		log("RaidTutorialUI: image tutorial closed (revealed " .. self._revealed .. "/7)")
 	end
