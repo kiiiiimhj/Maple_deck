@@ -17523,7 +17523,10 @@ script CardManager extends Logic
 		elseif name == "Slot4Card" then self:UpdateSlotVisual(4, true)
 		elseif name == "Slot5Card" then self:UpdateSlotVisual(5, true)
 		elseif name == "Slot6Card" then self:UpdateSlotVisual(6, true)
-		elseif name == "Slot6Unlocked" then self:RefreshSlot6Lock()
+		elseif name == "Slot6Unlocked" then
+			self:RefreshSlot6Lock()
+			-- 잠금이 풀리는 순간 카드 도착과 같은 펀치 + 반짝이(2026-09-24 유저 지정). 다시 잠길 땐(새 판) 조용히
+			if self.Slot6Unlocked then self:PunchSlotScale(6) end
 		elseif name == "PotionLevel" then self:UpdatePotionVisual()
 		elseif name == "AquaTrapLevel" then self:RefreshSlotIfHoldsCard(14)
 		elseif name == "HailStoneLevel" then self:RefreshSlotIfHoldsCard(15)
@@ -24053,6 +24056,15 @@ script CardManager extends Logic
 		self:ApplyUpgradeOrSubstitute(cardIdx, upgradeType, "choice")
 		self._choiceCard1 = 0 ; self._choiceCard2 = 0 ; self._choiceCard3 = 0
 		self:HideLevelUpChoices()
+		-- 고른 카드가 실제로 들어간 슬롯으로 아이콘을 날린다(2026-09-24 유저 지정 "그냥 카드가 열려서 인지가
+		-- 잘 안 된다 — 필드 드롭이 슬롯에 들어갈 때처럼 반짝이"). 슬롯은 적용이 끝난 **뒤에** 찾는다 —
+		-- 조합 스킬은 기존 슬롯을 이어받는 등 규칙이 복잡해 미리 추측하면 틀린다. 슬롯이 없는 패시브는 생략
+		for s = 1, 6 do
+			if self:GetSlotCard(s) == cardIdx then
+				self:PlayChoiceFlyToSlot(choiceIndex, cardIdx, s)
+				break
+			end
+		end
 
 		-- 튜토리얼의 마지막 단계 — 정지를 풀고 마무리 문구를 띄운다. 아래 _pendingLevelUps 재생성보다
 		-- 먼저 불러야, 연속 레벨업으로 카드가 다시 떠도 NotifyChoicesShown이 이미 끝난 튜토리얼을
@@ -27066,6 +27078,53 @@ script CardManager extends Logic
 			icon.Entity:SetEnable(false)
 			self:PunchSlotScale(slotIdx)
 		end, self.DropFlyDuration)
+	end
+
+	@ExecSpace("ClientOnly")
+	method Vector2 GetChoiceCenterUI(integer choiceIndex)
+		-- 선택 카드의 화면 중앙 기준 UI 좌표를 **실제 캔버스 크기로** 계산한다. GetChoiceUIPosition은 1920 기준
+		-- 고정값이라 캔버스가 더 넓은 모바일에선 카드(우하단 앵커)와 200px 넘게 어긋났다(2026-09-24 실측)
+		local card = self.choiceCard1
+		if choiceIndex == 2 then card = self.choiceCard2 elseif choiceIndex == 3 then card = self.choiceCard3 end
+		if not isvalid(card) or card.Parent == nil then return self:GetChoiceUIPosition(choiceIndex) end
+		local t = card.UITransformComponent
+		local size = card.Parent.UITransformComponent.RectSize
+		local ap = t.anchoredPosition
+		local amin = t.AnchorsMin
+		return Vector2((amin.x - 0.5) * size.x + ap.x, (amin.y - 0.5) * size.y + ap.y)
+	end
+
+	@ExecSpace("Multicast")
+	method void PlayChoiceFlyToSlot(integer choiceIndex, integer cardIdx, integer slotIdx)
+		-- 레벨업 선택 카드 자리에서 스킬 아이콘이 포물선으로 슬롯까지 날아가 도착 시 슬롯 펀치 + 반짝이
+		-- (필드 카드 드롭 FlyCardDropToSlot 연출 그대로 — 드롭용 비행 아이콘 3개 중 쉬고 있는 것을 빌린다)
+		if self:IsServer() then return end
+		local icon = nil
+		for i = 1, 3 do
+			local candidate = self:GetDropIcon(i)
+			if isvalid(candidate) and not candidate.Entity.Enable then
+				icon = candidate
+				break
+			end
+		end
+		if icon == nil then
+			-- 드롭 연출이 셋 다 날고 있으면 비행은 건너뛰고 도착 연출만
+			self:PunchSlotScale(slotIdx)
+			return
+		end
+		local startUI = self:GetChoiceCenterUI(choiceIndex)
+		-- 시작 크기(날면서 절반까지 줄어든다). ⚠ 이 파일은 새 property가 재임포트에서 누락되는 일이 잦아 지역 상수로 둔다
+		local flyScale = 1.3
+		icon.ImageRUID = self:GetCardIconRUID(cardIdx)
+		icon.Color = Color(1, 1, 1, 1)
+		icon.Entity:SetEnable(true)
+		local tc = icon.Entity.UITransformComponent
+		tc.anchoredPosition = startUI
+		tc.Scale = Vector3(flyScale, flyScale, 1)
+		tc.UIRotation = Vector3(0, 0, self:GetCardIconRotation(cardIdx))
+		tc.ZRotation = 0
+		self:FlyCardDropToSlot(icon, startUI, slotIdx, flyScale)
+		log("CardManager: choice fly card=" .. cardIdx .. " -> slot " .. slotIdx)
 	end
 
 	@ExecSpace("ClientOnly")
