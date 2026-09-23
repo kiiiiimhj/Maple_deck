@@ -125,6 +125,10 @@ script UIComposePopup extends Component
 
 	property integer TabEnum = 1
 
+	-- 탭 번호 → TabHolder 아래 탭 엔티티 이름(UIInventoryTabHolder.TabEntityNames와 같은 표).
+	-- 장신구(5번)는 화면상 방어구 오른쪽이지만 번호는 맨 뒤라 Children[번호]로 찾으면 어긋난다(2026-09-23)
+	property table TabEntityNames = {}
+
 	@ExecSpace("ClientOnly")
 	method void OnBeginPlay()
 		self.BtnClose.Entity:ConnectEvent(ButtonClickEvent, function() self:Close() end)
@@ -150,14 +154,20 @@ script UIComposePopup extends Component
 		self:SetupTabs()
 	end
 
-	-- 인벤토리와 동일한 All/Weapon/Armor/etc 4탭 — 재료 후보도 부위별로 필터링해서 보여준다(유저 지정)
+	-- 인벤토리와 동일한 전체/무기/방어구/기타/장신구 5탭 — 재료 후보도 부위별로 필터링해서 보여준다(유저 지정)
 	@ExecSpace("ClientOnly")
 	method void SetupTabs()
-		-- 탭 이름은 로컬라이제이션 키(전체/무기/방어구/기타) — 인벤토리 탭(UIInventoryTabHolder)과 같은 키
-		local tabNames = { "UI_EQUIPMENTGROUP_007", "MLUA_EPISODEREWARDLOGIC_004", "MLUA_EPISODEREWARDLOGIC_003", "MLUA_INVENTORYEXPANDLOGIC_001" }
-		local children = self.TabHolder.Children
-		for i, child in ipairs(children) do
-			child.UIComposeTab:Initalize(self, i, _LocText:Resolve(tabNames[i]))
+		-- 탭 이름은 로컬라이제이션 키 — 인벤토리 탭(UIInventoryTabHolder)과 같은 키, 같은 번호
+		local tabNames = { "UI_EQUIPMENTGROUP_007", "MLUA_EPISODEREWARDLOGIC_004", "MLUA_EPISODEREWARDLOGIC_003",
+			"MLUA_INVENTORYEXPANDLOGIC_001", "MLUA_INVENTORYEXPANDLOGIC_003" }
+		self.TabEntityNames = { "All", "Weapon", "Armor", "Etc", "Acc" }
+		for i, name in ipairs(self.TabEntityNames) do
+			local tab = self:GetTabEntity(i)
+			if tab ~= nil then
+				tab.UIComposeTab:Initalize(self, i, _LocText:Resolve(tabNames[i]))
+			else
+				log_warning("UIComposePopup: tab entity missing " .. name)
+			end
 		end
 
 		local function IsAll(itemData)
@@ -187,11 +197,19 @@ script UIComposePopup extends Component
 		end
 
 		local function IsEtc(itemData)
-			-- 인벤 창(UIInventoryTabHolder)과 같은 기준 — 장비가 아닌 아이템 + 장신구(반지).
-			-- 반지는 무기/방어구 어디에도 안 붙어서 예전엔 전체 탭에만 보였다(2026-09-23)
+			-- 인벤 창(UIInventoryTabHolder)과 같은 기준 — 장비가 아닌 아이템(장신구는 장신구 탭으로 분리, 2026-09-23)
 			local itemGearData = itemData:GetGearData()
 			if itemGearData == nil then
 				return self.InsertFunc_MatchAndStop
+			end
+			return self.InsertFunc_NotMatch
+		end
+
+		local function IsAccessory(itemData)
+			-- 장신구 탭 = 반지 등 장신구
+			local itemGearData = itemData:GetGearData()
+			if itemGearData == nil then
+				return self.InsertFunc_NotMatch
 			end
 			if _GearCategoryEnum:IsAccessory(itemGearData.GearCategory) then
 				return self.InsertFunc_MatchAndStop
@@ -199,7 +217,8 @@ script UIComposePopup extends Component
 			return self.InsertFunc_NotMatch
 		end
 
-		self.InsertFunctions = { IsAll, IsWeapon, IsArmor, IsEtc }
+		-- 순서 = 탭 번호(1=전체 2=무기 3=방어구 4=기타 5=장신구)
+		self.InsertFunctions = { IsAll, IsWeapon, IsArmor, IsEtc, IsAccessory }
 	end
 
 	@ExecSpace("ClientOnly")
@@ -208,14 +227,22 @@ script UIComposePopup extends Component
 			return
 		end
 
-		local previousTab = self.TabHolder.Children[self.TabEnum]
+		local previousTab = self:GetTabEntity(self.TabEnum)
 		previousTab.UIComposeTab:OnDeselected()
 
-		local currentTab = self.TabHolder.Children[tabEnum]
+		local currentTab = self:GetTabEntity(tabEnum)
 		currentTab.UIComposeTab:OnSelected()
 
 		self.TabEnum = tabEnum
 		self:RefreshCandidates()
+	end
+
+	@ExecSpace("ClientOnly")
+	method Entity GetTabEntity(integer tabEnum)
+		-- 탭 번호 → 탭 엔티티(이름으로 찾는다 — 화면 순서와 번호가 다르다)
+		local name = self.TabEntityNames[tabEnum]
+		if name == nil then return nil end
+		return self.TabHolder:GetChildByName(name)
 	end
 
 	@ExecSpace("ClientOnly")

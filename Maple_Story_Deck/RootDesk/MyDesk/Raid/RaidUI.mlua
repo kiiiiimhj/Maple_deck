@@ -90,6 +90,9 @@ script RaidUI extends Logic
 	-- y를 음수로 두면 카메라가 내려가 바닥 타일이 더 보인다.
 	property Vector2 RaidCameraOffset = Vector2(-0.2, -1.0)
 
+	-- 자쿰(Raid_2)은 맵 바닥이 얕아 발록 값(-1.0)을 쓰면 액자 아래로 맵 바깥 빈 띠가 보였다(유저 지적 2026-09-23)
+	property Vector2 RaidCameraOffsetZakum = Vector2(-0.2, -0.3)
+
 	property table GradeColors = {
 		"#9aa0a6", "#9aa0a6", "#6fcf97", "#56ccf2", "#9b8cff", "#ffb340", "#ff5d5d",
 	}
@@ -133,7 +136,14 @@ script RaidUI extends Logic
 	--     RaidRevealDelay만큼 자리 잡을 시간을 주고 나서 공개한다
 	property number RaidRevealDelay = 0.2
 	property integer RaidCameraStableTicks = 3
-	property number RaidCameraSettleMax = 1.5
+	-- 2026-09-23 유저 리포트(모바일, 간헐): "레이드 들어가면 가끔 발록 대가리 쪽에 포커스 / 줌이 조금씩 왔다 갔다".
+	--   · 느린 폰에서는 0.05초 타이머가 **같은 프레임 안에서** 여러 번 돌아 화면 모서리 값이 그대로라 "멈췄다"로
+	--     착각했다 → 새 프레임이 그려졌을 때만 센다(_frameNo). 카메라가 따라가는 플레이어 위치도 같이 멈춰야 한다.
+	--   · 1.5초 상한이 느린 폰엔 짧아 카메라가 오기 전에 공개됐다 → 3초
+	--   · 공개 **뒤에** 모바일 줌 보정이 0.35초마다 8번 돌면서 줌 변화 도중에 재서 과보정↔되돌림이 보였다 →
+	--     보정은 로딩이 가리는 동안 끝내고(보정 → 다시 멈춤 확인 → 공개), 공개 뒤에는 줌을 건드리지 않는다
+	property number RaidCameraSettleMax = 3.0
+	property integer _frameNo = 0
 	property number RaidPreloadWaitMax = 2.0
 	property boolean _uiPreloaded = false
 	property boolean _revealing = false
@@ -144,6 +154,20 @@ script RaidUI extends Logic
 
 	-- 레이드 입장 로딩 그림(유저 지정 2026-09-23). 게임 입장 로딩과 같은 화면에 배경만 바꿔 쓴다
 	property string RaidLoadingImageRUID = "8dde242cef0040e4b5d26ab30516881b"
+
+	-- ── 레이드 2종 요일 교대(2026-09-23 유저 지정: 월~수 발록 / 목~일 자쿰) ──
+	-- 로비 버튼은 하나이고 요일(= _RaidLogic.RaidId)에 따라 그림만 바뀐다. 로딩 그림도 레이드별.
+	property string ZakumLoadingImageRUID = "10dd753b57bc4292858d39645dbcfd83"
+
+	property string BalrogLobbyIconRUID = "549d8fbf2bb948f8be5328fc3863af00"
+
+	property string ZakumLobbyIconRUID = "2cba30b14d254ef3ac2fee506896e9d3"
+
+	-- 로비 레이드 버튼 안의 보스 그림(TitleGroup/RaidButton/Overlay)
+	property SpriteGUIRendererComponent lobbyOverlay = "152bbdf4-f9d4-4fc5-b293-cf0b884826f8"
+
+	-- 로비 그림을 마지막으로 칠한 레이드(매 프레임 같은 값을 다시 쓰지 않게)
+	property integer _lobbyIconRaidId = 0
 
 	-- 팝업 좌측 상단 튜토리얼 버튼(유저 지정 2026-09-23 — 뽑기 팝업의 i 버튼처럼) → 4단계 이미지 튜토리얼
 	property ButtonComponent btnTutorial = "13cd8b68-a927-4e4a-b1b6-2f16d83e189a"
@@ -194,7 +218,12 @@ script RaidUI extends Logic
 			return
 		end
 		local ruids = {}
-		local seen = {}
+		-- 엔진 기본 흰 스프라이트(빌더 기본 패널 / 딤·단색 사각형)는 미리 불러오면 [LEA-3015] CannotLoad 에러를 찍는다.
+		-- 렌더는 원래 정상이지만 기기에선 에러 때문에 로그 콘솔이 튀어나와서 목록에서 뺀다(2026-09-23 유저 리포트)
+		local seen = {
+			["2860136c06ab075439721c027de365af"] = true,
+			["4fea64a3307cda641809ad8be0d4890b"] = true,
+		}
 		local stack = { self.raidGroup }
 		while #stack > 0 do
 			local e = table.remove(stack)
@@ -209,8 +238,11 @@ script RaidUI extends Logic
 			for _, c in ipairs(e.Children) do table.insert(stack, c) end
 		end
 		-- 레이드 입장 로딩 그림도 같이(처음 누를 때 로딩 배경이 늦게 뜨지 않게)
-		if self.RaidLoadingImageRUID ~= "" and not seen[self.RaidLoadingImageRUID] then
-			table.insert(ruids, self.RaidLoadingImageRUID)
+		for _, loadingRuid in ipairs({ self.RaidLoadingImageRUID, self.ZakumLoadingImageRUID }) do
+			if loadingRuid ~= "" and not seen[loadingRuid] then
+				seen[loadingRuid] = true
+				table.insert(ruids, loadingRuid)
+			end
 		end
 		if #ruids == 0 then
 			self._uiPreloaded = true
@@ -279,7 +311,7 @@ script RaidUI extends Logic
 			if self._open or self._entering then return end
 			if not _LoadingUI:IsIdle() then return end
 			_TimerService:ClearTimer(timerId)
-			_LoadingUI:WarmImage(self.RaidLoadingImageRUID, 1.0)
+			_LoadingUI:WarmImage(self:GetLoadingImageRUID(), 1.0)
 		end, 0.5)
 	end
 
@@ -369,9 +401,11 @@ script RaidUI extends Logic
 		-- 누르는 즉시 팝업(액자·HUD)을 띄운다(유저 지정 2026-09-22 "다른 팝업처럼 바로 떴으면",
 		-- "가림막은 인게임 들어갈 때 쓰는 로딩으로"). RaidGroup(24)이 LoadingGroup(15)보다 위라서
 		-- 액자 안쪽 창에는 입장 로딩 화면이 보이고, 그 뒤에서 이동·카메라 정리가 끝나면 로딩만 걷힌다
-		_LoadingUI:CoverNowWithImageTitled(self.RaidLoadingImageRUID)
+		_LoadingUI:CoverNowWithImageTitled(self:GetLoadingImageRUID())
 		self._loadingCovered = true
 		self:ShowRaidFrame()
+		-- 로딩 그림 가운데를 액자 가운데(x≈-24)에 맞춘다 — 그림 속 문양이 액자 장식과 어긋나 보였다(2026-09-23 유저)
+		if isvalid(self.raidGroup) then _LoadingUI:AlignContentTo(self.raidGroup:GetChildByName("Frame")) end
 		self:SetLoadingHudHidden(true)
 		self._entering = true
 		self._enterWaited = 0
@@ -423,10 +457,14 @@ script RaidUI extends Logic
 		self._revealing = true
 		-- 들어올 때마다 캐릭터 자세(유령/서기)를 다시 건다
 		self._heroPoseState = ""
+		-- 에피2·3 카메라 Y 잠금/커스텀 경계가 남아 있으면 레이드 구도를 덮어쓴다 — 먼저 푼다
+		_MapManager:ReleaseCameraLockForOverlay()
 		self:SnapCamera(true)
 		-- 줌은 트윈 없이 즉시(0초) — 트윈이 공개 뒤까지 이어지면 액자 안에서 화면이 움직여 보인다
 		_CameraService:ZoomTo(self.RaidZoomPercent * _MobileScreenFitLogic:GetZoomMultiplier(), 0)
-		self:SetCameraOffset(self.RaidCameraOffset)
+		local camOffset = self.RaidCameraOffset
+		if _RaidLogic.RaidId == _RaidLogic.RaidZakum then camOffset = self.RaidCameraOffsetZakum end
+		self:SetCameraOffset(camOffset)
 		self:SetPlayerVisible(false)
 		-- 고정 시간만 기다리면 카메라가 덜 멈춘 채 공개될 때가 있었다(실측: 첫 장면에 구도가 틀어짐).
 		-- 화면 왼쪽 위 모서리가 가리키는 월드 좌표를 매 틱 재서, 연속 RaidCameraStableTicks번 거의 안 변하면
@@ -435,25 +473,46 @@ script RaidUI extends Logic
 		local step = 0.05
 		local timerId = 0
 		local lastCorner = nil
+		local lastPlayerPos = nil
+		local lastFrame = -1
 		local stableTicks = 0
+		local fitted = false
 		timerId = _TimerService:SetTimerRepeat(function()
 			waited = waited + step
 			if not isvalid(self) or not self._open then
 				_TimerService:ClearTimer(timerId)
 				return
 			end
-			local corner = _UILogic:ScreenToWorldPosition(Vector2(0, 0))
-			if lastCorner ~= nil and math.abs(corner.x - lastCorner.x) < 0.005 and math.abs(corner.y - lastCorner.y) < 0.005 then
-				stableTicks = stableTicks + 1
-			else
-				stableTicks = 0
+			-- 같은 프레임 안에서 여러 번 불리면 값이 안 바뀐 게 당연하다 — 새 프레임일 때만 판정한다
+			if self._frameNo ~= lastFrame then
+				lastFrame = self._frameNo
+				local corner = _UILogic:ScreenToWorldPosition(Vector2(0, 0))
+				local player = _UserService.LocalPlayer
+				local playerPos = nil
+				if isvalid(player) then playerPos = player.TransformComponent.WorldPosition end
+				local cornerStill = lastCorner ~= nil and math.abs(corner.x - lastCorner.x) < 0.005 and math.abs(corner.y - lastCorner.y) < 0.005
+				local playerStill = playerPos == nil or (lastPlayerPos ~= nil and math.abs(playerPos.x - lastPlayerPos.x) < 0.005 and math.abs(playerPos.y - lastPlayerPos.y) < 0.005)
+				if cornerStill and playerStill then
+					stableTicks = stableTicks + 1
+				else
+					stableTicks = 0
+				end
+				lastCorner = corner
+				lastPlayerPos = playerPos
 			end
-			lastCorner = corner
-			local cameraReady = (waited >= self.RaidRevealDelay and stableTicks >= self.RaidCameraStableTicks) or waited >= self.RaidCameraSettleMax
+			local settled = waited >= self.RaidRevealDelay and stableTicks >= self.RaidCameraStableTicks
+			-- 모바일 줌 실측 보정은 가려진 동안 한 번 — 줌이 바뀌면 모서리 값이 움직여 멈춤 판정이 다시 시작된다
+			if settled and not fitted then
+				fitted = true
+				_MobileScreenFitLogic:FitCameraForZoom(self.RaidZoomPercent)
+				stableTicks = 0
+				return
+			end
+			local cameraReady = (settled and fitted) or waited >= self.RaidCameraSettleMax
 			local ready = cameraReady and (self._uiPreloaded or waited >= self.RaidPreloadWaitMax)
 			if not ready then return end
 			_TimerService:ClearTimer(timerId)
-			log(string.format("RaidUI: reveal after %.2fs (cameraStable=%d preloaded=%s)", waited, stableTicks, tostring(self._uiPreloaded)))
+			log(string.format("RaidUI: reveal after %.2fs (cameraStable=%d fitted=%s preloaded=%s)", waited, stableTicks, tostring(fitted), tostring(self._uiPreloaded)))
 			self:RevealRaidView()
 		end, step)
 	end
@@ -483,22 +542,22 @@ script RaidUI extends Logic
 		--   훨씬 확대돼 보이고, 키 큰 마왕 발록의 위아래가 잘린다(유저 리포트 2026-09-21
 		--   "레이드 pc랑 모바일 버전 해상도가 달라서 보스잡는게 짤려보여"). ShowRaidView에서 화면비 배율을
 		--   곱한 근삿값을 즉시 적용해 뒀고, 여기서 공개 직전에 실측으로 한 번 재보정한다(가려진 상태라 안 보임).
-		--   PC는 FitCameraForZoom이 즉시 빠져나가므로 완전히 그대로다. 남은 오차는 StartCameraFit이 잡는다.
-		_MobileScreenFitLogic:FitCameraForZoom(self.RaidZoomPercent)
+		--   PC는 FitCameraForZoom이 즉시 빠져나가므로 완전히 그대로다.
+		--   ⚠ 실측 보정은 ShowRaidView의 대기 루프(가려진 동안)에서 끝낸다. 여기서/공개 뒤에 다시 보정하면
+		--     화면이 보이는 상태에서 줌이 조금씩 왔다 갔다 한다(2026-09-23 모바일 리포트) — StartCameraFit은 더 안 쓴다.
 		self:Refresh()
 		local wasCovered = self._loadingCovered
 		self:ShowRaidFrame()
 		self:SnapCamera(false)
-		self:StartCameraFit()
 		if wasCovered then
-			-- 로딩이 걷히는 페이드(0.5초) 동안에도 체력바·DPS가 로딩 그림 위에 떠 보였다 —
-			-- 페이드가 다 끝난 뒤에 HUD를 켠다(ShowRaidFrame의 Refresh가 켠 잠금/부활 패널도 그때까지 숨김)
+			-- 로딩이 걷히는 동안에도 체력바·DPS가 로딩 그림 위에 떠 보였다 —
+			-- 걷힘이 다 끝난 뒤에 HUD를 켠다(ShowRaidFrame의 Refresh가 켠 잠금/부활 패널도 그때까지 숨김)
 			self:SetLoadingHudHidden(true)
 			_TimerService:SetTimerOnce(function()
 				if not isvalid(self) or not self._open then return end
 				self:SetLoadingHudHidden(false)
 				self:Refresh()
-			end, _LoadingUI.FadeOutSeconds)
+			end, _LoadingUI:GetLiftRevealSeconds())
 		else
 			self:SetLoadingHudHidden(false)
 		end
@@ -558,7 +617,8 @@ script RaidUI extends Logic
 		-- Open에서 CoverNow로 덮어 둔 입장 로딩 화면을 걷는다(덮은 적 없으면 아무것도 안 한다)
 		if not self._loadingCovered then return end
 		self._loadingCovered = false
-		_LoadingUI:PlayReveal()
+		-- 뽑기 덮개처럼 살짝 커졌다가 위로 올라가며 사라진다(2026-09-23 유저 지정)
+		_LoadingUI:PlayRevealLift()
 	end
 
 	@ExecSpace("ClientOnly")
@@ -687,6 +747,10 @@ script RaidUI extends Logic
 		local locked = _RaidLogic:HasPendingReward()
 		if isvalid(self.lockDim) then self.lockDim.Enable = locked end
 		if isvalid(self.lockPanel) then self.lockPanel.Enable = locked end
+		-- 버튼 엔티티가 .ui에서 꺼진 채 저장돼 있어(2026-09-23 실측 entEnable=false) 창만 뜨고 버튼이 안 보였다 — 여기서 켠다
+		if isvalid(self.btnClaimPending) and self.btnClaimPending.Entity.Enable ~= locked then
+			self.btnClaimPending.Entity.Enable = locked
+		end
 		if locked and isvalid(self.lockGradeText) then
 			local grade = _RaidLogic.PendingGrade
 			self.lockGradeText.Text = _RaidLogic:GetGradeName(grade)
@@ -954,6 +1018,15 @@ script RaidUI extends Logic
 
 		local current = _RaidLogic:GetGradeIndex()
 		local maxIdx = _RaidLogic:GetMaxGradeIndex()
+		-- 보상 장비 열 헤더 — 발록은 반지, 자쿰은 목걸이(2026-09-23)
+		local head = self.rewardTable:GetChildByName("Head")
+		local ringHead = nil
+		if isvalid(head) then ringHead = head:GetChildByName("Ring") end
+		if isvalid(ringHead) then
+			local headKey = "UI_RAIDGROUP_012"
+			if _RaidLogic.RaidId == _RaidLogic.RaidZakum then headKey = "MLUA_RAIDUI_005" end
+			ringHead.TextGUIRendererComponent.Text = _LocalizationService:GetText(headKey)
+		end
 		for i = 0, maxIdx do
 			local row = self.rewardTable:GetChildByName("Row" .. tostring(i))
 			if isvalid(row) then
@@ -1010,6 +1083,13 @@ script RaidUI extends Logic
 		end
 	end
 
+	@ExecSpace("ClientOnly")
+	method string GetLoadingImageRUID()
+		-- 지금 열린 레이드의 입장 로딩 그림
+		if _RaidLogic.RaidId == _RaidLogic.RaidZakum then return self.ZakumLoadingImageRUID end
+		return self.RaidLoadingImageRUID
+	end
+
 	-- ── 로비 아이콘 ───────────────────────────────────────────────────────────
 	@ExecSpace("ClientOnly")
 	method void RefreshLobbyIcon()
@@ -1024,6 +1104,15 @@ script RaidUI extends Logic
 		if isvalid(self.lobbyRedDot) then
 			self.lobbyRedDot.Enable = _RaidLogic:CanClaimNow() or _RaidLogic.IsGhost
 		end
+		-- 버튼 그림 = 지금 요일의 레이드(월~수 발록 / 목~일 자쿰). 바뀔 때만 쓴다
+		local raidId = _RaidLogic.RaidId
+		if raidId ~= self._lobbyIconRaidId and isvalid(self.lobbyOverlay) then
+			self._lobbyIconRaidId = raidId
+			local icon = self.BalrogLobbyIconRUID
+			if raidId == _RaidLogic.RaidZakum then icon = self.ZakumLobbyIconRUID end
+			self.lobbyOverlay.ImageRUID = DataRef(icon)
+			log("RaidUI: lobby icon -> raid " .. raidId)
+		end
 	end
 
 	@ExecSpace("ClientOnly")
@@ -1035,6 +1124,7 @@ script RaidUI extends Logic
 
 	@ExecSpace("ClientOnly")
 	method void OnUpdate(number delta)
+		self._frameNo = self._frameNo + 1
 		self:TickFpsProbe(delta)
 		if not self._open then
 			self:RefreshLobbyIcon()

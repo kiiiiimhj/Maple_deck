@@ -169,6 +169,31 @@ script RaidScene extends Component
 	-- 이 오프셋 없이 Transform 좌표에 이펙트를 스폰하면 보스 몸이 아니라 발밑 바닥에서 터진다.
 	property Vector2 BossBodyOffset = Vector2(0.15, 1.15)
 
+	-- ── 보스 팔(자쿰, 2026-09-23 유저 "다른 팔들도 가끔씩 공격 모션") ──
+	-- "악령이 깃든 자쿰"(mob/9834207 몸통 + 9834209~9834216 팔1~8)은 팔이 따로 된 몬스터다.
+	-- 팔 스프라이트의 기준점이 전부 몸통 발밑과 같은 원점이라, 맵에 RaidBoss와 같은 위치·크기로
+	-- 팔 엔티티(BossArmPrefix..번호)를 겹쳐 두면 원래 자쿰 모양으로 조립된다.
+	-- 몇 초마다 공격 모션이 있는 팔 하나를 골라 공격시키고, 끝나면 대기로 돌린다. 발록은 BossArmPrefix가 비어 있어 꺼져 있다.
+	property string BossArmPrefix = ""
+
+	-- 팔 번호 순서(1번부터)의 CSV. 공격 클립이 없는 팔은 빈 칸으로 둔다 — 그 팔은 공격하지 않는다
+	property string BossArmStandRUIDs = ""
+
+	property string BossArmAttackRUIDs = ""
+
+	-- 팔별 공격 클립 길이(초) CSV — 이 시간이 지나면 대기로 돌린다
+	property string BossArmAttackSeconds = ""
+
+	-- 한 팔의 공격이 끝난 뒤 다음 팔이 공격하기까지 쉬는 시간(초) 범위
+	property number BossArmRestMin = 1.0
+
+	property number BossArmRestMax = 3.0
+
+	property integer _armActive = 0
+	property number _armBusy = 0
+	property number _armRest = 2.0
+	property integer _armLast = 0
+
 	-- 색 초기화(PaintHero)는 Client RPC라 매 프레임 쏘면 낭비다 — 상태가 바뀔 때와 이 주기마다만.
 	-- (유령 자세 자체는 SetHeroDead가 서버 선택기 값으로 걸어서 늦게 들어온 클라도 바로 받는다)
 	property number GhostRepaintInterval = 5.0
@@ -315,8 +340,10 @@ script RaidScene extends Component
 				self._bossBusy = 0
 				self:SetBossClip(self.BossStandRUID)
 			end
+			self:StopArmAttack()
 			return
 		end
+		self:TickArms(delta)
 		if self._bossBusy > 0 then
 			self._bossBusy = self._bossBusy - delta
 			if self._bossBusy <= 0 then self:SetBossClip(self.BossStandRUID) end
@@ -340,6 +367,73 @@ script RaidScene extends Component
 		if not isvalid(self._boss) then return end
 		self:SetBossClip(self.BossAttackRUID)
 		self._bossBusy = self.BossAttackDuration
+	end
+
+	-- ── 보스 팔 ──────────────────────────────────────────────────────────────
+	@ExecSpace("ServerOnly")
+	method table SplitCsv(string csv)
+		-- "a,,b" → {"a", "", "b"} (빈 칸도 자리를 지킨다 — 팔 번호와 인덱스가 어긋나지 않게)
+		local out = {}
+		if csv == nil or csv == "" then return out end
+		local startIdx = 1
+		while true do
+			local sep = string.find(csv, ",", startIdx, true)
+			if sep == nil then
+				table.insert(out, string.sub(csv, startIdx))
+				break
+			end
+			table.insert(out, string.sub(csv, startIdx, sep - 1))
+			startIdx = sep + 1
+		end
+		return out
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SetArmClip(integer armIdx, string ruid)
+		-- 팔 엔티티는 캐시하지 않고 매번 이름으로 찾는다(property any 테이블 캐시가 비는 문제 — RefreshHeroes 참고)
+		if ruid == "" then return end
+		local arm = self:FindInMap(self.BossArmPrefix .. tostring(armIdx))
+		if not isvalid(arm) then return end
+		local renderer = arm.SpriteRendererComponent
+		if renderer ~= nil then renderer.SpriteRUID = ruid end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void StopArmAttack()
+		-- 공격 중인 팔을 대기 모션으로 되돌린다
+		if self._armActive <= 0 then return end
+		local stands = self:SplitCsv(self.BossArmStandRUIDs)
+		self:SetArmClip(self._armActive, stands[self._armActive] or "")
+		self._armActive = 0
+		self._armBusy = 0
+	end
+
+	@ExecSpace("ServerOnly")
+	method void TickArms(number delta)
+		-- 한 번에 한 팔씩: 공격이 끝나면 잠깐 쉬고, 공격 모션이 있는 팔 중 하나(직전 팔 제외)를 무작위로 고른다
+		if self.BossArmPrefix == "" then return end
+		if self._armActive > 0 then
+			self._armBusy = self._armBusy - delta
+			if self._armBusy <= 0 then
+				self:StopArmAttack()
+				self._armRest = self.BossArmRestMin + _UtilLogic:RandomDouble() * (self.BossArmRestMax - self.BossArmRestMin)
+			end
+			return
+		end
+		self._armRest = self._armRest - delta
+		if self._armRest > 0 then return end
+		local attacks = self:SplitCsv(self.BossArmAttackRUIDs)
+		local seconds = self:SplitCsv(self.BossArmAttackSeconds)
+		local candidates = {}
+		for i, ruid in ipairs(attacks) do
+			if ruid ~= "" and i ~= self._armLast then table.insert(candidates, i) end
+		end
+		if #candidates == 0 then return end
+		local pick = candidates[_UtilLogic:RandomIntegerRange(1, #candidates)]
+		self:SetArmClip(pick, attacks[pick])
+		self._armActive = pick
+		self._armLast = pick
+		self._armBusy = tonumber(seconds[pick]) or 3.0
 	end
 
 	@ExecSpace("ServerOnly")

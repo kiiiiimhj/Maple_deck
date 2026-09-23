@@ -66,6 +66,16 @@ script LoadingUI extends Logic
 	-- 이게 없으면 로드 단계가 실패했을 때 화면이 영영 검은 채로 남는다
 	property number BootMaxSeconds = 8.0
 
+	-- ── 레이드 입장 로딩 전용(2026-09-23 유저 지정) ──
+	-- 로딩 그림(배경+제목)을 레이드 팝업 액자 가운데에 맞춘다 — 액자는 화면 가운데보다 왼쪽(x≈-24)에 있어서
+	-- 그림 속 문양이 액자 장식(별)과 어긋나 보였다. 맞춘 뒤 미세 조정이 필요하면 이 값(px, +는 오른쪽)을 고친다
+	property number AlignNudgeX = 0
+	-- 걷힐 때 뽑기 덮개(GachaUI.PlayCoverOpen)처럼 살짝 커졌다가(팝) 위로 올라가며 사라진다
+	property number LiftPopScale = 1.04
+	property number LiftPopSeconds = 0.08
+	property number LiftDistance = 140
+	property number LiftSeconds = 0.32
+
 	property boolean _playing = false
 	-- 지금 화면이 완전히 덮여 있는가(부팅 커버 포함) — PlayEntry가 페이드인을 건너뛸지 판단한다
 	property boolean _covered = false
@@ -197,6 +207,7 @@ script LoadingUI extends Logic
 		end
 
 		self._playing = true
+		self:ResetLiftTransform()
 		self.loadingScreen.Enable = true
 
 		-- 이미 덮여 있으면(부팅 커버가 아직 안 걷힌 상태) 페이드인을 건너뛴다 —
@@ -240,8 +251,19 @@ script LoadingUI extends Logic
 		if not isvalid(self.loadingScreen) or not isvalid(self.screenCanvas) then return end
 		self._playing = true
 		self._covered = true
+		self:ResetLiftTransform()
 		self.loadingScreen.Enable = true
 		self.screenCanvas.GroupAlpha = 1
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ResetLiftTransform()
+		-- PlayRevealLift로 올려 둔 화면 위치/크기를 원래대로. 올리는 트윈의 마지막 프레임이 종료 타이머보다
+		-- 늦게 와서 y가 +140에 남는 걸 실측으로 확인했다 — 그래서 다음에 덮을 때마다 여기서 한 번 더 되돌린다
+		if self._T.liftBase == nil or not isvalid(self.loadingScreen) then return end
+		local t = self.loadingScreen.UITransformComponent
+		t.anchoredPosition = self._T.liftBase
+		t.Scale = Vector3(1, 1, 1)
 	end
 
 	@ExecSpace("ClientOnly")
@@ -306,6 +328,7 @@ script LoadingUI extends Logic
 		-- CoverNowWithImage로 바꾼 배경/장식을 원래대로.
 		-- 제목은 _bgOverridden 가드보다 먼저 끈다 — 배경 복구가 이미 끝난 뒤에도 글자만 남는 일이 없게
 		if isvalid(self.titleText) then self.titleText.Enable = false end
+		self:ResetContentAlign()
 		if not self._bgOverridden then return end
 		self._bgOverridden = false
 		if isvalid(self.bgSprite) and self._origBgRuid ~= nil then self.bgSprite.ImageRUID = self._origBgRuid end
@@ -335,6 +358,97 @@ script LoadingUI extends Logic
 			self:RestoreBackground()
 			log("LoadingUI: revealed")
 		end, self.FadeOutSeconds)
+	end
+
+	@ExecSpace("ClientOnly")
+	method table GetAlignTargets()
+		-- 액자 가운데 맞춤 때 같이 옮기는 엔티티(배경 그림 + 제목). 없는 건 빼고 돌려준다
+		local list = {}
+		if isvalid(self.bgSprite) then table.insert(list, self.bgSprite.Entity) end
+		if isvalid(self.titleText) then table.insert(list, self.titleText) end
+		return list
+	end
+
+	@ExecSpace("ClientOnly")
+	method void AlignContentTo(Entity target)
+		-- 로딩 그림(배경+제목)의 가로 가운데를 target(다른 UI 그룹의 엔티티) 가운데에 맞춘다(레이드 액자).
+		-- 위치는 RestoreBackground → ResetContentAlign이 되돌린다
+		if not isvalid(target) or not isvalid(self.loadingScreen) then return end
+		local corners = target.UITransformComponent:GetWorldCorners()
+		local cx = (corners[1].x + corners[3].x) * 0.5
+		local cy = (corners[1].y + corners[3].y) * 0.5
+		local p = self.loadingScreen.UITransformComponent:ToLocalPoint(Vector3(cx, cy, 0))
+		local dx = p.x + self.AlignNudgeX
+		for _, e in ipairs(self:GetAlignTargets()) do
+			if isvalid(e) then
+				if self._T.alignBase == nil then self._T.alignBase = {} end
+				local t = e.UITransformComponent
+				if self._T.alignBase[e.Id] == nil then self._T.alignBase[e.Id] = t.anchoredPosition end
+				local base = self._T.alignBase[e.Id]
+				t.anchoredPosition = Vector2(base.x + dx, base.y)
+			end
+		end
+		log(string.format("LoadingUI: content aligned dx=%.1f", dx))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ResetContentAlign()
+		-- AlignContentTo로 옮긴 배경/제목을 원래 자리로
+		if self._T.alignBase == nil then return end
+		for _, e in ipairs(self:GetAlignTargets()) do
+			if isvalid(e) and self._T.alignBase[e.Id] ~= nil then
+				e.UITransformComponent.anchoredPosition = self._T.alignBase[e.Id]
+			end
+		end
+		self._T.alignBase = nil
+	end
+
+	@ExecSpace("ClientOnly")
+	method number GetLiftRevealSeconds()
+		-- PlayRevealLift가 끝나기까지 걸리는 시간(팝 + 올라가며 사라짐)
+		return self.LiftPopSeconds + self.LiftSeconds
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayRevealLift()
+		-- PlayReveal과 같지만 뽑기 덮개처럼: 살짝 커졌다가(팝) 위로 슥 올라가면서 알파가 빠져 사라진다(레이드 입장)
+		if not isvalid(self.screenCanvas) or not isvalid(self.loadingScreen) then
+			self:PlayReveal()
+			return
+		end
+		local screen = self.loadingScreen
+		local t = screen.UITransformComponent
+		-- 기준 위치는 처음 한 번만 잡는다(직전 연출이 덜 되돌려진 채로 다시 불려도 기준이 밀리지 않게)
+		if self._T.liftBase == nil then self._T.liftBase = t.anchoredPosition end
+		local basePos = self._T.liftBase
+		local liftPos = Vector2(basePos.x, basePos.y + self.LiftDistance)
+		local liftSec = self.LiftSeconds
+
+		_TweenLogic:ScaleTo(screen, Vector2(self.LiftPopScale, self.LiftPopScale), self.LiftPopSeconds, EaseType.QuadEaseOut)
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(screen) then return end
+			_TweenLogic:ScaleTo(screen, Vector2(1, 1), 0.1, EaseType.QuadEaseOut)
+			_TweenLogic:PlayTween(basePos, liftPos, liftSec, EaseType.QuadEaseOut, function(value)
+				if isvalid(screen) then screen.UITransformComponent.anchoredPosition = value end
+			end)
+			_TweenLogic:PlayTween(1, 0, liftSec, EaseType.QuadEaseOut, function(value)
+				if isvalid(self.screenCanvas) then self.screenCanvas.GroupAlpha = value end
+			end)
+			_TimerService:SetTimerOnce(function()
+				if not isvalid(self) then return end
+				if isvalid(self.screenCanvas) then self.screenCanvas.GroupAlpha = 0 end
+				if isvalid(screen) then screen.Enable = false end
+				self._playing = false
+				self._covered = false
+				self:RestoreBackground()
+				self:ResetLiftTransform()
+				-- 트윈 마지막 프레임이 늦게 덮어쓰는 경우를 대비해 조금 뒤 한 번 더(다음 덮기 때도 ResetLiftTransform이 돈다)
+				_TimerService:SetTimerOnce(function()
+					if isvalid(self) and not self._covered then self:ResetLiftTransform() end
+				end, 0.1)
+				log("LoadingUI: revealed (lift)")
+			end, liftSec)
+		end, self.LiftPopSeconds)
 	end
 
 	-- 화면이 검게 덮여있는 총 시간. GameManager가 스폰 시작을 얼마나 미룰지 맞출 때 참고한다.

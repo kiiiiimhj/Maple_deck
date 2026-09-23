@@ -2,7 +2,7 @@
 script AchievementLogic extends Logic
 
 	-- 업적 시스템(유저 지정 2026-09-19). 로비 업적 버튼 → 업적 팝업(AchievementUI).
-	--   · 업적 50개, 달성하면 1개당 다이아 10개(받기 / 모두 받기).
+	--   · 업적 60개(2026-09-23 레이드 5 + 재화 사용 5 추가), 달성하면 1개당 다이아 10개(받기 / 모두 받기).
 	--   · 진행도는 "통계 키(stat) → 누적 숫자" 하나로 통일한다. 업적은 (stat, 목표치)만 가진다.
 	--     - 누적형: 몬스터 처치 수, 포션 획득 수 등(Add)
 	--     - 최고기록형: 한 판 최고 레벨, 발견한 조합 수(SetMax)
@@ -37,7 +37,7 @@ script AchievementLogic extends Logic
 
 	-- ── 업적 정의(서버/클라 공용 — ExecSpace 없음) ─────────────────────────────
 	method table GetDefs()
-		-- { id, name(제목), desc(조건 설명), stat, target } 50개. 표시 순서 = 이 순서
+		-- { id, name(제목), desc(조건 설명), stat, target } 60개. 표시 순서 = 이 순서
 		if self._defs ~= nil then return self._defs end
 		local d = {}
 		local function add(id, name, desc, stat, target)
@@ -99,6 +99,18 @@ script AchievementLogic extends Logic
 		add("comp_5", "MLUA_ACHIEVEMENTLOGIC_093", "MLUA_ACHIEVEMENTLOGIC_094", "compose", 5)
 		add("gear_50", "MLUA_ACHIEVEMENTLOGIC_095", "MLUA_ACHIEVEMENTLOGIC_096", "gearget", 50)
 		add("sell_100", "MLUA_ACHIEVEMENTLOGIC_097", "MLUA_ACHIEVEMENTLOGIC_098", "sell", 100)
+		-- 레이드(2026-09-23 유저 지정). raidgrade = 도달한 최고 등급 번호+1(F=1 … C=4 … S=7)
+		add("raid_enter_1", "MLUA_ACHIEVEMENTLOGIC_101", "MLUA_ACHIEVEMENTLOGIC_102", "raidenter", 1)
+		add("raid_claim_1", "MLUA_ACHIEVEMENTLOGIC_103", "MLUA_ACHIEVEMENTLOGIC_104", "raidclaim", 1)
+		add("raid_claim_4", "MLUA_ACHIEVEMENTLOGIC_105", "MLUA_ACHIEVEMENTLOGIC_106", "raidclaim", 4)
+		add("raid_grade_c", "MLUA_ACHIEVEMENTLOGIC_107", "MLUA_ACHIEVEMENTLOGIC_108", "raidgrade", 4)
+		add("raid_grade_s", "MLUA_ACHIEVEMENTLOGIC_109", "MLUA_ACHIEVEMENTLOGIC_110", "raidgrade", 7)
+		-- 재화 사용(2026-09-23 유저 지정) — 로비 다이아/골드(코인)를 쓴 누적량
+		add("dia_use_1k", "MLUA_ACHIEVEMENTLOGIC_111", "MLUA_ACHIEVEMENTLOGIC_112", "diaspent", 1000)
+		add("dia_use_5k", "MLUA_ACHIEVEMENTLOGIC_113", "MLUA_ACHIEVEMENTLOGIC_114", "diaspent", 5000)
+		add("dia_use_20k", "MLUA_ACHIEVEMENTLOGIC_115", "MLUA_ACHIEVEMENTLOGIC_116", "diaspent", 20000)
+		add("gold_use_100k", "MLUA_ACHIEVEMENTLOGIC_117", "MLUA_ACHIEVEMENTLOGIC_118", "goldspent", 100000)
+		add("gold_use_1m", "MLUA_ACHIEVEMENTLOGIC_119", "MLUA_ACHIEVEMENTLOGIC_120", "goldspent", 1000000)
 		-- 메타
 		add("done_30", "MLUA_ACHIEVEMENTLOGIC_099", "MLUA_ACHIEVEMENTLOGIC_100", "done", 30)
 		self._defs = d
@@ -380,6 +392,38 @@ script AchievementLogic extends Logic
 	method void OnGearSold(integer count)
 		-- GearSellLogic.RequestSellGears
 		self:Add("sell", count)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnRaidEntered()
+		-- RaidLogic.RequestEnterRaid(레이드 맵으로 이동할 때)
+		self:Add("raidenter", 1)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnRaidClaimed(integer gradeIndex)
+		-- RaidLogic.RequestClaim 성공 — 주간 보상 수령 횟수 + 받은 등급도 최고 등급으로 반영
+		self:Add("raidclaim", 1)
+		self:OnRaidGrade(gradeIndex)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnRaidGrade(integer gradeIndex)
+		-- RaidLogic.PushDamage(피해가 갱신될 때마다) — 지금 도달한 등급(0=F … 6=S)을 최고기록으로
+		if gradeIndex < 0 then return end
+		self:SetMax("raidgrade", gradeIndex + 1)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnDiamondSpent(integer amount)
+		-- GameManager.SpendDiamond 성공(뽑기·칸 확장·이어하기 등 다이아를 쓰는 모든 곳)
+		self:Add("diaspent", amount)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnGoldSpent(integer amount)
+		-- GameManager.SpendCoins 성공(유물 강화 등 로비 골드를 쓰는 모든 곳)
+		self:Add("goldspent", amount)
 	end
 
 	-- ── 서버: 주기 처리(생존 판정 + 저장) ──────────────────────────────────────

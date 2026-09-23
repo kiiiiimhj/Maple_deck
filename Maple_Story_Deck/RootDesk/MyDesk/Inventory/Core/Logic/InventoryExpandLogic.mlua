@@ -5,7 +5,8 @@ script InventoryExpandLogic extends Logic
 	-- 무기 / 방어구 / 기타 각각 기본 100칸이고, 확장할 때마다 그 탭만 5칸씩 늘어난다.
 	-- All 탭은 세 탭의 합계를 보여주는 뷰라 자체 정원도 없고 확장 버튼도 없다.
 	--
-	-- 탭 번호는 UIInventoryTabHolder.TabNames 순서를 그대로 쓴다: 1=All / 2=Weapon / 3=Armor / 4=etc
+	-- 탭 번호는 UIInventoryTabHolder.TabNames 순서를 그대로 쓴다: 1=All / 2=Weapon / 3=Armor / 4=etc / 5=Acc(장신구)
+	-- 장신구 탭(2026-09-23 추가)은 화면상 방어구 오른쪽이지만 번호는 5다 — 기타(4)의 번호와 저장 키를 그대로 두려고.
 
 	property integer TabAll = 1
 
@@ -14,6 +15,8 @@ script InventoryExpandLogic extends Logic
 	property integer TabArmor = 3
 
 	property integer TabEtc = 4
+
+	property integer TabAcc = 5
 
 	property integer BaseCapacity = 100
 
@@ -37,6 +40,9 @@ script InventoryExpandLogic extends Logic
 	@Sync
 	property integer EtcExpandCount = 0
 
+	@Sync
+	property integer AccExpandCount = 0
+
 	property any _storage = nil
 
 	@ExecSpace("ServerOnly")
@@ -50,8 +56,9 @@ script InventoryExpandLogic extends Logic
 		self.WeaponExpandCount = self:LoadCount("InvExpandWeapon")
 		self.ArmorExpandCount = self:LoadCount("InvExpandArmor")
 		self.EtcExpandCount = self:LoadCount("InvExpandEtc")
+		self.AccExpandCount = self:LoadCount("InvExpandAcc")
 		log("InventoryExpandLogic started (weapon=" .. self.WeaponExpandCount
-			.. " armor=" .. self.ArmorExpandCount .. " etc=" .. self.EtcExpandCount .. ")")
+			.. " armor=" .. self.ArmorExpandCount .. " etc=" .. self.EtcExpandCount .. " acc=" .. self.AccExpandCount .. ")")
 	end
 
 	@ExecSpace("ServerOnly")
@@ -75,18 +82,20 @@ script InventoryExpandLogic extends Logic
 		if tabEnum == self.TabWeapon then return self.WeaponExpandCount end
 		if tabEnum == self.TabArmor then return self.ArmorExpandCount end
 		if tabEnum == self.TabEtc then return self.EtcExpandCount end
+		if tabEnum == self.TabAcc then return self.AccExpandCount end
 		return 0
 	end
 
 	method boolean IsExpandableTab(integer tabEnum)
 		-- All은 세 탭을 합쳐 보여주는 뷰라 확장 버튼(+)을 붙이지 않는다
-		return tabEnum == self.TabWeapon or tabEnum == self.TabArmor or tabEnum == self.TabEtc
+		return tabEnum == self.TabWeapon or tabEnum == self.TabArmor or tabEnum == self.TabEtc or tabEnum == self.TabAcc
 	end
 
 	method integer GetCapacity(integer tabEnum)
-		-- 그 탭의 현재 정원. All은 세 탭 정원의 합
+		-- 그 탭의 현재 정원. All은 나머지 네 탭 정원의 합
 		if tabEnum == self.TabAll then
 			return self:GetCapacity(self.TabWeapon) + self:GetCapacity(self.TabArmor) + self:GetCapacity(self.TabEtc)
+				+ self:GetCapacity(self.TabAcc)
 		end
 
 		if not self:IsExpandableTab(tabEnum) then
@@ -111,29 +120,30 @@ script InventoryExpandLogic extends Logic
 		if tabEnum == self.TabWeapon then return "MLUA_EPISODEREWARDLOGIC_004" end
 		if tabEnum == self.TabArmor then return "MLUA_EPISODEREWARDLOGIC_003" end
 		if tabEnum == self.TabEtc then return "MLUA_INVENTORYEXPANDLOGIC_001" end
+		if tabEnum == self.TabAcc then return "MLUA_INVENTORYEXPANDLOGIC_003" end
 		return "MLUA_INVENTORYEXPANDLOGIC_002"
 	end
 
 	@ExecSpace("ServerOnly")
 	method integer GetItemTab(integer itemId)
 		-- 아이템이 인벤 창 어느 탭에 보이는지(UIInventoryTabHolder.SetCachingItemsFunctions와 같은 분류) —
-		-- 2=무기 / 3=방어구 / 4=기타(장비 아님 + 장신구). 어디에도 안 붙으면 전체 탭에만 보이고 탭 정원이 없다 → 0
+		-- 2=무기 / 3=방어구 / 4=기타(장비 아님) / 5=장신구. 어디에도 안 붙으면 전체 탭에만 보이고 탭 정원이 없다 → 0
 		local itemData = _ItemDataLogic:GetData(itemId)
 		if itemData == nil then return 0 end
 		local gear = itemData:GetGearData()
 		if gear == nil then return self.TabEtc end
 		if _GearCategoryEnum:IsWeapon(gear.GearCategory) then return self.TabWeapon end
 		if _GearCategoryEnum:IsArmor(gear.GearCategory) then return self.TabArmor end
-		-- 장신구(반지)는 무기/방어구 어디에도 안 붙어 전체 탭에만 보였다 → 기타 탭에 묶는다(2026-09-23 유저 지정).
-		-- ⚠ UIInventoryTabHolder / UIComposePopup의 기타 탭 조건과 **한 쌍**이다. 여기만 바꾸면
+		-- 장신구(반지)는 장신구 탭(2026-09-23 유저 지정 — 그 전엔 기타 탭에 묶여 있었다).
+		-- ⚠ UIInventoryTabHolder의 탭 조건과 **한 쌍**이다. 여기만 바꾸면
 		--   정원에는 세는데 탭에는 안 보이고, 저쪽만 바꾸면 그 반대가 된다
-		if _GearCategoryEnum:IsAccessory(gear.GearCategory) then return self.TabEtc end
+		if _GearCategoryEnum:IsAccessory(gear.GearCategory) then return self.TabAcc end
 		return 0
 	end
 
 	@ExecSpace("ServerOnly")
 	method table CountItemsByTab(string userId)
-		-- 탭별 보유 수 {[2]=n, [3]=n, [4]=n} — 인벤 창 "N / M"과 같은 기준(장착 중인 장비 포함)
+		-- 탭별 보유 수 {[2]=n, [3]=n, [4]=n, [5]=n} — 인벤 창 "N / M"과 같은 기준(장착 중인 장비 포함)
 		local used = {}
 		local user = _UserService:GetUserEntityByUserId(userId)
 		if not isvalid(user) or not isvalid(user.PkgPlayerInventory) then return used end
@@ -174,6 +184,9 @@ script InventoryExpandLogic extends Logic
 		elseif tabEnum == self.TabArmor then
 			self.ArmorExpandCount = self.ArmorExpandCount + 1
 			key = "InvExpandArmor"
+		elseif tabEnum == self.TabAcc then
+			self.AccExpandCount = self.AccExpandCount + 1
+			key = "InvExpandAcc"
 		else
 			self.EtcExpandCount = self.EtcExpandCount + 1
 			key = "InvExpandEtc"

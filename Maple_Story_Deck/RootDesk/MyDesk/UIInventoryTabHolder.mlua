@@ -3,6 +3,11 @@ script UIInventoryTabHolder extends Component
 
 	property table TabNames = {}
 
+	-- 탭 번호(=InventoryExpandLogic의 TabAll~TabAcc) → TabHolder 아래 탭 엔티티 이름.
+	-- 장신구 탭(5번)은 화면상 방어구 오른쪽에 있지만 번호는 맨 뒤다 — 기타(4번)의 번호/저장 키를 안 바꾸려고
+	-- 화면 순서와 번호를 분리했다(2026-09-23). 그래서 Children[번호]가 아니라 이 이름으로 탭을 찾는다
+	property table TabEntityNames = {}
+
 	property table InsertFunctions = {}
 
 	property integer InsertFunc_MatchAndKeepSearch = 1
@@ -19,23 +24,28 @@ script UIInventoryTabHolder extends Component
 
 	@ExecSpace("ClientOnly")
 	method void OnBeginPlay()
-		local children = self.Entity.Children
-		
-		-- 유저 요청: 장착 슬롯에서 장신구(Acc)를 없애서 Acc 탭도 같이 제거했다
-		-- 탭 이름은 로컬라이제이션 키(전체/무기/방어구/기타) — 예전엔 영어 "All/Weapon/Armor/etc"로 박혀 있었다
+		-- 탭 이름은 로컬라이제이션 키(전체/무기/방어구/기타) — 예전엔 영어 "All/Weapon/Armor/etc"로 박혀 있었다.
+		-- 장신구 탭은 2026-09-23 유저 요청으로 추가(반지가 기타 탭에 섞여 있었다)
 		self.TabNames = {
 			"UI_EQUIPMENTGROUP_007",
 			"MLUA_EPISODEREWARDLOGIC_004",
 			"MLUA_EPISODEREWARDLOGIC_003",
 			"MLUA_INVENTORYEXPANDLOGIC_001",
+			"MLUA_INVENTORYEXPANDLOGIC_003",
 		}
+		self.TabEntityNames = { "All", "Weapon", "Armor", "Etc", "Acc" }
 
-		for i, child in ipairs(children) do
-			child.UIInventoryTab:Initalize(i, _LocText:Resolve(self.TabNames[i]))
+		for i, name in ipairs(self.TabEntityNames) do
+			local tab = self:GetTabEntity(i)
+			if tab ~= nil then
+				tab.UIInventoryTab:Initalize(i, _LocText:Resolve(self.TabNames[i]))
+			else
+				log_warning("UIInventoryTabHolder: tab entity missing " .. name)
+			end
 		end
-		
+
 		self.TabEnum = 1
-		local currentTab = self.Entity.Children[self.TabEnum]
+		local currentTab = self:GetTabEntity(self.TabEnum)
 		currentTab.UIInventoryTab:OnSelected()
 		
 		self:SetCachingItemsFunctions()
@@ -82,14 +92,24 @@ script UIInventoryTabHolder extends Component
 		---@param itemData ItemData
 		---@return integer
 		local function IsEtc(itemData)
-			-- 기타 탭 = 장비가 아닌 아이템(강화 주문서 등) + **장신구**(반지).
-			-- 반지는 Category가 Gear인데 무기도 방어구도 아니라서 예전엔 어느 탭 조건에도 안 걸려
-			-- 전체 탭에만 보였다(유저 리포트 2026-09-23 "all에만 들어있다").
+			-- 기타 탭 = 장비가 아닌 아이템(강화 주문서 등). 장신구(반지)는 2026-09-23부터 장신구 탭으로 따로 뺐다.
 			-- ⚠ 이 분류는 InventoryExpandLogic.GetItemTab과 **한 쌍**이다 — 한쪽만 고치면
 			--   탭에는 보이는데 정원("N / M")에는 안 세는 상태가 된다.
 			local itemGearData = itemData:GetGearData()
 			if itemGearData == nil then
 				return self.InsertFunc_MatchAndStop
+			end
+
+			return self.InsertFunc_NotMatch
+		end
+
+		---@param itemData ItemData
+		---@return integer
+		local function IsAccessory(itemData)
+			-- 장신구 탭 = 반지 등 장신구. Category는 Gear인데 무기도 방어구도 아닌 것들
+			local itemGearData = itemData:GetGearData()
+			if itemGearData == nil then
+				return self.InsertFunc_NotMatch
 			end
 
 			if _GearCategoryEnum:IsAccessory(itemGearData.GearCategory) then
@@ -99,11 +119,13 @@ script UIInventoryTabHolder extends Component
 			return self.InsertFunc_NotMatch
 		end
 
+		-- 순서 = 탭 번호(1=전체 2=무기 3=방어구 4=기타 5=장신구)
 		self.InsertFunctions = {
 			IsAll,
 			IsWeapon,
 			IsArmor,
-			IsEtc
+			IsEtc,
+			IsAccessory
 		}
 	end
 
@@ -148,16 +170,24 @@ script UIInventoryTabHolder extends Component
 			return
 		end
 		
-		local previousTab = self.Entity.Children[self.TabEnum]
+		local previousTab = self:GetTabEntity(self.TabEnum)
 		previousTab.UIInventoryTab:OnDeselected()
-		
-		local currentTab = self.Entity.Children[enum]
+
+		local currentTab = self:GetTabEntity(enum)
 		currentTab.UIInventoryTab:OnSelected()
 
 		self.TabEnum = enum
 		-- 탭 전환은 완전히 다른 목록으로 바뀌는 것이므로 스크롤을 맨 위로 리셋한다(resetPos=true)
 		self:Update(false, true)
 		return
+	end
+
+	@ExecSpace("ClientOnly")
+	method Entity GetTabEntity(integer enum)
+		-- 탭 번호 → 탭 엔티티(이름으로 찾는다 — 화면 순서와 번호가 다르다)
+		local name = self.TabEntityNames[enum]
+		if name == nil then return nil end
+		return self.Entity:GetChildByName(name)
 	end
 
 	-- resetPos: UIInventoryGrid.Update 참고 — 탭 전환/최초 오픈에서만 true를 넘긴다.
