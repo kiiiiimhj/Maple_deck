@@ -1,0 +1,66 @@
+@Logic
+script RewardTooltipLogic extends Logic
+
+	-- 보상 팝업(에피소드 보상 / 레벨 보상) 카드의 장비 상자를 누르면 뜨는 말풍선 툴팁(유저 지정 2026-09-24).
+	--   "인벤 주문서 누르면 나오는 툴팁"과 같은 말풍선(823c09…) — 예: "에픽 무기 상자\n(수령 즉시 장비창에 등록됩니다.)"
+	--   툴팁 엔티티는 팝업마다 자기 .ui에 있고(그룹 순서가 달라서 공용으로 못 쓴다), 위치 잡기·자동 닫힘·문구만 여기서 공용으로 한다.
+
+	-- 떠 있는 시간(초) — 인벤 주문서 툴팁(UIInventoryGrid.ItemNameTooltipDuration)과 같게
+	property number Duration = 1.5
+	-- 카드 윗변에서 말풍선 아래까지 띄우는 간격, 꼬리(왼쪽 아래)를 카드 가운데로 맞추는 가로 보정
+	property number GapY = 6
+	property number OffsetX = 80
+
+	property integer _timerId = 0
+	property any _shown = nil
+
+	method string GetGearBoxText(boolean isWeapon, integer grade)
+		-- "{등급} 무기 상자" / "{등급} 방어구 상자" + 둘째 줄 안내
+		local gradeName = _GearGradeEnum:GetKoreanName(grade)
+		local key = "FMT_REWARDTOOLTIPLOGIC_002"
+		if isWeapon then key = "FMT_REWARDTOOLTIPLOGIC_001" end
+		return _LocalizationService:GetTextFormat(key, gradeName) .. "\n" .. _LocalizationService:GetText("MLUA_REWARDTOOLTIPLOGIC_003")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Show(Entity tooltip, Entity card, string text)
+		-- tooltip(부모 = 팝업 Panel)을 card 바로 위에 띄우고 Duration초 뒤 닫는다. 다시 누르면 시간 연장
+		if not isvalid(tooltip) or not isvalid(card) then return end
+		local parent = tooltip.Parent
+		if not isvalid(parent) then return end
+		local label = tooltip:GetChildByName("Label")
+		if isvalid(label) then label.TextGUIRendererComponent.Text = text end
+		-- 카드 네 모서리(월드) → 툴팁 부모 로컬로. 카드는 캐러셀이 Scale을 바꾸므로 모서리로 재야 실제 크기가 나온다
+		local corners = card.UITransformComponent:GetWorldCorners()
+		local ptr = parent.UITransformComponent
+		local c1 = corners[1]
+		local c3 = corners[3]
+		local bl = ptr:ToLocalPoint(Vector3(c1.x, c1.y, 0))
+		local tr = ptr:ToLocalPoint(Vector3(c3.x, c3.y, 0))
+		local cx = (bl.x + tr.x) * 0.5
+		local top = math.max(bl.y, tr.y)
+		local ttr = tooltip.UITransformComponent
+		ttr.anchoredPosition = Vector2(cx + self.OffsetX, top + self.GapY + ttr.RectSize.y * 0.5)
+		tooltip.Enable = true
+		_UILogic:SetSiblingIndex(ttr, 1000000)
+		self._shown = tooltip
+		if self._timerId ~= 0 then _TimerService:ClearTimer(self._timerId) end
+		self._timerId = _TimerService:SetTimerOnce(function()
+			self._timerId = 0
+			self:Hide()
+		end, self.Duration)
+		log("RewardTooltipLogic: show '" .. string.gsub(text, "\n", " / ") .. "'")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Hide()
+		-- 떠 있는 툴팁을 닫는다(팝업을 닫을 때도 부른다)
+		if self._timerId ~= 0 then
+			_TimerService:ClearTimer(self._timerId)
+			self._timerId = 0
+		end
+		if self._shown ~= nil and isvalid(self._shown) then self._shown.Enable = false end
+		self._shown = nil
+	end
+
+end

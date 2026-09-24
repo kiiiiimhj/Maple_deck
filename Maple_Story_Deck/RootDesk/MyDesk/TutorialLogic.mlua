@@ -93,6 +93,16 @@ script TutorialLogic extends Logic
 	-- 존에 들어온 뒤 흐른 시간(-1이면 그 존 밖)
 	property number _eggZoneElapsed = -1
 
+	-- ── 첫 설치 인트로 만화(유저 지정 2026-09-24) ─────────────────────────────────
+	-- 처음 들어온 유저에게 부팅 로딩 대신 컷 7장짜리 만화를 보여준다(IntroComicUI). 계정당 1회,
+	-- 유저별 저장소 Intro.ComicSeen. 로드 전 기본값은 true(봤음) — 저장값을 읽기 전에 잘못 뜨지 않게.
+	-- IntroLoaded는 클라(LoadingUI)가 "값을 읽었는지" 기다리는 데 쓴다
+	@Sync
+	property boolean IntroSeen = true
+	@Sync
+	property boolean IntroLoaded = false
+	property string IntroStorageKey = "Intro.ComicSeen"
+
 	@ExecSpace("ServerOnly")
 	@EventSender("Service", "UserService")
 	handler HandleUserEnterEvent(UserEnterEvent event)
@@ -106,6 +116,12 @@ script TutorialLogic extends Logic
 		self.TutorialSeen = (errorCode == 0 and raw == "1")
 		local eggCode, eggRaw = self._storage:GetAndWait(self.EggStorageKey)
 		self.EggTutorialSeen = (eggCode == 0 and eggRaw == "1")
+		-- 읽기 실패(에러)면 이미 본 것으로 둔다 — 기존 유저에게 만화가 다시 뜨는 것보다 안전하다.
+		-- "첫 설치" 기준이라 이 기능 이전부터 하던 유저(첫 플레이 튜토리얼을 이미 끝낸 유저)도 본 것으로 친다
+		local introCode, introRaw = self._storage:GetAndWait(self.IntroStorageKey)
+		self.IntroSeen = (introCode ~= 0) or (introRaw == "1") or self.TutorialSeen
+		self.IntroLoaded = true
+		log("TutorialLogic: intro comic seen=" .. tostring(self.IntroSeen))
 		log("TutorialLogic started (seen=" .. tostring(self.TutorialSeen) .. ", eggSeen=" .. tostring(self.EggTutorialSeen) .. ")")
 	end
 
@@ -282,6 +298,23 @@ script TutorialLogic extends Logic
 		self.TutorialSeen = true
 		if self._storage ~= nil then self._storage:SetAndWait(self.StorageKey, "1") end
 		log("TutorialLogic: marked as seen")
+	end
+
+	@ExecSpace("Server")
+	method void RequestMarkIntroSeen()
+		-- 인트로 만화를 끝까지 봤거나 건너뛰었을 때 클라(IntroComicUI)가 부른다 — 다시는 안 뜬다
+		if self.IntroSeen then return end
+		self.IntroSeen = true
+		if self._storage ~= nil then self._storage:SetAndWait(self.IntroStorageKey, "1") end
+		log("TutorialLogic: intro comic marked as seen")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void DebugResetIntro()
+		-- 테스트 전용: 인트로 만화를 다시 보게 한다(다음 부팅 때 뜬다)
+		self.IntroSeen = false
+		if self._storage ~= nil then self._storage:SetAndWait(self.IntroStorageKey, "0") end
+		log("TutorialLogic: intro comic reset (debug)")
 	end
 
 	-- ── 이스터에그 튜토리얼 ──────────────────────────────────────────────────────

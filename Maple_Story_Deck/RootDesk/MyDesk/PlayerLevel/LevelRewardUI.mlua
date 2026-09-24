@@ -17,6 +17,8 @@ script LevelRewardUI extends Logic
 	property TextGUIRendererComponent claimText = "8d071f58-1606-4e26-8999-8212784de66e"
 	property TextGUIRendererComponent subTitle = "ce0fe6bf-3667-4105-9efa-e43aa68ff080"
 	property Entity strip = "0dec58fd-dd45-43ba-9086-3954f19d9b96"
+	-- 장비 상자 칸을 누르면 뜨는 말풍선(Panel/GearBoxTooltip) — 2026-09-24
+	property Entity gearTooltip = "c2653701-7bda-4403-9eca-a0975ee5b510"
 	-- 팝업 안에서 위로 떠오르며 사라지는 안내 문구(받기 버튼 위)
 	property TextGUIRendererComponent failToast = "ed974700-c6cf-4836-ba35-9d3127daa9af"
 	-- 로비 인벤토리 프로필(EquipmentGroup) — 별 뱃지 안 레벨 숫자 / 아이디 / 클릭 버튼
@@ -69,6 +71,7 @@ script LevelRewardUI extends Logic
 	property any _closeHandler = nil
 	property any _claimHandler = nil
 	property any _profileHandler = nil
+	property table _cardHandlers = {}
 
 	@ExecSpace("ClientOnly")
 	method void OnBeginPlay()
@@ -78,6 +81,12 @@ script LevelRewardUI extends Logic
 		self._claimHandler = self.btnClaim.Entity:ConnectEvent(ButtonClickEvent, self.OnClaimClicked)
 		if isvalid(self.profileButton) then
 			self._profileHandler = self.profileButton.Entity:ConnectEvent(ButtonClickEvent, self.OnProfileClicked)
+		end
+		for i = 1, self.TotalSlots do
+			local card = self:GetCard(i)
+			if isvalid(card) and card.ButtonComponent ~= nil then
+				self._cardHandlers[i] = card:ConnectEvent(ButtonClickEvent, function() self:OnCardClicked(i) end)
+			end
 		end
 		self:RefreshProfile()
 		self:RefreshAll()
@@ -171,9 +180,18 @@ script LevelRewardUI extends Logic
 	@ExecSpace("ClientOnly")
 	method void Close()
 		self:FlyPendingRewards()
+		_RewardTooltipLogic:Hide()
 		self.popupGroup.Enable = false
 		self._isOpen = false
 		self:StopPulse()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnCardClicked(integer index)
+		-- 장비 상자 칸을 누르면 인벤 주문서처럼 말풍선 툴팁 — "{등급} 무기/방어구 상자 / (수령 즉시 장비창에 등록됩니다.)"
+		local kind = _LevelRewardLogic:GetRewardKind(index)
+		if kind ~= "gearWeapon" and kind ~= "gearArmor" then return end
+		_RewardTooltipLogic:Show(self.gearTooltip, self:GetCard(index), _RewardTooltipLogic:GetGearBoxText(kind == "gearWeapon", _LevelRewardLogic:GetRewardGrade(index)))
 	end
 
 	@ExecSpace("ClientOnly")
@@ -519,6 +537,11 @@ script LevelRewardUI extends Logic
 		if self._closeHandler then self.btnClose.Entity:DisconnectEvent(ButtonClickEvent, self._closeHandler) end
 		if self._claimHandler then self.btnClaim.Entity:DisconnectEvent(ButtonClickEvent, self._claimHandler) end
 		if self._profileHandler then self.profileButton.Entity:DisconnectEvent(ButtonClickEvent, self._profileHandler) end
+		for i, h in pairs(self._cardHandlers) do
+			local card = self:GetCard(i)
+			if isvalid(card) then card:DisconnectEvent(ButtonClickEvent, h) end
+		end
+		self._cardHandlers = {}
 	end
 
 end

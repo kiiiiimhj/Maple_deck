@@ -1,0 +1,294 @@
+@Logic
+script IntroComicUI extends Logic
+
+	-- 첫 설치 인트로 만화(유저 지정 2026-09-24): 처음 들어온 유저에게 부팅 로딩 대신 보여준다.
+	--   흰 바탕 위에 검은 테두리 컷 7장이 1~2 / 3~4 / 5~7 세 줄로 한 컷씩 차례로 등장한다(ui/IntroComicGroup.ui).
+	--   · 등장: 옆(윗줄)·아래(마지막 줄)에서 살짝 밀려 들어오며 작게 시작해 톡 커졌다가 제자리(BackEaseOut) + 페이드
+	--   · 화면을 누르면 다음 컷을 바로 꺼낸다. 다 나오면 "화면을 터치하면 계속" → 누르면 페이드아웃하며 로비
+	--   · 건너뛰기(오른쪽 아래 — 오른쪽 위는 MSW 기본 버튼 자리)는 언제든 바로 끝낸다. 끝까지 보든 건너뛰든 서버에 "봤음"을 저장한다(계정당 1회)
+	--   · 자막은 SubtitleKeys에 컷 순서대로 번역 키를 넣으면 그 컷이 나올 때 바뀐다(지금은 비어 있음 — 문구 대기)
+	-- 언제 띄울지는 LoadingUI가 부팅 커버를 걷을 때 ShouldPlay()를 보고 정한다.
+
+	property Entity screen = "ce60597f-39ed-4aa3-a52f-27e510c5d1c8"
+	property CanvasGroupComponent screenCanvas = "ce60597f-39ed-4aa3-a52f-27e510c5d1c8"
+	property ButtonComponent bgButton = "6ece3692-e401-4537-b98b-18a92dff8737"
+	property ButtonComponent skipButton = "9218d771-3e8d-42d8-9ae7-5a52710b1116"
+	property TextGUIRendererComponent subtitle = "50d80d64-4949-4362-b7fa-dc6569908cc9"
+	property TextGUIRendererComponent tapHint = "b69f23ee-a921-4c3b-ba57-bedcf9f1365e"
+	-- 웹툰 뒤 배경 그림(유저 지정 2026-09-24, RUID 57c6e8fc…). 흰 바탕(Bg) 자식 — 재생할 때 화면을 비율 유지로 꽉 덮게 맞춘다
+	property Entity bgArt = "bc7fe130-10f1-4728-8dd0-3cdcd26f95e2"
+	-- 배경 그림 원본 비율(가로/세로, 계정 썸네일 실측 ≈3:2). 화면비가 달라도 찌그러지지 않고 넘치는 쪽만 잘린다
+	property number BgArtAspect = 1.524
+
+	property integer CutCount = 7
+	-- 화면이 밝아진 뒤 첫 컷까지
+	property number FirstDelay = 0.45
+	-- 자동으로 다음 컷이 나오는 간격(유저 지정 2026-09-24: 1.4 → 2.9 → 최종 2.5초)
+	property number CutInterval = 2.5
+	-- 한 컷이 튀어나오는 시간
+	property number PopSeconds = 0.4
+	-- 시작 크기(작게 시작해서 1로 — BackEaseOut이라 살짝 넘쳤다가 돌아온다)
+	property number PopStartScale = 0.82
+	-- 밀려 들어오는 거리(px). 윗 두 줄은 좌우 번갈아, 마지막 줄은 아래에서
+	property number SlideDistance = 70
+	property number FadeInSeconds = 0.3
+	property number FadeOutSeconds = 0.5
+	-- 마지막 컷 뒤 "화면을 터치하면 계속"이 뜨기까지
+	property number TapHintDelay = 0.6
+	-- 컷별 자막 번역 키(유저 지정 대사 2026-09-24 — 동화체 "~했습니다" 버전). 빈 칸이면 자막을 비운다.
+	-- 한 컷에 여러 문장을 넣고 싶으면 "|"로 키를 이으면 한 줄로 이어 붙는다
+	property table SubtitleKeys = {
+		"MLUA_INTROCOMICUI_001",
+		"MLUA_INTROCOMICUI_002",
+		"MLUA_INTROCOMICUI_003",
+		"MLUA_INTROCOMICUI_004",
+		"MLUA_INTROCOMICUI_005",
+		"MLUA_INTROCOMICUI_006",
+		"MLUA_INTROCOMICUI_007",
+	}
+
+	property boolean _playing = false
+	property boolean _allShown = false
+	property boolean _finishing = false
+	property integer _shown = 0
+	property integer _seq = 0
+	property number _hintTime = 0
+	property table _cuts = {}
+	property table _cutBase = {}
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		-- 버튼 연결 + 컷 원래 자리 기억. 화면은 .ui에 꺼진 채 저장돼 있다
+		if not isvalid(self.screen) then
+			log_error("IntroComicUI: screen entity missing")
+			return
+		end
+		self._cuts = {}
+		self._cutBase = {}
+		for i = 1, self.CutCount do
+			local cut = self.screen:GetChildByName("Cut" .. tostring(i))
+			self._cuts[i] = cut
+			if isvalid(cut) then self._cutBase[i] = cut.UITransformComponent.anchoredPosition end
+		end
+		if isvalid(self.bgButton) then
+			self.bgButton.Entity:ConnectEvent(ButtonClickEvent, function() self:OnTap() end)
+		end
+		if isvalid(self.skipButton) then
+			self.skipButton.Entity:ConnectEvent(ButtonClickEvent, function() self:Finish() end)
+		end
+		self.screen.Enable = false
+		log("IntroComicUI started (cuts=" .. tostring(#self._cuts) .. ")")
+	end
+
+	method boolean IsIntroLoaded()
+		-- 서버가 "이 유저가 인트로를 봤는지"를 읽어 왔는가(LoadingUI가 부팅 커버를 걷기 전에 기다린다)
+		return _TutorialLogic.IntroLoaded
+	end
+
+	method boolean ShouldPlay()
+		-- 처음 들어온 유저(아직 안 봄)면 true
+		return _TutorialLogic.IntroLoaded and not _TutorialLogic.IntroSeen
+	end
+
+	method boolean IsPlaying()
+		return self._playing
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Play()
+		-- 흰 바탕을 페이드인하고 컷을 하나씩 꺼내기 시작한다
+		if self._playing or not isvalid(self.screen) then return end
+		self._playing = true
+		self._allShown = false
+		self._finishing = false
+		self._shown = 0
+		self._seq = self._seq + 1
+		for i = 1, self.CutCount do self:HideCut(i) end
+		if isvalid(self.subtitle) then self.subtitle.Text = "" end
+		if isvalid(self.tapHint) then self.tapHint.Entity.Enable = false end
+		self.screen.Enable = true
+		self:FitBackgroundArt()
+		if isvalid(self.screenCanvas) then
+			self.screenCanvas.GroupAlpha = 0
+			_TweenLogic:PlayTween(0, 1, self.FadeInSeconds, EaseType.QuadEaseOut, function(v)
+				if isvalid(self.screenCanvas) then self.screenCanvas.GroupAlpha = v end
+			end)
+		end
+		self:ScheduleNext(self.FirstDelay)
+		log("IntroComicUI: play")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void FitBackgroundArt()
+		-- 배경 그림을 실제 화면(모바일은 안전영역 밖 노치 옆까지) 전체를 덮는 크기로 — 비율 유지, 넘치는 쪽은 잘린다
+		if not isvalid(self.bgArt) or self.BgArtAspect <= 0 then return end
+		local parent = self.bgArt.Parent
+		if not isvalid(parent) then return end
+		local sw = 1920
+		local sh = 1080
+		local cx = 0
+		local cy = 0
+		local m = _MobileScreenFitLogic:MeasureScreenLoose(parent.UITransformComponent)
+		if m ~= nil then
+			sw = m.x1 - m.x0
+			sh = m.y1 - m.y0
+			cx = (m.x0 + m.x1) / 2
+			cy = (m.y0 + m.y1) / 2
+		end
+		-- 가장자리가 비치지 않게 2% 여유
+		sw = sw * 1.02
+		sh = sh * 1.02
+		local w = sw
+		local h = w / self.BgArtAspect
+		if h < sh then
+			h = sh
+			w = h * self.BgArtAspect
+		end
+		local tr = self.bgArt.UITransformComponent
+		tr.RectSize = Vector2(w, h)
+		tr.anchoredPosition = Vector2(cx, cy)
+		log(string.format("IntroComicUI: bg art %.0fx%.0f at (%.0f,%.0f) screen %.0fx%.0f measured=%s", w, h, cx, cy, sw, sh, tostring(m ~= nil)))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void HideCut(integer i)
+		-- 컷을 등장 전 상태로(투명·원래 자리·원래 크기)
+		local cut = self._cuts[i]
+		if not isvalid(cut) then return end
+		if cut.CanvasGroupComponent ~= nil then cut.CanvasGroupComponent.GroupAlpha = 0 end
+		if self._cutBase[i] ~= nil then cut.UITransformComponent.anchoredPosition = self._cutBase[i] end
+		cut.UITransformComponent.UIScale = Vector3(1, 1, 1)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ScheduleNext(number delay)
+		-- delay 뒤 다음 컷. 그 사이 화면을 눌러 먼저 꺼냈으면(_seq가 바뀜) 이 예약은 버린다
+		self._seq = self._seq + 1
+		local seq = self._seq
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) or seq ~= self._seq or not self._playing or self._finishing then return end
+			self:ShowNext()
+		end, delay)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ShowNext()
+		-- 다음 컷을 꺼낸다. 다 꺼냈으면 "터치하면 계속"을 띄운다
+		if self._shown >= self.CutCount then
+			self:ShowTapHint()
+			return
+		end
+		self._shown = self._shown + 1
+		self:AnimateCut(self._shown)
+		self:SetSubtitle(self._shown)
+		if self._shown >= self.CutCount then
+			self._allShown = true
+			self:ScheduleNext(self.TapHintDelay)
+		else
+			self:ScheduleNext(self.CutInterval)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method Vector2 GetSlideOffset(integer i)
+		-- 윗 두 줄(1~4)은 왼쪽 컷은 왼쪽에서, 오른쪽 컷은 오른쪽에서 / 마지막 줄(5~7)은 아래에서 올라온다
+		if i >= 5 then return Vector2(0, -self.SlideDistance) end
+		if i % 2 == 1 then return Vector2(-self.SlideDistance, 0) end
+		return Vector2(self.SlideDistance, 0)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void AnimateCut(integer i)
+		-- 밀려 들어오며 작게 시작해 톡 커졌다 제자리 + 페이드인
+		local cut = self._cuts[i]
+		if not isvalid(cut) or self._cutBase[i] == nil then return end
+		local tr = cut.UITransformComponent
+		local base = self._cutBase[i]
+		local off = self:GetSlideOffset(i)
+		local from = Vector2(base.x + off.x, base.y + off.y)
+		tr.anchoredPosition = from
+		tr.UIScale = Vector3(self.PopStartScale, self.PopStartScale, 1)
+		_TweenLogic:PlayTween(from, base, self.PopSeconds, EaseType.CubicEaseOut, function(v)
+			if isvalid(tr) then tr.anchoredPosition = v end
+		end)
+		_TweenLogic:PlayTween(self.PopStartScale, 1, self.PopSeconds, EaseType.BackEaseOut, function(v)
+			if isvalid(tr) then tr.UIScale = Vector3(v, v, 1) end
+		end)
+		local cg = cut.CanvasGroupComponent
+		if cg ~= nil then
+			_TweenLogic:PlayTween(0, 1, self.PopSeconds * 0.6, EaseType.QuadEaseOut, function(v)
+				if isvalid(cg) then cg.GroupAlpha = v end
+			end)
+		end
+		log("IntroComicUI: cut " .. tostring(i))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetSubtitle(integer i)
+		-- 컷에 맞는 자막(키가 비어 있으면 자막을 비운다)
+		if not isvalid(self.subtitle) then return end
+		local key = self.SubtitleKeys[i]
+		if key == nil or key == "" then
+			self.subtitle.Text = ""
+			return
+		end
+		-- 여러 문장은 한 줄로 이어 붙인다(유저 지정 2026-09-24 "줄바꿈 없어도 한 줄에 다 써질 듯") — 길면 BestFit이 글자를 줄인다
+		local lines = {}
+		for part in string.gmatch(key, "[^|]+") do
+			table.insert(lines, _LocalizationService:GetText(part))
+		end
+		self.subtitle.Text = table.concat(lines, " ")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ShowTapHint()
+		-- 다 봤다 — 자막 자리에 "화면을 터치하면 계속"(자막이 있으면 그 아래 깜빡임은 OnUpdate가 한다)
+		if not isvalid(self.tapHint) then return end
+		self._hintTime = 0
+		self.tapHint.Entity.Enable = true
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUpdate(number delta)
+		-- "화면을 터치하면 계속" 깜빡임
+		if not self._playing or not isvalid(self.tapHint) or not self.tapHint.Entity.Enable then return end
+		self._hintTime = self._hintTime + delta
+		-- 가장 흐릴 때도 0.7 — 너무 흐리면 안 보인다(유저 리포트 "화면을 터치하세요도 안 보임")
+		local a = 0.7 + 0.3 * (0.5 + 0.5 * math.cos(self._hintTime * 4))
+		local c = self.tapHint.FontColor
+		self.tapHint.FontColor = Color(c.r, c.g, c.b, a)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnTap()
+		-- 화면 터치: 아직 남은 컷이 있으면 바로 다음 컷, 다 나왔으면 끝낸다
+		if not self._playing or self._finishing then return end
+		if self._allShown then
+			self:Finish()
+			return
+		end
+		self:ShowNext()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Finish()
+		-- 끝(다 봄/건너뛰기): 서버에 "봤음" 저장 → 페이드아웃 → 끄기
+		if not self._playing or self._finishing then return end
+		self._finishing = true
+		self._seq = self._seq + 1
+		_TutorialLogic:RequestMarkIntroSeen()
+		if isvalid(self.screenCanvas) then
+			_TweenLogic:PlayTween(1, 0, self.FadeOutSeconds, EaseType.QuadEaseIn, function(v)
+				if isvalid(self.screenCanvas) then self.screenCanvas.GroupAlpha = v end
+			end)
+		end
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) then return end
+			if isvalid(self.screen) then self.screen.Enable = false end
+			self._playing = false
+			self._finishing = false
+			log("IntroComicUI: finished (shown=" .. tostring(self._shown) .. ")")
+		end, self.FadeOutSeconds)
+	end
+
+end

@@ -156,12 +156,25 @@ script LoadingUI extends Logic
 		-- 데이터 로드 완료(_DataLoadLogic.IsLoadEnd)까지 덮어두고, 안 오면 BootMaxSeconds에서 포기한다
 		self._bootElapsed = self._bootElapsed + self.BootPollSeconds
 
-		local ready = _DataLoadLogic.IsLoadEnd
+		-- 첫 설치 인트로 만화를 띄울지 알려면 서버가 "봤음" 값을 읽어 와야 한다 — 그것까지 기다린다(시간 초과면 안 띄움)
+		local ready = _DataLoadLogic.IsLoadEnd and _IntroComicUI:IsIntroLoaded()
 		local timedOut = self._bootElapsed >= self.BootMaxSeconds
 		if not ready and not timedOut then return end
 
 		_TimerService:ClearTimer(self._bootTimerId)
 		self._bootTimerId = 0
+
+		-- 처음 들어온 유저: 로딩 화면 대신 인트로 만화(유저 지정 2026-09-24). 만화의 흰 바탕이 덮은 뒤 로딩을 걷어서
+		-- 만화가 끝나면 바로 로비가 보인다. 최소 노출 시간(BootMinShowSeconds)은 기다리지 않는다
+		if ready and _IntroComicUI:ShouldPlay() then
+			log(string.format("LoadingUI: first install — intro comic instead of loading (%.1fs)", self._bootElapsed))
+			_IntroComicUI:Play()
+			_TimerService:SetTimerOnce(function()
+				if not isvalid(self) then return end
+				self:PlayReveal()
+			end, self.BootSettleSeconds)
+			return
+		end
 
 		if timedOut and not ready then
 			log_warning(string.format("LoadingUI: boot cover timed out after %.1fs (data load not finished), revealing anyway", self._bootElapsed))

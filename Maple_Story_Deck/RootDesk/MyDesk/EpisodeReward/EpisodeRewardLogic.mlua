@@ -3,7 +3,10 @@ script EpisodeRewardLogic extends Logic
 
 	-- 에피소드 생존 보상(유저 지정 2026-09-15, 탕탕특공대 방식).
 	--   · 한 판에서 5분/10분/15분을 버티면 그 에피소드의 칸이 열린다(타임어택·무제한 상관없음).
-	--   · 칸은 EP1 5분 → EP1 10분 → EP1 15분 → EP2 5분 … → EP3 15분, 총 9칸을 "순서대로만" 받는다.
+	--   · 칸은 EP1 5분 → EP1 10분 → EP1 15분 → EP2 5분 … → EP3 15분, 총 9칸.
+	--     2026-09-24 유저 지정 "순서만 풀기": 달성한 칸은 앞 칸을 못 받았어도 받을 수 있다(예: EP1 15분을 못 깼어도
+	--     EP2 5분 달성분은 받는다). 받기는 여전히 한 번에 한 칸 — 받을 수 있는 칸 중 가장 앞 칸부터.
+	--     그래서 "몇 칸 받았나"(ClaimedCount) 대신 칸별 수령 여부(ClaimedMask, 비트 i-1)를 저장한다.
 	--   · 보상: 5분 매직 장비 1개 / 10분 다이아 500 / 15분 무료 뽑기권 10(EP1·EP3 스킬, EP2 유물).
 	--     5분 장비(유저 지정 2026-09-17, 예전 골드 10,000): 그 에피소드 드롭 부위 풀(EP1 무기 / EP2 갑옷·모자 / EP3 장갑·망토)에서
 	--     받을 때 균등 랜덤 1개, 등급 매직 고정, 품질 F/E 50%씩. 레벨업 보상처럼 그 탭이 가득 차 있으면 지급하지 않고 거절한다.
@@ -12,9 +15,12 @@ script EpisodeRewardLogic extends Logic
 	--     이 런이 어느 에피소드인지는 경과 시간이 1초 미만일 때(런 시작 전후)만 잡아두고 런 중엔 고정한다 —
 	--     로비로 나갔다가 다른 에피소드로 "게임 시작"을 누르면 StartGame이 경과 시간을 안 지운 채
 	--     SelectedEpisode만 바꾸는 경로가 있어서, 그걸 그대로 믿으면 EP1에서 버틴 시간이 EP2로 잡힌다.
-	-- 저장: 유저별 UserDataStorage 키 "EpisodeReward" JSON {c,b1,b2,b3}. b = 에피소드별 최고 달성 단계(0/300/600/900초)라
-	-- 단계를 새로 넘는 순간과 수령할 때만 쓴다.
+	-- 저장: 유저별 UserDataStorage 키 "EpisodeReward" JSON {m,c,b1,b2,b3}. m = 칸별 수령 비트(2026-09-24~),
+	-- c = 받은 칸 수(옛 저장 호환 — m이 없는 옛 데이터는 "앞에서 c칸 받음"으로 읽는다).
+	-- b = 에피소드별 최고 달성 단계(0/300/600/900초)라 단계를 새로 넘는 순간과 수령할 때만 쓴다.
 
+	@Sync property integer ClaimedMask = 0
+	-- 받은 칸 수(ClaimedMask의 비트 수) — 로그·다 받았는지 판정용
 	@Sync property integer ClaimedCount = 0
 	@Sync property integer Best1 = 0
 	@Sync property integer Best2 = 0
@@ -125,9 +131,54 @@ script EpisodeRewardLogic extends Logic
 		return self:GetBest(self:GetSlotEpisode(index)) >= self:GetSlotMinutes(index) * 60
 	end
 
+	method boolean IsClaimed(integer index)
+		-- 이 칸을 이미 받았는가
+		if index < 1 or index > self.TotalSlots then return false end
+		-- ⚠ Lua에선 == 가 & 보다 먼저 묶인다 — 괄호 필수
+		return ((self.ClaimedMask >> (index - 1)) & 1) == 1
+	end
+
+	method integer GetNextClaimable()
+		-- 받을 수 있는 칸(달성 + 안 받음) 중 가장 앞 칸. 없으면 0
+		if not self.Loaded then return 0 end
+		for i = 1, self.TotalSlots do
+			if not self:IsClaimed(i) and self:IsReached(i) then return i end
+		end
+		return 0
+	end
+
+	method integer GetFocusIndex()
+		-- 팝업 가운데에 둘 칸: 받을 수 있는 칸 → 없으면 아직 안 받은 가장 앞 칸 → 다 받았으면 마지막 칸
+		local next = self:GetNextClaimable()
+		if next > 0 then return next end
+		for i = 1, self.TotalSlots do
+			if not self:IsClaimed(i) then return i end
+		end
+		return self.TotalSlots
+	end
+
+	method integer GetFocusIndexAfterClaim(integer claimedIndex)
+		-- 방금 claimedIndex를 받은 것으로 치고 다음에 가운데 올 칸(수령 결과 동기화보다 연출이 먼저 돌 때 쓴다)
+		for i = 1, self.TotalSlots do
+			if i ~= claimedIndex and not self:IsClaimed(i) and self:IsReached(i) then return i end
+		end
+		for i = 1, self.TotalSlots do
+			if i ~= claimedIndex and not self:IsClaimed(i) then return i end
+		end
+		return claimedIndex
+	end
+
 	method boolean CanClaimNext()
-		if not self.Loaded or self:IsAllDone() then return false end
-		return self:IsReached(self.ClaimedCount + 1)
+		return self:GetNextClaimable() > 0
+	end
+
+	method integer CountBits(integer mask)
+		-- 받은 칸 수
+		local n = 0
+		for i = 1, self.TotalSlots do
+			if ((mask >> (i - 1)) & 1) == 1 then n = n + 1 end
+		end
+		return n
 	end
 
 	-- ── 서버: 로드/저장 ──────────────────────────────────────────────────────
@@ -148,7 +199,16 @@ script EpisodeRewardLogic extends Logic
 		if code == 0 and raw ~= nil and raw ~= "" then
 			local t = _HttpService:JSONDecode(raw)
 			if t ~= nil then
-				self.ClaimedCount = math.floor(tonumber(t["c"]) or 0)
+				local c = math.floor(tonumber(t["c"]) or 0)
+				local m = tonumber(t["m"])
+				if m ~= nil then
+					self.ClaimedMask = math.floor(m)
+				else
+					-- 옛 저장(순서대로만 받던 시절): 앞에서 c칸을 받은 것
+					if c > self.TotalSlots then c = self.TotalSlots end
+					self.ClaimedMask = (1 << c) - 1
+				end
+				self.ClaimedCount = self:CountBits(self.ClaimedMask)
 				self.Best1 = math.floor(tonumber(t["b1"]) or 0)
 				self.Best2 = math.floor(tonumber(t["b2"]) or 0)
 				self.Best3 = math.floor(tonumber(t["b3"]) or 0)
@@ -166,6 +226,7 @@ script EpisodeRewardLogic extends Logic
 		if self._profileCode == "" then return end
 		local ds = _DataStorageService:GetUserDataStorage(self._profileCode)
 		local t = {}
+		t["m"] = self.ClaimedMask
 		t["c"] = self.ClaimedCount
 		t["b1"] = self.Best1
 		t["b2"] = self.Best2
@@ -210,7 +271,7 @@ script EpisodeRewardLogic extends Logic
 			log("EpisodeRewardLogic: claim rejected (claimed=" .. self.ClaimedCount .. " best=" .. self.Best1 .. "/" .. self.Best2 .. "/" .. self.Best3 .. ")")
 			return
 		end
-		local index = self.ClaimedCount + 1
+		local index = self:GetNextClaimable()
 		if not self:GrantReward(index, senderUserId) then
 			-- 장비 칸이 가득 찬 경우 — 수령 자체를 미룬다(칸은 그대로 남는다, 레벨업 보상과 같은 규칙)
 			local tabName = "MLUA_EPISODEREWARDLOGIC_003"
@@ -218,8 +279,11 @@ script EpisodeRewardLogic extends Logic
 			_EpisodeRewardUI:OnClaimFailed(tabName, senderUserId)
 			return
 		end
-		self.ClaimedCount = index
+		self.ClaimedMask = self.ClaimedMask | (1 << (index - 1))
+		self.ClaimedCount = self:CountBits(self.ClaimedMask)
 		self:Save()
+		-- 지급한 재화·장비를 바로 저장 — 날아가는 연출 중에 앱이 꺼져도 수령은 남는다(2026-09-24)
+		_GameManager:PersistRewardNow(senderUserId)
 		log("EpisodeRewardLogic: claimed slot " .. index .. " (" .. self:GetSlotLabel(index) .. " " .. self:GetRewardKind(index) .. " " .. self:GetRewardAmount(index) .. ")")
 		_EpisodeRewardUI:OnClaimed(index, senderUserId)
 	end
@@ -284,6 +348,7 @@ script EpisodeRewardLogic extends Logic
 	-- 테스트 전용 — 수령/기록을 전부 0으로
 	@ExecSpace("ServerOnly")
 	method void DebugReset()
+		self.ClaimedMask = 0
 		self.ClaimedCount = 0
 		self.Best1 = 0
 		self.Best2 = 0
@@ -295,7 +360,7 @@ script EpisodeRewardLogic extends Logic
 	-- ── 클라: 동기화되면 UI 갱신 ──────────────────────────────────────────────
 	@ExecSpace("ClientOnly")
 	method void OnSyncProperty(string name, any value)
-		if name == "ClaimedCount" or name == "Loaded" or name == "Best1" or name == "Best2" or name == "Best3" then
+		if name == "ClaimedMask" or name == "ClaimedCount" or name == "Loaded" or name == "Best1" or name == "Best2" or name == "Best3" then
 			_EpisodeRewardUI:RefreshAll()
 		end
 	end

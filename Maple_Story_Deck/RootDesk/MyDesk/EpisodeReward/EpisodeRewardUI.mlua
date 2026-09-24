@@ -15,6 +15,8 @@ script EpisodeRewardUI extends Logic
 	property TextGUIRendererComponent hintText = "9b353907-27e7-4f9f-9dfd-fa173c95cf27"
 	property ButtonComponent lobbyButton = "5fc6997a-910e-4d69-9b95-94213dd4f114"
 	property Entity lobbyRedDot = "b0837c33-aac2-4ee3-9cb4-7db6670ad4ee"
+	-- 장비 상자 칸을 누르면 뜨는 말풍선(Panel/GearBoxTooltip) — 2026-09-24
+	property Entity gearTooltip = "46fcf927-54fb-436c-b631-f806f58b6325"
 
 	-- 캐러셀 값
 	property number CardSpacing = 200
@@ -53,6 +55,7 @@ script EpisodeRewardUI extends Logic
 	property any _closeHandler = nil
 	property any _claimHandler = nil
 	property any _lobbyHandler = nil
+	property table _cardHandlers = {}
 
 	@ExecSpace("ClientOnly")
 	method void OnBeginPlay()
@@ -62,6 +65,12 @@ script EpisodeRewardUI extends Logic
 		self._claimHandler = self.btnClaim.Entity:ConnectEvent(ButtonClickEvent, self.OnClaimClicked)
 		if isvalid(self.lobbyButton) then
 			self._lobbyHandler = self.lobbyButton.Entity:ConnectEvent(ButtonClickEvent, self.OnLobbyButtonClicked)
+		end
+		for i = 1, 9 do
+			local card = self:GetCard(i)
+			if isvalid(card) and card.ButtonComponent ~= nil then
+				self._cardHandlers[i] = card:ConnectEvent(ButtonClickEvent, function() self:OnCardClicked(i) end)
+			end
 		end
 		self:RefreshAll()
 		log("EpisodeRewardUI started")
@@ -75,10 +84,9 @@ script EpisodeRewardUI extends Logic
 
 	@ExecSpace("ClientOnly")
 	method integer GetTargetFocus()
-		-- 가운데에 올 칸 = 다음에 받을 칸(다 받았으면 마지막 칸)
-		local f = _EpisodeRewardLogic:GetClaimedCount() + 1
-		if f > 9 then f = 9 end
-		return f
+		-- 가운데에 올 칸 = 받을 수 있는 칸 → 없으면 아직 안 받은 가장 앞 칸 → 다 받았으면 마지막 칸
+		-- (2026-09-24 "순서만 풀기" — 앞 칸을 못 받았어도 달성한 뒤 칸을 받을 수 있다)
+		return _EpisodeRewardLogic:GetFocusIndex()
 	end
 
 	@ExecSpace("ClientOnly")
@@ -100,9 +108,19 @@ script EpisodeRewardUI extends Logic
 	@ExecSpace("ClientOnly")
 	method void Close()
 		self:FlyPendingRewards()
+		_RewardTooltipLogic:Hide()
 		self.popupGroup.Enable = false
 		self._isOpen = false
 		self:StopPulse()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnCardClicked(integer index)
+		-- 장비 상자 칸을 누르면 인벤 주문서처럼 말풍선 툴팁 — "매직 무기 상자 / (수령 즉시 장비창에 등록됩니다.)"
+		-- EP1 칸은 무기 상자, EP2·3 칸은 방어구 상자 아이콘이라 문구도 그에 맞춘다(등급은 매직 고정 — GrantGear)
+		if _EpisodeRewardLogic:GetRewardKind(index) ~= "gear" then return end
+		local isWeapon = _EpisodeRewardLogic:GetSlotEpisode(index) == 1
+		_RewardTooltipLogic:Show(self.gearTooltip, self:GetCard(index), _RewardTooltipLogic:GetGearBoxText(isWeapon, _GearGradeEnum.Magic))
 	end
 
 	@ExecSpace("ClientOnly")
@@ -114,10 +132,9 @@ script EpisodeRewardUI extends Logic
 	method void RefreshAll()
 		-- 9칸 + 받기 버튼 + 로비 버튼을 현재 동기화된 상태로 다시 그린다(수령 연출 중인 칸/슬라이드는 건드리지 않는다)
 		if not isvalid(self.strip) then return end
-		local claimed = _EpisodeRewardLogic:GetClaimedCount()
 		for i = 1, 9 do
 			if i ~= self._animatingIndex then
-				self:ApplyCardState(i, i <= claimed)
+				self:ApplyCardState(i, _EpisodeRewardLogic:IsClaimed(i))
 			end
 		end
 		if not self._animating then
@@ -224,7 +241,7 @@ script EpisodeRewardUI extends Logic
 			self.hintText.Text = _LocalizationService:GetText("MLUA_EPISODEREWARDUI_002")
 			return
 		end
-		local next = logic:GetClaimedCount() + 1
+		local next = logic:GetFocusIndex()
 		self.claimText.Text = _LocalizationService:GetText("MLUA_EPISODEREWARDUI_003")
 		if logic:CanClaimNext() then
 			sprite.Color = Color(1, 1, 1, 1)
@@ -251,12 +268,12 @@ script EpisodeRewardUI extends Logic
 		local logic = _EpisodeRewardLogic
 		if logic:IsAllDone() then return end
 		if not logic:CanClaimNext() then
-			local next = logic:GetClaimedCount() + 1
+			local next = logic:GetFocusIndex()
 			_UIToast:ShowMessage(_LocalizationService:GetTextFormat("FMT_EPISODEREWARDUI_004", logic:GetSlotEpisode(next), logic:GetSlotMinutes(next)))
 			return
 		end
 		-- 서버 지급 Multicast가 배지 숫자를 바로 올리기 전에 보류 — 팝업을 닫고 아이콘이 도착할 때 오른다
-		local claimIndex = logic:GetClaimedCount() + 1
+		local claimIndex = logic:GetNextClaimable()
 		self._holdKind = logic:GetRewardKind(claimIndex)
 		self._holdAmount = logic:GetRewardAmount(claimIndex)
 		if self._holdKind == "gold" or self._holdKind == "diamond" then
@@ -393,7 +410,10 @@ script EpisodeRewardUI extends Logic
 		end)
 		_TimerService:SetTimerOnce(function()
 			self._animatingIndex = 0
-			self:SlideTo(index + 1)
+			-- 다음에 가운데 올 칸(순서가 풀려서 바로 오른쪽 칸이 아닐 수 있다) — 받은 결과 동기화 전일 수 있어 방금 칸은 받은 것으로 친다
+			local nextFocus = _EpisodeRewardLogic:GetFocusIndexAfterClaim(index)
+			if nextFocus == index then nextFocus = 10 end
+			self:SlideTo(nextFocus)
 		end, self.CheckDropDuration + self.SlideDelay)
 		log("EpisodeRewardUI: claim animation slot " .. index)
 	end
@@ -442,6 +462,11 @@ script EpisodeRewardUI extends Logic
 		if self._closeHandler then self.btnClose.Entity:DisconnectEvent(ButtonClickEvent, self._closeHandler) end
 		if self._claimHandler then self.btnClaim.Entity:DisconnectEvent(ButtonClickEvent, self._claimHandler) end
 		if self._lobbyHandler then self.lobbyButton.Entity:DisconnectEvent(ButtonClickEvent, self._lobbyHandler) end
+		for i, h in pairs(self._cardHandlers) do
+			local card = self:GetCard(i)
+			if isvalid(card) then card:DisconnectEvent(ButtonClickEvent, h) end
+		end
+		self._cardHandlers = {}
 	end
 
 end
