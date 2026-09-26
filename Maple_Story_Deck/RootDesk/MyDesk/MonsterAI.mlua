@@ -556,6 +556,10 @@ script MonsterAI extends Component
 
 	property number FlyAttackInterval = 1.5  -- 도달 판정 없이 이 간격으로 계속 공격
 
+	-- 태초의 마을 웨이브 비행 종(주니어 부기, GameManager.GetWaveIsFlying)의 비행 속도 배율 —
+	-- 일반 비행 종 대비(유저 지정 2026-09-27: 50%)
+	property number WaveFlyingSpeedFactor = 0.5
+
 	-- ── 에피2 보스 전용 거동(엘리쟈·픽시맘 등) ────────────────────────────────────
 	-- 공격을 한 번 할 때마다 공속에 더해지는 비율. 피격 성장(_growAtkPerHit)과 **경로만 다르고
 	-- 누적처는 같다**(둘 다 _growAtkBonus로 모여 GetEffectiveAttackInterval이 나눠 쓴다).
@@ -720,7 +724,7 @@ script MonsterAI extends Component
 
 	property integer ChargeDustOrderInLayer = 1  -- 몬스터 본체(OrderInLayer=2, platform.md 기본값)보다 낮게 둬서 몬스터가 먼지 위에 그려지게 한다
 
-	property number ChargeDustScale = 0.6  -- 원형 먼지 이펙트 스케일(유저 요청: 기존 1.0 대비 40% 축소)
+	property number ChargeDustScale = 0.42  -- 원형 먼지 이펙트 스케일(유저 요청: 1.0 → 0.6(40% 축소) → 2026-09-27 다시 30% 축소 0.42)
 
 	property boolean _isPushingBack = false
 
@@ -1219,8 +1223,16 @@ script MonsterAI extends Component
 			self._dieDuration = _GameManager:GetZoneDieDuration(speciesIdx)
 			self._hitRUID = _GameManager:GetZoneHitRUID(speciesIdx)
 			self._attackRUID = ""
-			-- 재사용 엔티티에 이전 돌진 성질이 남지 않게(이 풀엔 돌진 종이 없다)
-			self._isCharge = false
+			-- 돌진형(유저 지정 2026-09-27): 2번 "이상한 돼지"(빨간 리본을 단 돼지 — 유저는 "리본 돼지"라 부른다).
+			-- 재사용 엔티티에 이전 돌진 성질이 남지 않게 항상 대입한다. 보스로 뽑힌 개체는 제외.
+			self._isCharge = (not isBoss) and _GameManager:GetZoneIsCharge(speciesIdx)
+			if self._isCharge then
+				self._chargeWindupTimer = _GameManager:GetMapChargeShakeDuration(0, speciesIdx)
+				self._chargeDashActive = false
+				local chargePos = self.Entity.TransformComponent.Position
+				self._chargeSpawnX = chargePos.x
+				self._chargeSpawnY = chargePos.y
+			end
 		else
 			-- 맵1~3: 웨이브1~9는 웨이브 번호 = 종 인덱스(기존과 동일), 보스는 항상 리본돼지(species=10)
 			-- 고정(2026-08-03: 보스가 시간 기반으로 바뀌면서 wave가 더 이상 10이 아닐 수 있어 isBoss로
@@ -1248,7 +1260,35 @@ script MonsterAI extends Component
 			else
 				self._customAttackInterval = 0
 			end
-			-- 돌진형(유저 지정 2026-09-26: 돼지/리본 돼지) — 존7+ 풀의 돌진 종과 같은 경로(떨다가 먼지와 함께 돌진)
+			-- 비행형(유저 지정 2026-09-27: 주니어 부기) — 존7+ 풀의 비행 분기와 같은 초기화.
+			-- 재사용 엔티티에 이전 값이 남지 않게 항상 대입한다([[feedback_boss_reuse_flying_flag_inherit]]).
+			self._isFlying = (not isBoss) and _GameManager:GetWaveIsFlying(speciesIdx)
+			self._flyAttackIntervalOverride = 0
+			if self._isFlying then
+				self._currentScale = 1.0
+				self._reachedPlayer = false
+				-- 스포너는 웨이브 존(맵1~3)에서 종을 모르고 지면에 세운다 — 높이는 UpdateFlying이 바로 공중으로
+				-- 옮기고, 좌우 중심만 존 중앙 ±(5-FlyRangeX) 안으로 당긴다(배회 폭까지 더해도 화면 안전범위 ±5 안).
+				-- _flyCenterX는 **로컬** Position 기준 — 존 중앙(월드)을 부모 기준 로컬로 바꿔서 비교한다.
+				local localX = self.Entity.TransformComponent.Position.x
+				local parent = self.Entity.Parent
+				local parentWorldX = 0
+				if isvalid(parent) and parent.TransformComponent ~= nil then parentWorldX = parent.TransformComponent.WorldPosition.x end
+				local zoneCenterLocal = _MonsterSpawner:GetZoneOffsetX(zoneIndex) - parentWorldX
+				local halfRange = math.max(0, 5 - self.FlyRangeX)
+				self._flyCenterX = math.max(zoneCenterLocal - halfRange, math.min(zoneCenterLocal + halfRange, localX))
+				self._flyBaseY = (self.FlyingWanderMinY + self.FlyingWanderMaxY) * 0.5
+				self._flyTime = 0
+				self._flyPhaseX = _UtilLogic:RandomDouble() * math.pi * 2
+				self._flyPhaseY = _UtilLogic:RandomDouble() * math.pi * 2
+				self._flySpeedMultX = (0.8 + _UtilLogic:RandomDouble() * 0.4) * self.WaveFlyingSpeedFactor
+				self._flySpeedMultY = (0.8 + _UtilLogic:RandomDouble() * 0.4) * self.WaveFlyingSpeedFactor
+				-- attack1(12프레임 1.25초)이 공용 비행 주기(1.5초)와 겹치지 않게 — 보스 비행 분기와 같은 공식
+				if self._attackRUID ~= "" then self._flyAttackIntervalOverride = self._attackDuration + 0.7 end
+				self._attackTimer = self.FlyAttackInterval
+				log(string.format("MonsterAI: wave flying species=%d zone=%d centerX=%.2f (zoneCenter %.2f) speedFactor=%.2f", speciesIdx, zoneIndex, self._flyCenterX, zoneCenterLocal, self.WaveFlyingSpeedFactor))
+			end
+			-- 돌진형(유저 지정 2026-09-26 돼지/리본 돼지 → 2026-09-27 리본 돼지만) — 존7+ 풀의 돌진 종과 같은 경로(떨다가 먼지와 함께 돌진)
 			self._isCharge = _GameManager:GetWaveIsCharge(speciesIdx)
 			if self._isCharge then
 				self._chargeWindupTimer = _GameManager:GetMapChargeShakeDuration(0, speciesIdx)
@@ -3199,10 +3239,17 @@ script MonsterAI extends Component
 		self.Entity.TransformComponent.Position = Vector3(self._chargeSpawnX, self._chargeSpawnY, pos.z)
 		-- 유저 지정(2026-08-22): 원형파장(DustExplosion — "연기와 함께 원형 파장이 터지는" 네이티브
 		-- 파티클) 위치가 발밑에 너무 깔려 보였다는 지적으로 Y오프셋을 0.5 올림(-0.25 → 0.25).
-		_ParticleService:PlayBasicParticleAttached(
+		-- ⚠ 버그 수정(2026-09-27, 유저 리포트 "크기 줄였는데 왜 아직도 크냐") — 예전엔 몬스터에 **붙여서**
+		--   (PlayBasicParticleAttached) 재생해서 이펙트 크기 = ChargeDustScale × 몬스터 Transform 스케일이었다.
+		--   돌진 몬스터는 접근하며 스케일이 계속 커지므로(최대 1.5배 이상, 엘리트/존 배율까지 곱) 파장도
+		--   따라 커져 ChargeDustScale을 아무리 낮춰도 크게 보였다. → 돌진 시작 지점에 **떼어서** 고정 크기로
+		--   터뜨린다("뒤에 남는 먼지"라 몬스터를 따라다닐 필요도 없다). Y오프셋만 현재 몸 크기에 맞춘다.
+		local worldPos = self.Entity.TransformComponent.WorldPosition
+		local bodyScale = self.Entity.TransformComponent.Scale.y
+		_ParticleService:PlayBasicParticle(
 			BasicParticleType.DustExplosion,
 			self.Entity,
-			Vector3(0, 0.25, 0.1),
+			Vector3(worldPos.x, worldPos.y + 0.25 * bodyScale, worldPos.z + 0.1),
 			0,
 			Vector3(self.ChargeDustScale, self.ChargeDustScale, self.ChargeDustScale),
 			false,

@@ -1,0 +1,254 @@
+@Logic
+script HowToPlayUI extends Logic
+
+	-- 인게임 옵션 → "게임 방법" 이미지 튜토리얼(유저 지정 2026-09-26).
+	-- 예전 텍스트 스크롤 안내(OptionGroup/TutorialPanel)를 대신한다. 레이드 튜토리얼(RaidTutorialUI)과
+	-- 같은 흐름: 1번 이미지 → 화살표 → 2번 → 화살표 → 3번 → 화살표 → 4번이 차례로 팝 등장,
+	-- 아무 데나 누르면 닫히고 옵션 패널로 돌아간다(OptionUI.CloseTutorial).
+	-- UI 엔티티는 전부 ui/OptionGroup.ui의 HowToTutorial 아래(빌더: .builder-work/howto_tutorial_ui.cjs).
+	-- ⚠ 모바일 대응: .ui 좌표는 PC 1920×1080 기준이라 FitToScreen이 열 때마다 실제 화면에 맞춰
+	--   묶음 전체를 가운데로 옮기고, 넘치면 통째로 줄인다(RaidTutorialUI.FitToCanvas와 같은 방식).
+
+	-- ── 바인딩(전부 OptionGroup.ui) ─────────────────────────────────────────
+	property Entity optionGroup = "286e4e96-7bf6-4463-85ed-27ab4741f26c"
+
+	property Entity tutorialRoot = "076d5f36-c0d1-4b06-b407-f929c3ce14e3"
+
+	property UITransformComponent tutorialRootTf = "076d5f36-c0d1-4b06-b407-f929c3ce14e3"
+
+	property ButtonComponent tutorialDimBtn = "58bf65f8-ef0f-4ae6-a352-46f524040d77"
+
+	property Entity step1 = "ad80ef68-13c4-4b6c-b142-d24e8c44c53e"
+
+	property Entity step2 = "f5bc62ec-f14d-4c25-9153-f7aaf71f8167"
+
+	property Entity step3 = "2c54e3f4-5a21-404a-aafa-1a44732fd725"
+
+	property Entity step4 = "1498a295-43c8-4183-8c95-a6019700e093"
+
+	property Entity arrow1 = "3c842426-4c70-4bbe-868f-10a5685bc282"
+
+	property Entity arrow2 = "81b6fb12-a6ac-49dd-8dc2-ae0d4f0ff7d2"
+
+	property Entity arrow3 = "17bc3864-4fb6-42b8-b9cb-73a2f57ecbd1"
+
+	-- ── 연출 값 ─────────────────────────────────────────────────────────────
+	-- 이미지 한 덩이(또는 화살표 하나)가 추가로 나타나는 간격(초)
+	property number StepInterval = 0.55
+
+	-- 화면에 맞출 때 위아래/좌우에 남길 여백(UI 단위) — 레이드 튜토리얼과 같은 값
+	property number FitMargin = 60
+
+	-- 묶음 전체를 화면 중앙에서 추가로 더 내릴 양(양수 = 아래로)
+	property number FitOffsetY = 30
+
+	-- 등장 팝(작게 나왔다가 제 크기로)
+	property number PopScale = 0.85
+
+	property number PopDuration = 0.18
+
+	-- ── 상태 ─────────────────────────────────────────────────────────────────
+	property boolean _open = false
+
+	property number _time = 0
+
+	property integer _revealed = 0
+
+	property number _fitScale = 1
+
+	property any _dimClickHandler = nil
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		-- 꺼진 상태로 시작하고, 딤(=화면 전체 버튼)을 누르면 닫는다
+		if isvalid(self.tutorialRoot) then self.tutorialRoot.Enable = false end
+		if isvalid(self.tutorialDimBtn) then
+			self._dimClickHandler = self.tutorialDimBtn.Entity:ConnectEvent(ButtonClickEvent, function()
+				self:Close()
+			end)
+		end
+		log("HowToPlayUI: ready")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		-- 이벤트 정리
+		if self._dimClickHandler ~= nil and isvalid(self.tutorialDimBtn) then
+			self.tutorialDimBtn.Entity:DisconnectEvent(ButtonClickEvent, self._dimClickHandler)
+			self._dimClickHandler = nil
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean IsOpen()
+		-- 다른 Logic이 물어볼 때 쓰는 접근자
+		return self._open == true
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Open()
+		-- 7덩이를 전부 감춘 뒤 1번부터 순서대로 나타나게 한다(옵션 그룹은 OptionUI가 이미 켜 둔 상태)
+		if self._open then return end
+		if not isvalid(self.tutorialRoot) then
+			log_warning("HowToPlayUI: tutorialRoot missing")
+			return
+		end
+		self._open = true
+		self._time = 0
+		self._revealed = 0
+		for i = 1, 7 do
+			local e = self:GetSeqEntity(i)
+			if isvalid(e) then e.Enable = false end
+		end
+		self.tutorialRoot.Enable = true
+		-- 띄우기 직전에 매번 다시 잰다(기기/회전/안전영역이 바뀌어도 따라간다)
+		self:FitToScreen()
+		self:RevealNext()
+		log("HowToPlayUI: opened")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Close()
+		-- "Tap To Skip" — 아무 데나 누르면 닫고 OptionUI 쪽 복귀(옵션 패널로 돌아가기)를 맡긴다
+		if not self._open then return end
+		self._open = false
+		if isvalid(self.tutorialRoot) then self.tutorialRoot.Enable = false end
+		log("HowToPlayUI: closed (revealed " .. self._revealed .. "/7)")
+		_OptionUI:CloseTutorial()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUpdate(number delta)
+		-- 다음 덩이가 나타날 때가 됐는지만 본다(전부 나오면 유저가 누를 때까지 그대로 둔다).
+		-- 옵션이 열려 있는 동안 게임은 멈춰 있지만 UI 연출은 실제 시간으로 흐른다
+		if not self._open then return end
+		self._time = self._time + delta
+		if self._revealed >= 7 then return end
+		if self._time < self._revealed * self.StepInterval then return end
+		self:RevealNext()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RevealNext()
+		-- 순서: 1번 이미지 → 화살표 → 2번 → 화살표 → 3번 → 화살표 → 4번
+		self._revealed = self._revealed + 1
+		local e = self:GetSeqEntity(self._revealed)
+		if not isvalid(e) then return end
+		e.Enable = true
+		local tf = e.UITransformComponent
+		if tf ~= nil then
+			-- 팝 연출의 최종 크기는 1이 아니라 FitToScreen이 정한 배율(모바일에서 줄인 걸 되돌리지 않게)
+			local s = self._fitScale
+			tf.Scale = Vector3(s * self.PopScale, s * self.PopScale, 1)
+			_TweenLogic:ScaleTo(e, Vector2(s, s), self.PopDuration, EaseType.QuadEaseOut)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void FitToScreen()
+		-- 7덩이를 하나의 묶음으로 보고 ① 실제 화면 한가운데로 옮기고 ② 그래도 넘치면 통째로 줄인다.
+		-- 기준 사각형은 캔버스가 아니라 **실제 화면**이다 — 모바일 캔버스는 안전영역이라 화면보다 작고
+		-- 아래가 홈바만큼 잘려 있어서, 캔버스 중심에 맞추면 내용이 위로 붙는다(레이드 튜토리얼 실기 교훈).
+		-- Skip 안내문(바닥 앵커)은 캔버스를 따라가므로 건드리지 않는다.
+		self._fitScale = 1
+		if not isvalid(self.optionGroup) then return end
+		local canvas = self.optionGroup.UITransformComponent.RectSize
+		if canvas.x <= 0 or canvas.y <= 0 then return end
+		if self._T.seqOrig == nil then self._T.seqOrig = {} end
+
+		local x0 = 0
+		local x1 = 0
+		local y0 = 0
+		local y1 = 0
+		local found = false
+		for i = 1, 7 do
+			local e = self:GetSeqEntity(i)
+			if isvalid(e) and e.UITransformComponent ~= nil then
+				local t = e.UITransformComponent
+				-- 원본 좌표는 한 번만 저장한다 — 매번 원본 기준으로 다시 계산해야 두 번 줄어들지 않는다
+				if self._T.seqOrig[i] == nil then self._T.seqOrig[i] = t.anchoredPosition end
+				local p = self._T.seqOrig[i]
+				local hw = t.RectSize.x / 2
+				local hh = t.RectSize.y / 2
+				if not found then
+					found = true
+					x0 = p.x - hw
+					x1 = p.x + hw
+					y0 = p.y - hh
+					y1 = p.y + hh
+				else
+					x0 = math.min(x0, p.x - hw)
+					x1 = math.max(x1, p.x + hw)
+					y0 = math.min(y0, p.y - hh)
+					y1 = math.max(y1, p.y + hh)
+				end
+			end
+		end
+		if not found then return end
+
+		local rx0 = -canvas.x / 2
+		local rx1 = canvas.x / 2
+		local ry0 = -canvas.y / 2
+		local ry1 = canvas.y / 2
+		local measured = false
+		local sw = _UILogic.ScreenWidth
+		local sh = _UILogic.ScreenHeight
+		if sw > 0 and sh > 0 and isvalid(self.tutorialRootTf) then
+			local p0 = _UILogic:ScreenToLocalUIPosition(Vector2(0, 0), self.tutorialRootTf)
+			local p1 = _UILogic:ScreenToLocalUIPosition(Vector2(sw, sh), self.tutorialRootTf)
+			if p0 ~= nil and p1 ~= nil then
+				local mx0 = math.min(p0.x, p1.x)
+				local mx1 = math.max(p0.x, p1.x)
+				local my0 = math.min(p0.y, p1.y)
+				local my1 = math.max(p0.y, p1.y)
+				-- 값이 폭주하면(부모 스케일 연출 중 등) 버린다 — 캔버스의 0.5~2배 안일 때만 채택
+				if (mx1 - mx0) > canvas.x * 0.5 and (mx1 - mx0) < canvas.x * 2
+					and (my1 - my0) > canvas.y * 0.5 and (my1 - my0) < canvas.y * 2 then
+					rx0 = mx0
+					rx1 = mx1
+					ry0 = my0
+					ry1 = my1
+					measured = true
+				end
+			end
+		end
+
+		local w = x1 - x0
+		local h = y1 - y0
+		local availW = (rx1 - rx0) - self.FitMargin * 2
+		local availH = (ry1 - ry0) - self.FitMargin * 2
+		local scale = 1
+		if w > 0 and w > availW then scale = availW / w end
+		if h > 0 and h * scale > availH then scale = availH / h end
+		if scale <= 0 then scale = 1 end
+		self._fitScale = scale
+
+		-- 축소한 뒤의 묶음 중심을 화면 중심으로 끌어온다(cy를 키우면 내용이 내려간다)
+		local cx = (x0 + x1) / 2 * scale - (rx0 + rx1) / 2
+		local cy = (y0 + y1) / 2 * scale - (ry0 + ry1) / 2 + self.FitOffsetY
+		for i = 1, 7 do
+			local e = self:GetSeqEntity(i)
+			local p = self._T.seqOrig[i]
+			if isvalid(e) and p ~= nil and e.UITransformComponent ~= nil then
+				e.UITransformComponent.anchoredPosition = Vector2(p.x * scale - cx, p.y * scale - cy)
+			end
+		end
+		log(string.format("HowToPlayUI: fit rect %.0fx%.0f center(%.0f,%.0f) measured=%s canvas %.0fx%.0f content %.0fx%.0f -> scale %.3f shift(%.0f,%.0f)",
+			rx1 - rx0, ry1 - ry0, (rx0 + rx1) / 2, (ry0 + ry1) / 2, tostring(measured),
+			canvas.x, canvas.y, w, h, scale, -cx, -cy))
+	end
+
+	@ExecSpace("ClientOnly")
+	method any GetSeqEntity(integer index)
+		-- 등장 순서 → 엔티티
+		if index == 1 then return self.step1 end
+		if index == 2 then return self.arrow1 end
+		if index == 3 then return self.step2 end
+		if index == 4 then return self.arrow2 end
+		if index == 5 then return self.step3 end
+		if index == 6 then return self.arrow3 end
+		if index == 7 then return self.step4 end
+		return nil
+	end
+
+end
