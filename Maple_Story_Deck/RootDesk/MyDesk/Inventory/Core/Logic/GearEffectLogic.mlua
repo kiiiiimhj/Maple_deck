@@ -2,9 +2,16 @@
 --
 -- WeaponTierDataLogic이 "무슨 효과인지(이름/수치/표시 텍스트)"를 담는 데이터 레이어라면, 이 로직은
 -- 그 효과가 "실전에서 실제로 어떻게 작동하는지"를 담는 런타임 레이어다. 런 시작 시 로비 장비
--- 인벤토리에서 장착 중인 5부위(무기/상의/모자/장갑/망토)를 한 번 읽어 캐시하고(런 중에는 장비를
--- 바꿀 수 없다 — CardManager.InitWeaponSkillForRun과 동일한 전제), 이후 전투 코드가 이 로직의
+-- 인벤토리에서 장착 중인 부위(무기/상의/모자/장갑/망토/반지/목걸이)를 한 번 읽어 캐시하고(런 중에는
+-- 장비를 바꿀 수 없다 — CardManager.InitWeaponSkillForRun과 동일한 전제), 이후 전투 코드가 이 로직의
 -- getter만 호출해서 보너스를 반영한다.
+--
+-- ⭐ 2026-09-26 유저 지정 "해금된 등급 줄은 전부 적용": 예전엔 "지금 등급 1줄"만 적용하고 하위 등급 줄은
+-- 교체된 것으로 봤다. 이제 **지금 등급 이하(해금된) 모든 줄**이 동시에 켜지고, 각 줄은 **그 등급에 굴려진
+-- 수치**(WeaponTierDataLogic.GetGradeBonusPerMille = 장비 정보 창 줄별 숫자)를 쓴다.
+-- 반지/목걸이는 등급마다 옵션 종류가 달라 종류별로 합산한다. 레거시 스태프의 공격력%(매직/에픽)·쿨타임%(유니크)도
+-- 여기서 처리한다(예전엔 표시만 되고 어디서도 적용되지 않았다). 스태프 레어/레전더리 스킬 발동은 CardManager.
+-- ⚠ UIEquippedGearPanel.ComputeGearStats가 이 규칙을 클라에서 복제한다 — 효과 표를 바꾸면 같이 고칠 것.
 --
 -- 소비 지점(전부 단일 관문):
 --   CardManager.GetCardDamage        → 공격력%/피해량% (전체 스킬)
@@ -24,39 +31,27 @@ script GearEffectLogic extends Logic
 	property integer HelmGrade = -1
 	property integer CapeGrade = -1
 	property integer GloveGrade = -1
-
-	-- 반지(2026-09-21 신설, 레이드 보상). 다른 부위와 달리 등급 스킬이 등급마다 고정이 아니라
-	-- 드롭 시 확정된 RingStatType(1~5 = 공격력/치명타 확률/치명타 피해/최대 체력/스킬 쿨타임)
-	-- 1종에 RingBonus(1~3%)가 붙는다. 노말(스킬 없음)은 RingStatType을 보지 않는다.
 	property integer RingGrade = -1
-	property integer RingStatType = 0
-
-	-- 목걸이(2026-09-23, 자쿰 레이드 보상) — 반지와 옵션 구조가 같다. 반지와 **따로** 더해진다
-	-- (같은 등급 스킬 종류면 두 보너스가 둘 다 들어간다)
 	property integer NecklaceGrade = -1
-	property integer NecklaceStatType = 0
-	property number NecklaceBonus = 0
+
+	-- 부위별 "등급 줄 → 보너스 비율(0.05 = 5%)" 표. 해금된 등급(매직~지금 등급)만 채워진다
+	property any WeaponBonusByGrade = nil
+	property any SuitBonusByGrade = nil
+	property any HelmBonusByGrade = nil
+	property any GloveBonusByGrade = nil
+	property any CapeBonusByGrade = nil
+
+	-- 반지/목걸이: 옵션 종류(1 공격력% / 2 치명타 확률 / 3 치명타 피해 / 4 최대 체력% / 5 스킬 쿨타임) → 해금된 줄 합계
+	property any RingStatBonus = nil
+	property any NecklaceStatBonus = nil
+
+	-- 고정 공격력 가산(무기/투구/반지/목걸이) — 배율보다 먼저 더한다
+	property integer WeaponAtk = 0
+	property integer HelmAtk = 0
+	property integer RingAtk = 0
 	property integer NecklaceAtk = 0
 
-	-- 장착 중인 무기의 ATK(고정값) — 유저 지정: 배율이 아니라 모든 공격 대미지에 그대로 더한다.
-	-- 미장착이면 0. 방어구 라인은 ATK가 0이라 자연히 영향 없음
-	property integer WeaponAtk = 0
-
-	-- 투구 공격력(2026-09-02 신규) — 무기 절반 수치. GetFlatAtk 에서 무기 ATK 와 합산된다
-	property integer HelmAtk = 0
-
-	-- 각 부위의 확정 보너스 수치(비율, 0.05 = 5%) — 아이템에 드롭 시 고정된 BonusPercentPerMille를 환산
-	property number WeaponBonus = 0
-	property number SuitBonus = 0
-	property number HelmBonus = 0
-	property number CapeBonus = 0
-	property number GloveBonus = 0
-	property number RingBonus = 0
-
-	-- 반지 ATK(무기/투구와 같은 고정값 가산). 반지는 ATK와 HP를 동시에 갖는 유일한 부위다
-	property integer RingAtk = 0
-
-	-- 자마다르 레전더리의 "{C}% 확률" 부분(ProcChancePerMille 환산) / 활 레전더리의 추가공격 확률
+	-- 자마다르 레전더리의 "{C}% 확률" 부분(ProcChancePerMille 환산)
 	property number WeaponProcChance = 0
 
 	-- ── 런 중 누적 카운터 ────────────────────────────────────────────────
@@ -90,8 +85,7 @@ script GearEffectLogic extends Logic
 	property boolean GlovePowerAttackReady = false
 
 	method void Init()
-		-- 다른 @Logic들과 달리 별도 카탈로그가 없어 초기화할 테이블이 없다 — 런별 상태는
-		-- InitForRun에서 전부 리셋하므로 여기서는 아무것도 하지 않는다(DataLoadLogic 등록용 훅).
+		-- 런별 상태는 InitForRun에서 전부 리셋하므로 여기서는 초기값만 잡는다(DataLoadLogic 등록용 훅)
 		self:ResetRunState()
 	end
 
@@ -100,17 +94,24 @@ script GearEffectLogic extends Logic
 		-- 런 사이에 남으면 안 되는 누적 상태를 전부 초기화한다(최초 시작/다시하기 공통).
 		self.WeaponGrade = -1
 		self.WeaponItemId = 0
-		self.WeaponAtk = 0
 		self.SuitGrade = -1
 		self.SuitItemId = 0
 		self.HelmGrade = -1
 		self.CapeGrade = -1
 		self.GloveGrade = -1
-		self.WeaponBonus = 0
-		self.SuitBonus = 0
-		self.HelmBonus = 0
-		self.CapeBonus = 0
-		self.GloveBonus = 0
+		self.RingGrade = -1
+		self.NecklaceGrade = -1
+		self.WeaponBonusByGrade = {}
+		self.SuitBonusByGrade = {}
+		self.HelmBonusByGrade = {}
+		self.GloveBonusByGrade = {}
+		self.CapeBonusByGrade = {}
+		self.RingStatBonus = {}
+		self.NecklaceStatBonus = {}
+		self.WeaponAtk = 0
+		self.HelmAtk = 0
+		self.RingAtk = 0
+		self.NecklaceAtk = 0
 		self.WeaponProcChance = 0
 		self.KillCount = 0
 		self.BasicAttackCount = 0
@@ -130,17 +131,31 @@ script GearEffectLogic extends Logic
 		self.ShieldRemain = 0
 		self.GloveKillBuffReady = false
 		self.GlovePowerAttackReady = false
-		self.RingGrade = -1
-		self.RingStatType = 0
-		self.RingBonus = 0
-		self.RingAtk = 0
-		self.NecklaceGrade = -1
-		self.NecklaceStatType = 0
-		self.NecklaceBonus = 0
-		self.NecklaceAtk = 0
 	end
 
-	-- 런 시작 시 1회 — 장착 중인 5부위를 읽어 이번 런 동안 고정한다. userId는 CardManager
+	-- 해금된 등급 줄(매직~지금 등급)의 보너스 비율 표를 만든다
+	@ExecSpace("ServerOnly")
+	method table ReadGradeBonuses(integer itemId, any gearStruct)
+		local out = {}
+		for g = _GearGradeEnum.Magic, gearStruct.Grade do
+			out[g] = _WeaponTierDataLogic:GetGradeBonusPerMille(itemId, gearStruct, g) / 1000.0
+		end
+		return out
+	end
+
+	-- 반지/목걸이: 해금된 줄을 옵션 종류별로 합산한다(같은 종류가 두 줄이면 두 수치를 더한다)
+	@ExecSpace("ServerOnly")
+	method table ReadAccessoryStats(integer itemId, any gearStruct)
+		local out = {}
+		for g = _GearGradeEnum.Magic, gearStruct.Grade do
+			local statType = _WeaponTierDataLogic:GetSkillVariantForGrade(gearStruct, g)
+			local bonus = _WeaponTierDataLogic:GetGradeBonusPerMille(itemId, gearStruct, g) / 1000.0
+			out[statType] = (out[statType] or 0) + bonus
+		end
+		return out
+	end
+
+	-- 런 시작 시 1회 — 장착 중인 부위를 읽어 이번 런 동안 고정한다. userId는 CardManager
 	-- .InitWeaponSkillForRun과 동일하게 호출부가 흘려보낸 senderUserId(서버에서 LocalPlayer 금지)
 	@ExecSpace("ServerOnly")
 	method void InitForRun(string userId)
@@ -153,79 +168,73 @@ script GearEffectLogic extends Logic
 		end
 
 		local inventory = playerEntity.PkgPlayerInventory
-		-- 버그 수정: inventory.CurrentJob은 UIInventory.Open()이 ClientOnly에서만 세팅해서 서버에서는
-		-- 항상 nil이었다 — ResolveCurrentJob()으로 서버에서도 안전하게 job을 구한다.
+		-- inventory.CurrentJob은 클라에서만 세팅된다 — ResolveCurrentJob()으로 서버에서도 안전하게 job을 구한다
 		local job = inventory:ResolveCurrentJob()
+		local T = _WeaponTierDataLogic
 
 		local weapon = inventory:GetAttachedGearItemStruct(job, _GearCategoryEnum.OneHandedWeapon)
-		if weapon ~= nil and _WeaponTierDataLogic:IsWeaponItem(weapon.ItemId) then
+		if weapon ~= nil and T:IsWeaponItem(weapon.ItemId) then
 			local s = weapon:GetGearStruct()
 			if s ~= nil then
 				self.WeaponItemId = weapon.ItemId
 				self.WeaponGrade = s.Grade
-				-- 강화 레벨 보너스를 여기서 더한다(2026-09-02). 예전에는 Level 을 올려도
-				-- 스탯에 전혀 반영되지 않아 주문서/코인만 소모됐다.
+				-- 강화 레벨 보너스 포함(2026-09-02)
 				self.WeaponAtk = s.Atk + _EnhanceScrollLogic:GetStatBonusForLevel(s.Level)
-				self.WeaponBonus = s.BonusPercentPerMille / 1000.0
+				self.WeaponBonusByGrade = self:ReadGradeBonuses(weapon.ItemId, s)
 				self.WeaponProcChance = s.ProcChancePerMille / 1000.0
 			end
 		end
 
 		local suit = inventory:GetAttachedGearItemStruct(job, _GearCategoryEnum.Longcoat)
-		if suit ~= nil and _WeaponTierDataLogic:IsWeaponItem(suit.ItemId) then
+		if suit ~= nil and T:IsWeaponItem(suit.ItemId) then
 			local s = suit:GetGearStruct()
 			if s ~= nil then
 				self.SuitItemId = suit.ItemId
 				self.SuitGrade = s.Grade
-				self.SuitBonus = s.BonusPercentPerMille / 1000.0
+				self.SuitBonusByGrade = self:ReadGradeBonuses(suit.ItemId, s)
 			end
 		end
 
 		local helm = inventory:GetAttachedGearItemStruct(job, _GearCategoryEnum.Cap)
-		if helm ~= nil and helm.ItemId == _WeaponTierDataLogic.HelmItemId then
+		if helm ~= nil and helm.ItemId == T.HelmItemId then
 			local s = helm:GetGearStruct()
 			if s ~= nil then
 				self.HelmGrade = s.Grade
-				self.HelmBonus = s.BonusPercentPerMille / 1000.0
-				-- 2026-09-02 유저 지정: 투구도 공격력을 갖는다(무기의 절반 수치).
-				-- 무기 ATK 와 같은 취급이라 그대로 합산한다.
+				self.HelmBonusByGrade = self:ReadGradeBonuses(helm.ItemId, s)
+				-- 투구도 공격력을 갖는다(무기 절반 수치, 2026-09-02) — 무기 ATK와 같이 합산
 				self.HelmAtk = s.Atk + _EnhanceScrollLogic:GetStatBonusForLevel(s.Level)
 			end
 		end
 
 		local glove = inventory:GetAttachedGearItemStruct(job, _GearCategoryEnum.Glove)
-		if glove ~= nil and glove.ItemId == _WeaponTierDataLogic.GloveItemId then
+		if glove ~= nil and glove.ItemId == T.GloveItemId then
 			local s = glove:GetGearStruct()
 			if s ~= nil then
 				self.GloveGrade = s.Grade
-				self.GloveBonus = s.BonusPercentPerMille / 1000.0
+				self.GloveBonusByGrade = self:ReadGradeBonuses(glove.ItemId, s)
 			end
 		end
 
 		local cape = inventory:GetAttachedGearItemStruct(job, _GearCategoryEnum.Cape)
-		if cape ~= nil and cape.ItemId == _WeaponTierDataLogic.CapeItemId then
+		if cape ~= nil and cape.ItemId == T.CapeItemId then
 			local s = cape:GetGearStruct()
 			if s ~= nil then
 				self.CapeGrade = s.Grade
-				self.CapeBonus = s.BonusPercentPerMille / 1000.0
+				self.CapeBonusByGrade = self:ReadGradeBonuses(cape.ItemId, s)
 			end
 		end
 
-		-- 반지 — 등급 스킬 종류(SkillVariant)까지 같이 읽어야 어떤 스탯에 붙일지 정해진다.
-		-- 메인 옵션은 공격력/최대 체력 중 **한쪽뿐**이라(유저 지정 2026-09-21) 강화 레벨 보너스도
-		-- 그 한쪽에만 얹는다. 체력형이면 아래 HP 합산에 ringHp로 넘긴다.
+		-- 반지 — 메인 옵션은 공격력/최대 체력 중 **한쪽뿐**이라(2026-09-21) 강화 레벨 보너스도 그 한쪽에만 얹는다.
+		-- 체력형이면 아래 HP 합산에 ringHp로 넘긴다
 		local ring = inventory:GetAttachedGearItemStruct(job, _GearCategoryEnum.Ring)
 		local ringHp = 0
-		if ring ~= nil and ring.ItemId == _WeaponTierDataLogic.RingItemId then
+		if ring ~= nil and ring.ItemId == T.RingItemId then
 			local s = ring:GetGearStruct()
 			if s ~= nil then
 				self.RingGrade = s.Grade
-				-- 등급 스킬 변형은 등급마다 따로 굴려져 있다 — 지금 등급의 것을 꺼낸다
-				-- (옛 아이템은 헬퍼가 기존 SkillVariant 한 값으로 폴백)
-				self.RingStatType = _WeaponTierDataLogic:GetSkillVariantForGrade(s, s.Grade)
-				self.RingBonus = s.BonusPercentPerMille / 1000.0
+				self.RingStatBonus = self:ReadAccessoryStats(ring.ItemId, s)
 				local ringLevelBonus = _EnhanceScrollLogic:GetStatBonusForLevel(s.Level)
-				if s.MainStatType == _WeaponTierDataLogic.RingMainStatHp then
+				if s.MainStatType == T.RingMainStatHp then
 					ringHp = s.Hp + ringLevelBonus
 				else
 					self.RingAtk = s.Atk + ringLevelBonus
@@ -233,16 +242,15 @@ script GearEffectLogic extends Logic
 			end
 		end
 
-		-- 목걸이 — 반지와 똑같이 읽는다(메인 옵션 한쪽에만 강화 보너스). 체력형이면 ringHp에 같이 얹는다
+		-- 목걸이 — 반지와 똑같이 읽는다(반지와 **따로** 더해진다)
 		local necklace = inventory:GetAttachedGearItemStruct(job, _GearCategoryEnum.Pendant)
-		if necklace ~= nil and necklace.ItemId == _WeaponTierDataLogic.NecklaceItemId then
+		if necklace ~= nil and necklace.ItemId == T.NecklaceItemId then
 			local s = necklace:GetGearStruct()
 			if s ~= nil then
 				self.NecklaceGrade = s.Grade
-				self.NecklaceStatType = _WeaponTierDataLogic:GetSkillVariantForGrade(s, s.Grade)
-				self.NecklaceBonus = s.BonusPercentPerMille / 1000.0
+				self.NecklaceStatBonus = self:ReadAccessoryStats(necklace.ItemId, s)
 				local necklaceLevelBonus = _EnhanceScrollLogic:GetStatBonusForLevel(s.Level)
-				if s.MainStatType == _WeaponTierDataLogic.RingMainStatHp then
+				if s.MainStatType == T.RingMainStatHp then
 					ringHp = ringHp + s.Hp + necklaceLevelBonus
 				else
 					self.NecklaceAtk = s.Atk + necklaceLevelBonus
@@ -250,29 +258,23 @@ script GearEffectLogic extends Logic
 			end
 		end
 
-		-- 슈트의 HP 스탯(고정값) — 유저 지정: 공격력과 동일하게 런 시작 시 최대 체력에 그대로 더한다.
-		-- 망토 유니크의 체력 %는 이 가산이 끝난 뒤에 곱해야 "장비로 올린 체력에도 %가 붙는" 자연스러운
-		-- 순서가 된다(가산 → 배율 순).
-		-- HP 스탯 부위를 전부 합산한다(2026-09-02):
-		--   갑옷(Longcoat) 전체 수치 + 장갑/망토 절반 수치 + 각 부위의 강화 레벨 보너스.
-		-- 부위마다 따로 굴린 값이라 개별로 더해야 한다.
+		-- HP 스탯 부위 합산(2026-09-02): 갑옷 전체 수치 + 장갑/망토 절반 수치 + 각 부위 강화 보너스.
+		-- 체력 %(망토 유니크·반지/목걸이 옵션4)는 이 가산이 끝난 뒤에 곱한다(가산 → 배율)
 		local suitHp = 0
 		for _, pair in ipairs({
 			{ _GearCategoryEnum.Longcoat, nil },
-			{ _GearCategoryEnum.Glove, _WeaponTierDataLogic.GloveItemId },
-			{ _GearCategoryEnum.Cape, _WeaponTierDataLogic.CapeItemId },
+			{ _GearCategoryEnum.Glove, T.GloveItemId },
+			{ _GearCategoryEnum.Cape, T.CapeItemId },
 		}) do
 			local st = inventory:GetAttachedGearItemStruct(job, pair[1])
-			if st ~= nil and (pair[2] == nil or st.ItemId == pair[2]) and _WeaponTierDataLogic:IsWeaponItem(st.ItemId) then
+			if st ~= nil and (pair[2] == nil or st.ItemId == pair[2]) and T:IsWeaponItem(st.ItemId) then
 				local ss = st:GetGearStruct()
 				if ss ~= nil and ss.Hp > 0 then
 					suitHp = suitHp + ss.Hp + _EnhanceScrollLogic:GetStatBonusForLevel(ss.Level)
 				end
 			end
 		end
-		-- 반지 HP는 위 루프에 넣지 않고 따로 더한다 — 루프는 "HP 라인" 전용이라 StatField이 Atk로
-		-- 등록된 반지를 걸러내고, 강화 레벨 보너스도 이미 위에서 ringHp에 얹어뒀다(이중 적용 방지).
-		-- 공격력형 반지면 ringHp가 0이라 아무 영향이 없다
+		-- 반지/목걸이 HP는 위 루프가 걸러내므로 따로 더한다(강화 보너스는 이미 ringHp에 들어 있다)
 		if ringHp > 0 then
 			suitHp = suitHp + ringHp
 		end
@@ -281,8 +283,7 @@ script GearEffectLogic extends Logic
 			_GameManager.PlayerMaxHp = _GameManager.PlayerMaxHp + suitHp
 		end
 
-		-- 망토 유니크: 최대 체력 % 증가 — 보호막 계산보다 먼저 적용해야 보호막도 늘어난 최대 체력
-		-- 기준으로 잡힌다. 런 시작 직후라 현재 체력도 같이 꽉 채워준다
+		-- 최대 체력 % — 보호막 계산보다 먼저 적용해야 보호막도 늘어난 최대 체력 기준으로 잡힌다
 		local maxHpMult = self:GetMaxHpMult()
 		if maxHpMult > 1.0 then
 			_GameManager.PlayerMaxHp = math.floor(_GameManager.PlayerMaxHp * maxHpMult)
@@ -293,43 +294,80 @@ script GearEffectLogic extends Logic
 
 		-- 슈트 매직: 전투 시작 시 최대 HP의 X% 보호막
 		if self:IsSuit(_GearGradeEnum.Magic) then
-			self.ShieldRemain = math.floor(_GameManager.PlayerMaxHp * self.SuitBonus)
+			self.ShieldRemain = math.floor(_GameManager.PlayerMaxHp * self:SB(_GearGradeEnum.Magic))
 		end
 
 		log("GearEffectLogic.InitForRun: weapon=" .. self.WeaponItemId .. "/g" .. self.WeaponGrade
 			.. " suit=" .. self.SuitItemId .. "/g" .. self.SuitGrade
 			.. " helm=g" .. self.HelmGrade .. " glove=g" .. self.GloveGrade .. " cape=g" .. self.CapeGrade
-			.. " ring=g" .. self.RingGrade .. "/skill" .. self.RingStatType
-			.. "/atk" .. self.RingAtk .. "/hp" .. ringHp .. "/" .. string.format("%.1f", self.RingBonus * 100) .. "%"
-			.. " necklace=g" .. self.NecklaceGrade .. "/skill" .. self.NecklaceStatType .. "/atk" .. self.NecklaceAtk
-			.. "/" .. string.format("%.1f", self.NecklaceBonus * 100) .. "%"
-			.. " shield=" .. self.ShieldRemain)
+			.. " ring=g" .. self.RingGrade .. " " .. self:FormatStats(self.RingStatBonus) .. " atk" .. self.RingAtk .. " hp" .. ringHp
+			.. " necklace=g" .. self.NecklaceGrade .. " " .. self:FormatStats(self.NecklaceStatBonus) .. " atk" .. self.NecklaceAtk
+			.. " maxHp=" .. _GameManager.PlayerMaxHp .. " shield=" .. self.ShieldRemain)
 	end
 
-	-- ── 장착 판정 헬퍼 ───────────────────────────────────────────────────
-	-- "그 부위에 그 라인이, 정확히 그 등급으로 장착돼 있는가". 등급 스킬은 상위 등급이 하위 등급
-	-- 효과를 포함하지 않고 등급마다 완전히 교체되므로(유저 표) 전부 정확히 일치 비교다.
-
-	-- 반지 전용 판정 — 다른 부위는 "등급"으로 효과가 갈리지만 반지는 **그 등급에 굴려져 있는**
-	-- 스킬 종류(1~5)로 갈린다(InitForRun이 현재 등급의 값을 RingStatType에 담아둔다).
-	-- 노말(스킬 없음)과 미장착(-1)은 항상 false.
-	method boolean HasRingStat(integer statType)
-		if self.RingGrade < _GearGradeEnum.Magic then
-			return false
+	method string FormatStats(any stats)
+		-- 로그용: 옵션 종류별 합계를 "s1=1.3% s5=2.7%"처럼
+		if stats == nil then return "-" end
+		local parts = {}
+		for statType = 1, 5 do
+			local v = stats[statType]
+			if v ~= nil and v > 0 then table.insert(parts, "s" .. statType .. "=" .. string.format("%.1f", v * 100) .. "%") end
 		end
-		return self.RingStatType == statType
+		if #parts == 0 then return "-" end
+		return table.concat(parts, " ")
 	end
 
-	-- 목걸이 전용 판정(반지와 같은 규칙)
-	method boolean HasNecklaceStat(integer statType)
-		if self.NecklaceGrade < _GearGradeEnum.Magic then
-			return false
-		end
-		return self.NecklaceStatType == statType
+	-- ── 해금 판정 / 등급 줄 수치 ───────────────────────────────────────────
+	-- "그 부위에 그 라인이 있고, 그 등급 줄이 해금됐는가"(지금 등급 >= 그 등급). 미장착(-1)은 항상 false
+
+	method number GradeBonus(any byGrade, integer grade)
+		if byGrade == nil then return 0 end
+		local v = byGrade[grade]
+		if v == nil then return 0 end
+		return v
+	end
+
+	method number WB(integer grade)
+		return self:GradeBonus(self.WeaponBonusByGrade, grade)
+	end
+
+	method number SB(integer grade)
+		return self:GradeBonus(self.SuitBonusByGrade, grade)
+	end
+
+	method number HB(integer grade)
+		return self:GradeBonus(self.HelmBonusByGrade, grade)
+	end
+
+	method number GB(integer grade)
+		return self:GradeBonus(self.GloveBonusByGrade, grade)
+	end
+
+	method number CB(integer grade)
+		return self:GradeBonus(self.CapeBonusByGrade, grade)
+	end
+
+	-- 반지/목걸이 옵션 합계(해금된 줄 중 그 종류만)
+	method number RingStat(integer statType)
+		if self.RingStatBonus == nil then return 0 end
+		local v = self.RingStatBonus[statType]
+		if v == nil then return 0 end
+		return v
+	end
+
+	method number NecklaceStat(integer statType)
+		if self.NecklaceStatBonus == nil then return 0 end
+		local v = self.NecklaceStatBonus[statType]
+		if v == nil then return 0 end
+		return v
 	end
 
 	method boolean IsWeapon(integer itemId, integer grade)
-		return self.WeaponItemId == itemId and self.WeaponGrade == grade
+		return self.WeaponItemId == itemId and self.WeaponGrade >= grade
+	end
+
+	method boolean IsStaff(integer grade)
+		return self:IsWeapon(_WeaponTierDataLogic.WeaponItemId, grade)
 	end
 
 	method boolean IsBow(integer grade)
@@ -347,27 +385,27 @@ script GearEffectLogic extends Logic
 	-- 슈트A/B는 같은 부위의 다른 시리즈 — 등급 효과가 같은 칸(매직 보호막/레어 회복/유니크 피해감소)은
 	-- 시리즈 구분 없이 동작해야 해서 "둘 중 아무거나"를 묻는 헬퍼를 따로 둔다
 	method boolean IsSuit(integer grade)
-		return self.SuitGrade == grade and (self.SuitItemId == _WeaponTierDataLogic.SuitAItemId or self.SuitItemId == _WeaponTierDataLogic.SuitBItemId)
+		return self.SuitGrade >= grade and (self.SuitItemId == _WeaponTierDataLogic.SuitAItemId or self.SuitItemId == _WeaponTierDataLogic.SuitBItemId)
 	end
 
 	method boolean IsSuitA(integer grade)
-		return self.SuitItemId == _WeaponTierDataLogic.SuitAItemId and self.SuitGrade == grade
+		return self.SuitItemId == _WeaponTierDataLogic.SuitAItemId and self.SuitGrade >= grade
 	end
 
 	method boolean IsSuitB(integer grade)
-		return self.SuitItemId == _WeaponTierDataLogic.SuitBItemId and self.SuitGrade == grade
+		return self.SuitItemId == _WeaponTierDataLogic.SuitBItemId and self.SuitGrade >= grade
 	end
 
 	method boolean IsHelm(integer grade)
-		return self.HelmGrade == grade
+		return self.HelmGrade >= grade
 	end
 
 	method boolean IsGlove(integer grade)
-		return self.GloveGrade == grade
+		return self.GloveGrade >= grade
 	end
 
 	method boolean IsCape(integer grade)
-		return self.CapeGrade == grade
+		return self.CapeGrade >= grade
 	end
 
 	-- ── 매 프레임 타이머 감소(CardManager.OnUpdate가 호출) ───────────────
@@ -413,44 +451,38 @@ script GearEffectLogic extends Logic
 
 	-- ── 대미지 가산/배율(CardManager.GetCardDamage에서 소비) ─────────────
 
-	-- 장착 무기 ATK — 유저 지정: 배율이 아니라 고정값 가산. 배율(GetDamageMult)보다 "먼저" 더해야
-	-- 공격력% 보너스가 무기 ATK에도 걸리는 자연스러운 순서가 된다(가산 → 배율)
+	-- 고정 공격력 가산 — 배율(GetDamageMult)보다 "먼저" 더해야 공격력%가 이 값에도 걸린다(가산 → 배율)
 	method number GetFlatAtk()
-		-- 무기 + 투구. 둘 다 스킬 기본값에 "더해지는" 고정 공격력이라 그냥 합산한다
-		-- (배율보다 먼저 더해지므로 모든 스킬에 동일하게 반영된다 — CardManager.GetCardDamage 참고)
-		-- 반지 ATK도 같은 성격(고정값 가산)이라 그대로 합산한다
 		return self.WeaponAtk + self.HelmAtk + self.RingAtk + self.NecklaceAtk
 	end
 
 	method number GetDamageMult()
-		-- 전체 스킬에 적용되는 상시 대미지 보너스 — 양손검 매직/에픽(공격력), 투구 매직/에픽(공격력),
-		-- 망토 매직(피해량), 양손검 레전더리(HP 30% 이하 조건부), 망토 레어(처치 트리거 10초 버프)
+		-- 전체 스킬 상시 대미지 보너스 — 해금된 줄마다 따로 곱한다
 		local mult = 1.0
+		local G = _GearGradeEnum
 
-		if self:IsSword(_GearGradeEnum.Magic) or self:IsSword(_GearGradeEnum.Epic) then
-			mult = mult * (1.0 + self.WeaponBonus)
-		end
-		if self:IsSword(_GearGradeEnum.Legendary) then
+		-- 스태프 매직/에픽: 공격력 %
+		if self:IsStaff(G.Magic) then mult = mult * (1.0 + self:WB(G.Magic)) end
+		if self:IsStaff(G.Epic) then mult = mult * (1.0 + self:WB(G.Epic)) end
+		-- 양손검 매직/에픽: 공격력 %, 레전더리: HP 30% 이하일 때
+		if self:IsSword(G.Magic) then mult = mult * (1.0 + self:WB(G.Magic)) end
+		if self:IsSword(G.Epic) then mult = mult * (1.0 + self:WB(G.Epic)) end
+		if self:IsSword(G.Legendary) then
 			if _GameManager.PlayerMaxHp > 0 and (_GameManager.PlayerHp / _GameManager.PlayerMaxHp) <= 0.3 then
-				mult = mult * (1.0 + self.WeaponBonus)
+				mult = mult * (1.0 + self:WB(G.Legendary))
 			end
 		end
-		if self:IsHelm(_GearGradeEnum.Magic) or self:IsHelm(_GearGradeEnum.Epic) then
-			mult = mult * (1.0 + self.HelmBonus)
-		end
-		if self:IsCape(_GearGradeEnum.Magic) then
-			mult = mult * (1.0 + self.CapeBonus)
-		end
+		-- 투구 매직/에픽: 공격력 %
+		if self:IsHelm(G.Magic) then mult = mult * (1.0 + self:HB(G.Magic)) end
+		if self:IsHelm(G.Epic) then mult = mult * (1.0 + self:HB(G.Epic)) end
+		-- 망토 매직: 피해량 %
+		if self:IsCape(G.Magic) then mult = mult * (1.0 + self:CB(G.Magic)) end
+		-- 망토 레어: 처치 트리거 10초 버프
 		if self.DamageBuffTimer > 0 then
 			mult = mult * (1.0 + self.DamageBuffValue)
 		end
-		-- 반지 스탯1: 공격력%
-		if self:HasRingStat(1) then
-			mult = mult * (1.0 + self.RingBonus)
-		end
-		if self:HasNecklaceStat(1) then
-			mult = mult * (1.0 + self.NecklaceBonus)
-		end
+		-- 반지/목걸이 옵션1: 공격력 %
+		mult = mult * (1.0 + self:RingStat(1)) * (1.0 + self:NecklaceStat(1))
 
 		return mult
 	end
@@ -461,27 +493,25 @@ script GearEffectLogic extends Logic
 	@ExecSpace("ServerOnly")
 	method number ConsumeBasicAttackMult()
 		local mult = 1.0
+		local G = _GearGradeEnum
 
-		if self:IsBow(_GearGradeEnum.Magic) or self:IsBow(_GearGradeEnum.Epic) then
-			mult = mult * (1.0 + self.WeaponBonus)
-		end
-		if self:IsGlove(_GearGradeEnum.Magic) then
-			mult = mult * (1.0 + self.GloveBonus)
-		end
+		if self:IsBow(G.Magic) then mult = mult * (1.0 + self:WB(G.Magic)) end
+		if self:IsBow(G.Epic) then mult = mult * (1.0 + self:WB(G.Epic)) end
+		if self:IsGlove(G.Magic) then mult = mult * (1.0 + self:GB(G.Magic)) end
 
 		-- 투구 유니크: 스킬 사용 시 걸린 "다음 기본 공격 강화"(10초 내 1회)
 		if self.NextBasicAttackDamageBuffTimer > 0 then
-			mult = mult * (1.0 + self.HelmBonus)
+			mult = mult * (1.0 + self:HB(G.Unique))
 			self.NextBasicAttackDamageBuffTimer = 0
 		end
 		-- 장갑 에픽: 30회마다 예약된 강화 1회
 		if self.GlovePowerAttackReady then
-			mult = mult * (1.0 + self.GloveBonus)
+			mult = mult * (1.0 + self:GB(G.Epic))
 			self.GlovePowerAttackReady = false
 		end
 		-- 장갑 유니크: 기본 공격으로 처치한 직후 1회
 		if self.GloveKillBuffReady then
-			mult = mult * (1.0 + self.GloveBonus)
+			mult = mult * (1.0 + self:GB(G.Unique))
 			self.GloveKillBuffReady = false
 		end
 
@@ -496,58 +526,44 @@ script GearEffectLogic extends Logic
 			return 1.0
 		end
 		self.NextSkillDamageBuffTimer = 0
-		return 1.0 + self.HelmBonus
+		return 1.0 + self:HB(_GearGradeEnum.Legendary)
 	end
 
 	-- 망토 에픽/레전더리: 엘리트·보스에게 주는 피해량 증가(MonsterAI가 자기 자신이 엘리트/보스일 때만 곱한다)
 	@ExecSpace("ServerOnly")
 	method number GetEliteBossDamageMult()
-		if self:IsCape(_GearGradeEnum.Epic) or self:IsCape(_GearGradeEnum.Legendary) then
-			return 1.0 + self.CapeBonus
-		end
-		return 1.0
+		local mult = 1.0
+		if self:IsCape(_GearGradeEnum.Epic) then mult = mult * (1.0 + self:CB(_GearGradeEnum.Epic)) end
+		if self:IsCape(_GearGradeEnum.Legendary) then mult = mult * (1.0 + self:CB(_GearGradeEnum.Legendary)) end
+		return mult
 	end
 
 	-- ── 쿨타임 / 치명타 ──────────────────────────────────────────────────
 
 	@ExecSpace("ServerOnly")
 	method number GetCooldownReduction()
-		-- 활 유니크(상시) + 투구 레어(50마리 처치로 해금된 뒤 상시). 둘 다 있으면 가산 후 90%로 클램프
+		-- 스태프 유니크 + 활 유니크(상시) + 투구 레어(50마리 처치로 해금된 뒤 상시) + 반지/목걸이 옵션5. 90% 클램프
+		local G = _GearGradeEnum
 		local reduction = 0
-		if self:IsBow(_GearGradeEnum.Unique) then
-			reduction = reduction + self.WeaponBonus
-		end
-		if self.HelmCooldownUnlocked then
-			reduction = reduction + self.HelmBonus
-		end
-		-- 반지 스탯5: 스킬 쿨타임 감소%
-		if self:HasRingStat(5) then
-			reduction = reduction + self.RingBonus
-		end
-		if self:HasNecklaceStat(5) then
-			reduction = reduction + self.NecklaceBonus
-		end
+		if self:IsStaff(G.Unique) then reduction = reduction + self:WB(G.Unique) end
+		if self:IsBow(G.Unique) then reduction = reduction + self:WB(G.Unique) end
+		if self.HelmCooldownUnlocked then reduction = reduction + self:HB(G.Rare) end
+		reduction = reduction + self:RingStat(5) + self:NecklaceStat(5)
 		if reduction > 0.9 then reduction = 0.9 end
 		return reduction
 	end
 
 	@ExecSpace("ServerOnly")
 	method number GetCritChanceBonus()
-		-- 자마다르 매직/유니크(상시) + 자마다르 레어(처치 트리거 10초 버프)
+		-- 자마다르 매직/유니크(상시) + 자마다르 레어(처치 트리거 10초 버프) + 반지/목걸이 옵션2
+		local G = _GearGradeEnum
 		local bonus = 0
-		if self:IsJamadar(_GearGradeEnum.Magic) or self:IsJamadar(_GearGradeEnum.Unique) then
-			bonus = bonus + self.WeaponBonus
-		end
+		if self:IsJamadar(G.Magic) then bonus = bonus + self:WB(G.Magic) end
+		if self:IsJamadar(G.Unique) then bonus = bonus + self:WB(G.Unique) end
 		if self.CritChanceBuffTimer > 0 then
 			bonus = bonus + self.CritChanceBuffValue
 		end
-		-- 반지 스탯2: 치명타 확률%
-		if self:HasRingStat(2) then
-			bonus = bonus + self.RingBonus
-		end
-		if self:HasNecklaceStat(2) then
-			bonus = bonus + self.NecklaceBonus
-		end
+		bonus = bonus + self:RingStat(2) + self:NecklaceStat(2)
 		return bonus
 	end
 
@@ -559,26 +575,18 @@ script GearEffectLogic extends Logic
 			return 0
 		end
 		self.NextBasicAttackCritBuffTimer = 0
-		return self.GloveBonus
+		return self:GB(_GearGradeEnum.Rare)
 	end
 
 	@ExecSpace("ServerOnly")
 	method number GetCritDamageBonus()
-		-- 자마다르 에픽(상시) + 자마다르 레전더리(기본공격 확률 발동 10초 버프)
+		-- 자마다르 에픽(상시) + 자마다르 레전더리(기본공격 확률 발동 10초 버프) + 반지/목걸이 옵션3
 		local bonus = 0
-		if self:IsJamadar(_GearGradeEnum.Epic) then
-			bonus = bonus + self.WeaponBonus
-		end
+		if self:IsJamadar(_GearGradeEnum.Epic) then bonus = bonus + self:WB(_GearGradeEnum.Epic) end
 		if self.CritDamageBuffTimer > 0 then
 			bonus = bonus + self.CritDamageBuffValue
 		end
-		-- 반지 스탯3: 치명타 피해%
-		if self:HasRingStat(3) then
-			bonus = bonus + self.RingBonus
-		end
-		if self:HasNecklaceStat(3) then
-			bonus = bonus + self.NecklaceBonus
-		end
+		bonus = bonus + self:RingStat(3) + self:NecklaceStat(3)
 		return bonus
 	end
 
@@ -586,32 +594,28 @@ script GearEffectLogic extends Logic
 
 	@ExecSpace("ServerOnly")
 	method number GetDamageTakenReduction()
-		-- 양손검 유니크(상시) + 슈트 에픽(상시) + 슈트 유니크(HP 30% 이하 조건부). 가산 후 90% 클램프
+		-- 양손검 유니크(상시) + 슈트A 에픽(상시) + 슈트 유니크(HP 30% 이하 조건부). 가산 후 90% 클램프
+		local G = _GearGradeEnum
 		local reduction = 0
-		if self:IsSword(_GearGradeEnum.Unique) then
-			reduction = reduction + self.WeaponBonus
-		end
-		if self:IsSuit(_GearGradeEnum.Epic) and self.SuitItemId == _WeaponTierDataLogic.SuitAItemId then
-			reduction = reduction + self.SuitBonus
-		end
-		if self:IsSuit(_GearGradeEnum.Unique) then
+		if self:IsSword(G.Unique) then reduction = reduction + self:WB(G.Unique) end
+		if self:IsSuitA(G.Epic) then reduction = reduction + self:SB(G.Epic) end
+		if self:IsSuit(G.Unique) then
 			if _GameManager.PlayerMaxHp > 0 and (_GameManager.PlayerHp / _GameManager.PlayerMaxHp) <= 0.3 then
-				reduction = reduction + self.SuitBonus
+				reduction = reduction + self:SB(G.Unique)
 			end
 		end
 		if reduction > 0.9 then reduction = 0.9 end
 		return reduction
 	end
 
-	-- 슈트B 에픽: 피격 시 확률로 피해 완전 무효화. 슈트A 레전더리: 치명적 피해 시 5초 무적(전투당 1회)로
-	-- 이미 무적 중이면 무조건 무효. 무적 부여 자체는 AbsorbDamage가 처리한다
+	-- 슈트B 에픽: 피격 시 확률로 피해 완전 무효화. 슈트A 레전더리 무적 중이면 무조건 무효
 	@ExecSpace("ServerOnly")
 	method boolean ShouldNullifyDamage()
 		if self.InvincibleTimer > 0 then
 			return true
 		end
 		if self:IsSuitB(_GearGradeEnum.Epic) then
-			if _UtilLogic:RandomDouble() < self.SuitBonus then
+			if _UtilLogic:RandomDouble() < self:SB(_GearGradeEnum.Epic) then
 				log("GearEffect: 슈트B 에픽 피해 무효화 발동")
 				return true
 			end
@@ -620,8 +624,7 @@ script GearEffectLogic extends Logic
 	end
 
 	-- 감소가 끝난 최종 대미지에서 보호막 잔량을 먼저 깎고, 남은 실피해만 돌려준다(슈트 매직).
-	-- 이어서 슈트A 레전더리(치사 피해 → 5초 무적 + 그 피해 무효)와 슈트B 레전더리(HP 20% 이하 →
-	-- 즉시 회복)를 판정한다. 전투당 1회 제한이 있는 둘은 각각 플래그로 관리한다.
+	-- 이어서 슈트A 레전더리(치사 피해 → 5초 무적 + 그 피해 무효)를 판정한다(전투당 1회)
 	@ExecSpace("ServerOnly")
 	method integer AbsorbDamage(integer damage)
 		local remain = damage
@@ -637,7 +640,6 @@ script GearEffectLogic extends Logic
 			self.ShieldRemain = 0
 		end
 
-		-- 슈트A 레전더리 — 이 피해로 죽는 상황이면 그 피해를 없애고 5초 무적을 준다(전투당 1회)
 		if self:IsSuitA(_GearGradeEnum.Legendary) and not self.SuitLastStandUsed then
 			if _GameManager.PlayerHp - remain <= 0 then
 				self.SuitLastStandUsed = true
@@ -660,70 +662,64 @@ script GearEffectLogic extends Logic
 		if (_GameManager.PlayerHp / _GameManager.PlayerMaxHp) > 0.2 then return end
 
 		self.SuitEmergencyHealUsed = true
-		local heal = math.floor(_GameManager.PlayerMaxHp * self.SuitBonus)
+		local heal = math.floor(_GameManager.PlayerMaxHp * self:SB(_GearGradeEnum.Legendary))
 		_GameManager:HealPlayer(heal)
 		log("GearEffect: 10주년 블랙 슈트 긴급 회복 " .. heal)
 	end
 
-	-- 망토 유니크: 최대 체력 % 증가 — GameManager가 최대 체력을 계산할 때 곱한다
+	-- 최대 체력 % — 망토 유니크 + 반지/목걸이 옵션4(곱연산)
 	@ExecSpace("ServerOnly")
 	method number GetMaxHpMult()
 		local mult = 1.0
 		if self:IsCape(_GearGradeEnum.Unique) then
-			mult = mult * (1.0 + self.CapeBonus)
+			mult = mult * (1.0 + self:CB(_GearGradeEnum.Unique))
 		end
-		-- 반지 스탯4: 최대 체력% — 망토 유니크와 같은 관문이라 곱연산으로 합친다
-		if self:HasRingStat(4) then
-			mult = mult * (1.0 + self.RingBonus)
-		end
-		if self:HasNecklaceStat(4) then
-			mult = mult * (1.0 + self.NecklaceBonus)
-		end
+		mult = mult * (1.0 + self:RingStat(4)) * (1.0 + self:NecklaceStat(4))
 		return mult
 	end
 
 	-- ── 트리거(처치 / 기본 공격) ─────────────────────────────────────────
 
-	-- 몬스터 처치마다 MonsterAI.Die()가 호출 — 처치 수 기반 등급 스킬 4종을 여기서 전부 처리한다.
-	-- 각 효과의 발동 주기가 다르므로(10/30/50마리) 나머지 연산으로 판정한다.
+	-- 몬스터 처치마다 MonsterAI.Die()가 호출 — 처치 수 기반 등급 스킬을 여기서 전부 처리한다.
 	@ExecSpace("ServerOnly")
 	method void OnMonsterKilled()
+		local G = _GearGradeEnum
 		self.KillCount = self.KillCount + 1
 
 		-- 활 레어: 적 10마리 처치 시 추가 기본 공격
-		if self:IsBow(_GearGradeEnum.Rare) and self.KillCount % 10 == 0 then
+		if self:IsBow(G.Rare) and self.KillCount % 10 == 0 then
 			_CardManager:TriggerExtraBasicAttack(1.0)
 		end
 
 		-- 양손검 레어: 적 30마리 처치 시 HP 회복
-		if self:IsSword(_GearGradeEnum.Rare) and self.KillCount % 30 == 0 then
-			local heal = math.floor(_GameManager.PlayerMaxHp * self.WeaponBonus)
+		if self:IsSword(G.Rare) and self.KillCount % 30 == 0 then
+			local heal = math.floor(_GameManager.PlayerMaxHp * self:WB(G.Rare))
 			if heal > 0 then _GameManager:HealPlayer(heal) end
 		end
 
-		-- 자마다르 레어: 30마리 처치 시 치명타 확률 증가(10초). "지속시간동안 갱신X" — 남아있으면 무시
-		if self:IsJamadar(_GearGradeEnum.Rare) and self.KillCount % 30 == 0 then
+		-- 자마다르 레어: 30마리 처치 시 치명타 확률 증가(10초). "지속시간동안 갱신X"
+		if self:IsJamadar(G.Rare) and self.KillCount % 30 == 0 then
 			if self.CritChanceBuffTimer <= 0 then
-				self.CritChanceBuffValue = self.WeaponBonus
+				self.CritChanceBuffValue = self:WB(G.Rare)
 				self.CritChanceBuffTimer = 10.0
 			end
 		end
 
 		-- 슈트 레어: 50마리 처치 시 HP 회복
-		if self:IsSuit(_GearGradeEnum.Rare) and self.KillCount % 50 == 0 then
-			local heal = math.floor(_GameManager.PlayerMaxHp * self.SuitBonus)
+		if self:IsSuit(G.Rare) and self.KillCount % 50 == 0 then
+			local heal = math.floor(_GameManager.PlayerMaxHp * self:SB(G.Rare))
 			if heal > 0 then _GameManager:HealPlayer(heal) end
 		end
 
-		-- 투구 레어: 50마리 처치 시 모든 스킬 쿨타임 감소(유저 표에 지속시간 없음 → 런 끝까지 유지)
-		if self:IsHelm(_GearGradeEnum.Rare) and not self.HelmCooldownUnlocked and self.KillCount >= 50 then
+		-- 투구 레어: 50마리 처치 시 모든 스킬 쿨타임 감소(런 끝까지 유지)
+		if self:IsHelm(G.Rare) and not self.HelmCooldownUnlocked and self.KillCount >= 50 then
 			self.HelmCooldownUnlocked = true
 			log("GearEffect: 자쿰의 투구 쿨타임 감소 해금")
 		end
 
 		-- 망토 레어: 50마리 처치 시 피해량 증가(10초)
-		if self:IsCape(_GearGradeEnum.Rare) and self.KillCount % 50 == 0 then
-			self.DamageBuffValue = self.CapeBonus
+		if self:IsCape(G.Rare) and self.KillCount % 50 == 0 then
+			self.DamageBuffValue = self:CB(G.Rare)
 			self.DamageBuffTimer = 10.0
 		end
 	end
@@ -732,32 +728,33 @@ script GearEffectLogic extends Logic
 	-- 확률 기반 활/자마다르 레전더리 효과를 여기서 예약한다 — 실제 소비는 Consume* 쪽에서 일어난다
 	@ExecSpace("ServerOnly")
 	method void OnBasicAttack()
+		local G = _GearGradeEnum
 		self.BasicAttackCount = self.BasicAttackCount + 1
 
 		-- 장갑 레어: 20회마다 다음 기본 공격 치명타 확률 증가(5초)
-		if self:IsGlove(_GearGradeEnum.Rare) and self.BasicAttackCount % 20 == 0 then
+		if self:IsGlove(G.Rare) and self.BasicAttackCount % 20 == 0 then
 			self.NextBasicAttackCritBuffTimer = 5.0
 		end
 
-		-- 장갑 에픽: 30회마다 다음 기본 공격 대미지 증가(지속시간 없음 — 다음 1회에 무조건 적용)
-		if self:IsGlove(_GearGradeEnum.Epic) and self.BasicAttackCount % 30 == 0 then
+		-- 장갑 에픽: 30회마다 다음 기본 공격 대미지 증가(다음 1회에 무조건 적용)
+		if self:IsGlove(G.Epic) and self.BasicAttackCount % 30 == 0 then
 			self.GlovePowerAttackReady = true
 		end
 
 		-- 장갑 레전더리: 10회마다 강화 공격(기본 공격 대미지의 200%) 1회 추가 발동
-		if self:IsGlove(_GearGradeEnum.Legendary) and self.BasicAttackCount % 10 == 0 then
+		if self:IsGlove(G.Legendary) and self.BasicAttackCount % 10 == 0 then
 			_CardManager:TriggerExtraBasicAttack(2.0)
 		end
 
 		-- 활 레전더리: 확률로 추가 공격 1회
-		if self:IsBow(_GearGradeEnum.Legendary) and _UtilLogic:RandomDouble() < self.WeaponBonus then
+		if self:IsBow(G.Legendary) and _UtilLogic:RandomDouble() < self:WB(G.Legendary) then
 			_CardManager:TriggerExtraBasicAttack(1.0)
 		end
 
 		-- 자마다르 레전더리: 확률로 치명타 피해 증가(10초). "지속시간동안 갱신X"
-		if self:IsJamadar(_GearGradeEnum.Legendary) and self.CritDamageBuffTimer <= 0 then
+		if self:IsJamadar(G.Legendary) and self.CritDamageBuffTimer <= 0 then
 			if _UtilLogic:RandomDouble() < self.WeaponProcChance then
-				self.CritDamageBuffValue = self.WeaponBonus
+				self.CritDamageBuffValue = self:WB(G.Legendary)
 				self.CritDamageBuffTimer = 10.0
 			end
 		end

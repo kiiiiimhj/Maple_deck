@@ -6,6 +6,14 @@ script TitleUI extends Logic
 	property Entity titleGroup = "4109795c-8f3d-41f1-9403-fefcec8fbb3e"
 	property ButtonComponent btnStart = "7324df2c-c085-43e9-9b23-93c36b4e7121"
 
+	-- 로비/레이드 화면 뒤 인게임 HUD 클릭 차단(2026-09-26 유저 리포트 "스킬탭에서 안 보이는 인게임 인벤토리 버튼이 눌린다").
+	-- 인게임 HUD(DefaultGroup, GroupOrder 0)와 콜로세움 UI는 로비 동안에도 꺼지지 않고 뒤에 깔려 있고, 로비 탭 배경은
+	-- 클릭을 막지 않아 그 자리를 누르면 HUD 버튼(인벤토리·맵 이동·스킬 슬롯·6번 슬롯 다이아 해금·리롤 등)이 눌렸다.
+	-- 로비나 레이드 화면이 떠 있는 동안 두 그룹의 CanvasGroup.Interactable을 끈다(보이는 모습은 그대로)
+	property CanvasGroupComponent hudCanvas = "3833f71e-06ae-4874-97ae-8d983afa9a9e"
+	property CanvasGroupComponent arenaCanvas = "135eaa2f-fb1a-4194-8f71-6f22dfc69090"
+	property integer _hudInteractState = -1
+
 	-- 로비 전용 BGM(2026-08-21, 유저 지정) — map01.map 루트 SoundComponent와 동일한 RUID. map01의
 	-- SoundComponent는 PlayOnEnable이라 월드 부팅 시 딱 한 번만 자동 재생되고, 로비↔게임 왕복 중엔 다시
 	-- 안 켜지므로(엔티티 자체가 계속 Enable 상태라 재트리거 안 됨), 로비로 돌아올 때(ShowLobby)는 이
@@ -322,11 +330,8 @@ script TitleUI extends Logic
 	method void OnButtonStateChanged(ButtonStateChangeEvent event, Entity buttonEntity)
 		-- Pressed 상태가 되는 순간 작아지고, 그 외(뗐을 때 등) 상태로 돌아오면 원래 크기로 복귀한다
 		if not isvalid(buttonEntity) then return end
-		if event.state == ButtonState.Pressed then
-			_TweenLogic:ScaleTo(buttonEntity, Vector2(0.9, 0.9), 0.06, EaseType.QuadEaseOut)
-		else
-			_TweenLogic:ScaleTo(buttonEntity, Vector2(1, 1), 0.12, EaseType.QuadEaseOut)
-		end
+		-- 눌림 연출은 이제 공용 ButtonPressFxLogic이 모든 버튼에 건다(2026-09-26) — 여기서 또 크기를 바꾸면
+		-- 같은 버튼을 두 곳이 다퉈 중심 보정이 틀어진다. 연결은 남겨두되 아무것도 하지 않는다
 	end
 
 	@ExecSpace("ClientOnly")
@@ -384,6 +389,20 @@ script TitleUI extends Logic
 		local redDot = self.btnRelic.Entity:GetChildByName("RedDot")
 		if not isvalid(redDot) then return end
 		redDot.Enable = _RelicInventory:HasAnyNewRelic()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUpdate(number delta)
+		-- 로비/레이드 화면이 떠 있으면 뒤에 깔린 인게임 HUD·콜로세움 UI 버튼이 안 눌리게 한다(값이 바뀔 때만 쓴다)
+		local covered = (isvalid(self.titleGroup) and self.titleGroup.Enable) or _RaidUI:IsOpen()
+		local state = 1
+		if covered then state = 0 end
+		if state == self._hudInteractState then return end
+		self._hudInteractState = state
+		local interactable = not covered
+		if isvalid(self.hudCanvas) then self.hudCanvas.Interactable = interactable end
+		if isvalid(self.arenaCanvas) then self.arenaCanvas.Interactable = interactable end
+		log("TitleUI: in-game HUD interactable=" .. tostring(interactable))
 	end
 
 end

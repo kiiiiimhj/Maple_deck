@@ -152,6 +152,7 @@ script UIEquippedGearPanel extends Component
 	method table ComputeGearStats()
 		-- GearEffectLogic.InitForRun + 상시 효과 계산(GetFlatAtk/GetDamageMult/…)과 같은 규칙을 **읽기 전용**으로 따라간다.
 		-- 처치 수·체력 조건·확률 발동 같은 전투 중 조건부 효과는 넣지 않는다(항상 켜진 수치만).
+		-- 2026-09-26 "해금된 등급 줄은 전부 적용": 지금 등급 이하 모든 줄이 켜지고 줄마다 그 등급의 수치를 쓴다.
 		-- ⚠ GearEffectLogic의 등급 효과 표를 바꾸면 여기도 같이 고칠 것
 		local result = { atk = 0, maxHp = self.StatBaseHp, atkPct = 0, basicPct = 0, critRate = 0, critDmg = 0,
 			cooldown = 0, dmgReduction = 0, eliteBoss = 0 }
@@ -163,14 +164,19 @@ script UIEquippedGearPanel extends Component
 		local tier = _WeaponTierDataLogic
 		local G = _GearGradeEnum
 
-		-- 부위별로 (아이템ID, 등급, GearStruct)를 읽는다
+		-- 부위별로 (아이템ID, 등급, GearStruct, 해금된 줄별 보너스)를 읽는다
 		local function read(category, requiredItemId)
 			local st = inventory:GetAttachedGearItemStruct(job, category)
 			if st == nil then return nil end
 			if requiredItemId ~= nil and st.ItemId ~= requiredItemId then return nil end
 			local gs = st:GetGearStruct()
 			if gs == nil then return nil end
-			return { itemId = st.ItemId, grade = gs.Grade, gs = gs, bonus = gs.BonusPercentPerMille / 1000.0,
+			-- 매직~지금 등급 줄의 수치(전투 GearEffectLogic.ReadGradeBonuses와 같은 헬퍼)
+			local byGrade = {}
+			for g = G.Magic, gs.Grade do
+				byGrade[g] = tier:GetGradeBonusPerMille(st.ItemId, gs, g) / 1000.0
+			end
+			return { itemId = st.ItemId, grade = gs.Grade, gs = gs, byGrade = byGrade,
 				level = _EnhanceScrollLogic:GetStatBonusForLevel(gs.Level) }
 		end
 
@@ -184,13 +190,25 @@ script UIEquippedGearPanel extends Component
 		local ring = read(_GearCategoryEnum.Ring, tier.RingItemId)
 		local neck = read(_GearCategoryEnum.Pendant, tier.NecklaceItemId)
 
-		local function isWeapon(itemId, grade) return weapon ~= nil and weapon.itemId == itemId and weapon.grade == grade end
-		local function gradeIs(part, grade) return part ~= nil and part.grade == grade end
-		-- 반지/목걸이 등급 스킬(1 공격력% / 2 치명 확률 / 3 치명 피해 / 4 최대 체력% / 5 쿨감) — 매직 이상만
+		-- 그 줄이 해금됐으면 그 줄 수치, 아니면 0
+		local function line(part, grade)
+			if part == nil or part.grade < grade then return 0 end
+			local v = part.byGrade[grade]
+			if v == nil then return 0 end
+			return v
+		end
+		local function wLine(itemId, grade)
+			if weapon == nil or weapon.itemId ~= itemId then return 0 end
+			return line(weapon, grade)
+		end
+		-- 반지/목걸이 옵션(1 공격력% / 2 치명 확률 / 3 치명 피해 / 4 최대 체력% / 5 쿨감) — 해금된 줄 중 그 종류 합계
 		local function accStat(part, statType)
-			if part == nil or part.grade < G.Magic then return 0 end
-			if tier:GetSkillVariantForGrade(part.gs, part.grade) ~= statType then return 0 end
-			return part.bonus
+			if part == nil then return 0 end
+			local sum = 0
+			for g = G.Magic, part.grade do
+				if tier:GetSkillVariantForGrade(part.gs, g) == statType then sum = sum + line(part, g) end
+			end
+			return sum
 		end
 
 		-- 공격력(고정 가산): 무기 + 투구 + 반지/목걸이(공격형) — 강화 레벨 보너스 포함
@@ -209,46 +227,41 @@ script UIEquippedGearPanel extends Component
 				end
 			end
 		end
-		-- 최대 체력: 갑옷·장갑·망토 HP(+강화) + 반지/목걸이(체력형) → 망토 유니크·반지/목걸이 스탯4 배율
+		-- 최대 체력: 갑옷·장갑·망토 HP(+강화) + 반지/목걸이(체력형) → 망토 유니크·반지/목걸이 옵션4 배율
 		local hpParts = { suit, glove, cape }
 		for i = 1, 3 do
 			local part = hpParts[i]
 			if part ~= nil and part.gs.Hp > 0 then hpAdd = hpAdd + part.gs.Hp + part.level end
 		end
-		local hpMult = 1.0
-		if gradeIs(cape, G.Unique) then hpMult = hpMult * (1.0 + cape.bonus) end
-		hpMult = hpMult * (1.0 + accStat(ring, 4)) * (1.0 + accStat(neck, 4))
+		local hpMult = (1.0 + line(cape, G.Unique)) * (1.0 + accStat(ring, 4)) * (1.0 + accStat(neck, 4))
 		result.maxHp = math.floor((self.StatBaseHp + hpAdd) * hpMult)
 
-		-- 공격력 %: 양손검 매직/에픽, 투구 매직/에픽, 망토 매직, 반지/목걸이 스탯1(곱연산)
+		-- 공격력 %(줄마다 곱연산): 스태프·양손검 매직/에픽, 투구 매직/에픽, 망토 매직, 반지/목걸이 옵션1
 		local dmgMult = 1.0
-		if isWeapon(tier.TwoHandSwordItemId, G.Magic) or isWeapon(tier.TwoHandSwordItemId, G.Epic) then dmgMult = dmgMult * (1.0 + weapon.bonus) end
-		if gradeIs(helm, G.Magic) or gradeIs(helm, G.Epic) then dmgMult = dmgMult * (1.0 + helm.bonus) end
-		if gradeIs(cape, G.Magic) then dmgMult = dmgMult * (1.0 + cape.bonus) end
+		for _, itemId in ipairs({ tier.WeaponItemId, tier.TwoHandSwordItemId }) do
+			dmgMult = dmgMult * (1.0 + wLine(itemId, G.Magic)) * (1.0 + wLine(itemId, G.Epic))
+		end
+		dmgMult = dmgMult * (1.0 + line(helm, G.Magic)) * (1.0 + line(helm, G.Epic))
+		dmgMult = dmgMult * (1.0 + line(cape, G.Magic))
 		dmgMult = dmgMult * (1.0 + accStat(ring, 1)) * (1.0 + accStat(neck, 1))
 		result.atkPct = dmgMult - 1.0
 
 		-- 기본 공격 피해 %: 활 매직/에픽, 장갑 매직
-		local basicMult = 1.0
-		if isWeapon(tier.BowItemId, G.Magic) or isWeapon(tier.BowItemId, G.Epic) then basicMult = basicMult * (1.0 + weapon.bonus) end
-		if gradeIs(glove, G.Magic) then basicMult = basicMult * (1.0 + glove.bonus) end
+		local basicMult = (1.0 + wLine(tier.BowItemId, G.Magic)) * (1.0 + wLine(tier.BowItemId, G.Epic)) * (1.0 + line(glove, G.Magic))
 		result.basicPct = basicMult - 1.0
 
-		-- 치명타 확률: 자마다르 매직/유니크 + 반지/목걸이 스탯2
-		if isWeapon(tier.JamadarItemId, G.Magic) or isWeapon(tier.JamadarItemId, G.Unique) then result.critRate = result.critRate + weapon.bonus end
-		result.critRate = result.critRate + accStat(ring, 2) + accStat(neck, 2)
-		-- 치명타 피해: 자마다르 에픽 + 반지/목걸이 스탯3
-		if isWeapon(tier.JamadarItemId, G.Epic) then result.critDmg = result.critDmg + weapon.bonus end
-		result.critDmg = result.critDmg + accStat(ring, 3) + accStat(neck, 3)
-		-- 스킬 쿨타임 감소: 활 유니크 + 반지/목걸이 스탯5 (최대 90%)
-		if isWeapon(tier.BowItemId, G.Unique) then result.cooldown = result.cooldown + weapon.bonus end
-		result.cooldown = math.min(0.9, result.cooldown + accStat(ring, 5) + accStat(neck, 5))
+		-- 치명타 확률: 자마다르 매직/유니크 + 반지/목걸이 옵션2
+		result.critRate = wLine(tier.JamadarItemId, G.Magic) + wLine(tier.JamadarItemId, G.Unique) + accStat(ring, 2) + accStat(neck, 2)
+		-- 치명타 피해: 자마다르 에픽 + 반지/목걸이 옵션3
+		result.critDmg = wLine(tier.JamadarItemId, G.Epic) + accStat(ring, 3) + accStat(neck, 3)
+		-- 스킬 쿨타임 감소: 스태프·활 유니크 + 반지/목걸이 옵션5 (최대 90%)
+		result.cooldown = math.min(0.9, wLine(tier.WeaponItemId, G.Unique) + wLine(tier.BowItemId, G.Unique) + accStat(ring, 5) + accStat(neck, 5))
 		-- 받는 피해 감소: 양손검 유니크 + 슈트A 에픽 (최대 90%)
-		if isWeapon(tier.TwoHandSwordItemId, G.Unique) then result.dmgReduction = result.dmgReduction + weapon.bonus end
-		if suit ~= nil and suit.itemId == tier.SuitAItemId and suit.grade == G.Epic then result.dmgReduction = result.dmgReduction + suit.bonus end
-		result.dmgReduction = math.min(0.9, result.dmgReduction)
-		-- 엘리트·보스 피해: 망토 에픽/레전더리
-		if gradeIs(cape, G.Epic) or gradeIs(cape, G.Legendary) then result.eliteBoss = cape.bonus end
+		local suitAEpic = 0
+		if suit ~= nil and suit.itemId == tier.SuitAItemId then suitAEpic = line(suit, G.Epic) end
+		result.dmgReduction = math.min(0.9, wLine(tier.TwoHandSwordItemId, G.Unique) + suitAEpic)
+		-- 엘리트·보스 피해: 망토 에픽 × 레전더리(곱연산)
+		result.eliteBoss = (1.0 + line(cape, G.Epic)) * (1.0 + line(cape, G.Legendary)) - 1.0
 		return result
 	end
 

@@ -869,6 +869,37 @@ script WeaponTierDataLogic extends Logic
 		return self:RollInBand(data.PercentMin * 10, data.PercentMax * 10, qualityEnum)
 	end
 
+	-- 이 아이템의 "그 등급 줄" 확정 보너스(1000분율). 드롭 시 전 등급을 굴려 둔 표(BonusPercentPerMilleByGrade)를
+	-- 우선 쓰고, 표가 없는 옛 아이템은 현재 등급이면 BonusPercentPerMille, 아니면 그 등급 구간의 중앙값을 쓴다
+	-- (매번 새로 굴리면 볼 때마다 숫자가 바뀐다). 전투(GearEffectLogic)·능력치 팝업·장비 정보 창이 전부 이 값을 쓴다
+	-- — 2026-09-26 유저 지정 "해금된 등급 줄은 전부 적용"으로 하위 등급 줄 수치도 실제로 쓰이게 되면서 신설
+	method integer GetGradeBonusPerMille(integer itemId, any gearStruct, integer gradeEnum)
+		local byGrade = gearStruct.BonusPercentPerMilleByGrade
+		if byGrade ~= nil then
+			local v = byGrade[gradeEnum]
+			if v ~= nil and v > 0 then return v end
+		end
+		if gradeEnum == gearStruct.Grade and gearStruct.BonusPercentPerMille ~= nil and gearStruct.BonusPercentPerMille > 0 then
+			return gearStruct.BonusPercentPerMille
+		end
+		return self:GetBonusMidPerMille(itemId, gradeEnum)
+	end
+
+	-- 그 등급 보너스 구간(전 품질)의 중앙값(1000분율) — 표가 없는 옛 아이템 폴백용
+	method integer GetBonusMidPerMille(integer itemId, integer gradeEnum)
+		if self:IsLegacyWeapon(itemId) then
+			local data = self.LegacyTierDataTable[gradeEnum]
+			if data == nil or data.QualityStats == nil then return 0 end
+			local lo = data.QualityStats[_QualityEnum.F]
+			local hi = data.QualityStats[_QualityEnum.S]
+			if lo == nil or hi == nil or lo.BonusPercentMin == nil or hi.BonusPercentMax == nil then return 0 end
+			return math.floor((lo.BonusPercentMin + hi.BonusPercentMax) / 2)
+		end
+		local data = self:GetTierData(itemId, gradeEnum)
+		if data == nil or data.PercentMin == nil then return 0 end
+		return math.floor((data.PercentMin + data.PercentMax) * 10 / 2)
+	end
+
 	method table RollBonusPercentPerMilleByGrade(integer itemId, integer qualityEnum)
 		local result = {}
 		for grade = _GearGradeEnum.None, _GearGradeEnum.Legendary do
@@ -970,7 +1001,9 @@ script WeaponTierDataLogic extends Logic
 
 			if gradeEnum == _GearGradeEnum.Legendary then
 				local skillName = self:GetSkillText(itemId, gradeEnum, skillVariant)
-				return string.format("MLUA_WEAPONTIERDATALOGIC_164", self:FormatPercentPerMille(procChancePerMille), skillName)
+				-- ⚠ 번역 키를 먼저 풀어야 한다 — 키 문자열을 그대로 format하면 화면에 "MLUA_WEAPONTIERDATALOGIC_164"가
+				-- 찍혔다(2026-09-26 유저 리포트 "아크스태프 마지막 스킬 이상하게 나옴")
+				return string.format(self:LocalizeTemplate("MLUA_WEAPONTIERDATALOGIC_164"), self:FormatPercentPerMille(procChancePerMille), skillName)
 			end
 
 			local label = self:GetBonusLabel(itemId, gradeEnum)

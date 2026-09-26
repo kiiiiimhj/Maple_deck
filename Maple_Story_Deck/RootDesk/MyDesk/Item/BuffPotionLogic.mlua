@@ -39,12 +39,12 @@ script BuffPotionLogic extends Logic
 	property number PopDuration = 0.59
 	property number DropYOffset = 60
 
-	-- 1 = 흡혈, 2 = 크리티컬, 3 = 파워. 효과 종료 시각(_UtilLogic.ElapsedSeconds 기준)
-	property number _vampireUntil = 0
-	property number _critUntil = 0
-	property number _powerUntil = 0
-	property any _endTimerIds = nil
-	property any _endSeq = nil
+	-- 1 = 흡혈, 2 = 크리티컬, 3 = 파워. 남은 효과 시간(초) — 서버 OnUpdate가 줄인다.
+	-- 일시정지(옵션/튜토리얼/인게임 상점 — _GameManager:IsGamePaused()) 중에는 줄지 않는다
+	-- (2026-09-26 유저 지정 "일시정지하면 버프도 멈춰야"). 예전엔 종료 시각 + TimerService라 정지 중에도 흘렀다
+	property number _vampireLeft = 0
+	property number _critLeft = 0
+	property number _powerLeft = 0
 
 	property boolean _flyActive = false
 
@@ -108,38 +108,24 @@ script BuffPotionLogic extends Logic
 	method void ApplyBuffPotion(integer potionType)
 		-- 효과 시작(이미 켜져 있으면 남은 시간을 최대치로 갱신) + 메시지 + 버프 아이콘
 		if _GameManager.GameOver then return end
-		local now = _UtilLogic.ElapsedSeconds
 		local duration = 0
 		if potionType == 1 then
 			duration = self.VampireDuration
-			self._vampireUntil = now + duration
+			self._vampireLeft = duration
 			_UIToast:ShowMessage("MLUA_BUFFPOTIONLOGIC_001")
 		elseif potionType == 2 then
 			duration = self.CritDuration
-			self._critUntil = now + duration
+			self._critLeft = duration
 			_UIToast:ShowMessage("MLUA_BUFFPOTIONLOGIC_002")
 		elseif potionType == 3 then
 			duration = self.PowerDuration
-			self._powerUntil = now + duration
+			self._powerLeft = duration
 			_UIToast:ShowMessage("MLUA_BUFFPOTIONLOGIC_003")
 		else
 			return
 		end
 		-- 업적: 버프 포션 획득 수 + 3종 수집
 		_AchievementLogic:OnBuffPotion(potionType)
-		if self._endTimerIds == nil then self._endTimerIds = {} end
-		if self._endSeq == nil then self._endSeq = {} end
-		local prev = self._endTimerIds[potionType]
-		if prev ~= nil and prev ~= 0 then _TimerService:ClearTimer(prev) end
-		local seq = (self._endSeq[potionType] or 0) + 1
-		self._endSeq[potionType] = seq
-		self._endTimerIds[potionType] = _TimerService:SetTimerOnce(function()
-			if not isvalid(self) then return end
-			if self._endSeq[potionType] ~= seq then return end
-			self._endTimerIds[potionType] = 0
-			self:NotifyPotionBuffOff(potionType)
-			log("BuffPotionLogic: buff ended type=" .. potionType)
-		end, duration)
 		self:NotifyPotionBuffOn(potionType, duration)
 		log("BuffPotionLogic: buff applied type=" .. potionType .. " for " .. duration .. "s")
 	end
@@ -147,29 +133,43 @@ script BuffPotionLogic extends Logic
 	@ExecSpace("ServerOnly")
 	method void ResetRun()
 		-- 새 판 시작(StartGame/RestartGame) — 효과와 아이콘 모두 끈다
-		self._vampireUntil = 0
-		self._critUntil = 0
-		self._powerUntil = 0
+		self._vampireLeft = 0
+		self._critLeft = 0
+		self._powerLeft = 0
 		self._healShowAcc = 0
-		if self._endTimerIds ~= nil then
-			for potionType, id in pairs(self._endTimerIds) do
-				if id ~= nil and id ~= 0 then _TimerService:ClearTimer(id) end
-			end
-		end
-		self._endTimerIds = {}
-		self._endSeq = {}
 		for potionType = 1, 3 do self:NotifyPotionBuffOff(potionType) end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnUpdate(number delta)
+		-- 켜진 버프의 남은 시간을 줄인다 — 일시정지 중에는 멈춘다. 다 되면 효과·아이콘을 끈다
+		if self._vampireLeft <= 0 and self._critLeft <= 0 and self._powerLeft <= 0 then return end
+		if _GameManager:IsGamePaused() then return end
+		self._vampireLeft = self:TickBuff(1, self._vampireLeft, delta)
+		self._critLeft = self:TickBuff(2, self._critLeft, delta)
+		self._powerLeft = self:TickBuff(3, self._powerLeft, delta)
+	end
+
+	@ExecSpace("ServerOnly")
+	method number TickBuff(integer potionType, number left, number delta)
+		-- 한 종류의 남은 시간을 delta만큼 줄이고, 방금 끝났으면 아이콘을 끈다
+		if left <= 0 then return 0 end
+		left = left - delta
+		if left > 0 then return left end
+		self:NotifyPotionBuffOff(potionType)
+		log("BuffPotionLogic: buff ended type=" .. potionType)
+		return 0
 	end
 
 	method number GetDamageMult()
 		-- MonsterAI 피격 진입점에서 곱하는 공격력 배율(파워 포션 중 1.5)
-		if _UtilLogic.ElapsedSeconds < self._powerUntil then return self.PowerDamageMult end
+		if self._powerLeft > 0 then return self.PowerDamageMult end
 		return 1
 	end
 
 	method boolean IsCritForced()
 		-- CardManager.RollCrit이 묻는다 — 크리티컬 포션 중이면 무조건 크리티컬
-		return _UtilLogic.ElapsedSeconds < self._critUntil
+		return self._critLeft > 0
 	end
 
 	method void OnPlayerDamageDealt(number damage)
@@ -177,7 +177,7 @@ script BuffPotionLogic extends Logic
 		-- 유저 지정(2026-09-18): 원래 준 대미지의 1%였는데 후반 대미지가 커지면 회복량이 과해져서
 		-- (유저: "1%로 하니깐 너무 과밸런스") 대미지와 무관한 고정값으로 바꿨다.
 		if damage <= 0 then return end
-		if _UtilLogic.ElapsedSeconds >= self._vampireUntil then return end
+		if self._vampireLeft <= 0 then return end
 		local heal = self.VampireHealPerHit
 		if heal > 0 then
 			_GameManager:HealPlayer(heal)

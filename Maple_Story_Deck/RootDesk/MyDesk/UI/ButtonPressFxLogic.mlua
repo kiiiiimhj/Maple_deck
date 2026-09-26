@@ -1,0 +1,307 @@
+@Logic
+script ButtonPressFxLogic extends Logic
+
+	-- 모든 UI 버튼 공용 눌림 연출(2026-09-26 유저 지정 "뽑기 버튼처럼 나머지도 적용").
+	-- 누르는 순간 이미지 **중심 기준**으로 작아지고, 떼면 살짝 튀며(BackEaseOut) 원래 크기로 돌아온다.
+	-- 예전엔 뽑기/로비 시작/유물·스킬 강화 버튼만 각 스크립트에서 ScaleTo로 따로 하던 것을 여기로 모았다
+	-- (그 스크립트들의 OnButtonStateChanged는 이제 아무것도 안 한다 — 두 곳이 같은 버튼 크기를 다투지 않게).
+	--
+	-- ⚠ 버튼 절반가량이 Pivot이 가운데가 아니다(모서리/가장자리 기준 — 2026-09-26 실측 약 300개 중 ~110개).
+	--   Scale은 Pivot 기준으로 줄어서 그대로 두면 한쪽 모서리로 쪼그라든다 → 줄어든 만큼 anchoredPosition을
+	--   중심 쪽으로 밀어 보정한다. 보정은 "지난번에 민 양을 빼고 새 양을 더하는" 차분 방식이라, 그 사이
+	--   GridView/레이아웃/다른 스크립트가 버튼을 옮겨도 원래 자리가 틀어지지 않는다.
+	-- ⚠ GridView/ScrollLayoutGroup 안 칸은 이 보정이 먹지 않는다 — ResolveTarget 참고(가운데 아이콘만 줄이거나 제외).
+	-- ⚠ 누르고 있는 동안 Pressed 직후 Hover가 한 번 더 온다(CardManager.OnSlotHoldStateChanged 실측) — Hover는 무시한다.
+
+	-- 작은 버튼 / 큰 버튼(카드형 상품 등) 눌림 배율
+	property number PressScale = 0.9
+	property number PressScaleLarge = 0.95
+	-- 이 크기(UI 단위, 가로나 세로) 이상이면 큰 버튼 배율을 쓴다
+	property number LargeSize = 300
+	-- 화면을 덮는 딤/클릭 차단용 버튼은 줄이면 딤이 쪼그라들어 보인다 — 이 크기를 동시에 넘으면 제외
+	property Vector2 ExcludeSize = Vector2(1000, 500)
+	property number PressDuration = 0.06
+	property number ReleaseDuration = 0.16
+	-- 런타임에 새로 생기는 버튼(목록 칸 등)을 잡기 위한 재탐색 주기(초). 켜진 트리만 훑는다
+	property number RescanInterval = 2.0
+	-- 레이아웃 칸(Pivot이 가운데가 아닌)에서 대신 줄일 가운데 아이콘 자식 이름(앞에 있는 것 우선)
+	property table LayoutIconChildNames = { "IconItem", "Icon" }
+	-- 투명 클릭 영역 대신 부모 이미지를 줄이는 조건: 부모 크기가 클릭 영역의 이 배율 이하(가로·세로 모두)
+	property number ClickAreaParentRatio = 1.5
+
+	-- entityId → { entity, eventHandle, factor, baseScale, offset, tweener, pressedAt }
+	-- (키 이름에 handler를 쓰면 mlua 예약어라 파싱 에러 — eventHandle로 둔다)
+	-- pressed = 지금 눌려 있음 / idle = 완전히 원래 크기로 돌아와 쉬는 중(이때만 기준 배율을 다시 잡는다)
+	property table _entries = {}
+	property number _rescanTimer = 0
+	property boolean _started = false
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		-- UI가 전부 로드된 뒤 한 번 전체(꺼진 화면 포함)를 훑어 연결한다
+		_TimerService:SetTimerOnce(function()
+			self:Scan(true)
+			self._started = true
+		end, 1.0)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUpdate(number delta)
+		if not self._started then return end
+		self._rescanTimer = self._rescanTimer + delta
+		if self._rescanTimer < self.RescanInterval then return end
+		self._rescanTimer = 0
+		self:Scan(false)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Scan(boolean includeDisabled)
+		-- /ui 아래 버튼을 찾아 처음 보는 것만 연결한다. includeDisabled=false면 켜진 트리만 훑어 가볍게 돈다
+		local root = _EntityService:GetEntityByPath("/ui")
+		if root == nil then return end
+
+		-- 사라진 버튼은 목록에서 뺀다
+		for id, entry in pairs(self._entries) do
+			if not isvalid(entry.entity) then self._entries[id] = nil end
+		end
+
+		local added = 0
+		local function walk(e)
+			if not includeDisabled and not e.Enable then return end
+			if e.ButtonComponent ~= nil and self._entries[e.Id] == nil then
+				if self:TryRegister(e) then added = added + 1 end
+			end
+			for _, child in ipairs(e.Children:ToTable()) do walk(child) end
+		end
+		walk(root)
+		if added > 0 then
+			log("ButtonPressFxLogic: +" .. added .. " buttons (full=" .. tostring(includeDisabled) .. ")")
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean TryRegister(Entity e)
+		-- 제외 대상이면 "확인했음"만 기록하고 연결하지 않는다(다음 재탐색에서 다시 안 보게)
+		-- target = 실제로 크기를 바꿀 엔티티(보통 버튼 자신, 레이아웃 칸이면 가운데 아이콘)
+		-- inner = 레이아웃 칸이라 위치를 못 옮기는 경우 — 대신 자기 이미지(LocalPosition)와 자식들을 칸 안에서 중심 쪽으로 민다
+		local entry = { entity = e, target = e, inner = false, eventHandle = nil, factor = 1.0, pressed = false, idle = true, baseScale = nil, offset = Vector2(0, 0), tweener = nil, pressedAt = 0 }
+		self._entries[e.Id] = entry
+		if self:IsExcluded(e) then return false end
+		local target = self:ResolveTarget(e)
+		if target == nil then return false end
+		entry.target = target
+		entry.inner = self:IsInLayout(target) and not self:IsCenterPivot(target)
+		entry.eventHandle = e:ConnectEvent(ButtonStateChangeEvent, function(event) self:OnStateChanged(entry, event) end)
+		return true
+	end
+
+	@ExecSpace("ClientOnly")
+	method Entity ResolveTarget(Entity e)
+		-- 크기를 바꿀 대상을 정한다. nil이면 이 버튼은 연출하지 않는다.
+		-- ⚠ GridView/ScrollLayoutGroup 안 칸은 레이아웃이 위치를 매 프레임 다시 잡아서 중심 보정(anchoredPosition 이동)이
+		--   지워진다(2026-09-26 실측: 인벤 칸 Pivot(0,1)·상점 상품 카드 Pivot(0,0.5) → 모서리로 쪼그라듦, 유저 리포트).
+		--   Pivot을 가운데로 바꿔도 소용없었다(실측). 그래서 칸 자체는 줄이되, 칸의 자기 이미지(SpriteGUIRenderer.LocalPosition)와
+		--   자식들을 칸 안에서 중심 쪽으로 밀어 틀 전체가 가운데 기준으로 줄어 보이게 한다(inner 모드, 2026-09-26 유저 지정
+		--   "아이템만이 아니라 틀 자체가"). 칸 자체에 글자가 붙어 있으면 글자는 못 밀어서, 그때만 가운데 아이콘 자식으로 대신한다
+		-- 투명 클릭 영역(로비 뽑기 아이콘 ClickArea, 인게임 스킬 슬롯 SlotBtn1~6 등)은 자기를 줄여봐야 안 보인다 —
+		-- 크기가 부모 이미지와 거의 같으면 부모를 대신 줄인다(2026-09-26 유저 리포트 "메인화면 뽑기 버튼은 적용이 안 돼 있네").
+		-- 부모가 훨씬 크면(하단 탭바처럼 바 전체) 그대로 둔다
+		if self:IsInvisibleClickArea(e) then
+			local p = e.Parent
+			if isvalid(p) and p.UITransformComponent ~= nil and p.TransformComponent ~= nil and p.SpriteGUIRendererComponent ~= nil then
+				local ps = p.UITransformComponent.RectSize
+				local es = e.UITransformComponent.RectSize
+				if ps.x <= es.x * self.ClickAreaParentRatio and ps.y <= es.y * self.ClickAreaParentRatio then
+					e = p
+				end
+			end
+		end
+
+		if not self:IsInLayout(e) or self:IsCenterPivot(e) then return e end
+		if e.TextGUIRendererComponent == nil then return e end
+		for _, childName in ipairs(self.LayoutIconChildNames) do
+			local icon = e:GetChildByName(childName)
+			if icon ~= nil and icon.UITransformComponent ~= nil and icon.TransformComponent ~= nil and self:IsCenterPivot(icon) then
+				return icon
+			end
+		end
+		return nil
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean IsInLayout(Entity e)
+		-- 부모가 위치를 직접 잡는 레이아웃(GridView/ScrollLayoutGroup)인가
+		local parent = e.Parent
+		return isvalid(parent) and (parent.GridViewComponent ~= nil or parent.ScrollLayoutGroupComponent ~= nil)
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean IsEmptyItemSlot(Entity e)
+		-- 아이템 칸(UIItemSlot)인데 아이템이 없으면 true — 빈 칸은 눌림 연출을 하지 않는다(유저 지정 2026-09-26).
+		-- 인벤 끝의 확장("+") 칸은 아이템은 없어도 누를 수 있는 칸이라 예외
+		---@type UIItemSlot
+		local slot = e:GetComponent("script.UIItemSlot")
+		if slot == nil then return false end
+		---@type UIInventoryGridCell
+		local cell = e:GetComponent("script.UIInventoryGridCell")
+		if cell ~= nil and cell.IsPlusSlot then return false end
+		return slot.ItemStruct == nil
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean IsInvisibleClickArea(Entity e)
+		-- 자기 이미지가 없거나 투명하고, 보이는 자식(이미지/글자)도 없는 버튼
+		if e.TextGUIRendererComponent ~= nil then return false end
+		local sp = e.SpriteGUIRendererComponent
+		if sp ~= nil and sp.Enable and sp.ImageRUID ~= "" and sp.Color.a >= 0.05 then return false end
+		for _, c in ipairs(e.Children:ToTable()) do
+			if c.TextGUIRendererComponent ~= nil then return false end
+			local cs = c.SpriteGUIRendererComponent
+			if cs ~= nil and cs.ImageRUID ~= "" and cs.Color.a >= 0.05 then return false end
+		end
+		return true
+	end
+
+	@ExecSpace("ClientOnly")
+	method string GetGroupName(Entity e)
+		-- /ui 바로 아래 조상(= UI 그룹) 이름
+		local cur = e
+		while isvalid(cur) and isvalid(cur.Parent) do
+			if cur.Parent.Name == "ui" then return cur.Name end
+			cur = cur.Parent
+		end
+		return ""
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean IsCenterPivot(Entity e)
+		local p = e.UITransformComponent.Pivot
+		return math.abs(p.x - 0.5) < 0.01 and math.abs(p.y - 0.5) < 0.01
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean IsExcluded(Entity e)
+		-- 딤/클릭 차단막(이름 또는 화면급 크기)은 제외
+		local name = e.Name
+		if string.find(name, "Dim") or string.find(name, "Blocker") or string.find(name, "Backdrop") then return true end
+		-- 출석 보상 7칸(Day1~7)은 유저 지정으로 제외(2026-09-26 "출석 보상 리스트는 빼도 될 듯") — 착지 반동 연출이 따로 있다
+		if string.match(name, "^Day%d+$") and self:GetGroupName(e) == "AttendanceGroup" then return true end
+		local ui = e.UITransformComponent
+		if ui == nil or e.TransformComponent == nil then return true end
+		local size = ui.RectSize
+		if size.x >= self.ExcludeSize.x and size.y >= self.ExcludeSize.y then return true end
+		return false
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnStateChanged(table entry, ButtonStateChangeEvent event)
+		-- Pressed → 줄이기 / Released·Clicked·Normal → 되돌리기 / Hover → 무시
+		if not isvalid(entry.entity) or not isvalid(entry.target) then return end
+		local state = event.state
+		if state == ButtonState.Pressed then
+			local button = entry.entity.ButtonComponent
+			if button ~= nil and not button.Enable then return end
+			if self:IsEmptyItemSlot(entry.entity) then return end
+			-- 쉬고 있을 때의 크기를 기준으로 잡는다(원래 배율이 1이 아닌 버튼도 있다). 되돌리기 중(오버슈트 포함)이면 기존 기준 유지
+			if entry.idle or entry.baseScale == nil then entry.baseScale = entry.target.TransformComponent.Scale end
+			entry.idle = false
+			entry.pressed = true
+			entry.pressedAt = _UtilLogic.ElapsedSeconds
+			self:AnimateTo(entry, self:GetPressScale(entry.target), self.PressDuration, false)
+		elseif state ~= ButtonState.Hover then
+			if not entry.pressed then return end
+			entry.pressed = false
+			-- 짧게 톡 친 경우에도 줄어드는 게 보이도록, 줄이기가 끝난 뒤에 되돌린다
+			local remain = self.PressDuration - (_UtilLogic.ElapsedSeconds - entry.pressedAt)
+			if remain > 0.005 then
+				_TimerService:SetTimerOnce(function()
+					if isvalid(entry.entity) and not entry.pressed then self:AnimateTo(entry, 1.0, self.ReleaseDuration, true) end
+				end, remain)
+			else
+				self:AnimateTo(entry, 1.0, self.ReleaseDuration, true)
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method number GetPressScale(Entity e)
+		local size = e.UITransformComponent.RectSize
+		if size.x >= self.LargeSize or size.y >= self.LargeSize then return self.PressScaleLarge end
+		return self.PressScale
+	end
+
+	@ExecSpace("ClientOnly")
+	method void AnimateTo(table entry, number target, number duration, boolean bounce)
+		-- 지금 배율에서 target까지 트윈한다(진행 중인 트윈은 멈추고 이어받는다)
+		if entry.tweener ~= nil then
+			entry.tweener:Stop()
+			entry.tweener = nil
+		end
+		-- 줄이기는 QuadEaseOut, 되돌리기는 BackEaseOut(살짝 튀며 복귀). 엔진 enum은 파라미터로 못 받아 bool로 고른다
+		local ease = EaseType.QuadEaseOut
+		if bounce then ease = EaseType.BackEaseOut end
+		local from = entry.factor
+		entry.tweener = _TweenLogic:PlayTween(from, target, duration, ease, function(f)
+			self:ApplyFactor(entry, f)
+		end)
+		if bounce and entry.tweener ~= nil then
+			-- 되돌리기가 끝나면 원래 배율·위치로 정확히 맞추고 "쉬는 중"으로 표시한다(오버슈트 잔여 오차 제거)
+			entry.tweener:SetOnEndCallback(function()
+				self:ApplyFactor(entry, 1.0)
+				if isvalid(entry.target) and entry.baseScale ~= nil then entry.target.TransformComponent.Scale = entry.baseScale end
+				entry.idle = true
+			end)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ApplyFactor(table entry, number f)
+		-- 배율 f를 적용하고, Pivot이 가운데가 아니면 줄어든 만큼 중심 쪽으로 위치를 보정한다
+		local e = entry.target
+		if not isvalid(e) or entry.baseScale == nil then return end
+		local bs = entry.baseScale
+		e.TransformComponent.Scale = Vector3(bs.x * f, bs.y * f, bs.z)
+
+		local ui = e.UITransformComponent
+		local pivot = ui.Pivot
+		local size = ui.RectSize
+		local k = 1.0 - f
+		local old = entry.offset
+		if entry.inner then
+			-- 칸 안쪽 좌표로 민다: 칸 배율(bs*f)이 곱해져 보이므로 화면상 이동량 (0.5-pivot)*size*bs*(1-f)를 내려면 bs*f로 나눈 값
+			local newOffset = Vector2(0, 0)
+			if f > 0.01 then newOffset = Vector2((0.5 - pivot.x) * size.x * k / f, (0.5 - pivot.y) * size.y * k / f) end
+			local dx = newOffset.x - old.x
+			local dy = newOffset.y - old.y
+			if math.abs(dx) > 0.0001 or math.abs(dy) > 0.0001 then
+				local sp = e.SpriteGUIRendererComponent
+				if sp ~= nil then sp.LocalPosition = Vector2(sp.LocalPosition.x + dx, sp.LocalPosition.y + dy) end
+				for _, child in ipairs(e.Children:ToTable()) do
+					local ct = child.UITransformComponent
+					if ct ~= nil then ct.anchoredPosition = Vector2(ct.anchoredPosition.x + dx, ct.anchoredPosition.y + dy) end
+				end
+				entry.offset = newOffset
+			end
+		else
+			local newOffset = Vector2((0.5 - pivot.x) * size.x * bs.x * k, (0.5 - pivot.y) * size.y * bs.y * k)
+			if math.abs(newOffset.x - old.x) > 0.0001 or math.abs(newOffset.y - old.y) > 0.0001 then
+				local pos = ui.anchoredPosition
+				ui.anchoredPosition = Vector2(pos.x - old.x + newOffset.x, pos.y - old.y + newOffset.y)
+				entry.offset = newOffset
+			end
+		end
+		entry.factor = f
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		-- 연결한 이벤트를 전부 해제한다
+		for _, entry in pairs(self._entries) do
+			if entry.eventHandle ~= nil and isvalid(entry.entity) then
+				entry.entity:DisconnectEvent(ButtonStateChangeEvent, entry.eventHandle)
+			end
+		end
+		self._entries = {}
+	end
+
+end
