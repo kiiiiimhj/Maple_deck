@@ -14326,6 +14326,8 @@ script CardManager extends Logic
 	property number DoubleTapWindow = 1.0
 	property integer _pendingTapChoice = 0
 	property number _pendingTapTime = 0
+	-- 선택을 서버로 보낸 뒤 카드가 닫힐 때까지 추가 탭을 막는 클라 잠금(MarkChoicePicked)
+	property boolean _clientChoicePicked = false
 	property integer _pendingTapTimerId = 0
 
 	-- 클라이언트 쿨타임 연출 — 캐스트마다 새 타이머를 만들지 않고
@@ -14470,8 +14472,8 @@ script CardManager extends Logic
 	end
 
 	-- 셀프 리커버리 — SelfRecoveryInterval초마다 최대 체력의 % 회복, Lv1:2%/Lv2:3%/Lv3:4%/Lv4:5%/Lv5:6%
-	-- (유저 지정 2026-09-17: 10초 3~7% → 15초 2~6%)
-	property number SelfRecoveryInterval = 15.0
+	-- (유저 지정 2026-09-17: 10초 3~7% → 15초 2~6%, 2026-09-29: 30초로)
+	property number SelfRecoveryInterval = 30.0
 	property number _selfRecoveryTimer = 0
 	method integer GetSelfRecoveryPercent()
 		if self.SelfRecoveryLevel >= 5 then return 6
@@ -19158,7 +19160,21 @@ script CardManager extends Logic
 	end
 
 	@ExecSpace("ClientOnly")
+	method void MarkChoicePicked()
+		-- 선택을 서버로 보냈다 — 카드가 실제로 닫히기(HideLevelUpChoices)까지의 틈에 들어오는 추가 탭을 막는다.
+		-- (2026-09-29 유저 리포트: 빠르게 두 번 탭하면 카드는 선택됐는데 스킬 정보창이 떠 있다 — 선택 직후 다음 누름이
+		--  정보창을 다시 열었고, 카드를 닫는 쪽은 정보창을 안 닫았다.) 서버가 어떤 이유로 안 닫으면 잠시 뒤 풀어준다
+		self._clientChoicePicked = true
+		self:HideTooltip()
+		self:ClearPendingTap()
+		_TimerService:SetTimerOnce(function()
+			if isvalid(self) then self._clientChoicePicked = false end
+		end, 1.5)
+	end
+
+	@ExecSpace("ClientOnly")
 	method void OnChoiceTouchDown(integer choiceIndex)
+		if self._clientChoicePicked then return end
 		if choiceIndex == 1 then self._choiceHoldStart1 = _UtilLogic.ElapsedSeconds
 		elseif choiceIndex == 2 then self._choiceHoldStart2 = _UtilLogic.ElapsedSeconds
 		else self._choiceHoldStart3 = _UtilLogic.ElapsedSeconds
@@ -19168,6 +19184,10 @@ script CardManager extends Logic
 
 	@ExecSpace("ClientOnly")
 	method void OnChoiceTouchUp(integer choiceIndex)
+		if self._clientChoicePicked then
+			self:HideTooltip()
+			return
+		end
 		local startTime = 0
 		if choiceIndex == 1 then startTime = self._choiceHoldStart1
 		elseif choiceIndex == 2 then startTime = self._choiceHoldStart2
@@ -19184,15 +19204,14 @@ script CardManager extends Logic
 		end
 
 		if not _OptionUI:IsDoubleTapSelect() then
-			self:HideTooltip()
+			self:MarkChoicePicked()
 			self:SelectLevelUpChoice(choiceIndex)
 			return
 		end
 
 		-- 두 번 터치 모드: 같은 카드를 창 안에 다시 탭했으면 선택, 아니면 이번 탭을 "첫 탭"으로 기억하고 툴팁을 열어 둔다
 		if self._pendingTapChoice == choiceIndex and (now - self._pendingTapTime) <= self.DoubleTapWindow then
-			self:HideTooltip()
-			self:ClearPendingTap()
+			self:MarkChoicePicked()
 			log("CardManager: double tap select choice " .. choiceIndex)
 			self:SelectLevelUpChoice(choiceIndex)
 			return
@@ -19237,9 +19256,14 @@ script CardManager extends Logic
 		-- [LEA-2007] AttemptToIndex 에러가 난다. 등록될 때까지 이번 프레임은 건너뛴다.
 		if _MonsterSpawner == nil then return end
 
+		-- 안전지대(그림자 상점/택시/콜로세움)에서는 자동공격·스킬 쿨타임·포션·장비 버프·무기 스킬 타이머를
+		-- 전부 멈춘다 — 서 있기만 해도 포션/회복이 차던 문제(유저 지정 2026-09-17, GameManager.SafeAreaFrozen 주석 참고).
+		-- 셀프 리커버리도 여기서 같이 멈춘다(유저 지정 2026-09-29 — 예전 "안전지대 예외"를 되돌림). 보물상자 존(44)은
+		-- 실제로 싸우는 곳이라 여기서 멈추지 않는다
+		if _GameManager:IsSafeAreaFrozen() then return end
+
 		-- 셀프 리커버리 자동 회복 — SelfRecoveryInterval초마다 고정 틱(포션과 달리 체력이 가득
 		-- 찼어도 타이머는 계속 돈다. HealPlayer가 최대 체력 초과를 자체 클램프하므로 안전)
-		-- 유저 지정(2026-09-17): 셀프 리커버리는 안전지대 정지에서 뺀다 — 그래서 아래 SafeAreaFrozen 게이트보다 앞에 둔다
 		if self.SelfRecoveryLevel > 0 then
 			self._selfRecoveryTimer = self._selfRecoveryTimer - delta
 			if self._selfRecoveryTimer <= 0 then
@@ -19249,11 +19273,6 @@ script CardManager extends Logic
 				self._selfRecoveryTimer = self.SelfRecoveryInterval
 			end
 		end
-
-		-- 안전지대(그림자 상점/택시/콜로세움)에서는 자동공격·스킬 쿨타임·포션·장비 버프·무기 스킬 타이머를
-		-- 전부 멈춘다 — 서 있기만 해도 포션/회복이 차던 문제(유저 지정 2026-09-17, GameManager.SafeAreaFrozen 주석 참고).
-		-- 셀프 리커버리만은 유저 지정으로 예외(위에서 먼저 처리). 보물상자 존(44)은 실제로 싸우는 곳이라 여기서 멈추지 않는다
-		if _GameManager:IsSafeAreaFrozen() then return end
 
 		local target = self:FindTarget()
 
@@ -24142,8 +24161,10 @@ script CardManager extends Logic
 	@ExecSpace("Multicast")
 	method void ShowLevelUpChoices(integer card1, string type1, integer card2, string type2, integer card3, string type3)
 		if self:IsServer() then return end
-		-- 새 선택지(레벨업/리롤)가 뜨면 이전 첫 탭은 무효
+		-- 새 선택지(레벨업/리롤)가 뜨면 이전 첫 탭은 무효, 선택 잠금도 풀고 남은 정보창도 닫는다
 		self:ClearPendingTap()
+		self._clientChoicePicked = false
+		self:HideTooltip()
 		self:SetChoiceCardText(self.choiceIcon1, self.choiceTitle1, self.choiceName1, self.choiceDesc1, card1, type1)
 		self:SetChoiceCardText(self.choiceIcon2, self.choiceTitle2, self.choiceName2, self.choiceDesc2, card2, type2)
 		self:SetChoiceCardText(self.choiceIcon3, self.choiceTitle3, self.choiceName3, self.choiceDesc3, card3, type3)
@@ -24156,11 +24177,32 @@ script CardManager extends Logic
 		self._clientChoiceCard3 = card3 ; self._clientChoiceType3 = type3
 	end
 
-	-- 이번 판 다시뽑기 비용 — 첫 1회 무료, 그다음부터 ChoiceRerollCost
+	-- 이번 판 다시뽑기 비용 — 첫 1회 무료(모험 지원 패스면 PassFreeRerolls회), 그다음부터 ChoiceRerollCost
 	method integer GetChoiceRerollCost()
 		-- 서버 전용 카운터 기준으로 다음 다시뽑기 비용을 돌려준다
-		if self._choiceRerollCount <= 0 then return 0 end
+		local freeCount = 1
+		if self._passRunActive then freeCount = self.PassFreeRerolls end
+		if self._choiceRerollCount < freeCount then return 0 end
 		return self.ChoiceRerollCost
+	end
+
+	-- ── 모험 지원 패스(30일 이용권, 2026-09-29) 판 단위 혜택 ─────────────────────────
+	-- 판을 시작할 때 한 번 AdventurePassLogic에 물어 _passRunActive로 고정한다 — 판 도중 만료돼도 그 판은 유지(유저 확정).
+	--   ① 6번 카드 슬롯 무료 해금(원래 매 판 다이아 10)  ② 다시뽑기 매 판 3회 무료(기본 1회 포함)  ③ 포션 Lv1로 시작
+	-- ResetAllCards 끝(다시하기/캐릭터 변경)과 GameManager.StartGame 최초 시작에서 부른다. 이어하기는 둘 다 안 불러 그대로 유지.
+	property boolean _passRunActive = false
+	property integer PassFreeRerolls = 3
+
+	@ExecSpace("ServerOnly")
+	method void ApplyAdventurePassForRun()
+		self._passRunActive = _AdventurePassLogic:IsActive()
+		if not self._passRunActive then return end
+		self.Slot6Unlocked = true
+		if self.PotionLevel < 1 then
+			self.PotionLevel = 1
+			self._potionTimer = 0
+		end
+		log("CardManager: adventure pass run benefits applied (slot6 open, free rerolls=" .. tostring(self.PassFreeRerolls) .. ", potion Lv1)")
 	end
 
 	-- 다시뽑기 버튼 표시. cost < 0 이면 숨김, 0이면 "무료", 그 외엔 다이아 아이콘 + 비용
@@ -26480,6 +26522,8 @@ script CardManager extends Logic
 
 		self.PotionLevel = 0
 		self._potionTimer = 0
+		-- 모험 지원 패스 혜택(6번 슬롯/포션 Lv1/다시뽑기 3회) — 위에서 전부 판 초기값으로 되돌린 뒤에 얹는다
+		self:ApplyAdventurePassForRun()
 
 		-- 보스 웨이브 슬롯 드롭 상한 초기화 — 보스를 못 잡고 게임오버로 끝나면 EndBossWaveDropCap이
 		-- 안 불려 상한이 켜진 채로 남는다. 새 런 시작 때 반드시 풀어줘야 다음 런 드롭이 안 막힌다.
@@ -26708,6 +26752,9 @@ script CardManager extends Logic
 		self._clientChoiceCard1 = 0 ; self._clientChoiceType1 = ""
 		self._clientChoiceCard2 = 0 ; self._clientChoiceType2 = ""
 		self._clientChoiceCard3 = 0 ; self._clientChoiceType3 = ""
+		-- 선택지가 닫히면 그 선택지의 정보창과 두 번 탭 대기도 같이 닫는다(2026-09-29 "카드는 선택됐는데 정보창이 떠 있다")
+		self:ClearPendingTap()
+		self:HideTooltip()
 	end
 
 	-- ── 엘리트 몬스터 드롭 ───────────────────────────────────────

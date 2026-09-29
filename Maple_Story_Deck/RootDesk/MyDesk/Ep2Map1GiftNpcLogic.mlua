@@ -32,6 +32,9 @@ script Ep2Map1GiftNpcLogic extends Logic
 	property number BubbleXOffset = -0.7652970
 
 	property number BubbleYOffset = 0.9155867
+	-- 진행 말풍선(공용 CollectBubbleLogic "몬스터 → 잡템 X남은개수", 유저 지정 2026-09-30) 위치 — 위 오프셋은 하트 말풍선용
+	property number QuestBubbleXOffset = -1.25
+	property number QuestBubbleYOffset = 1.25
 
 	-- 하트 아이콘 전용 위치/크기(2026-08-21, 유저 지정: "잡템 모아오라고한 이미지 사이즈랑 위치로 변경하고
 	-- 거기에서 오른쪽으로 더 이동"). 잡템 수집 중 아이콘(Icon 자식의 모델 기본값, GiftBubble.model 참고)과
@@ -94,8 +97,7 @@ script Ep2Map1GiftNpcLogic extends Logic
 		local have = _PlayerInventory:GetItemCount(self.PickedItemId)
 		if have < self.GiftAmount then
 			local remaining = self.GiftAmount - have
-			local itemDef = _PlayerInventory:GetItemDef(self.PickedItemId)
-			self:SpawnBubble(map, bubblePos, itemDef.icon, "X" .. remaining, true, 1.0, self.DefaultIconPosition, self.DefaultIconScale)
+			self:SpawnQuestBubble(npcEntity, "X" .. remaining)
 			log("Ep2Map1GiftNpc: still collecting - " .. self.PickedItemId .. " (" .. have .. "/" .. self.GiftAmount .. ", " .. remaining .. " left)")
 			return
 		end
@@ -181,6 +183,24 @@ script Ep2Map1GiftNpcLogic extends Logic
 			count.Enable = showText
 		end
 		
+		_TimerService:SetTimerOnce(function()
+			if isvalid(bubble) then bubble:Destroy() end
+			if self._activeBubble == bubble then self._activeBubble = nil end
+		end, self.BubbleShowDuration)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SpawnQuestBubble(Entity npc, string countText)
+		-- 진행상황 말풍선: 공용 CollectBubbleLogic으로 "몬스터 그림 → 잡템 X남은개수"
+		if self._activeBubble ~= nil and isvalid(self._activeBubble) then self._activeBubble:Destroy() end
+		self._activeBubble = nil
+		local map = npc.CurrentMap
+		if map == nil then return end
+		local wp = npc.TransformComponent.WorldPosition
+		local pos = Vector3(wp.x + self.QuestBubbleXOffset, wp.y + self.QuestBubbleYOffset, wp.z - 0.5)
+		local bubble = _CollectBubbleLogic:SpawnItemQuestBubble(map, pos, "Ep2Map1QuestBubble", self.PickedItemId, countText, false)
+		if bubble == nil then return end
+		self._activeBubble = bubble
 		_TimerService:SetTimerOnce(function()
 			if isvalid(bubble) then bubble:Destroy() end
 			if self._activeBubble == bubble then self._activeBubble = nil end

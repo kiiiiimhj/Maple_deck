@@ -26,6 +26,17 @@ script PlayLogLogic extends Logic
 	property ButtonComponent btnRecent = "2cead8d9-4a2d-400b-b202-3c473dd5fee7"
 	property ButtonComponent btnClose = "d1c9927b-ba7f-493a-ba71-00cb05bee4bc"
 	property TextGUIRendererComponent resultText = "e02c8a7c-675d-47fd-ba96-03afd2fa3d93"
+	-- 랭킹 상위 + 생존 시간 보기(2026-09-29 — "3만점 유저" 확인용). 랭킹 저장값 = 점수*RankScoreTimeScale + 생존초
+	-- (GameManager.EncodeRankScore)라 이미 쌓인 기록에서도 생존 시간을 꺼낼 수 있다. 입력칸에 닉네임이 있으면 그 사람만.
+	property ButtonComponent btnRank = "4b2ffa19-9dc7-4d4d-86b8-b3cc5cbae3ca"
+	property integer RankShowUnlimited = 15
+	property integer RankShowTimeAttack = 5
+	-- ⚠ GameManager.RankBoardIdUnlimited/TimeAttack·RankScoreTimeScale, RankUI와 같은 값 — 바꾸면 같이 바꿀 것
+	-- (다른 Logic 필드를 직접 읽으면 nil이 올 수 있어서 복제해 둠)
+	property integer RankBoardUnlimited = 1
+	property integer RankBoardTimeAttack = 2
+	property integer RankScoreTimeScale = 10000
+	property any _rankHandler = nil
 
 	property any _reportedUsers = nil
 	property integer _reportTries = 0
@@ -61,6 +72,9 @@ script PlayLogLogic extends Logic
 		end
 		if isvalid(self.btnClose) then
 			self._closeHandler = self.btnClose.Entity:ConnectEvent(ButtonClickEvent, function() self:CloseWindow() end)
+		end
+		if isvalid(self.btnRank) then
+			self._rankHandler = self.btnRank.Entity:ConnectEvent(ButtonClickEvent, function() self:OnRankClicked() end)
 		end
 		if isvalid(self.input) then
 			self.input.PlaceHolder = _LocText:Resolve("MLUA_PLAYLOGLOGIC_001")
@@ -286,6 +300,121 @@ script PlayLogLogic extends Logic
 	end
 
 	@ExecSpace("ClientOnly")
+	method void OnRankClicked()
+		-- 랭킹 상위 목록(입력칸에 닉네임이 있으면 그 사람 기록만)
+		local nick = ""
+		if isvalid(self.input) and self.input.Text ~= nil then nick = self.input.Text end
+		nick = string.match(nick, "^%s*(.-)%s*$")
+		self:SetResult(_LocText:Resolve("MLUA_PLAYLOGLOGIC_002"))
+		self:RequestRankLookup(nick)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SaveRankMeta(integer boardId, string profileCode, integer episode, integer character, integer continues, integer kills, integer level)
+		-- GameManager.SubmitRankingScore가 기록 갱신 시 호출 — 그 판 정보를 전역 저장소 "R:<보드>:<프로필>"에 남긴다
+		if profileCode == nil or profileCode == "" then return end
+		local meta = { ep = episode, ch = character, c = continues, k = kills, lv = level, t = self:GetKstString() }
+		local storage = _DataStorageService:GetGlobalDataStorage(self.StorageName)
+		local key = "R:" .. tostring(boardId) .. ":" .. profileCode
+		storage:SetAsync(key, _HttpService:JSONEncode(meta), function(errorCode)
+			if errorCode ~= 0 then log_warning("PlayLogLogic: rank meta save failed code=" .. tostring(errorCode)) end
+		end)
+		log(string.format("PlayLogLogic: rank meta saved board=%d ep=%d ch=%d continues=%d kills=%d lv=%d", boardId, episode, character, continues, kills, level))
+	end
+
+	@ExecSpace("Server")
+	method void RequestRankLookup(string nick)
+		-- 운영자만: 무제한/타임어택 보드의 저장값을 "보드\t순위\t닉네임\t저장값" 줄로 돌려준다(풀이는 클라)
+		local userId = senderUserId
+		if not self:IsAdmin(userId) then
+			log_warning("PlayLogLogic: rank lookup denied for " .. tostring(userId))
+			return
+		end
+		local lines = {}
+		local storage = _DataStorageService:GetGlobalDataStorage(self.StorageName)
+		-- 보드 id는 GameManager.RankBoardId* / RankUI.BoardId*와 같은 값(1=무제한, 2=타임어택)
+		local boards = { self.RankBoardUnlimited, self.RankBoardTimeAttack }
+		for _, boardId in ipairs(boards) do
+			local configData = _RankingConfigDataSetLogic:GetData(boardId)
+			if configData ~= nil then
+				local cycleIndex = configData:GetCycleIndex(_DateTimeLogic:GetTimeElapsed())
+				local entries = _RankingViewLogic:GetLiveEntriesAndWait(boardId, cycleIndex, configData)
+				local limit = self.RankShowUnlimited
+				if boardId == self.RankBoardTimeAttack then limit = self.RankShowTimeAttack end
+				local shown = 0
+				for i, e in ipairs(entries) do
+					local name = tostring(e.name)
+					local match = (nick == "" and shown < limit) or (nick ~= "" and name == nick)
+					if match then
+						shown = shown + 1
+						-- 판 정보(SaveRankMeta) — 이 기능 이전에 세워진 기록은 없다(빈 칸)
+						local metaRaw = ""
+						if e.profileCode ~= nil and e.profileCode ~= "" then
+							local code, raw = storage:GetAndWait("R:" .. tostring(boardId) .. ":" .. tostring(e.profileCode))
+							if code == 0 and raw ~= nil then metaRaw = raw end
+						end
+						table.insert(lines, table.concat({ tostring(boardId), tostring(i), name, tostring(e.score), metaRaw }, "\t"))
+					end
+				end
+				log(string.format("PlayLogLogic: rank lookup board=%d entries=%d shown=%d nick='%s'", boardId, #entries, shown, nick))
+			end
+		end
+		self:ShowRankResult(nick, table.concat(lines, "\n"), userId)
+	end
+
+	@ExecSpace("Client")
+	method void ShowRankResult(string nick, string raw)
+		-- 저장값을 점수 / 생존 시간으로 풀어서 보여 준다
+		if raw == "" then
+			self:SetResult(_LocText:Resolve("MLUA_PLAYLOGLOGIC_003"))
+			return
+		end
+		local scale = self.RankScoreTimeScale
+		local groups = {}
+		local order = {}
+		for line in string.gmatch(raw, "[^\n]+") do
+			local parts = {}
+			for p in string.gmatch(line .. "\t", "([^\t]*)\t") do table.insert(parts, p) end
+			local boardId = tonumber(parts[1]) or 0
+			local stored = math.tointeger(tonumber(parts[4]) or 0) or 0
+			local score = stored // scale
+			local sec = stored % scale
+			local timeText = string.format("%d:%02d:%02d", sec // 3600, (sec % 3600) // 60, sec % 60)
+			if sec >= scale - 1 then timeText = timeText .. "+" end
+			if groups[boardId] == nil then
+				groups[boardId] = {}
+				table.insert(order, boardId)
+			end
+			local row = string.format("%3s.  %8d   %s   %s", tostring(parts[2]), score, timeText, tostring(parts[3]))
+			local metaText = self:FormatRankMeta(parts[5])
+			if metaText ~= "" then row = row .. "   | " .. metaText end
+			table.insert(groups[boardId], row)
+		end
+		local out = {}
+		for _, boardId in ipairs(order) do
+			local boardKey = "UI_TITLEGROUP_013"
+			if boardId == self.RankBoardTimeAttack then boardKey = "UI_TITLEGROUP_012" end
+			if #out > 0 then table.insert(out, "") end
+			table.insert(out, _LocalizationService:GetTextFormat("FMT_PLAYLOGLOGIC_008", _LocText:Resolve(boardKey), tostring(#groups[boardId])))
+			for _, row in ipairs(groups[boardId]) do table.insert(out, row) end
+		end
+		self:SetResult(table.concat(out, "\n"))
+	end
+
+	@ExecSpace("ClientOnly")
+	method string FormatRankMeta(string raw)
+		-- SaveRankMeta JSON → "에피1 · 레이온 · 이어하기 3회 · 처치 8412 · Lv 58 · 날짜" (없으면 "")
+		if raw == nil or raw == "" then return "" end
+		local meta = _HttpService:JSONDecode(raw)
+		if meta == nil then return "" end
+		local charKeys = { "MLUA_WORLDCHARACTERSELECTUI_001", "MLUA_MAP21RELICEASTEREGG_001", "MLUA_EP2MAP2ARENALOGIC_006", "MLUA_CHARACTERUNLOCKLOGIC_001", "MLUA_CHARACTERUNLOCKLOGIC_003" }
+		local ch = math.tointeger(tonumber(meta.ch) or -1) or -1
+		local charName = tostring(ch)
+		if charKeys[ch + 1] ~= nil then charName = _LocText:Resolve(charKeys[ch + 1]) end
+		return _LocalizationService:GetTextFormat("FMT_PLAYLOGLOGIC_009", tostring(meta.ep), charName, tostring(meta.c), tostring(meta.k), tostring(meta.lv), tostring(meta.t))
+	end
+
+	@ExecSpace("ClientOnly")
 	method void SetResult(string text)
 		if isvalid(self.resultText) then self.resultText.Text = text end
 	end
@@ -298,6 +427,7 @@ script PlayLogLogic extends Logic
 		if self._recentHandler and isvalid(self.btnRecent) then self.btnRecent.Entity:DisconnectEvent(ButtonClickEvent, self._recentHandler) end
 		if self._closeHandler and isvalid(self.btnClose) then self.btnClose.Entity:DisconnectEvent(ButtonClickEvent, self._closeHandler) end
 		if self._submitHandler and isvalid(self.input) then self.input.Entity:DisconnectEvent(TextInputSubmitEvent, self._submitHandler) end
+		if self._rankHandler and isvalid(self.btnRank) then self.btnRank.Entity:DisconnectEvent(ButtonClickEvent, self._rankHandler) end
 	end
 
 end

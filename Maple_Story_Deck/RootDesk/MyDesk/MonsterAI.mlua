@@ -298,6 +298,8 @@ script MonsterAI extends Component
 	property number _erdasPatrolTargetX = 0
 
 	property number ErdasPatrolSpeed = 0.8
+	-- 에르다스 최소 체력(InitializeErdas — 시간 단계 체력×2가 이보다 낮으면 이 값)
+	property number ErdasMinHp = 3000
 
 	property number _erdasPatrolRetargetTimer = 0
 
@@ -1058,7 +1060,8 @@ script MonsterAI extends Component
 		if isBoss then
 			-- 보스는 항상 느린 접근(15초 교전창)을 유지한다 — GetWaveApproachSpeed는 wave==10일 때만
 			-- 특수값을 반환하므로, 실제 wave 값과 무관하게 리터럴 10을 넘겨 그 분기를 그대로 재사용한다.
-			self.ApproachSpeed = _GameManager:GetWaveApproachSpeed(10)
+			-- 2026-09-30 유저 지정: 보스는 일반 몬스터보다 20% 빠르게(예전 0.08 느린 교전창 폐지)
+			self.ApproachSpeed = _GameManager:GetWaveApproachSpeed(1) * _GameManager.BossApproachSpeedMultiplier
 		else
 			self.ApproachSpeed = _GameManager:GetWaveApproachSpeed(wave)
 		end
@@ -2250,6 +2253,8 @@ script MonsterAI extends Component
 		self:PickNewErdasPatrolTarget()
 		-- 2026-08-03 3차 재설계: 순수 시간 단계 기반(GetTimeStep/GetTimeStepHp)으로 되돌림
 		local hp = _GameManager:GetTimeStepHp(_GameManager:GetTimeStep()) * 2
+		-- 최소 체력(유저 지정 2026-09-29 "에르다스 너무 약하다, 최소 3천") — 판 초반 시간 단계에서도 이 아래로 안 내려간다
+		if hp < self.ErdasMinHp then hp = self.ErdasMinHp end
 		self.MaxHp = hp
 		self.CurrentHp = hp
 		self.ApproachSpeed = _GameManager:GetWaveApproachSpeed(_GameManager.Wave)
@@ -5185,6 +5190,10 @@ script MonsterAI extends Component
 		if self._isBoss or self._isElite then
 			_DiamondDropLogic:TryDropDiamond(self.Entity.TransformComponent.WorldPosition, fallHeight, groundWorldY, dropScale)
 		end
+		-- 무료 뽑기권 3%(유저 지정 2026-09-30) — 보스 처치에서만. 이스터에그와 12시간 5장 한도 공유(PullTicketDropLogic)
+		if self._isBoss then
+			_PullTicketDropLogic:OnBossKilled(self.Entity.TransformComponent.WorldPosition, fallHeight, groundWorldY, dropScale)  -- 계정 첫 보스는 확정 1장
+		end
 		-- 존16~17(그림자 존) 전용: 야누스의 검 교환권 5% 확률 드롭 (보스/일반/엘리트 무관하게 처치마다 판정)
 		if self._isErdas then
 			-- 존 잡템 풀 대신 Map23ErdasEasterEggLogic이 정수 드롭(100% 확정)+킬카운트를 전담한다
@@ -5215,6 +5224,7 @@ script MonsterAI extends Component
 				potionType = 2
 			end
 			_GameManager:ApplyPotionDrop(potionType, self.Entity.TransformComponent.WorldPosition, fallHeight, groundWorldY, dropScale)
+			_UIToast:ShowMessage("MLUA_EP2MAP3CAULDRONLOGIC_001")  -- 가마솥 포션 대사(유저 지정 2026-09-30)
 		elseif self._spawnZoneIndex == 16 or self._spawnZoneIndex == 17 then
 			_GameManager:TryDropShadowVoucher(self.Entity.TransformComponent.WorldPosition, fallHeight, groundWorldY, dropScale)
 		else

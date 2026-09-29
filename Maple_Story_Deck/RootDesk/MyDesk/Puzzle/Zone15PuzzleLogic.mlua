@@ -23,6 +23,9 @@ script Zone15PuzzleLogic extends Logic
 	-- 진입 시 불이 꺼지는 연출을 1회만 재생하기 위한 토큰 — 그 사이 플레이어가 이미 스위치를 누르기
 	-- 시작했으면(아래 OnSwitchTouched) 이 예약된 "전부 끄기"가 방금 누른 진행상황을 덮어쓰면 안 된다
 	property integer _enterToken = 0
+	-- 이번 런에 수수께끼 힌트를 이미 띄웠는지(유저 지정 2026-09-30: 런마다 존15 첫 진입 때 1번만)
+	property boolean _hintShownThisRun = false
+	property string HintMessageKey = "MLUA_MAPMOVEUI_001"
 
 	-- 불꽃 원래 Position/Scale(최초 1회만 캡처, 꺼지는 트윈이 끝나면 이 값으로 되돌린다)
 	property boolean _baseCaptured = false
@@ -60,6 +63,12 @@ script Zone15PuzzleLogic extends Logic
 		_TimerService:SetTimerOnce(function()
 			if not isvalid(self) then return end
 			if self._enterToken ~= myToken then return end  -- 그 사이 재입장 등으로 새 예약이 생겼으면 무시
+			-- 불이 꺼지는 순간 수수께끼 힌트(">" 버튼 막힘 때와 같은 문장) — 런마다 첫 진입 1번만
+			if not self._hintShownThisRun and not self.IsSolved then
+				self._hintShownThisRun = true
+				_UIToast:ShowMessage(self.HintMessageKey)
+				log("Zone15Puzzle: riddle hint shown on first entry this run")
+			end
 			if #self._pressedSequence > 0 then return end   -- 이미 누르기 시작했으면 덮어쓰지 않음
 			self:SetAllFlames(false)
 		end, 1.0)
@@ -188,8 +197,15 @@ script Zone15PuzzleLogic extends Logic
 			self.IsSolved = true
 			_MapMoveUI:NotifyZone15Solved()
 			log("Zone15Puzzle: solved!")
+			-- 성공 대사 2개 중 랜덤(유저 지정 2026-09-30)
+			if _UtilLogic:RandomDouble() < 0.5 then
+				_UIToast:ShowMessage("MLUA_EASTEREGGMSG_PUZZLE_3")
+			else
+				_UIToast:ShowMessage("MLUA_ZONE15PUZZLELOGIC_001")
+			end
 		else
 			log("Zone15Puzzle: wrong order, resetting")
+			_UIToast:ShowMessage("MLUA_ZONE15PUZZLELOGIC_002")  -- 실패 대사(유저 지정 2026-09-30)
 			self._pressedSequence = {}
 			self:SetAllFlames(false)
 		end
@@ -210,6 +226,7 @@ script Zone15PuzzleLogic extends Logic
 		self.IsSolved = false
 		self._pressedSequence = {}
 		self._enterToken = self._enterToken + 1
+		self._hintShownThisRun = false
 		log("Zone15Puzzle: reset for new run")
 	end
 

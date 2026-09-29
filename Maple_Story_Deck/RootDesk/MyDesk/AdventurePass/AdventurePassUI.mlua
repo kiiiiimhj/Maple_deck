@@ -1,0 +1,196 @@
+@Logic
+script AdventurePassUI extends Logic
+
+	-- 모험 지원 패스 팝업(ui/AdventurePassGroup.ui) + 로비 버튼(ui/TitleGroup.ui AdventurePassButton) 컨트롤러.
+	-- 기간/혜택 판정은 서버(AdventurePassLogic)가 하고, 여기는 표시·결제창 띄우기만 한다.
+
+	property Entity popupGroup = "35fbe5d0-d06d-43c2-8d2d-11de36a84a71"
+	property ButtonComponent btnBuy = "2b8a5f4a-629d-4539-8601-576d3fc93305"
+	property ButtonComponent btnClose = "6848c979-629f-464b-8238-62ba733b09ff"
+	property Entity dimmer = "eb8e909f-d970-417e-90a4-99d7277c1550"
+	property TextGUIRendererComponent priceText = "2b8a5f4a-629d-4539-8601-576d3fc93305"
+	property TextGUIRendererComponent remainText = "1e45462f-465c-4bdf-baa8-1f7648923df6"
+	property ButtonComponent lobbyButton = "207469c0-bb90-435b-85cc-8ba118fba8ca"
+	-- 로비 버튼 느낌표(무료 체험 가능할 때만) — AttendanceButton/RedDot 복제
+	property Entity lobbyRedDot = "a13d2e5b-8f6e-4e14-b09a-2c8afbbff01a"
+	property boolean _trialPending = false
+
+	-- 표시용 가격(포털 등록가와 같아야 한다 — 결제창은 포털 값으로 뜬다). 9,900원 ÷ 7.5원 = 1,320코인
+	property integer PriceCoins = 1320
+	property integer DurationDays = 30
+
+	property any _buyHandler = nil
+	property any _closeHandler = nil
+	property any _lobbyHandler = nil
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		-- 팝업은 닫아 두고 버튼을 연결한다
+		if isvalid(self.popupGroup) then self.popupGroup.Enable = false end
+		if isvalid(self.btnBuy) then
+			self._buyHandler = self.btnBuy.Entity:ConnectEvent(ButtonClickEvent, function() self:OnBuyClicked() end)
+		end
+		if isvalid(self.btnClose) then
+			self._closeHandler = self.btnClose.Entity:ConnectEvent(ButtonClickEvent, function() self:Close() end)
+		end
+		if isvalid(self.lobbyButton) then
+			self._lobbyHandler = self.lobbyButton.Entity:ConnectEvent(ButtonClickEvent, function() self:Open() end)
+		end
+		log("AdventurePassUI: ready (popup=" .. tostring(isvalid(self.popupGroup)) .. ", lobbyBtn=" .. tostring(isvalid(self.lobbyButton)) .. ")")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Open()
+		-- 팝업 열기 — 가격 글자를 채우고 남은 기간을 서버에 묻는다
+		if not isvalid(self.popupGroup) then return end
+		self.popupGroup.Enable = true
+		-- 서버 응답 전까지는 직전에 알던 값으로 그린다(처음이면 가격)
+		self:RefreshButtonText()
+		if isvalid(self.remainText) then self.remainText.Entity.Enable = false end
+		_AdventurePassLogic:RequestStatus()
+		log("AdventurePassUI: opened")
+	end
+
+	-- ── 가격 버튼 글자: 미보유 = "1,320 코인 / 30일", 이용 중 = "남은 기간" + 줄바꿈 + 단위 2개(유저 지정 2026-09-29) ──
+	-- 서버가 알려준 남은 초를 받은 순간의 클라 시계(_UtilLogic.ElapsedSeconds)와 같이 기억해 두고, 팝업이 열려 있는 동안
+	-- 1초마다 로컬로 깎아 그린다(매초 서버에 묻지 않는다). 기준은 서버 시각이라 기기 시계를 바꿔도 영향 없다.
+	property number _remainAtSync = 0
+	property number _syncedAt = 0
+	property integer _shownRemain = -1
+
+	@ExecSpace("ClientOnly")
+	method integer GetLocalRemainSec()
+		-- 마지막 서버 응답 기준으로 지금 남은 초(0 미만이면 0)
+		local r = self._remainAtSync - (_UtilLogic.ElapsedSeconds - self._syncedAt)
+		if r < 0 then return 0 end
+		return math.floor(r)
+	end
+
+	@ExecSpace("ClientOnly")
+	method string FormatRemain(integer sec)
+		-- 큰 단위 2개: 29일 14시간 / 13시간 25분 / 21분 25초
+		if sec >= 86400 then
+			return _LocalizationService:GetTextFormat("FMT_ADVENTUREPASSUI_003", tostring(sec // 86400), tostring((sec % 86400) // 3600))
+		elseif sec >= 3600 then
+			return _LocalizationService:GetTextFormat("FMT_ADVENTUREPASSUI_004", tostring(sec // 3600), tostring((sec % 3600) // 60))
+		end
+		return _LocalizationService:GetTextFormat("FMT_ADVENTUREPASSUI_005", tostring(sec // 60), tostring(sec % 60))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshButtonText()
+		if not isvalid(self.priceText) then return end
+		local remain = self:GetLocalRemainSec()
+		if remain == self._shownRemain then return end
+		self._shownRemain = remain
+		-- 이용 중(체험/구매)엔 누를 수 없는 버튼 — 눌림 연출(작아졌다 튀기)과 눌림 색 변화를 끈다(유저 지정 2026-09-30)
+		self:SetBuyButtonPressable(remain <= 0)
+		if remain > 0 then
+			self.priceText.Text = _LocText:Resolve("MLUA_ADVENTUREPASSUI_006") .. "\n" .. self:FormatRemain(remain)
+		elseif _AdventurePassLogic:IsTrialAvailable() then
+			-- 한 번도 체험/구매 안 한 계정: "3일 / 무료 체험"(유저 지정 2026-09-30)
+			self.priceText.Text = _LocText:Resolve("MLUA_ADVENTUREPASSUI_007")
+		else
+			self.priceText.Text = _LocalizationService:GetTextFormat("FMT_ADVENTUREPASSUI_001", self:FormatNumber(self.PriceCoins), tostring(self.DurationDays))
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetBuyButtonPressable(boolean on)
+		-- ButtonComponent.Enable=false로 막으면 Disabled 색(반투명)이 입혀져서, 모양은 두고 연출만 끈다
+		if not isvalid(self.btnBuy) then return end
+		if on then
+			self.btnBuy.Transition = TransitionType.ColorTint
+		else
+			self.btnBuy.Transition = TransitionType.None
+		end
+		_ButtonPressFxLogic:SetSuppressed(self.btnBuy.Entity, not on)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnPassStateChanged()
+		-- AdventurePassLogic @Sync(TrialAvailable/ExpireSec) 변경 — 로비 느낌표 + (열려 있으면) 버튼 글자
+		self._shownRemain = -1
+		self:RefreshButtonText()
+		self:RefreshLobbyBadge()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshLobbyBadge()
+		-- 무료 체험을 받을 수 있을 때만 로비 버튼에 느낌표(다른 로비 버튼과 같은 RedDot)
+		if isvalid(self.lobbyRedDot) then
+			self.lobbyRedDot.Enable = _AdventurePassLogic:IsTrialAvailable() and self:GetLocalRemainSec() <= 0
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUpdate(number delta)
+		-- 팝업이 열려 있을 때만 남은 기간 카운트다운(초가 바뀔 때만 글자 교체)
+		if not isvalid(self.popupGroup) or not self.popupGroup.Enable then return end
+		self:RefreshButtonText()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Close()
+		if isvalid(self.popupGroup) then self.popupGroup.Enable = false end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnBuyClicked()
+		-- 결제창(코인)을 띄운다. 지급은 결제 성공 콜백(ShopPurchaseLogic.ProcessPurchase → AdventurePassLogic)이 한다
+		-- 이용 중에는 버튼이 남은 기간 표시일 뿐 — 연장 구매는 받지 않는다(유저 지정 2026-09-29 "30일 연장은 필요 없음")
+		if self:GetLocalRemainSec() > 0 then
+			log("AdventurePassUI: already active, purchase blocked")
+			return
+		end
+		-- 무료 체험이 남아 있으면 결제 대신 3일 체험 시작(서버가 다시 검사)
+		if _AdventurePassLogic:IsTrialAvailable() then
+			if self._trialPending then return end
+			self._trialPending = true
+			log("AdventurePassUI: start trial requested")
+			_AdventurePassLogic:RequestStartTrial()
+			return
+		end
+		local productId = _AdventurePassLogic:GetProductId()
+		if productId == nil or productId == "" then
+			log("AdventurePassUI: product not registered yet")
+			_UIToast:ShowMessage("MLUA_ADVENTUREPASSUI_003")
+			return
+		end
+		log("AdventurePassUI: PromptPurchase " .. productId)
+		_WorldShopService:PromptPurchase(productId)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetStatus(integer remainSec, string toastKey)
+		-- 서버가 알려준 남은 기간 — 가격 버튼 글자에 반영(RefreshButtonText). 버튼 위 별도 줄(RemainText)은 안 쓴다.
+		-- toastKey: 구매 완료(MLUA_ADVENTUREPASSUI_004) / 체험 시작(008) 같은 알림, 없으면 ""
+		self._trialPending = false
+		self._remainAtSync = remainSec
+		self._syncedAt = _UtilLogic.ElapsedSeconds
+		self._shownRemain = -1
+		self:RefreshButtonText()
+		self:RefreshLobbyBadge()
+		if isvalid(self.remainText) then self.remainText.Entity.Enable = false end
+		if toastKey ~= nil and toastKey ~= "" then _UIToast:ShowMessage(toastKey) end
+		log("AdventurePassUI: status remainSec=" .. tostring(remainSec) .. " toast=" .. tostring(toastKey))
+	end
+
+	method string FormatNumber(integer n)
+		-- 1320 → "1,320"
+		local s = tostring(n)
+		local out = (string.gsub(string.reverse(s), "(%d%d%d)", "%1,"))
+		out = string.reverse(out)
+		if string.sub(out, 1, 1) == "," then out = string.sub(out, 2) end
+		return out
+	end
+
+	method void OnEndPlay()
+		-- 버튼 연결 해제
+		if self:IsServer() then return end
+		if self._buyHandler and isvalid(self.btnBuy) then self.btnBuy.Entity:DisconnectEvent(ButtonClickEvent, self._buyHandler) end
+		if self._closeHandler and isvalid(self.btnClose) then self.btnClose.Entity:DisconnectEvent(ButtonClickEvent, self._closeHandler) end
+		if self._lobbyHandler and isvalid(self.lobbyButton) then self.lobbyButton.Entity:DisconnectEvent(ButtonClickEvent, self._lobbyHandler) end
+	end
+
+end

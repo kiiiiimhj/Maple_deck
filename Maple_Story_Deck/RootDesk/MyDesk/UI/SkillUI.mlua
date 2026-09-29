@@ -59,6 +59,17 @@ script SkillUI extends Logic
 	property any _filterShadeHandler = nil
 	property any _filterRinHandler = nil
 
+	-- 강화 가능 필터 드롭다운(유저 지정 2026-09-29) — false=전체 / true=지금 바로 강화할 수 있는 스킬만
+	-- (조각이 다음 레벨 비용 이상 + 코인 충분 + 만렙 아님). 등급·캐릭터 필터와 AND로 결합된다
+	property boolean _upgradableOnly = false
+	property ButtonComponent upgradeFilterBtn = "da10688f-c259-481d-8569-93c890003222"
+	property Entity upgradeFilterList = "6f0e3a7b-5978-4075-b49f-f43a643b54c3"
+	property ButtonComponent btnUpgAll = "8a26dc5b-3e94-41f0-adf0-d4b79af12344"
+	property ButtonComponent btnUpgOnly = "b4aec129-3996-44f2-8960-a1171b699ba2"
+	property any _upgFilterBtnHandler = nil
+	property any _upgAllHandler = nil
+	property any _upgOnlyHandler = nil
+
 	@ExecSpace("ClientOnly")
 	method void OnBeginPlay()
 		-- 스킬 그리드를 좌우로 끌면 스크롤되고, 하단 스크롤바를 직접 끌어도 그리드가 같이 움직이도록 연결한다
@@ -69,6 +80,7 @@ script SkillUI extends Logic
 		self:PopulateSkillSlotsAndConnectSlots()
 		self:ConnectGradeFilterUI()
 		self:ConnectCharacterFilterUI()
+		self:ConnectUpgradeFilterUI()
 		self:ApplyGradeFilter(0)
 		self:RefreshAllSkillSlots()
 		-- 스크롤/스크롤바가 항상 맨 처음(왼쪽)부터 시작하도록 강제한다
@@ -126,6 +138,52 @@ script SkillUI extends Logic
 	end
 
 	@ExecSpace("ClientOnly")
+	method void ConnectUpgradeFilterUI()
+		-- "전체 ▼ / 강화 가능 ▼" 드롭다운
+		if not isvalid(self.upgradeFilterBtn) then return end
+		self._upgFilterBtnHandler = self.upgradeFilterBtn.Entity:ConnectEvent(ButtonClickEvent, function()
+			self.upgradeFilterList.Enable = not self.upgradeFilterList.Enable
+		end)
+		self._upgAllHandler = self.btnUpgAll.Entity:ConnectEvent(ButtonClickEvent, function() self:OnUpgradeOptionClicked(false) end)
+		self._upgOnlyHandler = self.btnUpgOnly.Entity:ConnectEvent(ButtonClickEvent, function() self:OnUpgradeOptionClicked(true) end)
+		self:RefreshUpgradeFilterLabel()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUpgradeOptionClicked(boolean upgradableOnly)
+		self.upgradeFilterList.Enable = false
+		self._upgradableOnly = upgradableOnly
+		self:RefreshUpgradeFilterLabel()
+		self:ApplyGradeFilter(self._gradeFilter)
+		log("SkillUI: upgradable filter = " .. tostring(upgradableOnly))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshUpgradeFilterLabel()
+		-- 버튼 글자 = 지금 고른 값("전체 ▼" / "강화 가능 ▼")
+		if not isvalid(self.upgradeFilterBtn) then return end
+		local key = "MLUA_SKILLUI_001"
+		if self._upgradableOnly then key = "MLUA_SKILLUI_002" end
+		-- 버튼 글자 컴포넌트는 IsLocalizationKey=true라 키를 그대로 넣는다(엔진이 언어별로 푼다)
+		local tc = self.upgradeFilterBtn.Entity.TextComponent
+		if tc ~= nil then tc.Text = key end
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean IsSkillUpgradable(integer i)
+		-- 지금 바로 강화할 수 있는가 — SkillInventory.RequestLevelUpSkill과 같은 조건(만렙 아님 + 조각 + 코인)
+		local key = tostring(i)
+		local level = 1
+		if _SkillInventory.Levels[key] ~= nil and _SkillInventory.Levels[key] > 0 then level = _SkillInventory.Levels[key] end
+		if level >= _SkillInventory:GetMaxLevelForSkill(i) then return false end
+		local grade = _SkillInventory:GetSkillGrade(i)
+		local count = 0
+		if _SkillInventory.Counts[key] ~= nil then count = _SkillInventory.Counts[key] end
+		if count < _SkillInventory:GetFragmentCostForLevel(level, grade) then return false end
+		return _TitleUI:GetLastCurrency("gold") >= _SkillInventory:GetGoldCostForLevel(level, grade)
+	end
+
+	@ExecSpace("ClientOnly")
 	method void OnCharacterFilterBtnClicked()
 		self.characterFilterList.Enable = not self.characterFilterList.Enable
 	end
@@ -157,6 +215,14 @@ script SkillUI extends Logic
 		-- Enable=false로 끈 슬롯은 레이아웃에서도 빠져서, 보이는 카드들이 자동으로 앞쪽 칸부터 다시 채워진다.
 		-- 캐릭터 필터(self._characterFilter, -1=전체/0=아르카나/1=실피드/2=레이온)와 AND로 결합해서 적용한다.
 		self._gradeFilter = grade
+		self:ApplySlotVisibility()
+		self.skillScroll:SetScrollNormalizedPosition(UITransformAxis.Horizontal, 0)
+		self:SyncScrollBar(0)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ApplySlotVisibility()
+		-- 등급 × 캐릭터 × 강화 가능 필터를 AND로 적용(스크롤은 안 건드린다 — 조각/코인이 바뀔 때도 불린다)
 		local list = self.skillScroll.Entity
 		if not isvalid(list) then return end
 		for i = 0, _SkillInventory.skillCount - 1 do
@@ -164,13 +230,12 @@ script SkillUI extends Logic
 			if isvalid(slot) then
 				local skillGrade = _SkillInventory:GetSkillGrade(i)
 				local skillChar = _SkillInventory:GetSkillCharacter(i)
-				local gradeOk = (grade == 0) or (skillGrade == grade)
+				local gradeOk = (self._gradeFilter == 0) or (skillGrade == self._gradeFilter)
 				local charOk = (self._characterFilter == -1) or (self._characterFilter == skillChar)
-				slot.Enable = gradeOk and charOk
+				local upgOk = (not self._upgradableOnly) or self:IsSkillUpgradable(i)
+				slot.Enable = gradeOk and charOk and upgOk
 			end
 		end
-		self.skillScroll:SetScrollNormalizedPosition(UITransformAxis.Horizontal, 0)
-		self:SyncScrollBar(0)
 	end
 
 	@ExecSpace("ClientOnly")
@@ -254,6 +319,8 @@ script SkillUI extends Logic
 				end
 			end
 		end
+		-- 강화 가능 필터를 켜 둔 상태면 강화 직후(조각·레벨 변화) 목록도 다시 거른다
+		if self._upgradableOnly then self:ApplySlotVisibility() end
 	end
 
 	@ExecSpace("ClientOnly")
@@ -304,6 +371,9 @@ script SkillUI extends Logic
 		if self._filterReionHandler then self.btnCharReion.Entity:DisconnectEvent(ButtonClickEvent, self._filterReionHandler) end
 		if self._filterShadeHandler then self.btnCharShade.Entity:DisconnectEvent(ButtonClickEvent, self._filterShadeHandler) end
 		if self._filterRinHandler then self.btnCharRin.Entity:DisconnectEvent(ButtonClickEvent, self._filterRinHandler) end
+		if self._upgFilterBtnHandler then self.upgradeFilterBtn.Entity:DisconnectEvent(ButtonClickEvent, self._upgFilterBtnHandler) end
+		if self._upgAllHandler then self.btnUpgAll.Entity:DisconnectEvent(ButtonClickEvent, self._upgAllHandler) end
+		if self._upgOnlyHandler then self.btnUpgOnly.Entity:DisconnectEvent(ButtonClickEvent, self._upgOnlyHandler) end
 	end
 
 end

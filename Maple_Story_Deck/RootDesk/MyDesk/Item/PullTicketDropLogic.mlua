@@ -1,0 +1,168 @@
+@Logic
+script PullTicketDropLogic extends Logic
+
+	-- 이스터에그 무료 뽑기권 드롭(유저 지정 2026-09-30).
+	--   · 아이템이 나오는 이스터에그 보상 때 3% (EasterEggBonusLogic.RollBonus — 다이아/버프 포션과 독립 굴림)
+	--   · 당첨이면 유물 뽑기권 또는 스킬 뽑기권 1장(반반). 출석 보상과 같은 적립 칸(_AttendanceLogic:AddFreePulls)
+	-- 어뷰징 방지는 다이아 드롭(DiamondDropLogic)과 같은 방식: 12시간 창 안에서 WindowCap(5장)까지만.
+	-- 창은 "처음 뽑기권을 얻은 시각"부터 12시간, 다 지나면 다음 획득 때 새 창. 유저별 저장소에 따로 저장.
+	-- 다른 이스터에그가 확정으로 주는 뽑기권(Map04CollectLogic 첫 교환 보상)도 이 한도에 1장으로 센다(CountExternalGrant).
+
+	property number DropChance = 0.03
+	property integer WindowCap = 5
+	property number WindowHours = 12
+	property string RelicTicketIconRUID = "3fccc38bffbd45b68cd1fc049809de54"
+	property string SkillTicketIconRUID = "38f5f4b9b8a342bf931b71298d60bb84"
+
+	property any _storage = nil
+	property integer _windowStartSec = 0
+	property integer _windowEarned = 0
+	property boolean _dirty = false
+	property integer _flushTimerId = 0
+
+	property string StorageKeyStart = "PullDrop.WindowStart"
+	property string StorageKeyEarned = "PullDrop.WindowEarned"
+	-- 계정 최초 보스 처치 확정 1장(유저 지정 2026-09-30) — 받았으면 "1"
+	property string StorageKeyFirstBoss = "PullDrop.FirstBossTicket"
+	property boolean _firstBossDone = true  -- 로드 전엔 안 주는 쪽으로(중복 지급 방지)
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		-- 3초마다 바뀐 창 상태만 저장(DiamondDropLogic과 같은 방식)
+		self._flushTimerId = _TimerService:SetTimerRepeat(function()
+			if isvalid(self) then self:FlushIfDirty() end
+		end, 3.0)
+	end
+
+	@ExecSpace("ServerOnly")
+	@EventSender("Service", "UserService")
+	handler HandleUserEnterEvent(UserEnterEvent event)
+		-- 입장한 유저의 12시간 창 상태 로드
+		local user = _UserService:GetUserEntityByUserId(event.UserId)
+		if user == nil then return end
+		self._storage = _DataStorageService:GetUserDataStorage(user.PlayerComponent.ProfileCode)
+		local startCode, startRaw = self._storage:GetAndWait(self.StorageKeyStart)
+		if startCode == 0 and startRaw ~= nil and startRaw ~= "" then
+			local v = tonumber(startRaw)
+			if v ~= nil then self._windowStartSec = math.floor(v) end
+		end
+		local earnedCode, earnedRaw = self._storage:GetAndWait(self.StorageKeyEarned)
+		if earnedCode == 0 and earnedRaw ~= nil and earnedRaw ~= "" then
+			local v = tonumber(earnedRaw)
+			if v ~= nil then self._windowEarned = math.floor(v) end
+		end
+		local fbCode, fbRaw = self._storage:GetAndWait(self.StorageKeyFirstBoss)
+		if fbCode == 0 or fbCode == 1000002 then
+			self._firstBossDone = (fbCode == 0 and fbRaw == "1")
+		end
+		log(string.format("PullTicketDropLogic: window start=%d earned=%d firstBossDone=%s", self._windowStartSec, self._windowEarned, tostring(self._firstBossDone)))
+	end
+
+	@ExecSpace("ServerOnly")
+	method void FlushIfDirty()
+		-- 바뀐 창 상태 저장
+		if not self._dirty or self._storage == nil then return end
+		self._dirty = false
+		self._storage:SetAndWait(self.StorageKeyStart, tostring(self._windowStartSec))
+		self._storage:SetAndWait(self.StorageKeyEarned, tostring(self._windowEarned))
+	end
+
+	method integer NowSec()
+		-- 서버 UTC 현재 시각(초)
+		return DateTime.UtcNow.Elapsed // 1000
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer GetRemainingCap()
+		-- 지금 창에서 더 받을 수 있는 장수(창이 만료됐으면 WindowCap부터 다시)
+		local now = self:NowSec()
+		local windowSec = math.floor(self.WindowHours * 3600)
+		if self._windowStartSec <= 0 or now - self._windowStartSec >= windowSec then
+			return self.WindowCap
+		end
+		local remain = self.WindowCap - self._windowEarned
+		if remain < 0 then remain = 0 end
+		return remain
+	end
+
+	@ExecSpace("ServerOnly")
+	method void AddToWindow(integer amount)
+		-- 창을 (필요하면 새로 열고) amount장 누적
+		local now = self:NowSec()
+		local windowSec = math.floor(self.WindowHours * 3600)
+		if self._windowStartSec <= 0 or now - self._windowStartSec >= windowSec then
+			self._windowStartSec = now
+			self._windowEarned = 0
+		end
+		self._windowEarned = self._windowEarned + amount
+		self._dirty = true
+	end
+
+	@ExecSpace("ServerOnly")
+	method void CountExternalGrant(integer amount)
+		-- 다른 곳에서 확정으로 준 뽑기권도 한도에 센다(유저 지정: Map04 잡템 NPC 첫 보상 -1)
+		self:AddToWindow(amount)
+		log(string.format("PullTicketDropLogic: external grant %d counted (window %d/%d)", amount, self._windowEarned, self.WindowCap))
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnBossKilled(Vector3 worldPos, number fallHeight, number groundWorldY, number dropScale)
+		-- 보스 처치(MonsterAI.Die): 계정 최초 1번은 확정 1장(한도가 차 있어도 지급, 한도엔 1장으로 셈), 그 뒤로는 3% 굴림
+		if _GameManager.GameOver then return end
+		if not self._firstBossDone and self._storage ~= nil then
+			self._firstBossDone = true
+			self._storage:SetAsync(self.StorageKeyFirstBoss, "1", function(code, key) end)
+			log("PullTicketDropLogic: first boss kill on this account -> guaranteed ticket")
+			self:GiveTicket(worldPos, fallHeight, groundWorldY, dropScale)
+			return
+		end
+		self:TryDropTicket(worldPos, fallHeight, groundWorldY, dropScale)
+	end
+
+	@ExecSpace("Server")
+	method void DebugResetFirstBoss()
+		-- 테스트 전용: 계정 첫 보스 확정 지급 기록을 지운다
+		self._firstBossDone = false
+		if self._storage ~= nil then self._storage:SetAsync(self.StorageKeyFirstBoss, "", function(code, key) end) end
+		log("PullTicketDropLogic: debug first-boss flag cleared")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void TryDropTicket(Vector3 worldPos, number fallHeight, number groundWorldY, number dropScale)
+		-- 이스터에그 보상 때 호출 — DropChance로 굴려 당첨이면 지급
+		if _GameManager.GameOver then return end
+		if _UtilLogic:RandomDouble() >= self.DropChance then return end
+		self:GrantTicketDrop(worldPos, fallHeight, groundWorldY, dropScale)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void GrantTicketDrop(Vector3 worldPos, number fallHeight, number groundWorldY, number dropScale)
+		-- 12시간 한도 안에서 유물/스킬 뽑기권 1장(반반) — 바닥에 떨어졌다가 가방으로 날아간 뒤 적립
+		if self:GetRemainingCap() <= 0 then
+			log("PullTicketDropLogic: window cap reached, skip")
+			return
+		end
+		self:GiveTicket(worldPos, fallHeight, groundWorldY, dropScale)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void GiveTicket(Vector3 worldPos, number fallHeight, number groundWorldY, number dropScale)
+		-- 한도 판정 없이 1장 지급(한도 누적은 함) — 유물/스킬 반반
+		self:AddToWindow(1)
+		local isSkill = _UtilLogic:RandomDouble() < 0.5
+		local icon = self.RelicTicketIconRUID
+		if isSkill then icon = self.SkillTicketIconRUID end
+		_GameManager:ScheduleLootDrop(worldPos, icon, fallHeight, groundWorldY, function()
+			_AttendanceLogic:AddFreePulls(1, isSkill)
+			if isSkill then
+				_UIToast:ShowMessage("MLUA_PULLTICKETDROPLOGIC_001")
+			else
+				_UIToast:ShowMessage("FMT_MAP24TREASURECHESTLOGIC_001|1")
+			end
+		end, dropScale)
+		local kind = "relic"
+		if isSkill then kind = "skill" end
+		log(string.format("PullTicketDropLogic: dropped %s ticket (window %d/%d)", kind, self._windowEarned, self.WindowCap))
+	end
+
+end

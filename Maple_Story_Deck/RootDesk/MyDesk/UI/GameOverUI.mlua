@@ -40,6 +40,8 @@ script GameOverUI extends Logic
 	property any _closeHandler = nil
 	-- 잡템 슬롯 아이콘별 .ui 원래 PreserveSprite 값(ApplyIconAspect가 처음 만질 때 기록)
 	property any _iconPreserveDefaults = nil
+	-- 잡템 칸 아이콘별 .ui 원래 RectSize(keepAspect 잡템은 이 안에 원본 비율로 줄여 넣는다)
+	property any _iconSizeDefaults = nil
 	property any _restartHandler = nil
 	property any _restartOvertimeHandler = nil
 	property any _dragHandler = nil
@@ -127,17 +129,24 @@ script GameOverUI extends Logic
 
 	@ExecSpace("ClientOnly")
 	method void ApplyIconAspect(Entity iconEntity, boolean keepAspect)
-		-- keepAspect 잡템(가로로 긴 발광 박쥐의 날개 등)만 칸 안에 원본 비율 그대로 맞추고, 나머지는 .ui 원래
-		-- PreserveSprite로 되돌린다(슬롯 재사용 시 이전 아이템 설정이 남지 않게)
+		-- keepAspect 잡템(가로로 긴 발광 박쥐의 날개 등)만 칸 안에 원본 비율 그대로 맞추고, 나머지는 .ui 원래 값으로 되돌린다.
+		-- ⚠ AspectOnly를 쓰면 스프라이트 피벗 기준으로 그려져 칸 밖(오른쪽 위)으로 밀린다(2026-09-29 유저 리포트, 에피4 몬스터 카드) —
+		-- InventoryUI.ApplyIconAspect와 같은 방식: PreserveSprite는 원래값, 칸(RectSize)을 원본 비율로 줄여 가운데 정렬
 		local renderer = iconEntity.SpriteGUIRendererComponent
 		if self._iconPreserveDefaults == nil then self._iconPreserveDefaults = {} end
+		if self._iconSizeDefaults == nil then self._iconSizeDefaults = {} end
 		local key = iconEntity.Id
+		local t = iconEntity.UITransformComponent
 		if self._iconPreserveDefaults[key] == nil then self._iconPreserveDefaults[key] = renderer.PreserveSprite end
-		if keepAspect then
-			renderer.PreserveSprite = PreserveSpriteType.AspectOnly
-		else
-			renderer.PreserveSprite = self._iconPreserveDefaults[key]
-		end
+		if self._iconSizeDefaults[key] == nil then self._iconSizeDefaults[key] = t.RectSize end
+		renderer.PreserveSprite = self._iconPreserveDefaults[key]
+		local baseSize = self._iconSizeDefaults[key]
+		t.RectSize = baseSize
+		if not keepAspect then return end
+		local m = _CardManager:GetSpriteMetrics(tostring(renderer.ImageRUID.DataId))
+		if m.w <= 0 or m.h <= 0 then return end
+		local fit = math.min(baseSize.x / m.w, baseSize.y / m.h)
+		t.RectSize = Vector2(m.w * fit, m.h * fit)
 	end
 
 	@ExecSpace("ClientOnly")

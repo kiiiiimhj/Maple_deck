@@ -14,6 +14,10 @@ script TreasureChestEgg extends Component
 	-- 안 쓰는 맵의 상자는 빈 값이면 그냥 무시된다
 	property Entity extraEntity = ""
 
+	-- 잠긴 상자(유저 지정 2026-09-30, map11 Zone12): 비어 있지 않으면 이 아이템을 1개 갖고 있어야만 열리고, 열 때 1개 쓴다.
+	-- 없으면 "굳게 잠겨 있다..." 토스트만 띄우고 닫힌 채로 둔다(몇 번이든 다시 시도 가능)
+	property string RequiredKeyItemId = ""
+
 	property boolean _opened = false
 	property any _touchHandler = nil
 	-- 열린 뒤 숨기는 예약 타이머 토큰 — 열자마자(0.8초 안에) 다시하기를 누르면 예약된 "숨기기"가
@@ -53,6 +57,16 @@ script TreasureChestEgg extends Component
 	method void RequestOpen()
 		-- 이미 열렸으면 중복 요청 무시 (여러 번 터치해도 카드가 한 번만 드롭되도록)
 		if self._opened then return end
+		local usedKey = false
+		if self.RequiredKeyItemId ~= "" then
+			if _PlayerInventory:GetItemCount(self.RequiredKeyItemId) < 1 then
+				_UIToast:ShowMessage("MLUA_TREASURECHESTEGG_001")
+				log("TreasureChestEgg: " .. self.Entity.Name .. " locked (no " .. self.RequiredKeyItemId .. ")")
+				return
+			end
+			_PlayerInventory:RemoveItem(self.RequiredKeyItemId, 1)
+			usedKey = true
+		end
 		self._opened = true
 		_AchievementLogic:OnTreasureChestOpened()
 		self:PlayOpen()
@@ -105,6 +119,11 @@ script TreasureChestEgg extends Component
 		else
 			_CardManager:OnTreasureBoxOpened(wp, 0, wp.y, 1.0)
 			_EasterEggBonusLogic:RollBonus(wp, 0, wp.y)
+		end
+		if usedKey then
+			_UIToast:ShowMessage("MLUA_TREASURECHESTEGG_002")  -- 열쇠로 연 상자 전용 대사
+		else
+			_EasterEggMessageLogic:Chest()  -- 보물상자 대사(유저 지정 2026-09-30)
 		end
 		-- 예전엔 Entity:Destroy()로 영구 삭제해서 "다시하기"를 해도 상자가 다시 안 생겼다(유저 리포트
 		-- 2026-09-13). 이제 열림 연출만 잠깐 보여준 뒤 Enable=false로 숨기고, ResetChest()에서 되살린다

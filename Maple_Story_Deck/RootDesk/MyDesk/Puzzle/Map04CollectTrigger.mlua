@@ -1,0 +1,113 @@
+@Component
+script Map04CollectTrigger extends Component
+
+	-- 에피1 map04 존6 object-1917_1(잡템 부탁 NPC) — 누르면 Map04CollectLogic이 말풍선을 띄운다.
+	-- 평소엔 초조한 듯 좌우로 조금씩 왔다갔다한다(유저 지정 2026-09-30). 걷기는 클라 화면 연출만이라
+	-- 서버 위치(말풍선 기준점)는 그대로다.
+	property any _touchHandler = nil
+	property any _shakeTween = nil
+	property number ShakeDuration = 0.35
+	property number ShakeAngle = 10
+
+	-- 왔다갔다: 기준 위치에서 좌우 PaceRange만큼, PaceSpeed(유닛/초)로 걷고 끝에서 잠깐 멈칫
+	property number PaceRange = 0.3
+	property number PaceSpeed = 0.9
+	property number PauseMin = 0.15
+	property number PauseMax = 0.7
+	-- 원본 그림이 왼쪽을 보고 있으면 true(오른쪽으로 갈 때 뒤집는다)
+	property boolean FacesLeft = true
+
+	property Vector3 _basePos = Vector3(0, 0, 0)
+	property number _targetX = 0
+	property number _pauseLeft = 0
+	property boolean _paceReady = false
+
+	method void OnBeginPlay()
+		-- 클라: 터치 연결 + 걷기 기준점 기억
+		if self:IsClient() then
+			self._touchHandler = self.Entity:ConnectEvent(TouchEvent, self.OnTouched)
+			self._basePos = self.Entity.TransformComponent.Position
+			self._targetX = self._basePos.x + self.PaceRange
+			self._paceReady = true
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUpdate(number delta)
+		-- 목표 X로 걷다가 도착하면 잠깐 멈추고 반대편 끝(조금씩 다른 거리)으로 다시 걷는다
+		if not self._paceReady then return end
+		if self._pauseLeft > 0 then
+			self._pauseLeft = self._pauseLeft - delta
+			return
+		end
+		local transform = self.Entity.TransformComponent
+		local pos = transform.Position
+		local dx = self._targetX - pos.x
+		local step = self.PaceSpeed * delta
+		if math.abs(dx) <= step then
+			transform.Position = Vector3(self._targetX, pos.y, pos.z)
+			self._pauseLeft = self.PauseMin + _UtilLogic:RandomDouble() * (self.PauseMax - self.PauseMin)
+			-- 다음 목표: 반대편, 거리는 60~100% 사이로 매번 조금씩 달리(초조한 느낌)
+			local dist = self.PaceRange * (0.6 + _UtilLogic:RandomDouble() * 0.4)
+			if self._targetX >= self._basePos.x then
+				self._targetX = self._basePos.x - dist
+			else
+				self._targetX = self._basePos.x + dist
+			end
+			return
+		end
+		local dir = 1
+		if dx < 0 then dir = -1 end
+		transform.Position = Vector3(pos.x + dir * step, pos.y, pos.z)
+		local renderer = self.Entity.SpriteRendererComponent
+		if renderer ~= nil then
+			if self.FacesLeft then
+				renderer.FlipX = dir > 0
+			else
+				renderer.FlipX = dir < 0
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnTouched(TouchEvent event)
+		-- 몬스터가 겹쳐 있거나 게임오버/로비 화면이면 무시(다른 이스터에그 트리거와 동일)
+		if _CardManager:IsMonsterUnderTouch(event.TouchPoint) then return end
+		if _GameManager.GameOver then return end
+		if _TitleUI.titleGroup.Enable then return end
+		self:PlayShake()
+		self:RequestTouch()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayShake()
+		-- 눌렀을 때 살짝 흔들기(Ep3Map2CollectTrigger와 동일)
+		if self._shakeTween ~= nil then
+			self._shakeTween:Stop()
+			self._shakeTween = nil
+		end
+		local transform = self.Entity.TransformComponent
+		self._shakeTween = _TweenLogic:PlayTween(0.0, 1.0, self.ShakeDuration, EaseType.Linear, function(t)
+			if not isvalid(self) or not isvalid(self.Entity) then return end
+			transform.ZRotation = self.ShakeAngle * math.sin(t * math.pi * 3) * (1.0 - t)
+			if t >= 1.0 then
+				transform.ZRotation = 0
+				self._shakeTween = nil
+			end
+		end)
+	end
+
+	@ExecSpace("Server")
+	method void RequestTouch()
+		-- 엔티티를 그대로 서버 Logic에 넘긴다
+		_Map04CollectLogic:OnObjectTouched(self.Entity)
+	end
+
+	method void OnEndPlay()
+		-- 터치 연결 해제
+		if self:IsClient() and self._touchHandler ~= nil then
+			self.Entity:DisconnectEvent(TouchEvent, self._touchHandler)
+		end
+	end
+
+end

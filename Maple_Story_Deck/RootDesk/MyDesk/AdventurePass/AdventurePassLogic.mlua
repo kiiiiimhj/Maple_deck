@@ -1,0 +1,214 @@
+@Logic
+script AdventurePassLogic extends Logic
+
+	-- 모험 지원 패스(30일 이용권, 유저 지정 2026-09-29).
+	--   · MSW 상품엔 기간제/구독 타입이 없다 → 포털엔 ITEM(재구매 가능)으로 등록하고, 30일은 여기서 관리한다.
+	--   · 만료 시각은 **서버 UTC 초**로 유저별 저장소에 저장한다 — 폰/PC 시계를 바꿔도 기간이 안 늘어난다.
+	--   · 이용 중에 또 사면 남은 기간에 30일을 더한다(연장). 자동 결제는 없다.
+	--   · 혜택(판 시작 시점 기준, 판 도중 만료돼도 그 판은 유지 — CardManager.ApplyAdventurePassForRun):
+	--       6번 카드 슬롯 매 판 무료 해금 / 카드 새로고침 매 판 3회 무료 / 포션 Lv1 적용 상태로 시작
+	-- 저장: 유저별 UserDataStorage 키 "AdvPass.ExpireSec" (UTC 초, 문자열). 없으면 미보유.
+	-- ⚠ 인스턴스당 1명 전제(@Sync가 인스턴스 단위) — 다른 계정 데이터와 같은 규칙.
+
+	-- 포털 등록 상품 ID(ITEM, 1,320코인, 2026-09-30 등록). 비우면 구매 버튼이 "준비 중" 안내만 띄운다.
+	property string ProductId = "WX2LAVHYJ"
+	property integer DurationDays = 30
+	property string StorageKey = "AdvPass.ExpireSec"
+
+	-- 만료 시각(서버 UTC 초). 0 = 없음. 클라는 이 값과 RequestStatus 응답으로 남은 기간을 그린다
+	@Sync property integer ExpireSec = 0
+
+	-- 3일 무료 체험(유저 지정 2026-09-30): 계정당 1회. 체험을 쓰거나 **한 번이라도 구매하면** 사용 처리.
+	-- 저장 키 "AdvPass.TrialUsed" ("1"이면 씀). ⚠ 로드 전엔 false(= 체험 버튼/느낌표 안 뜸)
+	property integer TrialDays = 3
+	property string TrialStorageKey = "AdvPass.TrialUsed"
+	@Sync property boolean TrialAvailable = false
+
+	property boolean _loaded = false
+	property string _profileCode = ""
+
+	-- ── 시간 ────────────────────────────────────────────────────────────────
+	@ExecSpace("ServerOnly")
+	method integer NowSec()
+		-- 서버 UTC 현재 시각(초). DateTime.Elapsed = 0001-01-01부터의 밀리초 (IdleRewardLogic/RaidLogic과 같은 기준)
+		return DateTime.UtcNow.Elapsed // 1000
+	end
+
+	-- ── 로드/저장 ────────────────────────────────────────────────────────────
+	@ExecSpace("ServerOnly")
+	@EventSender("Service", "UserService")
+	handler HandleUserEnterEvent(UserEnterEvent event)
+		local user = _UserService:GetUserEntityByUserId(event.UserId)
+		if user == nil then return end
+		self:LoadFor(user)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void LoadFor(Entity user)
+		-- 입장 시 1회. 키가 없으면(1000002) 한 번도 안 산 유저
+		self._profileCode = user.PlayerComponent.ProfileCode
+		local ds = _DataStorageService:GetUserDataStorage(self._profileCode)
+		local code, raw = ds:GetAndWait(self.StorageKey)
+		if code == 0 or code == 1000002 then
+			local v = 0
+			if code == 0 and raw ~= nil and raw ~= "" then v = math.tointeger(tonumber(raw) or 0) or 0 end
+			self.ExpireSec = v
+			local tCode, tRaw = ds:GetAndWait(self.TrialStorageKey)
+			if tCode ~= 0 and tCode ~= 1000002 then
+				log_warning("AdventurePassLogic: trial flag load failed code=" .. tostring(tCode) .. " (trial hidden this session)")
+				self.TrialAvailable = false
+			else
+				-- 산 적이 있는(만료 기록이 있는) 계정도 체험 대상 아님
+				self.TrialAvailable = (tRaw ~= "1") and v == 0
+			end
+			self._loaded = true
+			log("AdventurePassLogic: loaded expire=" .. tostring(v) .. " active=" .. tostring(self:IsActive()) .. " remainSec=" .. tostring(self:GetRemainSec()) .. " trialAvailable=" .. tostring(self.TrialAvailable))
+		else
+			log_warning("AdventurePassLogic: load failed code=" .. tostring(code) .. " (pass treated as inactive this session)")
+		end
+	end
+
+	-- ── 조회 ────────────────────────────────────────────────────────────────
+	@ExecSpace("ServerOnly")
+	method integer GetRemainSec()
+		-- 남은 초(없거나 만료면 0)
+		local remain = self.ExpireSec - self:NowSec()
+		if remain < 0 then return 0 end
+		return remain
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean IsActive()
+		-- 지금 이용 중인가(서버 시각 기준). 판 시작 때 CardManager가 한 번 물어 그 판 내내 쓴다
+		return self._loaded and self:GetRemainSec() > 0
+	end
+
+	method boolean IsPassProduct(string productId)
+		-- ShopPurchaseLogic.ProcessPurchase가 이 상품인지 먼저 묻는다
+		return self.ProductId ~= "" and productId == self.ProductId
+	end
+
+	method string GetProductId()
+		-- 클라 UI가 결제창을 띄울 때(다른 Logic 필드 직접 읽기는 nil일 수 있어 메서드로)
+		return self.ProductId
+	end
+
+	-- ── 결제 지급 ────────────────────────────────────────────────────────────
+	@ExecSpace("ServerOnly")
+	method boolean GrantFromPurchase(string userId)
+		-- 결제 성공 시 30일을 더한다(남아 있으면 그 끝에서부터 연장). 저장까지 성공해야 true —
+		-- false면 엔진이 다음 입장 때 결제 콜백을 다시 부르므로 결제가 사라지지 않는다
+		if not self._loaded then
+			log_warning("AdventurePassLogic: grant deferred (storage not loaded)")
+			return false
+		end
+		local now = self:NowSec()
+		local base = self.ExpireSec
+		if base < now then base = now end
+		local newExpire = base + self.DurationDays * 86400
+		local ds = _DataStorageService:GetUserDataStorage(self._profileCode)
+		local code = ds:SetAndWait(self.StorageKey, tostring(newExpire))
+		if code ~= 0 then
+			log_error("AdventurePassLogic: grant save failed code=" .. tostring(code))
+			return false
+		end
+		self.ExpireSec = newExpire
+		-- 한 번이라도 산 계정은 무료 체험 대상에서 뺀다(만료 뒤에 체험 버튼이 다시 뜨지 않게)
+		self:MarkTrialUsed()
+		log("AdventurePassLogic: granted " .. tostring(self.DurationDays) .. " days, expire=" .. tostring(newExpire) .. " remainSec=" .. tostring(newExpire - now))
+		self:ReplyStatus(newExpire - now, "MLUA_ADVENTUREPASSUI_004", userId)
+		return true
+	end
+
+	-- ── 3일 무료 체험 ────────────────────────────────────────────────────────
+	@ExecSpace("ServerOnly")
+	method void MarkTrialUsed()
+		if not self.TrialAvailable then return end
+		self.TrialAvailable = false
+		local ds = _DataStorageService:GetUserDataStorage(self._profileCode)
+		ds:SetAsync(self.TrialStorageKey, "1", function(code, key)
+			if code ~= 0 then log_warning("AdventurePassLogic: trial flag save failed code=" .. tostring(code)) end
+		end)
+	end
+
+	@ExecSpace("Server")
+	method void RequestStartTrial()
+		-- 팝업의 "3일 무료 체험" 버튼. 서버가 다시 검사한다(체험 미사용 + 이용 중 아님)
+		if not self._loaded or not self.TrialAvailable or self:GetRemainSec() > 0 then
+			log("AdventurePassLogic: trial rejected (loaded=" .. tostring(self._loaded) .. ", available=" .. tostring(self.TrialAvailable) .. ")")
+			self:ReplyStatus(self:GetRemainSec(), "", senderUserId)
+			return
+		end
+		local now = self:NowSec()
+		local newExpire = now + self.TrialDays * 86400
+		local ds = _DataStorageService:GetUserDataStorage(self._profileCode)
+		-- 두 키를 한 번에 — 체험 기간만 저장되고 사용 표시가 빠지면 무한 체험이 되므로 둘 다 성공해야 적용
+		local kv = {}
+		kv[self.StorageKey] = tostring(newExpire)
+		kv[self.TrialStorageKey] = "1"
+		local code, savedKeys = ds:BatchSetAndWait(kv)
+		if code ~= 0 then
+			log_error("AdventurePassLogic: trial save failed code=" .. tostring(code))
+			self:ReplyStatus(self:GetRemainSec(), "", senderUserId)
+			return
+		end
+		self.TrialAvailable = false
+		self.ExpireSec = newExpire
+		log("AdventurePassLogic: trial started " .. tostring(self.TrialDays) .. " days, expire=" .. tostring(newExpire))
+		self:ReplyStatus(newExpire - now, "MLUA_ADVENTUREPASSUI_008", senderUserId)
+	end
+
+	method boolean IsTrialAvailable()
+		-- 클라/서버 어디서나(다른 Logic 필드 직접 읽기는 nil일 수 있어 메서드로)
+		return self.TrialAvailable == true
+	end
+
+	-- ── 클라 UI 연동 ─────────────────────────────────────────────────────────
+	@ExecSpace("Server")
+	method void RequestStatus()
+		-- 팝업/로비 버튼이 남은 기간을 물을 때(서버 시각 기준으로 계산해 준다)
+		self:ReplyStatus(self:GetRemainSec(), "", senderUserId)
+	end
+
+	@ExecSpace("Client")
+	method void ReplyStatus(integer remainSec, string toastKey)
+		-- 물어본(또는 산/체험 시작한) 그 클라이언트에게만. toastKey가 있으면 토스트도 띄운다
+		_AdventurePassUI:SetStatus(remainSec, toastKey)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnSyncProperty(string name, any value)
+		-- 체험 가능 여부가 바뀌면 로비 느낌표/버튼 글자를 다시 그린다
+		if name == "TrialAvailable" or name == "ExpireSec" then _AdventurePassUI:OnPassStateChanged() end
+	end
+
+	-- 테스트 전용(콘솔 스크립트는 클라 컨텍스트라 Server로 열어 둔다)
+	@ExecSpace("Server")
+	method void DebugSetRemainDays(integer days)
+		-- 남은 기간을 days일로 맞춘다(0이면 만료). 저장까지 한다
+		if not self._loaded then return end
+		local v = 0
+		if days > 0 then v = self:NowSec() + days * 86400 end
+		self.ExpireSec = v
+		local ds = _DataStorageService:GetUserDataStorage(self._profileCode)
+		ds:SetAsync(self.StorageKey, tostring(v), function(code, key) end)
+		log("AdventurePassLogic: debug remain days=" .. tostring(days))
+		self:ReplyStatus(self:GetRemainSec(), "", senderUserId)
+	end
+
+	@ExecSpace("Server")
+	method void DebugResetTrial()
+		-- 테스트 전용: 체험 미사용 + 기간 0으로 되돌린다
+		if not self._loaded then return end
+		self.ExpireSec = 0
+		self.TrialAvailable = true
+		local ds = _DataStorageService:GetUserDataStorage(self._profileCode)
+		local kv = {}
+		kv[self.StorageKey] = "0"
+		kv[self.TrialStorageKey] = "0"
+		ds:BatchSetAsync(kv, function(code, keys) end)
+		log("AdventurePassLogic: debug trial reset")
+		self:ReplyStatus(0, "", senderUserId)
+	end
+
+end

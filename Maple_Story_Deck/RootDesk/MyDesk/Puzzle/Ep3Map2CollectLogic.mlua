@@ -23,6 +23,9 @@ script Ep3Map2CollectLogic extends Logic
 	-- 옮기면(2단계) 그 결과를 여기 반영한다(오브젝트 월드 좌표 기준 상대 오프셋)
 	property number BubbleXOffset = -0.7652970
 	property number BubbleYOffset = 0.9155867
+	-- 진행 말풍선(공용 CollectBubbleLogic "몬스터 → 잡템 X남은개수", 유저 지정 2026-09-30) 위치 — 위 오프셋은 하트 말풍선용
+	property number QuestBubbleXOffset = -1.25
+	property number QuestBubbleYOffset = 1.25
 	property Vector3 HeartIconPosition = Vector3(-0.4361, -0.2908, 0)
 	property Vector3 HeartIconScale = Vector3(5.788959, 5.78895855, 1)
 	property Vector3 DefaultIconPosition = Vector3(-0.7126, -0.2924, 0)
@@ -63,8 +66,7 @@ script Ep3Map2CollectLogic extends Logic
 		local have = _PlayerInventory:GetItemCount(self.PickedItemId)
 		if have < self.GiftAmount then
 			local remaining = self.GiftAmount - have
-			local itemDef = _PlayerInventory:GetItemDef(self.PickedItemId)
-			self:SpawnBubble(map, bubblePos, itemDef.icon, "X" .. remaining, true, 1.0, self.DefaultIconPosition, self.DefaultIconScale)
+			self:SpawnQuestBubble(touchedObject, "X" .. remaining)
 			log("Ep3Map2Collect: still collecting - " .. self.PickedItemId .. " (" .. have .. "/" .. self.GiftAmount .. ", " .. remaining .. " left)")
 			return
 		end
@@ -169,6 +171,24 @@ script Ep3Map2CollectLogic extends Logic
 			count.Enable = showText
 		end
 
+		_TimerService:SetTimerOnce(function()
+			if isvalid(bubble) then bubble:Destroy() end
+			if self._activeBubble == bubble then self._activeBubble = nil end
+		end, self.BubbleShowDuration)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SpawnQuestBubble(Entity npc, string countText)
+		-- 진행상황 말풍선: 공용 CollectBubbleLogic으로 "몬스터 그림 → 잡템 X남은개수"
+		if self._activeBubble ~= nil and isvalid(self._activeBubble) then self._activeBubble:Destroy() end
+		self._activeBubble = nil
+		local map = npc.CurrentMap
+		if map == nil then return end
+		local wp = npc.TransformComponent.WorldPosition
+		local pos = Vector3(wp.x + self.QuestBubbleXOffset, wp.y + self.QuestBubbleYOffset, wp.z - 0.5)
+		local bubble = _CollectBubbleLogic:SpawnItemQuestBubble(map, pos, "Ep3Map2QuestBubble", self.PickedItemId, countText, false)
+		if bubble == nil then return end
+		self._activeBubble = bubble
 		_TimerService:SetTimerOnce(function()
 			if isvalid(bubble) then bubble:Destroy() end
 			if self._activeBubble == bubble then self._activeBubble = nil end
