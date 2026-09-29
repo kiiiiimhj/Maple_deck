@@ -3,19 +3,20 @@ script EpisodeRewardLogic extends Logic
 
 	-- 에피소드 생존 보상(유저 지정 2026-09-15, 탕탕특공대 방식).
 	--   · 한 판에서 5분/10분/15분을 버티면 그 에피소드의 칸이 열린다(타임어택·무제한 상관없음).
-	--   · 칸은 EP1 5분 → EP1 10분 → EP1 15분 → EP2 5분 … → EP3 15분, 총 9칸.
+	--     EP1만 3분/6분/10분(유저 지정 2026-09-29) — GetSlotMinutes 한 곳에서 정한다.
+	--   · 칸은 EP1 5분 → EP1 10분 → EP1 15분 → EP2 5분 … → EP4 15분, 총 12칸(EP4 루디브리엄 칸 2026-09-29 추가).
 	--     2026-09-24 유저 지정 "순서만 풀기": 달성한 칸은 앞 칸을 못 받았어도 받을 수 있다(예: EP1 15분을 못 깼어도
 	--     EP2 5분 달성분은 받는다). 받기는 여전히 한 번에 한 칸 — 받을 수 있는 칸 중 가장 앞 칸부터.
 	--     그래서 "몇 칸 받았나"(ClaimedCount) 대신 칸별 수령 여부(ClaimedMask, 비트 i-1)를 저장한다.
-	--   · 보상: 5분 매직 장비 1개 / 10분 다이아 500 / 15분 무료 뽑기권 10(EP1·EP3 스킬, EP2 유물).
+	--   · 보상: 5분 매직 장비 1개(EP4는 레어) / 10분 다이아 500 / 15분 무료 뽑기권 10(EP1·EP3 스킬, EP2·EP4 유물).
 	--     5분 장비(유저 지정 2026-09-17, 예전 골드 10,000): 그 에피소드 드롭 부위 풀(EP1 무기 / EP2 갑옷·모자 / EP3 장갑·망토)에서
-	--     받을 때 균등 랜덤 1개, 등급 매직 고정, 품질 F/E 50%씩. 레벨업 보상처럼 그 탭이 가득 차 있으면 지급하지 않고 거절한다.
+	--     받을 때 균등 랜덤 1개, 등급 매직 고정(EP4만 레어 — GetGearGrade), 품질 F/E 50%씩. 레벨업 보상처럼 그 탭이 가득 차 있으면 지급하지 않고 거절한다.
 	--     뽑기권은 출석 보상과 같은 적립 칸(_AttendanceLogic:AddFreePulls).
 	--   · 생존 시간 = MonsterSpawner 런 경과 시간(_running일 때만 흐르고 다시하기 때 0으로).
 	--     이 런이 어느 에피소드인지는 경과 시간이 1초 미만일 때(런 시작 전후)만 잡아두고 런 중엔 고정한다 —
 	--     로비로 나갔다가 다른 에피소드로 "게임 시작"을 누르면 StartGame이 경과 시간을 안 지운 채
 	--     SelectedEpisode만 바꾸는 경로가 있어서, 그걸 그대로 믿으면 EP1에서 버틴 시간이 EP2로 잡힌다.
-	-- 저장: 유저별 UserDataStorage 키 "EpisodeReward" JSON {m,c,b1,b2,b3}. m = 칸별 수령 비트(2026-09-24~),
+	-- 저장: 유저별 UserDataStorage 키 "EpisodeReward" JSON {m,c,b1,b2,b3,b4}. m = 칸별 수령 비트(2026-09-24~),
 	-- c = 받은 칸 수(옛 저장 호환 — m이 없는 옛 데이터는 "앞에서 c칸 받음"으로 읽는다).
 	-- b = 에피소드별 최고 달성 단계(0/300/600/900초)라 단계를 새로 넘는 순간과 수령할 때만 쓴다.
 
@@ -25,17 +26,24 @@ script EpisodeRewardLogic extends Logic
 	@Sync property integer Best1 = 0
 	@Sync property integer Best2 = 0
 	@Sync property integer Best3 = 0
+	@Sync property integer Best4 = 0
 	@Sync property boolean Loaded = false
 
-	property integer TotalSlots = 9
+	-- 3칸 × 에피소드 수. EP4(루디브리엄) 칸 10~12 추가 2026-09-29 — 옛 저장(9칸 다 받음)도 비트라 그대로 호환된다
+	property integer TotalSlots = 12
+	property integer EpisodeCount = 4
 	property integer TierSeconds = 300
 	property integer MaxTierSeconds = 900
 	-- 다음 에피소드가 열리는 생존 시간(초) — IsEpisodeUnlocked 참고
 	property integer UnlockSeconds = 600
+	-- ⚠ 테스트용 ON(2026-09-28 유저 지정 "맵 다 열어줘") — 기록과 무관하게 모든 에피소드 입장 허용. 저장은 안 건드린다. 출시 전 false
+	property boolean TestUnlockAllEpisodes = false
 	property string StorageKey = "EpisodeReward"
 
 	property string _profileCode = ""
 	property integer _runEpisode = 0
+	-- 장비 칸이 인벤 탭이 차서 막혔을 때 그 탭 이름 키(GrantGear가 채우고 RequestClaim이 토스트로 보낸다)
+	property string _blockedTabName = "MLUA_EPISODEREWARDLOGIC_003"
 	property number _lastElapsed = 0
 
 	-- ── 칸 정의(서버/클라 공용 — ExecSpace 없음) ──────────────────────────────
@@ -44,7 +52,25 @@ script EpisodeRewardLogic extends Logic
 	end
 
 	method integer GetSlotMinutes(integer index)
-		return ((index - 1) % 3 + 1) * 5
+		-- 칸의 생존 시간(분). 기본 5/10/15분, EP1만 3/6/10분(유저 지정 2026-09-29 — 첫 에피소드는 더 빨리 받게)
+		local tier = (index - 1) % 3 + 1
+		if self:GetSlotEpisode(index) == 1 then
+			if tier == 1 then return 3 end
+			if tier == 2 then return 6 end
+			return 10
+		end
+		return tier * 5
+	end
+
+	method integer GetReachedTierSeconds(integer episode, number elapsed)
+		-- 이번 판 경과 시간으로 도달한 가장 높은 칸의 기준 초(0/첫칸/둘째칸/셋째칸). Best에는 이 값을 저장한다
+		local base = (episode - 1) * 3
+		local reached = 0
+		for t = 1, 3 do
+			local sec = self:GetSlotMinutes(base + t) * 60
+			if elapsed >= sec then reached = sec end
+		end
+		return reached
 	end
 
 	method string GetRewardKind(integer index)
@@ -53,7 +79,8 @@ script EpisodeRewardLogic extends Logic
 		local tier = (index - 1) % 3 + 1
 		if tier == 1 then return "gear" end
 		if tier == 2 then return "diamond" end
-		if self:GetSlotEpisode(index) == 2 then return "relicPull" end
+		-- EP1 스킬 → EP2 유물 → EP3 스킬 → EP4 유물(짝수 에피소드가 유물)
+		if self:GetSlotEpisode(index) % 2 == 0 then return "relicPull" end
 		return "skillPull"
 	end
 
@@ -68,7 +95,9 @@ script EpisodeRewardLogic extends Logic
 		-- 출석 보상과 같은 아이콘을 쓴다. 장비는 레벨업 보상과 같은 무기(EP1)/방어구(EP2·3) 아이콘
 		local kind = self:GetRewardKind(index)
 		if kind == "gear" then
-			if self:GetSlotEpisode(index) == 1 then return "88c02c7916d34c9fb93e77ed04891fa1" end
+			-- EP4는 무기 4종+갑옷 2종이 섞여 나와서 무기 상자 아이콘(툴팁은 "장비 상자")
+			local ep = self:GetSlotEpisode(index)
+			if ep == 1 or ep == 4 then return "88c02c7916d34c9fb93e77ed04891fa1" end
 			return "b3bb11564cc046ff849a6da55e5d7342"
 		end
 		if kind == "gold" then return "02a489cccff24a139a6c3582a5871f58" end
@@ -99,6 +128,11 @@ script EpisodeRewardLogic extends Logic
 		return self.ClaimedCount
 	end
 
+	method integer GetTotalSlots()
+		-- 칸 수(UI 루프용 — 다른 Logic에서 property를 직접 읽으면 nil이 나오는 경우가 있어 접근자로)
+		return self.TotalSlots
+	end
+
 	method boolean IsLoaded()
 		return self.Loaded
 	end
@@ -111,13 +145,21 @@ script EpisodeRewardLogic extends Logic
 		if episode == 1 then return self.Best1 end
 		if episode == 2 then return self.Best2 end
 		if episode == 3 then return self.Best3 end
+		if episode == 4 then return self.Best4 end
 		return 0
+	end
+
+	method integer GetGearGrade(integer episode)
+		-- 5분 칸 장비 등급 — EP1~3 매직, EP4부터 레어(유저 지정 2026-09-29, 툴팁 EpisodeRewardUI도 이걸 씀)
+		if episode >= 4 then return _GearGradeEnum.Rare end
+		return _GearGradeEnum.Magic
 	end
 
 	-- 에피소드 해금(유저 지정 2026-09-20): EP1은 항상 열려 있고, EP n은 EP n-1에서 한 판 10분(UnlockSeconds)을
 	-- 버텨야 열린다. 생존 기록은 위 Best(단계 0/300/600/900초)를 그대로 쓴다 — 타임어택·무제한 상관없이 같은 기준
 	method boolean IsEpisodeUnlocked(integer episode)
 		if episode <= 1 then return true end
+		if self.TestUnlockAllEpisodes then return true end
 		return self:GetBest(episode - 1) >= self.UnlockSeconds
 	end
 
@@ -212,12 +254,13 @@ script EpisodeRewardLogic extends Logic
 				self.Best1 = math.floor(tonumber(t["b1"]) or 0)
 				self.Best2 = math.floor(tonumber(t["b2"]) or 0)
 				self.Best3 = math.floor(tonumber(t["b3"]) or 0)
+				self.Best4 = math.floor(tonumber(t["b4"]) or 0)
 			end
 		elseif code ~= 0 and code ~= 1000002 then
 			log_warning("EpisodeRewardLogic: load failed code=" .. tostring(code))
 		end
 		self.Loaded = true
-		log("EpisodeRewardLogic: loaded claimed=" .. self.ClaimedCount .. " best=" .. self.Best1 .. "/" .. self.Best2 .. "/" .. self.Best3 .. " canClaim=" .. tostring(self:CanClaimNext()))
+		log("EpisodeRewardLogic: loaded claimed=" .. self.ClaimedCount .. " best=" .. self.Best1 .. "/" .. self.Best2 .. "/" .. self.Best3 .. "/" .. self.Best4 .. " canClaim=" .. tostring(self:CanClaimNext()))
 	end
 
 	@ExecSpace("ServerOnly")
@@ -231,6 +274,7 @@ script EpisodeRewardLogic extends Logic
 		t["b1"] = self.Best1
 		t["b2"] = self.Best2
 		t["b3"] = self.Best3
+		t["b4"] = self.Best4
 		ds:SetAsync(self.StorageKey, _HttpService:JSONEncode(t), function(code, key)
 			if code ~= 0 then log_warning("EpisodeRewardLogic: save failed code=" .. tostring(code)) end
 		end)
@@ -240,13 +284,15 @@ script EpisodeRewardLogic extends Logic
 	method void SetBest(integer episode, integer seconds)
 		if episode == 1 then self.Best1 = seconds
 		elseif episode == 2 then self.Best2 = seconds
-		elseif episode == 3 then self.Best3 = seconds end
+		elseif episode == 3 then self.Best3 = seconds
+		elseif episode == 4 then self.Best4 = seconds end
 	end
 
 	-- ── 서버: 생존 시간 감시 ──────────────────────────────────────────────────
 	@ExecSpace("ServerOnly")
 	method void OnUpdate(number delta)
-		-- 매 프레임 숫자 비교만 한다. 저장은 5/10/15분 단계를 "처음" 넘는 순간에만
+		-- 매 프레임 숫자 비교만 한다. 저장은 칸 단계(기본 5/10/15분, EP1 3/6/10분)를 "처음" 넘는 순간에만.
+		-- 옛 저장값(300/600/900)도 IsReached가 ">= 칸 초"로 보므로 그대로 호환된다
 		if not self.Loaded then return end
 		local elapsed = _MonsterSpawner:GetElapsedPlayTime()
 		if elapsed < 1.0 or elapsed < self._lastElapsed then
@@ -254,9 +300,8 @@ script EpisodeRewardLogic extends Logic
 		end
 		self._lastElapsed = elapsed
 		local ep = self._runEpisode
-		if ep < 1 or ep > 3 then return end
-		local tier = math.floor(elapsed / self.TierSeconds) * self.TierSeconds
-		if tier > self.MaxTierSeconds then tier = self.MaxTierSeconds end
+		if ep < 1 or ep > self.EpisodeCount then return end
+		local tier = self:GetReachedTierSeconds(ep, elapsed)
 		if tier > self:GetBest(ep) then
 			self:SetBest(ep, tier)
 			self:Save()
@@ -268,15 +313,13 @@ script EpisodeRewardLogic extends Logic
 	@ExecSpace("Server")
 	method void RequestClaim()
 		if not self:CanClaimNext() then
-			log("EpisodeRewardLogic: claim rejected (claimed=" .. self.ClaimedCount .. " best=" .. self.Best1 .. "/" .. self.Best2 .. "/" .. self.Best3 .. ")")
+			log("EpisodeRewardLogic: claim rejected (claimed=" .. self.ClaimedCount .. " best=" .. self.Best1 .. "/" .. self.Best2 .. "/" .. self.Best3 .. "/" .. self.Best4 .. ")")
 			return
 		end
 		local index = self:GetNextClaimable()
 		if not self:GrantReward(index, senderUserId) then
 			-- 장비 칸이 가득 찬 경우 — 수령 자체를 미룬다(칸은 그대로 남는다, 레벨업 보상과 같은 규칙)
-			local tabName = "MLUA_EPISODEREWARDLOGIC_003"
-			if self:GetSlotEpisode(index) == 1 then tabName = "MLUA_EPISODEREWARDLOGIC_004" end
-			_EpisodeRewardUI:OnClaimFailed(tabName, senderUserId)
+			_EpisodeRewardUI:OnClaimFailed(self._blockedTabName, senderUserId)
 			return
 		end
 		self.ClaimedMask = self.ClaimedMask | (1 << (index - 1))
@@ -308,7 +351,8 @@ script EpisodeRewardLogic extends Logic
 
 	@ExecSpace("ServerOnly")
 	method boolean GrantGear(integer index, string userId)
-		-- 5분 칸 장비(유저 지정 2026-09-17): 그 에피소드 드롭 풀에서 균등 랜덤 1개, 등급 매직 고정, 품질 F/E 50%씩.
+		-- 5분 칸 장비(유저 지정 2026-09-17): 그 에피소드 드롭 풀에서 균등 랜덤 1개, 품질 F/E 50%씩.
+		-- 등급은 GetGearGrade — EP1~3 매직, EP4 레어
 		-- 스탯/발동확률/등급스킬은 그 품질로 드롭과 같은 규칙으로 굴린다(GameManager.BuildGearCreateParamForGradeQuality)
 		local ep = self:GetSlotEpisode(index)
 		local pool = _WeaponTierDataLogic:GetGearItemIdsByEpisode(ep)
@@ -318,12 +362,15 @@ script EpisodeRewardLogic extends Logic
 		end
 		local itemId = pool[_UtilLogic:RandomIntegerRange(1, #pool)]
 		if not _InventoryExpandLogic:HasRoomFor(userId, itemId) then
+			-- 어느 탭이 찼는지(EP4는 무기·갑옷이 섞여서 에피소드만으론 모름) — GetItemTab 2 = 무기 탭
+			self._blockedTabName = "MLUA_EPISODEREWARDLOGIC_003"
+			if _InventoryExpandLogic:GetItemTab(itemId) == 2 then self._blockedTabName = "MLUA_EPISODEREWARDLOGIC_004" end
 			log("EpisodeRewardLogic: gear grant blocked — inventory tab full (slot " .. index .. " item " .. itemId .. ")")
 			return false
 		end
 		local quality = _QualityEnum.F
 		if _UtilLogic:RandomIntegerRange(1, 2) == 2 then quality = _QualityEnum.E end
-		local createParam = _GameManager:BuildGearCreateParamForGradeQuality(itemId, _GearGradeEnum.Magic, quality)
+		local createParam = _GameManager:BuildGearCreateParamForGradeQuality(itemId, self:GetGearGrade(ep), quality)
 		local errorCode = _ItemFactoryLogic:TryAddItem(userId, createParam, ItemCreateResultStruct())
 		if errorCode ~= _ErrorCodeEnum.Success then
 			log_error("EpisodeRewardLogic: gear add failed err=" .. tostring(errorCode))
@@ -333,7 +380,7 @@ script EpisodeRewardLogic extends Logic
 		_CharacterUnlockLogic:AddGearCollected(1)
 		-- 무기를 받았으면 신규 유저 첫 무기 보장도 더 필요 없다
 		_FirstWeaponGuaranteeLogic:OnGearGranted(itemId)
-		log("EpisodeRewardLogic: gear granted slot " .. index .. " EP" .. ep .. " item=" .. itemId .. " grade=Magic quality=" .. _QualityEnum:GetKoreanName(quality))
+		log("EpisodeRewardLogic: gear granted slot " .. index .. " EP" .. ep .. " item=" .. itemId .. " grade=" .. _GearGradeEnum:EnumToStr(self:GetGearGrade(ep)) .. " quality=" .. _QualityEnum:GetKoreanName(quality))
 		return true
 	end
 
@@ -353,6 +400,7 @@ script EpisodeRewardLogic extends Logic
 		self.Best1 = 0
 		self.Best2 = 0
 		self.Best3 = 0
+		self.Best4 = 0
 		self:Save()
 		log("EpisodeRewardLogic: debug reset")
 	end
@@ -360,7 +408,7 @@ script EpisodeRewardLogic extends Logic
 	-- ── 클라: 동기화되면 UI 갱신 ──────────────────────────────────────────────
 	@ExecSpace("ClientOnly")
 	method void OnSyncProperty(string name, any value)
-		if name == "ClaimedMask" or name == "ClaimedCount" or name == "Loaded" or name == "Best1" or name == "Best2" or name == "Best3" then
+		if name == "ClaimedMask" or name == "ClaimedCount" or name == "Loaded" or name == "Best1" or name == "Best2" or name == "Best3" or name == "Best4" then
 			_EpisodeRewardUI:RefreshAll()
 		end
 	end

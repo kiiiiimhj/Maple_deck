@@ -103,6 +103,17 @@ script TutorialLogic extends Logic
 	property boolean IntroLoaded = false
 	property string IntroStorageKey = "Intro.ComicSeen"
 
+	-- ── 로비 튜토리얼(유저 지정 2026-09-29) ─────────────────────────────────────────
+	-- 인트로 만화가 끝난 뒤 로비에서 캐릭터 대사 9단계로 아이콘을 하나씩 소개한다(LobbyTutorialUI). 계정당 1회,
+	-- 유저별 저장소 Tutorial.LobbySeen, 끝까지 넘기면 다이아 1,000. 로드 전 기본값 true(봤음) — 저장값 읽기 전에 안 뜨게.
+	-- 이 기능 이전부터 하던 유저(첫 플레이 튜토리얼을 이미 끝낸 유저)는 본 것으로 친다(인트로 만화와 같은 "첫 설치" 기준)
+	@Sync
+	property boolean LobbySeen = true
+	@Sync
+	property boolean LobbyLoaded = false
+	property string LobbyStorageKey = "Tutorial.LobbySeen"
+	property integer LobbyRewardDiamond = 1000
+
 	@ExecSpace("ServerOnly")
 	@EventSender("Service", "UserService")
 	handler HandleUserEnterEvent(UserEnterEvent event)
@@ -122,6 +133,10 @@ script TutorialLogic extends Logic
 		self.IntroSeen = (introCode ~= 0) or (introRaw == "1") or self.TutorialSeen
 		self.IntroLoaded = true
 		log("TutorialLogic: intro comic seen=" .. tostring(self.IntroSeen))
+		local lobbyCode, lobbyRaw = self._storage:GetAndWait(self.LobbyStorageKey)
+		self.LobbySeen = (lobbyCode ~= 0) or (lobbyRaw == "1") or self.TutorialSeen
+		self.LobbyLoaded = true
+		log("TutorialLogic: lobby tutorial seen=" .. tostring(self.LobbySeen))
 		log("TutorialLogic started (seen=" .. tostring(self.TutorialSeen) .. ", eggSeen=" .. tostring(self.EggTutorialSeen) .. ")")
 	end
 
@@ -315,6 +330,28 @@ script TutorialLogic extends Logic
 		self.IntroSeen = false
 		if self._storage ~= nil then self._storage:SetAndWait(self.IntroStorageKey, "0") end
 		log("TutorialLogic: intro comic reset (debug)")
+	end
+
+	-- ── 로비 튜토리얼(유저 지정 2026-09-29) ─────────────────────────────────────────
+	@ExecSpace("Server")
+	method void RequestFinishLobbyTutorial()
+		-- 로비 튜토리얼 마지막 대사까지 넘겼을 때 클라(LobbyTutorialUI)가 부른다 — 봤음 저장 + 다이아 1,000 지급(계정당 1회)
+		if self.LobbySeen then return end
+		self.LobbySeen = true
+		if self._storage ~= nil then self._storage:SetAndWait(self.LobbyStorageKey, "1") end
+		_GameManager:AddDiamond(self.LobbyRewardDiamond)
+		-- 지급한 다이아를 바로 저장 — 날아가는 연출 중에 앱이 꺼져도 보상은 남는다
+		_GameManager:PersistRewardNow(senderUserId)
+		log("TutorialLogic: lobby tutorial finished, +" .. self.LobbyRewardDiamond .. " diamonds")
+		_LobbyTutorialUI:OnRewardGranted(self.LobbyRewardDiamond, senderUserId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void DebugResetLobbyTutorial()
+		-- 테스트 전용: 로비 튜토리얼을 다시 보게 한다(로비에서 곧바로 다시 뜬다)
+		self.LobbySeen = false
+		if self._storage ~= nil then self._storage:SetAndWait(self.LobbyStorageKey, "0") end
+		log("TutorialLogic: lobby tutorial reset (debug)")
 	end
 
 	-- ── 이스터에그 튜토리얼 ──────────────────────────────────────────────────────

@@ -567,6 +567,10 @@ script MonsterSpawner extends Logic
 		return mapIndex == 18 or mapIndex == 35 or mapIndex == 44
 	end
 
+	-- 에피4 공중 발판 스폰 높이 상한(바닥 기준, 월드 유닛) — GetSpawnPositionFromFootholds 참고. 화면 위쪽 가시 한계가
+	-- 발밑 기준 약 +4.5유닛이고 몬스터 몸이 1유닛 안팎이라 발판은 +2.9까지만 쓴다.
+	property number Ep4MaxAerialSpawnHeight = 2.9
+
 	-- 존별 스폰 X 오프셋 — MapManager.ZoneInfo가 단일 진실 소스다(그룹A/B/C로 존이 늘어나도 여기 손댈
 	-- 필요 없음). 이 값은 아래 GetSpawnPosition의 "±5 범위" 로컬 스폰 로직의 중심으로 쓰인다.
 	@ExecSpace("ServerOnly")
@@ -831,7 +835,15 @@ script MonsterSpawner extends Logic
 		local hp = _GameManager:GetTimeStepHp(_GameManager:GetTimeStep()) * es.hpRatio
 		local speed = _GameManager:GetWaveApproachSpeed(_GameManager.Wave)
 		ai:InitializeBossEscort(zoneIndex, hp, speed, es.stand, es.move, es.hit, es.die, es.dieDur, x, groundY)
-		ai:SetAlienInvaderSounds("", es.hitSfx, es.dieSfx)
+		-- 공격 모션이 있는 호위병(에피4 마몬의 마녀의 곰 — 원거리). 키가 없는 기존 호위병은 예전처럼
+		-- 들이받기로 공격한다. ⚠ InitializeBossEscort가 _attackRUID를 ""로 밀어버리므로 반드시 그 뒤에 얹는다.
+		local escortAttackSfx = ""
+		if es.attack ~= nil and es.attack ~= "" then
+			ai:SetMinionAttack(es.attack, es.attackDur, es.ranged == true)
+			if es.hitFx ~= nil and es.hitFx ~= "" then ai:SetMinionHitEffect(es.hitFx, es.hitFxDur) end
+			if es.attackSfx ~= nil then escortAttackSfx = es.attackSfx end
+		end
+		ai:SetAlienInvaderSounds(escortAttackSfx, es.hitSfx, es.dieSfx)
 		ai:SetScaleMultiplier(es.scale)
 		-- 돌진형 호위병(에피3 베어울프 — 유저 지정). charge 키가 없는 기존 호위병은 그대로 일반 접근.
 		-- ⚠ 좌표를 잡은 **뒤에** 켜야 한다(떨림 중심을 현재 Position에서 읽는다).
@@ -1287,6 +1299,10 @@ script MonsterSpawner extends Logic
 		local savedGrowScale = 0
 		local savedGrowAtk = 0
 		local savedSummonTimer = -1
+		-- 방패 구슬(에피4 게이트키퍼) 남은 개수 — 넘겨주지 않으면 존만 옮겨도 5개로 다시 찬다
+		local savedShield = -1
+		-- 공격 슬롯 소환 쿨타임 기준 시각(에피4 타르가 유령) — 옮길 때마다 쿨이 풀려 바로 또 소환되지 않게
+		local savedVariantSummonTime = -999
 		if isvalid(self._currentBoss) then
 			---@type MonsterAI
 			local ai = self._currentBoss:GetComponent("script.MonsterAI")
@@ -1295,6 +1311,8 @@ script MonsterSpawner extends Logic
 				savedGrowScale = ai._erdasHitGrowthBonus
 				savedGrowAtk = ai._growAtkBonus
 				savedSummonTimer = ai._summonTimer
+				savedShield = ai._shieldCount
+				savedVariantSummonTime = ai._lastVariantSummonTime
 			end
 			self._currentBoss:Destroy()
 		end
@@ -1320,6 +1338,13 @@ script MonsterSpawner extends Logic
 				if savedSummonTimer >= 0 and ai._summonCooldown > 0 then
 					ai._summonTimer = savedSummonTimer
 				end
+				-- 방패 구슬 개수 복원 — 구슬 생성은 InitializeStats가 0.1초 늦춰 두었으므로 이 값을 보고 만든다
+				if savedShield >= 0 and ai._shieldCount > 0 then
+					ai._shieldCount = savedShield
+				end
+				-- 따라온 같은 보스 — 등장 소환(타르가)은 처음 나타날 때 한 번뿐, 소환 쿨타임도 이어서 센다
+				ai._skipOpeningSummon = true
+				ai._lastVariantSummonTime = savedVariantSummonTime
 			end
 		end
 		-- 본체가 비행 보스면 새 존에서도 비행 밴드로 다시 잡아준다(지상 좌표로 재소환되기 때문)
@@ -2079,6 +2104,11 @@ script MonsterSpawner extends Logic
 		
 		local runs = self:GetFlatRunsCached(mapIndex)
 		local baselineY = self:GetBaselineGroundY(mapIndex, footholdComp)
+		-- 에피4(134~173) 맵은 바닥에서 4~20유닛 위까지 발판이 쌓여 있다(ep4_map2 존1 3.43, ep4_map4 최대 19 — 실측).
+		-- 카메라가 바닥 기준으로 고정돼 있어(MapManager.Ep4FixedCameraY) 그 높이에 서면 화면 밖이라 안 보인다 →
+		-- 바닥 + Ep4MaxAerialSpawnHeight 위의 발판은 스폰 후보에서 뺀다. 다른 에피소드는 기존 동작 그대로.
+		local maxRunY = 9999
+		if mapIndex >= 134 and mapIndex <= 183 then maxRunY = baselineY + self.Ep4MaxAerialSpawnHeight end
 		
 		if isBoss then
 			-- 보스는 임팩트를 위해 존 중앙을 포함하는 바닥(baselineY) 구간에 고정 스폰
@@ -2102,7 +2132,7 @@ script MonsterSpawner extends Logic
 				local runWidth = run.xMax - run.xMin
 				local isAerial = run.y > baselineY + self.AerialHeightThreshold
 				local isExcluded = mapIndex == 15 and self:IsExcludedZone15Foothold(run.ownerId)
-				if isAerial and runWidth >= self.MinFlatRunWidth and not isExcluded and not self:IsRunOccupied(map, run) then
+				if isAerial and run.y <= maxRunY and runWidth >= self.MinFlatRunWidth and not isExcluded and not self:IsRunOccupied(map, run) then
 					local margin = math.min(self.EdgeMarginAerial, runWidth * 0.3)
 					local xMin = math.max(run.xMin + margin, safeMin)
 					local xMax = math.min(run.xMax - margin, safeMax)
@@ -2121,7 +2151,7 @@ script MonsterSpawner extends Logic
 			local run = runs[i]
 			local runWidth = run.xMax - run.xMin
 			local isExcluded = mapIndex == 15 and self:IsExcludedZone15Foothold(run.ownerId)
-			if runWidth >= self.MinFlatRunWidth and not isExcluded then
+			if runWidth >= self.MinFlatRunWidth and not isExcluded and run.y <= maxRunY then
 				local isAerial = run.y > baselineY + self.AerialHeightThreshold
 				local margin = math.min(isAerial and self.EdgeMarginAerial or self.EdgeMarginGround, runWidth * 0.3)
 				local xMin = math.max(run.xMin + margin, safeMin)
@@ -2583,7 +2613,9 @@ script MonsterSpawner extends Logic
 		-- 나머지는 단일 지면 — GetFlatRuns 기반 방식이라 이 역시 코드 수정 없이 실제 발판을 그대로 따라간다.
 		if (mapIndex >= 13 and mapIndex <= 15) or mapIndex == 8 or mapIndex == 27 or mapIndex == 28 or mapIndex == 29
 			or (mapIndex >= 61 and mapIndex <= 64) or (mapIndex >= 65 and mapIndex <= 84) or (mapIndex >= 85 and mapIndex <= 88)
-			or (mapIndex >= 89 and mapIndex <= 128) then
+			or (mapIndex >= 89 and mapIndex <= 128) or (mapIndex >= 134 and mapIndex <= 183) then
+			-- 134~173(에피4 map1~4, 2026-09-28)도 같은 덤프 계열이라 공중 발판이 촘촘하다(getFootholds 실측
+			-- 맵당 320~400개) — 발판 데이터 기반 스폰으로 지상형이 허공에 뜨지 않게 한다.
 			return self:GetSpawnPositionFromFootholds(mapIndex, isBoss, map)
 		end
 		

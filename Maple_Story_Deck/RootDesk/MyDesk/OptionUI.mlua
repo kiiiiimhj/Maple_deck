@@ -68,6 +68,15 @@ script OptionUI extends Logic
 	property Color OffColor = Color(0.45, 0.45, 0.45, 1.0)
 
 	property integer FusionRowCount = 7
+	-- 7개 행은 재사용하고, 조합식 수에 따라 페이지 수를 자동 계산한다.
+	property integer FusionPage = 1
+	property integer FusionPageCount = 1
+	property integer _fusionCharacter = -1
+	property ButtonComponent btnFusionPrev = "ec30f5d6-4dc1-419e-8bcc-fff2a83c00fe"
+	property ButtonComponent btnFusionNext = "f7355511-1902-435b-9822-f715effeaad5"
+	property TextGUIRendererComponent fusionPageText = "ea2d335d-e86d-46ed-8fce-918f4a189b14"
+	property any _fusionPrevHandler = nil
+	property any _fusionNextHandler = nil
 
 	-- 미발견 조합 가림 연출 — 아이콘은 이 색으로 곱해 실루엣으로 만들고, 같은 엔티티에 "?" 글자를 얹는다
 	property Color FusionHiddenTint = Color(0, 0, 0, 1)
@@ -90,6 +99,12 @@ script OptionUI extends Logic
 		self.btnOptionClose.Entity:ConnectEvent(ButtonClickEvent, function() self:CloseAll() end)
 		self.btnFusionClose.Entity:ConnectEvent(ButtonClickEvent, function() self:CloseFusion() end)
 		self.btnFusion.Entity:ConnectEvent(ButtonClickEvent, function() self:OpenFusion() end)
+		if isvalid(self.btnFusionPrev) then
+			self._fusionPrevHandler = self.btnFusionPrev.Entity:ConnectEvent(ButtonClickEvent, function() self:ChangeFusionPage(-1) end)
+		end
+		if isvalid(self.btnFusionNext) then
+			self._fusionNextHandler = self.btnFusionNext.Entity:ConnectEvent(ButtonClickEvent, function() self:ChangeFusionPage(1) end)
+		end
 		self.btnQuit.Entity:ConnectEvent(ButtonClickEvent, function() self:OpenQuitConfirm() end)
 		self.btnConfirmYes.Entity:ConnectEvent(ButtonClickEvent, function() self:OnQuitConfirmed() end)
 		self.btnConfirmNo.Entity:ConnectEvent(ButtonClickEvent, function() self:CloseQuitConfirm() end)
@@ -219,6 +234,7 @@ script OptionUI extends Logic
 	@ExecSpace("ClientOnly")
 	method void OpenFusion()
 		-- "조합" — 옵션 패널을 조합식 패널로 갈아끼운다(딤드는 그대로 유지).
+		self.FusionPage = 1
 		self:RefreshFusionRows()
 		self.confirmPanel:SetEnable(false)
 		self.optionPanel:SetEnable(false)
@@ -236,13 +252,24 @@ script OptionUI extends Logic
 	method void RefreshFusionRows()
 		-- 현재 고른 캐릭터의 조합식만 채운다. 재료가 2~4개로 제각각이라 슬롯/＋는 고정 좌표에 미리
 		-- 깔아두고 남는 것만 끈다 — 그래야 "=" 와 결과 아이콘이 모든 행에서 같은 x에 정렬된다.
-		local list = self._recipes[_GameManager.SelectedCharacter]
+		if self._recipes == nil then self:BuildRecipeTable() end
+		local character = _GameManager.SelectedCharacter
+		local list = self._recipes[character]
 		if list == nil then list = self._recipes[0] end
+		if list == nil then list = {} end
+		if self._fusionCharacter ~= character then
+			self._fusionCharacter = character
+			self.FusionPage = 1
+		end
+		local pageSize = math.max(1, self.FusionRowCount)
+		self.FusionPageCount = math.max(1, math.ceil(#list / pageSize))
+		self.FusionPage = math.max(1, math.min(self.FusionPage, self.FusionPageCount))
+		local firstIndex = (self.FusionPage - 1) * pageSize
 
 		for i = 1, self.FusionRowCount do
 			local row = self.fusionPanel:GetChildByName("Row" .. i, false)
 			if row ~= nil then
-				local rec = list[i]
+				local rec = list[firstIndex + i]
 				if rec == nil then
 					row:SetEnable(false)
 				else
@@ -286,6 +313,54 @@ script OptionUI extends Logic
 				end
 			end
 		end
+		self:RefreshFusionPager()
+		log("OptionUI: fusion page=" .. tostring(self.FusionPage) .. "/" .. tostring(self.FusionPageCount) .. " recipes=" .. tostring(#list))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ChangeFusionPage(integer direction)
+		-- 페이지 경계에서는 이동하지 않고, 행만 다시 채워 발견/미발견 표시를 유지한다.
+		if not isvalid(self.fusionPanel) or not self.fusionPanel.Enable then return end
+		local nextPage = math.max(1, math.min(self.FusionPage + direction, self.FusionPageCount))
+		if nextPage == self.FusionPage then return end
+		self.FusionPage = nextPage
+		self:RefreshFusionRows()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshFusionPager()
+		-- 숫자는 이미지에 넣지 않고 네이티브 텍스트로 표시한다.
+		if isvalid(self.fusionPageText) then self.fusionPageText.Text = tostring(self.FusionPage) end
+		self:SetFusionPageButton(self.btnFusionPrev, self.FusionPage > 1)
+		self:SetFusionPageButton(self.btnFusionNext, self.FusionPage < self.FusionPageCount)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetFusionPageButton(ButtonComponent button, boolean enabled)
+		-- 이동할 페이지가 없는 쪽은 보이되 클릭을 막고 흐리게 표시한다.
+		if not isvalid(button) then return end
+		button.Enable = enabled
+		local tint = Color(0.48, 0.48, 0.48, 1)
+		local labelColor = Color(1, 0.953, 0.82, 0.45)
+		if enabled then
+			tint = Color(1, 1, 1, 1)
+			labelColor = Color(1, 0.953, 0.82, 1)
+		end
+		button.Entity.SpriteGUIRendererComponent.Color = tint
+		button.Entity.TextGUIRendererComponent.FontColor = labelColor
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		-- 이번에 연결한 페이지 버튼 이벤트를 플레이 종료 시 해제한다.
+		if isvalid(self.btnFusionPrev) and self._fusionPrevHandler ~= nil then
+			self.btnFusionPrev.Entity:DisconnectEvent(ButtonClickEvent, self._fusionPrevHandler)
+		end
+		if isvalid(self.btnFusionNext) and self._fusionNextHandler ~= nil then
+			self.btnFusionNext.Entity:DisconnectEvent(ButtonClickEvent, self._fusionNextHandler)
+		end
+		self._fusionPrevHandler = nil
+		self._fusionNextHandler = nil
 	end
 
 	@ExecSpace("ClientOnly")
@@ -409,4 +484,3 @@ script OptionUI extends Logic
 		_GameManager:RequestGiveUp()
 	end
 end
-

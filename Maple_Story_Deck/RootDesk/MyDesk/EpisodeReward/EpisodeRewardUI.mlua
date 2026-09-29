@@ -3,7 +3,7 @@ script EpisodeRewardUI extends Logic
 
 	-- 에피소드 생존 보상 팝업(ui/EpisodeRewardGroup.ui) + 로비 버튼(ui/TitleGroup.ui BattlePanel/EpisodeRewardButton) 컨트롤러.
 	-- 상태(몇 칸 받았는지/에피소드별 최고 생존 단계)는 전부 EpisodeRewardLogic이 서버에서 들고 있고, 여기는 보여주기만 한다.
-	--   · 9칸이 가로 한 줄(Panel/Viewport/Strip/Card1~9) — 다음에 받을 칸이 가운데 크게, 양옆은 작고 어둡게
+	--   · 12칸이 가로 한 줄(Panel/Viewport/Strip/Card1~12, EP4 칸 10~12는 2026-09-29 Card9 복제) — 다음에 받을 칸이 가운데 크게, 양옆은 작고 어둡게
 	--   · 받으면 체크 도장 → 줄이 왼쪽으로 밀리며 다음 칸이 오른쪽에서 가운데로 올라온다(유저 지정)
 
 	-- UI 바인딩 (UIBuilder가 UUID를 넣는다)
@@ -66,7 +66,7 @@ script EpisodeRewardUI extends Logic
 		if isvalid(self.lobbyButton) then
 			self._lobbyHandler = self.lobbyButton.Entity:ConnectEvent(ButtonClickEvent, self.OnLobbyButtonClicked)
 		end
-		for i = 1, 9 do
+		for i = 1, _EpisodeRewardLogic:GetTotalSlots() do
 			local card = self:GetCard(i)
 			if isvalid(card) and card.ButtonComponent ~= nil then
 				self._cardHandlers[i] = card:ConnectEvent(ButtonClickEvent, function() self:OnCardClicked(i) end)
@@ -117,10 +117,18 @@ script EpisodeRewardUI extends Logic
 	@ExecSpace("ClientOnly")
 	method void OnCardClicked(integer index)
 		-- 장비 상자 칸을 누르면 인벤 주문서처럼 말풍선 툴팁 — "매직 무기 상자 / (수령 즉시 장비창에 등록됩니다.)"
-		-- EP1 칸은 무기 상자, EP2·3 칸은 방어구 상자 아이콘이라 문구도 그에 맞춘다(등급은 매직 고정 — GrantGear)
+		-- EP1 칸은 무기 상자, EP2·3 칸은 방어구 상자 아이콘이라 문구도 그에 맞춘다(등급은 GetGearGrade — EP1~3 매직, EP4 레어)
 		if _EpisodeRewardLogic:GetRewardKind(index) ~= "gear" then return end
-		local isWeapon = _EpisodeRewardLogic:GetSlotEpisode(index) == 1
-		_RewardTooltipLogic:Show(self.gearTooltip, self:GetCard(index), _RewardTooltipLogic:GetGearBoxText(isWeapon, _GearGradeEnum.Magic))
+		-- EP4는 무기·갑옷이 섞여 나와서 "장비 상자"
+		local ep = _EpisodeRewardLogic:GetSlotEpisode(index)
+		local grade = _EpisodeRewardLogic:GetGearGrade(ep)
+		local text = ""
+		if ep >= 4 then
+			text = _RewardTooltipLogic:GetMixedGearBoxText(grade)
+		else
+			text = _RewardTooltipLogic:GetGearBoxText(ep == 1, grade)
+		end
+		_RewardTooltipLogic:Show(self.gearTooltip, self:GetCard(index), text)
 	end
 
 	@ExecSpace("ClientOnly")
@@ -132,7 +140,7 @@ script EpisodeRewardUI extends Logic
 	method void RefreshAll()
 		-- 9칸 + 받기 버튼 + 로비 버튼을 현재 동기화된 상태로 다시 그린다(수령 연출 중인 칸/슬라이드는 건드리지 않는다)
 		if not isvalid(self.strip) then return end
-		for i = 1, 9 do
+		for i = 1, _EpisodeRewardLogic:GetTotalSlots() do
 			if i ~= self._animatingIndex then
 				self:ApplyCardState(i, _EpisodeRewardLogic:IsClaimed(i))
 			end
@@ -211,7 +219,7 @@ script EpisodeRewardUI extends Logic
 		self.strip.UITransformComponent.anchoredPosition = Vector2(-(self._focus - 1) * self.CardSpacing, 0)
 		local pulseTarget = 0
 		if not self._animating and _EpisodeRewardLogic:CanClaimNext() then pulseTarget = self:GetTargetFocus() end
-		for i = 1, 9 do
+		for i = 1, _EpisodeRewardLogic:GetTotalSlots() do
 			local card = self:GetCard(i)
 			if isvalid(card) then
 				local d = math.abs(i - self._focus)
@@ -412,7 +420,7 @@ script EpisodeRewardUI extends Logic
 			self._animatingIndex = 0
 			-- 다음에 가운데 올 칸(순서가 풀려서 바로 오른쪽 칸이 아닐 수 있다) — 받은 결과 동기화 전일 수 있어 방금 칸은 받은 것으로 친다
 			local nextFocus = _EpisodeRewardLogic:GetFocusIndexAfterClaim(index)
-			if nextFocus == index then nextFocus = 10 end
+			if nextFocus == index then nextFocus = _EpisodeRewardLogic:GetTotalSlots() + 1 end
 			self:SlideTo(nextFocus)
 		end, self.CheckDropDuration + self.SlideDelay)
 		log("EpisodeRewardUI: claim animation slot " .. index)
@@ -421,7 +429,7 @@ script EpisodeRewardUI extends Logic
 	@ExecSpace("ClientOnly")
 	method void SlideTo(integer target)
 		-- 다음 칸이 오른쪽에서 가운데로 — 마지막 칸을 받았으면 제자리
-		if target > 9 then
+		if target > _EpisodeRewardLogic:GetTotalSlots() then
 			self._animating = false
 			self:RefreshAll()
 			return

@@ -1,0 +1,463 @@
+@Logic
+script MonsterBookLogic extends Logic
+
+	-- 몬스터 도감(유저 지정 2026-09-29). 로비 도감 버튼 → 도감 팝업(MonsterBookUI).
+	--   · 에피소드마다 그 에피소드에 나오는 몬스터 카드. 같은 몬스터라도 **에피소드별로 따로** 센다.
+	--     한 번도 안 잡은 카드는 어둡게 + 흰 자물쇠.
+	--   · 카드마다 처치 수 단계 보상(다이아):
+	--       일반               100 / 1,000 / 10,000 / 50,000마리 → 10 / 100 / 500 / 1000개
+	--       보스·엘리트·이스터에그(1마리형)  1 / 3 / 30 / 100마리 → 10 / 100 / 500 / 1000개
+	--       이스터에그(떼로 나오는 형)       3 / 50 / 200 / 1,000마리 → 10 / 100 / 500 / 1000개
+	--     4단계 다 받으면 "완료".
+	--   · 카드 키: 일반/호위/부하/이스터에그 = stand RUID, 엘리트 = "E:"..stand, 보스 = "B:"..stand
+	--     (같은 모습이 일반 몹이자 보스 호위병이기도 한 경우를 갈라 세기 위함). MonsterAI.Die가 키를 넘긴다.
+	-- 저장: 유저별 UserDataStorage 키 "MonsterBook" JSON {n={"ep|key"=처치수}, c={"ep|key"=받은 단계}}.
+	--   빈 테이블은 JSONEncode 불가(LEA-3001)라 두 표 모두 "_v" 키를 항상 넣는다. 더티 + 10초 주기 저장.
+	-- 클라이언트: 받을 수 있는 단계 수(ClaimableCount)만 @Sync(로비 레드닷). 목록은 팝업 열 때 스냅샷 RPC.
+
+	@Sync property integer ClaimableCount = 0
+	@Sync property boolean Loaded = false
+
+	property string StorageKey = "MonsterBook"
+	property number SaveInterval = 10
+	property integer EpisodeCount = 4
+
+	property string _profileCode = ""
+	property table _counts = {}
+	property table _claimed = {}
+	property table _catalog = {}
+	property boolean _dirty = false
+	property boolean _needRecalc = false
+	property number _saveTimer = 0
+	property number _recalcTimer = 0
+
+	method integer GetClaimableCount()
+		-- 레드닷용(다른 Logic에서 필드를 직접 읽으면 nil이 나오는 함정이 있어 메서드로 읽는다)
+		return self.ClaimableCount
+	end
+
+	-- ── 단계 정의(서버/클라 공용 — ExecSpace 없음) ─────────────────────────────
+	method table GetTargets(string kind)
+		-- 카드 종류별 단계 목표 처치 수(n=일반, e=엘리트, b=보스, g=이스터에그 1마리형, w=이스터에그 떼)
+		if kind == "n" then return { 100, 1000, 10000, 50000 } end
+		if kind == "w" then return { 3, 50, 200, 1000 } end
+		return { 1, 3, 30, 100 }
+	end
+
+	method table GetRewards()
+		-- 단계별 다이아(모든 종류 공통)
+		return { 10, 100, 500, 1000 }
+	end
+
+	method integer GetReachedTier(string kind, integer count)
+		-- 처치 수로 도달한 단계 수(0~4)
+		local targets = self:GetTargets(kind)
+		local n = 0
+		for i = 1, #targets do
+			if count >= targets[i] then n = i end
+		end
+		return n
+	end
+
+	-- ── 서버: 에피소드별 카드 목록 ────────────────────────────────────────────
+	-- 존 몬스터 풀(웨이브/존4~6/존7+ 표)을 전부 훑어 모습(stand) 기준으로 중복을 걷어내고, 그 에피소드의
+	-- 엘리트·보스 로스터(+보스 호위병·소환 부하·동반 보스)와 이스터에그 몬스터를 덧붙인다.
+	-- 결과 = { {k=키, t=종류, s=stand RUID}, ... } — 표시 순서도 이 순서다.
+	@ExecSpace("ServerOnly")
+	method table GetCatalog(integer ep)
+		-- 에피소드 카드 목록(한 번 만들면 캐시)
+		local cached = self._catalog[ep]
+		if cached ~= nil then return cached end
+		local list = {}
+		local seen = {}
+		local function add(key, kind, stand)
+			if stand == nil or stand == "" then return end
+			if seen[key] then return end
+			seen[key] = true
+			table.insert(list, { k = key, t = kind, s = stand })
+		end
+		local function addZones(first, last)
+			for z = first, last do
+				if z ~= 10 then
+					local cnt = _GameManager:GetMapMonsterCount(z)
+					for i = 1, cnt do
+						local s = _GameManager:GetMapStandRUID(z, i)
+						add(s, "n", s)
+					end
+				end
+			end
+		end
+		if ep == 1 then
+			for i = 1, 9 do
+				local s = _GameManager:GetWaveStandRUID(i)
+				add(s, "n", s)
+			end
+			for i = 1, _GameManager:GetZoneMonsterCount() do
+				local s = _GameManager:GetZoneStandRUID(i)
+				add(s, "n", s)
+			end
+			addZones(7, 44)
+		elseif ep == 2 then
+			addZones(45, 84)
+		elseif ep == 3 then
+			addZones(89, 133)
+		elseif ep == 4 then
+			addZones(134, 183)
+		end
+		-- 보스 호위병·소환 부하는 일반 카드로(같은 모습이 이미 있으면 그 카드에 합쳐 센다)
+		local bossCount = self:GetBossCountFor(ep)
+		for i = 1, bossCount do
+			local def = self:GetBossDefFor(ep, i)
+			if def ~= nil then
+				if def.escort ~= nil then add(def.escort.stand, "n", def.escort.stand) end
+				if def.minion ~= nil then add(def.minion.stand, "n", def.minion.stand) end
+			end
+		end
+		-- 엘리트
+		for i = 1, self:GetEliteCountFor(ep) do
+			local def = self:GetEliteDefFor(ep, i)
+			if def ~= nil then add("E:" .. def.stand, "e", def.stand) end
+		end
+		-- 보스(동반 보스 포함)
+		for i = 1, bossCount do
+			local def = self:GetBossDefFor(ep, i)
+			if def ~= nil then
+				add("B:" .. def.stand, "b", def.stand)
+				if def.partner ~= nil then add("B:" .. def.partner.stand, "b", def.partner.stand) end
+			end
+		end
+		-- 이스터에그 몬스터(g = 1마리형 → 보스 단계 / w = 떼로 나오는 형)
+		local eggs = self:GetEasterEggs(ep)
+		for i = 1, #eggs do
+			add(eggs[i][1], eggs[i][2], eggs[i][1])
+		end
+		self._catalog[ep] = list
+		log("MonsterBookLogic: catalog ep" .. ep .. " = " .. #list)
+		return list
+	end
+
+	@ExecSpace("ServerOnly")
+	method table GetEasterEggs(integer ep)
+		-- 에피소드별 이스터에그 몬스터 { stand RUID, 종류 }. 모습은 각 이스터에그 로직/MonsterAI 전용 초기화의 stand와 같다.
+		if ep == 1 then
+			return {
+				{ "e035bb90c053401b88de2159dfa230eb", "g" },  -- 마노(존2)
+				{ "c9275f3f8cd242099528ada23a4c47d0", "g" },  -- 에르다스(map23)
+				{ "d4ae577677034eaaa0b902e3c20edf15", "w" },  -- 외계인 뉴그레이(존21 행성, 7마리)
+			}
+		elseif ep == 2 then
+			return {
+				{ "8e4d16ddd74644d8bfafaf422a1f7400", "g" },  -- 지쳐버린 기사
+				{ "d5b65bd56bcd4f85a87a8ca123abe32f", "g" },  -- 타락한 켄타우로스
+				{ "cbb6bd77341b4dceb4c88e70cf524740", "w" },  -- 블랙 켄타우로스(9마리)
+				{ "932504d966da4d0db4ce2977d1938139", "g" },  -- 노란 미니빈
+				{ "109a27a8b746465887d851112fab883b", "w" },  -- 미니빈(12마리)
+			}
+		elseif ep == 3 then
+			return {
+				{ "eb340b782b084e94ad512b613a4f4c40", "g" },  -- 보너스 보스(map2)
+				{ "a1f17c79feb04c1e94a2564ec3d775c1", "g" },  -- 쿠스코
+				{ "726c62b6df8041f08c2800c21fe37c80", "w" },  -- 펑코(5마리)
+				{ "a6ed6d215c3c4342904dc9a309b7420d", "w" },  -- 불량 루돌프(2마리)
+			}
+		end
+		return {}
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer GetBossCountFor(integer ep)
+		-- 에피소드별 보스 수(SelectedEpisode와 무관하게 지정 에피소드로 읽는다)
+		if ep == 1 then return _GameManager:GetEp1BossCount() end
+		if ep == 2 then return _GameManager:GetEp2BossCount() end
+		if ep == 3 then return _GameManager:GetEp3BossCount() end
+		if ep == 4 then return _GameManager:GetEp4BossCount() end
+		return 0
+	end
+
+	@ExecSpace("ServerOnly")
+	method any GetBossDefFor(integer ep, integer i)
+		-- 에피소드별 보스 정의
+		if ep == 1 then return _GameManager:GetEp1BossDef(i) end
+		if ep == 2 then return _GameManager:GetEp2BossDef(i) end
+		if ep == 3 then return _GameManager:GetEp3BossDef(i) end
+		if ep == 4 then return _GameManager:GetEp4BossDef(i) end
+		return nil
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer GetEliteCountFor(integer ep)
+		-- 에피소드별 엘리트 수
+		if ep == 1 then return _GameManager:GetEp1EliteCount() end
+		if ep == 2 then return _GameManager:GetEp2EliteCount() end
+		if ep == 3 then return _GameManager:GetEp3EliteCount() end
+		if ep == 4 then return _GameManager:GetEp4EliteCount() end
+		return 0
+	end
+
+	@ExecSpace("ServerOnly")
+	method any GetEliteDefFor(integer ep, integer i)
+		-- 에피소드별 엘리트 정의
+		if ep == 1 then return _GameManager:GetEp1EliteDef(i) end
+		if ep == 2 then return _GameManager:GetEp2EliteDef(i) end
+		if ep == 3 then return _GameManager:GetEp3EliteDef(i) end
+		if ep == 4 then return _GameManager:GetEp4EliteDef(i) end
+		return nil
+	end
+
+	@ExecSpace("ServerOnly")
+	method string FindKind(integer ep, string key)
+		-- 그 에피소드 도감에 있는 키면 종류, 없으면 ""
+		local list = self:GetCatalog(ep)
+		for i = 1, #list do
+			if list[i].k == key then return list[i].t end
+		end
+		return ""
+	end
+
+	-- ── 서버: 로드/저장 ──────────────────────────────────────────────────────
+	@ExecSpace("ServerOnly")
+	@EventSender("Service", "UserService")
+	handler HandleUserEnterEvent(UserEnterEvent event)
+		-- 입장 시 1회 로드
+		local user = _UserService:GetUserEntityByUserId(event.UserId)
+		if user == nil then return end
+		self:LoadFor(user)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void LoadFor(Entity user)
+		-- 처음 보는 유저(NotFound)는 빈 상태로 시작
+		self._profileCode = user.PlayerComponent.ProfileCode
+		self._counts = {}
+		self._claimed = {}
+		local ds = _DataStorageService:GetUserDataStorage(self._profileCode)
+		local code, raw = ds:GetAndWait(self.StorageKey)
+		if code == 0 and raw ~= nil and raw ~= "" then
+			local t = _HttpService:JSONDecode(raw)
+			if t ~= nil then
+				if t["n"] ~= nil then
+					for k, v in pairs(t["n"]) do
+						if k ~= "_v" then self._counts[k] = math.floor(tonumber(v) or 0) end
+					end
+				end
+				if t["c"] ~= nil then
+					for k, v in pairs(t["c"]) do
+						if k ~= "_v" then self._claimed[k] = math.floor(tonumber(v) or 0) end
+					end
+				end
+			end
+		elseif code ~= 0 and code ~= 1000002 then
+			log_warning("MonsterBookLogic: load failed code=" .. tostring(code))
+		end
+		self.Loaded = true
+		self:Recalc()
+		log("MonsterBookLogic: loaded claimable=" .. self.ClaimableCount)
+	end
+
+	@ExecSpace("ServerOnly")
+	method string EncodeState()
+		-- 저장용 JSON(빈 표 방지용 "_v" 키 포함)
+		local n = {}
+		for k, v in pairs(self._counts) do n[k] = v end
+		n["_v"] = 1
+		local c = {}
+		for k, v in pairs(self._claimed) do c[k] = v end
+		c["_v"] = 1
+		local t = {}
+		t["n"] = n
+		t["c"] = c
+		return _HttpService:JSONEncode(t)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void Save()
+		-- 더티일 때만 비동기 저장(실패하면 다음 주기에 다시)
+		if not self._dirty or not self.Loaded or self._profileCode == "" then return end
+		self._dirty = false
+		local ds = _DataStorageService:GetUserDataStorage(self._profileCode)
+		ds:SetAsync(self.StorageKey, self:EncodeState(), function(code, key)
+			if code ~= 0 then
+				self._dirty = true
+				log_warning("MonsterBookLogic: save failed code=" .. tostring(code))
+			end
+		end)
+	end
+
+	@ExecSpace("ServerOnly")
+	@EventSender("Service", "UserService")
+	handler HandleUserLeaveEvent(UserLeaveEvent event)
+		-- 나갈 때 남은 변경을 확실히 저장
+		if not self._dirty or not self.Loaded or self._profileCode == "" then return end
+		self._dirty = false
+		local ds = _DataStorageService:GetUserDataStorage(self._profileCode)
+		local code = ds:SetAndWait(self.StorageKey, self:EncodeState())
+		if code ~= 0 then log_warning("MonsterBookLogic: leave save failed code=" .. tostring(code)) end
+	end
+
+	-- ── 서버: 처치 집계 ──────────────────────────────────────────────────────
+	@ExecSpace("ServerOnly")
+	method void OnMonsterKilled(string key)
+		-- MonsterAI.Die — 지금 에피소드 도감에 있는 몬스터만 센다
+		if not self.Loaded or key == nil or key == "" then return end
+		local ep = _GameManager:GetSelectedEpisode()
+		if ep < 1 or ep > self.EpisodeCount then return end
+		if self:FindKind(ep, key) == "" then return end
+		local id = ep .. "|" .. key
+		self._counts[id] = (self._counts[id] or 0) + 1
+		self._dirty = true
+		self._needRecalc = true
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer GetCount(integer ep, string key)
+		-- 처치 수
+		return self._counts[ep .. "|" .. key] or 0
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer GetClaimed(integer ep, string key)
+		-- 이미 받은 단계 수
+		return self._claimed[ep .. "|" .. key] or 0
+	end
+
+	@ExecSpace("ServerOnly")
+	method void Recalc()
+		-- 받을 수 있는 단계 수 합계(레드닷용 @Sync)
+		local n = 0
+		for ep = 1, self.EpisodeCount do
+			local list = self:GetCatalog(ep)
+			for i = 1, #list do
+				local e = list[i]
+				local reached = self:GetReachedTier(e.t, self:GetCount(ep, e.k))
+				local claimed = self:GetClaimed(ep, e.k)
+				if reached > claimed then n = n + (reached - claimed) end
+			end
+		end
+		if n ~= self.ClaimableCount then
+			self.ClaimableCount = n
+			log("MonsterBookLogic: claimable=" .. n)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnUpdate(number delta)
+		-- 레드닷 재계산(0.5초 묶음) + 주기 저장
+		if not self.Loaded then return end
+		self._recalcTimer = self._recalcTimer + delta
+		if self._recalcTimer >= 0.5 then
+			self._recalcTimer = 0
+			if self._needRecalc then
+				self._needRecalc = false
+				self:Recalc()
+			end
+		end
+		self._saveTimer = self._saveTimer + delta
+		if self._saveTimer >= self.SaveInterval then
+			self._saveTimer = 0
+			self:Save()
+		end
+	end
+
+	-- ── 서버: 클라 요청 ──────────────────────────────────────────────────────
+	@ExecSpace("Server")
+	method void RequestSnapshot(integer ep)
+		-- 팝업을 열거나 에피소드를 넘길 때 — 그 에피소드 카드 목록 + 처치 수 + 받은 단계
+		if not self.Loaded then return end
+		_MonsterBookUI:OnSnapshot(self:BuildSnapshot(ep), senderUserId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method string BuildSnapshot(integer ep)
+		-- 클라 표시용 JSON {ep, l=[{k,t,s,n,c}]}
+		if ep < 1 or ep > self.EpisodeCount then ep = 1 end
+		local list = self:GetCatalog(ep)
+		local l = {}
+		for i = 1, #list do
+			local e = list[i]
+			table.insert(l, { k = e.k, t = e.t, s = e.s, n = self:GetCount(ep, e.k), c = self:GetClaimed(ep, e.k) })
+		end
+		local t = {}
+		t["ep"] = ep
+		t["l"] = l
+		return _HttpService:JSONEncode(t)
+	end
+
+	@ExecSpace("Server")
+	method void RequestClaim(integer ep, string key)
+		-- 카드 1장 — 도달한 단계를 전부 받는다
+		local amount = self:ClaimInner(ep, key)
+		self:FinishClaim(ep, amount, senderUserId)
+	end
+
+	@ExecSpace("Server")
+	method void RequestClaimAll(integer ep)
+		-- 지금 보고 있는 에피소드의 받을 수 있는 단계 전부(클라가 보류할 금액을 미리 알 수 있게 페이지 단위)
+		local amount = 0
+		local list = self:GetCatalog(ep)
+		for i = 1, #list do
+			amount = amount + self:ClaimInner(ep, list[i].k)
+		end
+		self:FinishClaim(ep, amount, senderUserId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer ClaimInner(integer ep, string key)
+		-- 도달했지만 안 받은 단계를 받음 처리하고 그 다이아 합계를 돌려준다
+		if not self.Loaded then return 0 end
+		local kind = self:FindKind(ep, key)
+		if kind == "" then return 0 end
+		local reached = self:GetReachedTier(kind, self:GetCount(ep, key))
+		local claimed = self:GetClaimed(ep, key)
+		if reached <= claimed then return 0 end
+		local rewards = self:GetRewards()
+		local amount = 0
+		for i = claimed + 1, reached do amount = amount + rewards[i] end
+		self._claimed[ep .. "|" .. key] = reached
+		return amount
+	end
+
+	@ExecSpace("ServerOnly")
+	method void FinishClaim(integer ep, integer amount, string userId)
+		-- 다이아 지급 + 즉시 저장 + 클라에 결과/새 스냅샷
+		if amount > 0 then
+			_GameManager:AddDiamond(amount)
+			self._dirty = true
+			self:Save()
+			-- 날아가는 연출 중에 앱이 꺼져도 수령은 남는다(업적과 같은 규칙)
+			_GameManager:PersistRewardNow(userId)
+			self:Recalc()
+			log("MonsterBookLogic: claimed diamond +" .. amount)
+		end
+		_MonsterBookUI:OnClaimResult(amount, self:BuildSnapshot(ep), userId)
+	end
+
+	-- 테스트 전용(서버 스크립트에서 직접 호출) — 처치 수 강제 설정
+	@ExecSpace("ServerOnly")
+	method void DebugSetCount(integer ep, string key, integer value)
+		self._counts[ep .. "|" .. key] = value
+		self._dirty = true
+		self:Recalc()
+		log("MonsterBookLogic: debug ep" .. ep .. " " .. key .. "=" .. value .. " claimable=" .. self.ClaimableCount)
+	end
+
+	-- 테스트 전용 — 처치 수/수령 전부 초기화
+	@ExecSpace("ServerOnly")
+	method void DebugReset()
+		self._counts = {}
+		self._claimed = {}
+		self._dirty = true
+		self:Save()
+		self:Recalc()
+		log("MonsterBookLogic: debug reset")
+	end
+
+	-- ── 클라: 레드닷 갱신 ──────────────────────────────────────────────────────
+	@ExecSpace("ClientOnly")
+	method void OnSyncProperty(string name, any value)
+		-- 받을 수 있는 단계 수가 바뀌면 로비 버튼 레드닷 갱신
+		if name == "ClaimableCount" or name == "Loaded" then
+			_MonsterBookUI:RefreshLobbyButton()
+		end
+	end
+
+end

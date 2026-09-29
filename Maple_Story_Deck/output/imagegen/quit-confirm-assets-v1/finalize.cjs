@@ -1,0 +1,14 @@
+const fs=require('fs'),path=require('path'),assert=require('assert/strict'),crypto=require('crypto');
+const {UIBuilder}=require('../../../.agents/skills/msw-ui-system/scripts/msw_ui_builder.cjs');
+const b=UIBuilder.read('ui/OptionGroup.ui'),before=UIBuilder.read(path.join(__dirname,'before.ui'));
+const sprite='MOD.Core.SpriteGUIRendererComponent',text='MOD.Core.TextGUIRendererComponent';
+assert.equal(b.getComponent('ConfirmPanel/Bg',sprite).ImageRUID.DataId,'963aa0aa0cbd418197e0696715357ff9');
+for(const name of ['Message','SubMessage','BtnYes','BtnNo'])assert.equal(b.getComponent('ConfirmPanel/'+name,text).BestFit,true);
+for(const name of ['BtnYes','BtnNo'])assert.equal(b.getComponent('ConfirmPanel/'+name,sprite).ImageRUID.DataId,'5f3b12df85724f2ab7b48e26610f42f5');
+for(const e of before.listEntities())if(!e.path.startsWith('/ui/OptionGroup/ConfirmPanel/'))assert.deepEqual(b.find(e.path),before.find(e.path));
+assert.equal(crypto.createHash('sha256').update(fs.readFileSync('RootDesk/MyDesk/OptionUI.mlua')).digest('hex'),'2f741a464cb88c5a5faf80cb1cf5cdb0b0d2a8ca5769b8f1ed0afa323782b7e3');
+const verifyPath=path.join(__dirname,'verification.json'),v=JSON.parse(fs.readFileSync(verifyPath,'utf8'));
+fs.copyFileSync(v.screenshotSource,path.join(__dirname,'applied-preview.png'));
+v.persistedAfterPlayStop=true;
+fs.writeFileSync(verifyPath,JSON.stringify(v,null,2)+'\n');
+console.log(JSON.stringify({persistedAfterPlayStop:true,entities:b.listEntities().length,unchangedOtherPanels:true,unchangedScript:true,preview:v.screenshot}));

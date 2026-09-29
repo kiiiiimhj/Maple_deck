@@ -1,0 +1,562 @@
+@Logic
+script MonsterBookUI extends Logic
+
+	-- 몬스터 도감 팝업(ui/MonsterBookGroup.ui) + 로비 도감 버튼(ui/TitleGroup.ui MonsterBookButton) 컨트롤러.
+	-- 상태는 전부 MonsterBookLogic(서버)이 들고 있고, 팝업을 열거나 에피소드를 넘길 때 스냅샷(JSON)을 받아 그린다.
+	--   · 위: 에피소드 사진 배너 + 좌우 화살표(에피소드 1~4 순환)
+	--   · 가운데: 카드 5열 그리드(위아래 스크롤). 카드 = 몬스터 그림 / 처치 수 "n/다음 목표" / 받기 버튼.
+	--     한 번도 안 잡은 카드는 그림을 까맣게(실루엣) + 카드 전체 어둡게 + 흰 자물쇠.
+	--     엘리트/보스는 그림 위에 머리 위 표식과 같은 해골(왕관 해골 / 불꽃 해골).
+	--   · 아래: 모두 받기(지금 에피소드). 받은 다이아는 팝업을 닫을 때 화면 중앙에서 다이아 배지로 날아간다.
+	-- 카드 그림: stand는 animationclip이라 UI 스프라이트에 그대로 넣으면 안 그려진다 → 첫 프레임 sprite RUID를
+	-- 클라에서 읽어 캐시해 쓴다(보이는 카드만 읽는다 — LoadAnimationClipAndWait는 한 프레임 멈춘다).
+
+	-- UI 바인딩 (UIBuilder가 UUID를 넣는다)
+	property Entity popupGroup = "bbce19ca-2dd3-461a-a2d0-1dde288eacc6"
+	property ButtonComponent btnClose = "ed5d6526-d4d1-4924-8014-68047344e69b"
+	property ButtonComponent btnClaimAll = "e77cd00c-65bc-4b4e-8b5e-17b21e32fc8f"
+	property ButtonComponent btnPrev = "5c14d3e0-b50a-4d5d-9cc0-1acdc7e43737"
+	property ButtonComponent btnNext = "86cddfd9-c7ed-4efd-a14c-84f7bd635eaa"
+	property GridViewComponent listGrid = "68c458af-272a-4a88-8639-414928a8cd7a"
+	property Entity cardTemplate = "dc2d29bf-e139-4d09-b538-2391a5d96e68"
+	property SpriteGUIRendererComponent episodePhoto = "c322cff9-ff37-4239-ac4a-715b2983e544"
+	property TextGUIRendererComponent episodeName = "2cf0d139-9ba1-44a7-a3ac-add6f13b28bd"
+	property ButtonComponent lobbyButton = "81dec33f-73bc-4a55-8e03-39271e5f34c3"
+	property Entity lobbyRedDot = "59de87ae-ca44-4902-bc47-ccc0c5ffd462"
+
+	property string DiamondIconRUID = "81462aeb825b4660991cef05651271cf"
+	property string EliteBadgeRUID = "ed6a53c6c13641dd8073ac871553de37"
+	property string BossBadgeRUID = "012d32932d3b4bf2866834a73eafb0d6"
+	-- 카드 안 그림 칸 중심 높이(카드 템플릿 Image의 기본 위치 — 카드를 0.78배로 줄이며 52→40.6)
+	property number ImageBaseY = 40.6
+	property Color ProgressColor = Color(0.36, 0.2, 0.08, 1)
+	property Color DoneColor = Color(0.2, 0.5, 0.12, 1)
+
+	-- 내부 상태
+	property boolean _isOpen = false
+	property boolean _lobbyTabVisible = true
+	property integer _ep = 1
+	property table _entries = {}
+	property table _frameCache = {}
+	property boolean _claimPending = false
+	property integer _pendingFlyAmount = 0
+	property integer _holdAmount = 0
+	-- 다이아가 날아가기 시작할 자리(누른 받기 버튼 / 모두 받기 버튼)
+	property Entity _flyFrom = nil
+	-- 판넬 세로 범위(판넬 중심 기준, .ui 실측) — FitPanelToCanvas가 모바일 캔버스에 맞춰 줄일 때 쓴다
+	property number PanelExtentTop = 548
+	property number PanelExtentBottom = -504
+	property any _panelBaseY = nil
+	property any _closeHandler = nil
+	property any _claimAllHandler = nil
+	property any _prevHandler = nil
+	property any _nextHandler = nil
+	property any _lobbyHandler = nil
+	property table _cardHandlers = {}
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		-- 버튼 연결 + 카드 그리드 준비(카드 템플릿 복제)
+		if not isvalid(self.popupGroup) then return end
+		self.popupGroup.Enable = false
+		self._closeHandler = self.btnClose.Entity:ConnectEvent(ButtonClickEvent, self.OnCloseClicked)
+		self._claimAllHandler = self.btnClaimAll.Entity:ConnectEvent(ButtonClickEvent, self.OnClaimAllClicked)
+		self._prevHandler = self.btnPrev.Entity:ConnectEvent(ButtonClickEvent, function() self:ChangeEpisode(-1) end)
+		self._nextHandler = self.btnNext.Entity:ConnectEvent(ButtonClickEvent, function() self:ChangeEpisode(1) end)
+		if isvalid(self.lobbyButton) then
+			self._lobbyHandler = self.lobbyButton.Entity:ConnectEvent(ButtonClickEvent, self.OnLobbyButtonClicked)
+		end
+		self.listGrid.ItemEntity = self.cardTemplate
+		self.listGrid.OnRefresh = function(index, entity) self:OnCardRefresh(index + 1, entity) end
+		self.listGrid.TotalCount = 0
+		self:RefreshLobbyButton()
+		log("MonsterBookUI started")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		-- 이벤트 해제
+		if self._closeHandler then self.btnClose.Entity:DisconnectEvent(ButtonClickEvent, self._closeHandler) end
+		if self._claimAllHandler then self.btnClaimAll.Entity:DisconnectEvent(ButtonClickEvent, self._claimAllHandler) end
+		if self._prevHandler then self.btnPrev.Entity:DisconnectEvent(ButtonClickEvent, self._prevHandler) end
+		if self._nextHandler then self.btnNext.Entity:DisconnectEvent(ButtonClickEvent, self._nextHandler) end
+		if self._lobbyHandler then self.lobbyButton.Entity:DisconnectEvent(ButtonClickEvent, self._lobbyHandler) end
+		for _, rec in pairs(self._cardHandlers) do
+			if isvalid(rec.entity) then rec.entity:DisconnectEvent(ButtonClickEvent, rec.h) end
+		end
+		self._cardHandlers = {}
+	end
+
+	-- ── 열기/닫기 ──────────────────────────────────────────────────────────────
+	@ExecSpace("ClientOnly")
+	method void OnLobbyButtonClicked()
+		-- 로비 도감 버튼
+		self:Open()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Open()
+		-- 처음엔 에피소드1부터. 목록은 서버 스냅샷이 오면 그린다
+		self.popupGroup.Enable = true
+		self._isOpen = true
+		self:FitPanelToCanvas()
+		self:ShowEpisode(self._ep, true)
+		log("MonsterBookUI: opened ep" .. self._ep)
+	end
+
+	-- 판넬(제목 위 끝 ~ 프레임 아래 끝)이 캔버스 세로보다 크면 비율대로 줄여 가운데 둔다.
+	-- PC 캔버스는 1080이라 그대로(1.0), 아이폰류 모바일은 안전영역 캔버스가 세로 ≈1027이라 제목/아래 장식이 잘렸다.
+	-- 값은 .ui 실측(2026-09-29): 판넬 중심 기준 아래 -504 ~ 위 +548 = 1052.
+	@ExecSpace("ClientOnly")
+	method void FitPanelToCanvas()
+		-- 캔버스 세로에 맞춰 판넬 크기/위치 보정
+		local panel = self.popupGroup:GetChildByName("Panel")
+		if not isvalid(panel) then return end
+		local tf = panel.UITransformComponent
+		if self._panelBaseY == nil then self._panelBaseY = tf.anchoredPosition.y end
+		local canvasH = self.popupGroup.UITransformComponent.RectSize.y
+		local s = 1.0
+		if canvasH > 0 and canvasH < self.PanelExtentTop - self.PanelExtentBottom + 10 then
+			s = (canvasH - 10) / (self.PanelExtentTop - self.PanelExtentBottom)
+		end
+		tf.UIScale = Vector3(s, s, 1)
+		if s < 1.0 then
+			-- 줄인 판넬의 위아래 끝이 캔버스 가운데에 오게
+			tf.anchoredPosition = Vector2(tf.anchoredPosition.x, -(self.PanelExtentTop + self.PanelExtentBottom) * 0.5 * s)
+		else
+			tf.anchoredPosition = Vector2(tf.anchoredPosition.x, self._panelBaseY)
+		end
+		log("MonsterBookUI: canvasH=" .. string.format("%.0f", canvasH) .. " panelScale=" .. string.format("%.3f", s))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Close()
+		-- 닫을 때 이번에 받은 다이아를 날린다
+		self.popupGroup.Enable = false
+		self._isOpen = false
+		self:FlyPending()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnCloseClicked()
+		-- X 버튼
+		self:Close()
+	end
+
+	-- ── 에피소드 전환 ──────────────────────────────────────────────────────────
+	@ExecSpace("ClientOnly")
+	method void ChangeEpisode(integer delta)
+		-- 좌우 화살표 — 1~4 순환
+		if self._claimPending then return end
+		local n = 4
+		local ep = self._ep + delta
+		if ep < 1 then ep = n end
+		if ep > n then ep = 1 end
+		self:ShowEpisode(ep, true)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ShowEpisode(integer ep, boolean resetPos)
+		-- 배너(사진/이름) 교체 + 비운 목록으로 먼저 그리고 서버에 스냅샷 요청
+		self._ep = ep
+		if isvalid(self.episodePhoto) then self.episodePhoto.ImageRUID = DataRef(self:GetEpisodePhoto(ep)) end
+		if isvalid(self.episodeName) then self.episodeName.Text = _LocalizationService:GetText(self:GetEpisodeNameKey(ep)) end
+		self._entries = {}
+		self.listGrid.TotalCount = 0
+		self.listGrid:Refresh(true, resetPos)
+		self:RefreshClaimAllButton()
+		_MonsterBookLogic:RequestSnapshot(ep)
+	end
+
+	@ExecSpace("ClientOnly")
+	method string GetEpisodePhoto(integer ep)
+		-- 월드 선택 화면과 같은 사진(WorldCharacterSelectUI._worlds)
+		if ep == 2 then return "d83a7e649d724c009faf12e4a3dfda4d" end
+		if ep == 3 then return "3ad5d3ae556b42fe94401c63d788bf7a" end
+		if ep == 4 then return "2fda6679e68c44729890ceb154fdc7f8" end
+		return "95ce798ac8fd4b1ab8177405c18c9949"
+	end
+
+	@ExecSpace("ClientOnly")
+	method string GetEpisodeNameKey(integer ep)
+		-- 월드 이름 번역 키(월드 선택 화면과 같은 키)
+		if ep == 2 then return "MLUA_IDLEREWARDLOGIC_001" end
+		if ep == 3 then return "MLUA_IDLEREWARDLOGIC_002" end
+		if ep == 4 then return "MLUA_IDLEREWARDLOGIC_004" end
+		return "MLUA_IDLEREWARDLOGIC_003"
+	end
+
+	-- ── 서버 응답 ──────────────────────────────────────────────────────────────
+	@ExecSpace("Client")
+	method void OnSnapshot(string json)
+		-- MonsterBookLogic.RequestSnapshot 응답(에피소드를 그새 넘겼으면 버린다)
+		local ep = self:ApplySnapshot(json)
+		if ep ~= self._ep then return end
+		self:RefreshList(true)
+	end
+
+	@ExecSpace("Client")
+	method void OnClaimResult(integer amount, string json)
+		-- 수령 결과 — amount 0이면 받은 게 없다(보류만 풀기)
+		self._claimPending = false
+		-- 받은 다이아는 **팝업을 닫을 때** 날아가고, 우측 상단 숫자는 날아간 다이아가 도착할 때 오른다(유저 지정 2026-09-29).
+		-- 그때까지 보류(Hold)로 숫자를 잡아둔다. 서버는 지급 즉시 저장(PersistRewardNow)해서 도중에 꺼져도 보상은 남는다.
+		local held = self._holdAmount
+		self._holdAmount = 0
+		if amount <= 0 then
+			if held > 0 then _RewardFlyUI:Release("diamond", held) end
+		else
+			-- 미리 보류한 금액과 실제 지급액이 다르면 차이만큼 맞춘다(도착 시 지급액만큼 풀린다)
+			if amount > held then
+				_RewardFlyUI:Hold("diamond", amount - held)
+			elseif held > amount then
+				_RewardFlyUI:Release("diamond", held - amount)
+			end
+			if self._isOpen then
+				self._pendingFlyAmount = self._pendingFlyAmount + amount
+			else
+				self:FlyDiamond(amount)
+			end
+		end
+		local ep = self:ApplySnapshot(json)
+		if ep == self._ep then self:RefreshList(false) end
+	end
+
+	@ExecSpace("ClientOnly")
+	method integer ApplySnapshot(string json)
+		-- {ep, l=[{k,t,s,n,c}]} → _entries. 반환 = 스냅샷의 에피소드
+		local t = _HttpService:JSONDecode(json)
+		if t == nil then return 0 end
+		local ep = math.floor(tonumber(t["ep"]) or 0)
+		if ep ~= self._ep then return ep end
+		local list = {}
+		local l = t["l"] or {}
+		for i = 1, #l do
+			local e = l[i]
+			table.insert(list, { k = e["k"], t = e["t"], s = e["s"], n = math.floor(tonumber(e["n"]) or 0), c = math.floor(tonumber(e["c"]) or 0) })
+		end
+		self._entries = list
+		return ep
+	end
+
+	-- ── 목록 ──────────────────────────────────────────────────────────────────
+	@ExecSpace("ClientOnly")
+	method integer GetClaimableAmount(table e)
+		-- 이 카드에서 지금 받을 수 있는 다이아 합계
+		local reached = _MonsterBookLogic:GetReachedTier(e.t, e.n)
+		if reached <= e.c then return 0 end
+		local rewards = _MonsterBookLogic:GetRewards()
+		local sum = 0
+		for i = e.c + 1, reached do sum = sum + rewards[i] end
+		return sum
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshList(boolean resetPos)
+		-- 그리드 갱신 + 모두 받기 버튼 상태
+		self.listGrid.TotalCount = #self._entries
+		self.listGrid:Refresh(true, resetPos)
+		if resetPos then
+			-- 목록은 맨 위로 돌아가도 옆 스크롤바(UIGridScrollBar) 손잡이는 그대로 남았다(유저 리포트 2026-09-29) —
+			-- 그리드 위치가 적용된 다음 프레임에 스크롤바를 그리드에 다시 맞춘다
+			self:ResetScrollBar()
+		end
+		if not resetPos then
+			-- force Refresh만으로 이미 그려진 칸이 안 바뀌는 경우가 있어 보이는 칸을 직접 다시 칠한다(업적 목록과 같은 이유)
+			self:RepaintVisibleCards()
+		end
+		self:RefreshClaimAllButton()
+		self:RefreshLobbyButton()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ResetScrollBar()
+		-- 커스텀 스크롤바 손잡이를 그리드 현재 위치(맨 위)로 다시 맞춘다
+		local bar = self.listGrid.Entity.Parent:GetChildByName("ScrollBar")
+		if not isvalid(bar) then return end
+		local comp = bar:GetComponent("script.UIGridScrollBar")
+		if comp == nil then return end
+		_TimerService:SetTimerOnce(function()
+			if isvalid(comp) and comp.TargetGrid ~= nil then comp:SyncFromGrid() end
+		end, 0.05)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshClaimAllButton()
+		-- 항상 밝게(유저 지정 2026-09-29 — 받을 게 없으면 누를 때 토스트로 알려준다) + 아래에 이 에피소드 받을 다이아 합계
+		self.btnClaimAll.Entity.SpriteGUIRendererComponent.Color = Color(1, 1, 1, 1)
+		local total = 0
+		for _, e in ipairs(self._entries) do total = total + self:GetClaimableAmount(e) end
+		local amountEntity = self.btnClaimAll.Entity:GetChildByName("Amount")
+		-- 합계는 K로 줄이지 않고 정확히(콤마) — 1,630 → 1,620처럼 조금 받았을 때 "1.6K" 그대로라 안 바뀐 것처럼 보였다
+		if isvalid(amountEntity) then amountEntity.TextGUIRendererComponent.Text = "x" .. self:FormatComma(total) end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnCardRefresh(integer index, Entity card)
+		-- 카드 하나 그리기(GridView가 칸을 재활용하므로 매번 전부 다시 설정)
+		local e = self._entries[index]
+		if e == nil then return end
+		local unlocked = e.n > 0
+		local targets = _MonsterBookLogic:GetTargets(e.t)
+		local reached = _MonsterBookLogic:GetReachedTier(e.t, e.n)
+		local done = e.c >= #targets
+		local claimable = reached > e.c
+
+		local imgEntity = card:GetChildByName("Image")
+		local img = imgEntity.SpriteGUIRendererComponent
+		local frame = self:GetFrameInfo(e.s)
+		img.ImageRUID = DataRef(frame.ruid)
+		self:PlaceImage(imgEntity, frame)
+		if unlocked then
+			img.Color = Color(1, 1, 1, 1)
+		else
+			-- 안 잡은 몬스터 = 까만 실루엣
+			img.Color = Color(0, 0, 0, 0.85)
+		end
+		card:GetChildByName("Dim").Enable = not unlocked
+		card:GetChildByName("Lock").Enable = not unlocked
+
+		local badge = card:GetChildByName("Badge")
+		if e.t == "b" then
+			badge.Enable = true
+			badge.SpriteGUIRendererComponent.ImageRUID = DataRef(self.BossBadgeRUID)
+		elseif e.t == "e" then
+			badge.Enable = true
+			badge.SpriteGUIRendererComponent.ImageRUID = DataRef(self.EliteBadgeRUID)
+		else
+			badge.Enable = false
+		end
+
+		local count = card:GetChildByName("Count").TextGUIRendererComponent
+		if done then
+			count.Text = self:FormatNumber(e.n)
+			count.FontColor = self.DoneColor
+		else
+			local nextTarget = targets[e.c + 1]
+			count.Text = self:FormatNumber(e.n) .. "/" .. self:FormatNumber(nextTarget)
+			-- 받을 수 있는 카드는 숫자를 초록으로(버튼은 밝기를 안 낮추므로 여기서 구분한다)
+			if claimable then
+				count.FontColor = self.DoneColor
+			else
+				count.FontColor = self.ProgressColor
+			end
+		end
+
+		-- 버튼: 잠김(안 잡음) = "잠김" + 눌리지 않음 / 완료 = "완료" + 눌리지 않음 / 그 외 = 밝은 "받기"
+		-- (유저 지정 2026-09-29 — 예전엔 못 받는 단계를 0.45로 어둡게 칠해 받기 버튼 전체가 어두워 보였다)
+		-- 받을 수 있는 카드는 버튼에 "다이아 xN"(유저 지정 2026-09-29 — 보상이 안 보였다). N = 지금 받을 수 있는
+		-- 합계, 아직 못 받으면 다음 단계 보상. 비활성 버튼의 어두운 색은 .ui의 ButtonComponent DisabledColor가 칠한다.
+		local btn = card:GetChildByName("BtnClaim")
+		local label = btn.TextGUIRendererComponent
+		local dia = btn:GetChildByName("Dia")
+		local amountText = btn:GetChildByName("Amount")
+		btn.SpriteGUIRendererComponent.Color = Color(1, 1, 1, 1)
+		if not unlocked or done then
+			if not unlocked then
+				label.Text = _LocalizationService:GetText("MLUA_MONSTERBOOKUI_002")
+			else
+				label.Text = _LocalizationService:GetText("MLUA_ATTENDANCEUI_001")
+			end
+			label.FontColor = Color(0.85, 0.85, 0.85, 1)
+			if isvalid(dia) then dia.Enable = false end
+			if isvalid(amountText) then amountText.Enable = false end
+			btn.ButtonComponent.Enable = false
+		else
+			label.Text = ""
+			local reward = self:GetClaimableAmount(e)
+			if reward <= 0 then reward = _MonsterBookLogic:GetRewards()[e.c + 1] end
+			if isvalid(dia) then dia.Enable = true end
+			if isvalid(amountText) then
+				amountText.Enable = true
+				amountText.TextGUIRendererComponent.Text = "x" .. self:FormatNumber(reward)
+			end
+			-- 아직 목표 전이면 보상은 보여주되 버튼은 어둡게(비활성) — 밝으면 눌러도 반응 없는 버튼으로 보였다(유저 리포트)
+			btn.ButtonComponent.Enable = claimable
+		end
+
+		-- 받기 버튼 연결(칸 엔티티당 1회, 누를 때 지금 그 칸의 카드 키를 읽는다)
+		self:SetCardKey(card, e.k, index)
+	end
+
+	@ExecSpace("ClientOnly")
+	method table GetFrameInfo(string stand)
+		-- stand 클립 첫 프레임의 sprite RUID + 원본 크기/기준점(캐시). 못 읽으면 크기 0(보정 없이 가운데)
+		local info = { ruid = stand, w = 0, h = 0, px = 0.5, py = 0.5 }
+		if stand == nil or stand == "" then return info end
+		local cached = self._frameCache[stand]
+		if cached ~= nil then return cached end
+		local ok, err = pcall(function()
+			local sp = nil
+			if _ResourceService:GetTypeAndWait(stand) == ResourceType.AnimationClip then
+				local clip = _ResourceService:LoadAnimationClipAndWait(stand)
+				if clip ~= nil and clip.Frames ~= nil and clip.Frames.Count > 0 then
+					sp = clip.Frames[1].FrameSprite
+				end
+			else
+				sp = _ResourceService:LoadSpriteAndWait(stand)
+			end
+			if sp ~= nil then
+				if sp.RUID ~= "" then info.ruid = sp.RUID end
+				info.w = sp.Width
+				info.h = sp.Height
+				info.px = sp.Pivot.x
+				info.py = sp.Pivot.y
+			end
+		end)
+		if not ok then log_warning("MonsterBookUI: frame read failed " .. stand) end
+		self._frameCache[stand] = info
+		return info
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlaceImage(Entity imgEntity, table frame)
+		-- 몬스터 스프라이트는 기준점이 발밑이라 UI 칸에 넣으면 기준점이 칸 가운데에 와서 그림이 위로 뜬다
+		-- (2026-09-29 스샷 실측). 칸 크기에 맞춰 줄어든 크기 기준으로 (0.5 - 기준점)만큼 되돌려 가운데에 둔다.
+		local tf = imgEntity.UITransformComponent
+		local baseX = 0
+		local baseY = self.ImageBaseY
+		if frame.w <= 0 or frame.h <= 0 then
+			tf.anchoredPosition = Vector2(baseX, baseY)
+			return
+		end
+		local rw = tf.RectSize.x
+		local rh = tf.RectSize.y
+		local s = math.min(rw / frame.w, rh / frame.h)
+		local dw = frame.w * s
+		local dh = frame.h * s
+		tf.anchoredPosition = Vector2(baseX - (0.5 - frame.px) * dw, baseY - (0.5 - frame.py) * dh)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetCardKey(Entity card, string key, integer index)
+		-- 재활용 칸의 현재 카드 키/목록 번호 기록 + 받기 버튼 핸들러 1회 연결
+		local id = card.Id
+		local rec = self._cardHandlers[id]
+		if rec == nil then
+			local btnEntity = card:GetChildByName("BtnClaim")
+			rec = { entity = btnEntity, card = card, key = key, index = index }
+			rec.h = btnEntity:ConnectEvent(ButtonClickEvent, function() self:OnCardClaimClicked(id) end)
+			self._cardHandlers[id] = rec
+		end
+		rec.key = key
+		rec.index = index
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RepaintVisibleCards()
+		-- 지금 화면에 있는 칸들을 기억해둔 목록 번호로 다시 그린다
+		for _, rec in pairs(self._cardHandlers) do
+			if isvalid(rec.card) and rec.card.Enable and rec.index >= 1 and rec.index <= #self._entries then
+				self:OnCardRefresh(rec.index, rec.card)
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method string FormatNumber(integer n)
+		-- 1000 이상은 K(소수 한 자리 버림) — 유저 지정 2026-09-29 "천 개는 1k로"(카드/버튼 폭이 좁다)
+		if n >= 1000000 then return self:TrimDecimal(n / 1000000) .. "M" end
+		if n >= 1000 then return self:TrimDecimal(n / 1000) .. "K" end
+		local out = tostring(math.floor(n))
+		while true do
+			local k
+			out, k = string.gsub(out, "^(-?%d+)(%d%d%d)", "%1,%2")
+			if k == 0 then break end
+		end
+		return out
+	end
+
+	@ExecSpace("ClientOnly")
+	method string FormatComma(integer n)
+		-- 1000 단위 콤마(모두 받기 합계용 — 줄이지 않는다)
+		local out = tostring(math.floor(n))
+		while true do
+			local k
+			out, k = string.gsub(out, "^(-?%d+)(%d%d%d)", "%1,%2")
+			if k == 0 then break end
+		end
+		return out
+	end
+
+	@ExecSpace("ClientOnly")
+	method string TrimDecimal(number v)
+		-- 소수 첫째 자리에서 버림, 끝의 .0은 뗀다
+		local t = math.floor(v * 10) / 10
+		if t == math.floor(t) then return tostring(math.floor(t)) end
+		return string.format("%.1f", t)
+	end
+
+	-- ── 수령 ──────────────────────────────────────────────────────────────────
+	@ExecSpace("ClientOnly")
+	method void OnCardClaimClicked(string cardId)
+		-- 카드 받기 버튼 — 받을 게 없으면 무시
+		local rec = self._cardHandlers[cardId]
+		if rec == nil or self._claimPending then return end
+		local e = self._entries[rec.index]
+		if e == nil or e.k ~= rec.key then return end
+		local amount = self:GetClaimableAmount(e)
+		if amount <= 0 then return end
+		self._flyFrom = rec.entity
+		self:BeginClaim(amount)
+		_MonsterBookLogic:RequestClaim(self._ep, e.k)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnClaimAllClicked()
+		-- 모두 받기(지금 에피소드)
+		if self._claimPending then return end
+		local total = 0
+		for _, e in ipairs(self._entries) do total = total + self:GetClaimableAmount(e) end
+		if total <= 0 then
+			-- (토스트가 팝업 뒤에 깔리던 문제는 UIToast.ShowMessage가 스스로 맨 앞으로 올라오게 고쳤다)
+			_UIToast:ShowMessage(_LocalizationService:GetText("MLUA_MONSTERBOOKUI_001"))
+			return
+		end
+		self._flyFrom = self.btnClaimAll.Entity
+		self:BeginClaim(total)
+		_MonsterBookLogic:RequestClaimAll(self._ep)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void BeginClaim(integer amount)
+		-- 서버 지급 전 다이아 배지 숫자를 보류(날아가서 도착할 때 오른다)
+		self._claimPending = true
+		self._holdAmount = amount
+		_RewardFlyUI:Hold("diamond", amount)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void FlyPending()
+		-- 팝업을 닫을 때 모아둔 다이아를 날린다
+		if self._pendingFlyAmount <= 0 then return end
+		local amount = self._pendingFlyAmount
+		self._pendingFlyAmount = 0
+		self:FlyDiamond(amount)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void FlyDiamond(integer amount)
+		-- 화면 중앙 → 다이아 배지(업적과 같은 연출)
+		_RewardFlyUI:Fly("diamond", amount, self.DiamondIconRUID, Vector2(0, 0), 0)
+	end
+
+	-- ── 로비 버튼 ──────────────────────────────────────────────────────────────
+	@ExecSpace("ClientOnly")
+	method void RefreshLobbyButton()
+		-- 전투 탭에서만 보이고, 받을 보상이 있으면 레드닷
+		if not isvalid(self.lobbyButton) then return end
+		self.lobbyButton.Entity.Enable = self._lobbyTabVisible
+		if isvalid(self.lobbyRedDot) then
+			self.lobbyRedDot.Enable = _MonsterBookLogic:GetClaimableCount() > 0
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetLobbyTabVisible(boolean visible)
+		-- TitleUI.ShowPanelOnly가 탭을 바꿀 때 부른다(업적 버튼과 같은 규칙)
+		self._lobbyTabVisible = visible
+		self:RefreshLobbyButton()
+	end
+
+end
