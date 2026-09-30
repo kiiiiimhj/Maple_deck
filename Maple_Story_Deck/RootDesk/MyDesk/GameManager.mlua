@@ -7674,6 +7674,38 @@ script GameManager extends Logic
 		end, dropScale)
 	end
 
+	-- 이스터에그 오브젝트 드롭용 착지 계산(유저 지정 2026-09-30: "이스터에그 아이템이 살짝 공중에 떠서 멈춘다 —
+	-- 공중 몬스터처럼 바닥까지 떨어지게"). 오브젝트 위치에서 바로 아래 발판을 찾아 낙하 높이/착지 Y를 돌려준다.
+	-- 반환 Vector3(fallHeight(UI px 근사, 월드1=100), groundWorldY, 0). 아래에 발판이 없으면 (0, worldPos.y) = 예전과 같음.
+	-- MonsterAI.GetLootDropFallParams와 같은 레이캐스트지만, 오브젝트보다 **위**에 있는 발판은 고르지 않는다.
+	@ExecSpace("ServerOnly")
+	method Vector3 GetGroundFallFor(Entity refEntity, Vector3 worldPos)
+		local fallHeight = 0
+		local groundY = worldPos.y
+		local map = nil
+		if isvalid(refEntity) then map = refEntity.CurrentMap end
+		if map == nil then map = _CardManager:GetCurrentMap() end
+		if map == nil then return Vector3(0, groundY, 0) end
+		---@type FootholdComponent
+		local foothold = map:GetComponent("FootholdComponent")
+		if foothold == nil then return Vector3(0, groundY, 0) end
+		local hits = foothold:RaycastAll(Vector2(worldPos.x, worldPos.y), Vector2(0, -1), 50)
+		local bestDist = nil
+		for i = 1, #hits do
+			local h = hits[i]
+			if not _MonsterSpawner:IsExcludedZone15Foothold(h.OwnerId) then
+				local y = h:GetYByX(worldPos.x)
+				local dist = worldPos.y - y
+				if dist >= -0.05 and (bestDist == nil or dist < bestDist) then
+					bestDist = dist
+					groundY = y
+				end
+			end
+		end
+		if worldPos.y > groundY then fallHeight = (worldPos.y - groundY) * 100 end
+		return Vector3(fallHeight, groundY, 0)
+	end
+
 	-- 잡템/야누스의 검 교환권 공용 — 포션과 동일하게, 드랍 연출이 끝나기 전에 맵을 이동하면
 	-- 그 자리에서 바로 주운 것으로 치고 즉시 지급 + 클라이언트에 조기수거를 알린다.
 	-- fallHeight: 비행형 몬스터처럼 사망 위치가 공중일 때, 바닥(타일) 높이까지 먼저 빙그르르 돌며
