@@ -12,6 +12,10 @@ script CharacterUnlockLogic extends Logic
 	@Sync property boolean ShadeUnlocked = false
 	-- 린 해금 여부 — 누적 몬스터 처치 100,000마리(유저 지정 2026-09-16). 쉐이드와 동일한 누적 카운터 방식.
 	@Sync property boolean RinUnlocked = false
+	-- 아직 못 보여준 해금 축하 팝업(유저 지정 2026-09-30: "게임 도중에 뜨면 안 되고, 조건 완료 후 로비에 가면 떠야 한다").
+	-- "shade", "rin"을 쉼표로 이어 둔다. 진행도 JSON("pp")에 같이 저장되어 판 도중에 꺼도 다음 로비에서 뜬다.
+	-- 실제 표시는 클라(CharacterUnlockUI.TryShowPending)가 로비가 보일 때만 한다.
+	@Sync property string PendingUnlockPopups = ""
 
 	-- 해금 목표치. 조건 문구(WorldCharacterSelectUI의 unlockHint — _characters 초기값과
 	-- RefreshShadeSlot/RefreshRinSlot 두 곳)와 반드시 같이 고칠 것
@@ -61,6 +65,11 @@ script CharacterUnlockLogic extends Logic
 			self.LeionUnlocked = true
 		end
 		self:LoadProgress()
+		-- 입장 시점에 이미 목표를 넘겨 있으면 바로 해금한다(유저 리포트 2026-09-30: 목표를 낮춘 업데이트 뒤 이미
+		-- 달성한 계정이 로비에선 안 풀리고, 판에 들어가 다음 처치가 나와서야 인게임 팝업이 떴다).
+		-- 팝업은 대기 목록으로 가서 로비에서 뜬다(CharacterUnlockUI.TryShowPending)
+		if not self.ShadeUnlocked and self._gearCollected >= self.ShadeGearGoal then self:UnlockShade() end
+		if not self.RinUnlocked and self._monsterKilled >= self.RinKillGoal then self:UnlockRin() end
 		log("CharacterUnlockLogic: SylphUnlocked=" .. tostring(self.SylphUnlocked) .. " LeionUnlocked=" .. tostring(self.LeionUnlocked) .. " ShadeUnlocked=" .. tostring(self.ShadeUnlocked) .. "(" .. self._gearCollected .. "/" .. self.ShadeGearGoal .. ")" .. " RinUnlocked=" .. tostring(self.RinUnlocked) .. "(" .. self._monsterKilled .. "/" .. self.RinKillGoal .. ")")
 
 		-- 이전 세션에서 이미 실피드를 획득했다면(영구 저장된 값), 맵21 퍼즐/오브젝트가 새 세션에서
@@ -103,6 +112,8 @@ script CharacterUnlockLogic extends Logic
 				self._monsterKilled = math.floor(tonumber(t["k"]) or 0)
 				self.ShadeUnlocked = math.floor(tonumber(t["s"]) or 0) == 1
 				self.RinUnlocked = math.floor(tonumber(t["r"]) or 0) == 1
+				local pp = t["pp"]
+				if pp ~= nil then self.PendingUnlockPopups = tostring(pp) end
 			end
 		elseif code ~= 0 and code ~= 1000002 then
 			-- 1000002(NotFound)는 아직 한 번도 안 센 계정 — 정상이므로 경고하지 않는다
@@ -127,6 +138,7 @@ script CharacterUnlockLogic extends Logic
 		if self.RinUnlocked then r = 1 end
 		t["s"] = s
 		t["r"] = r
+		t["pp"] = self.PendingUnlockPopups
 		local raw = _HttpService:JSONEncode(t)
 		if blocking then
 			local code = self._unlockStorage:SetAndWait(self.ProgressKey, raw)
@@ -192,25 +204,56 @@ script CharacterUnlockLogic extends Logic
 	method void UnlockShade()
 		if self.ShadeUnlocked then return end
 		self.ShadeUnlocked = true
+		-- 축하 팝업은 바로 띄우지 않고 로비에서(CharacterUnlockUI.TryShowPending) — 판 도중에 뜨지 않게
+		self:AddPendingPopup("shade")
 		self:SaveProgress(true)
-		log("CharacterUnlockLogic: Shade unlocked and saved (gear " .. self._gearCollected .. ")")
-		local userId = self:GetSoleUserId()
-		if userId ~= "" then
-			-- 실피드/레이온과 같은 축하 팝업을 재사용한다. 자동전투라 판 중에 떠도 조작을 막지 않는다
-			_CharacterUnlockUI:Open("a8348a83ab4343409cd461ddd83c6730", "MLUA_CHARACTERUNLOCKLOGIC_001", "MLUA_CHARACTERUNLOCKLOGIC_002", userId)
-		end
+		log("CharacterUnlockLogic: Shade unlocked and saved (gear " .. self._gearCollected .. ") — popup pending for lobby")
 	end
 
 	@ExecSpace("ServerOnly")
 	method void UnlockRin()
 		if self.RinUnlocked then return end
 		self.RinUnlocked = true
+		-- 축하 팝업은 바로 띄우지 않고 로비에서(CharacterUnlockUI.TryShowPending) — 판 도중에 뜨지 않게
+		self:AddPendingPopup("rin")
 		self:SaveProgress(true)
-		log("CharacterUnlockLogic: Rin unlocked and saved (kills " .. self._monsterKilled .. ")")
-		local userId = self:GetSoleUserId()
-		if userId ~= "" then
-			_CharacterUnlockUI:Open("e64d2ef49017475b925f18c98510ee7f", "MLUA_CHARACTERUNLOCKLOGIC_003", "MLUA_CHARACTERUNLOCKLOGIC_004", userId)
+		log("CharacterUnlockLogic: Rin unlocked and saved (kills " .. self._monsterKilled .. ") — popup pending for lobby")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void AddPendingPopup(string name)
+		-- 보여줄 해금 팝업 목록에 추가(중복 없이)
+		for part in string.gmatch(self.PendingUnlockPopups, "[^,]+") do
+			if part == name then return end
 		end
+		if self.PendingUnlockPopups == "" then
+			self.PendingUnlockPopups = name
+		else
+			self.PendingUnlockPopups = self.PendingUnlockPopups .. "," .. name
+		end
+	end
+
+	@ExecSpace("Server")
+	method void ConsumePendingPopup(string name)
+		-- 클라가 로비에서 팝업을 띄운 뒤 호출 — 목록에서 빼고 저장한다
+		local rest = {}
+		for part in string.gmatch(self.PendingUnlockPopups, "[^,]+") do
+			if part ~= name then table.insert(rest, part) end
+		end
+		self.PendingUnlockPopups = table.concat(rest, ",")
+		self:SaveProgress(false)
+		log("CharacterUnlockLogic: unlock popup shown in lobby: " .. name .. " (left: \"" .. self.PendingUnlockPopups .. "\")")
+	end
+
+	method string GetPendingUnlockPopups()
+		-- 클라 UI가 읽는다(다른 Logic 필드 직접 읽기 대신)
+		return self.PendingUnlockPopups
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnSyncProperty(string name, any value)
+		-- 보여줄 해금 팝업이 생기면 로비가 떠 있을 때 바로 띄운다(판 중이면 로비로 갈 때 TitleUI.ShowLobby가 부른다)
+		if name == "PendingUnlockPopups" then _CharacterUnlockUI:TryShowPending() end
 	end
 
 	@ExecSpace("ServerOnly")

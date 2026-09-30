@@ -4032,13 +4032,106 @@ script CardManager extends Logic
 		local fragmentDamage = damage * self:GetShadowSplitFragmentPercent(self.ShadowSplitLevel)
 		local spread = self.Card204SplitSpreadX
 		local dirXList = { -spread, 0.0, spread }
+		-- 2026-09-30 유저 지정: 분열 표창은 위로 튀어 올랐다가 포물선을 그리며 주변 적에게 떨어진다
+		-- (적이 없으면 예전처럼 위쪽 부채꼴 직선으로 화면 밖까지)
+		local targets = self:GetSplitFragmentTargets(map, originPos, self.Card204SplitCount, depthAnchor)
 		for i = 1, self.Card204SplitCount do
 			local dirX = dirXList[i]
-			-- SplitCount를 3보다 크게 올리면 남는 조각은 가운데(수직)로 보낸다
 			if dirX == nil then dirX = 0.0 end
-			self:FlyShadowSplitFragment(map, originPos, dirX, 1.0, fragmentDamage, isCrit, depthAnchor, castZoneIndex)
+			if #targets > 0 then
+				self:FlySplitFragmentArc(map, originPos, targets[i], dirX, 204, self.Card204BallRUID, self.Card204BallScale * self.Card204SplitScaleRatio, self.Card204HitRUID, self.Card204HitScale * self.Card204SplitScaleRatio, self.Card204FlipDefault, fragmentDamage, isCrit, castZoneIndex)
+			else
+				self:FlyShadowSplitFragment(map, originPos, dirX, 1.0, fragmentDamage, isCrit, depthAnchor, castZoneIndex)
+			end
 		end
 		log("ShadowSplitFragments: count=" .. self.Card204SplitCount .. " dmg=" .. math.floor(fragmentDamage))
+	end
+
+	-- ── 분열 표창 유도 낙하(쉐도우 스플릿 204 / 팬텀 스플릿 219 공용, 유저 지정 2026-09-30) ─────────────
+	-- "원래처럼 위로 올라갔다가, 포물선으로 타겟을 찾아서 떨어지게". 분열 자리에서 가까운 적부터(같은 깊이 대역만)
+	-- 조각마다 한 마리씩 배정하고(방금 원본에 맞은 타겟은 제외, 조각이 더 많으면 가까운 순으로 다시 배정),
+	-- 적이 하나도 없으면 빈 목록 → 호출측이 예전 위쪽 직선 비행으로 처리한다.
+	property number Card204ArcDuration = 0.6     -- 분열~착탄 시간(초)
+	property number Card204ArcHeight = 2.4       -- 분열 자리/목표 중 높은 쪽보다 이만큼 위로 솟는다
+	property number Card204ArcSpreadX = 2.0      -- 조각마다 위로 튀는 방향을 좌우로 벌리는 정도(부채꼴 dirX × 이 값)
+
+	@ExecSpace("ServerOnly")
+	method table GetSplitFragmentTargets(Entity map, Vector3 originPos, integer count, MonsterAI origTarget)
+		-- 반환: MonsterAI count개(적이 없으면 빈 테이블)
+		local others = {}
+		for _, mob in ipairs(self:GetMonstersInCurrentZone(map)) do
+			---@type MonsterAI
+			local m = mob
+			if isvalid(m) and not m._dead and isvalid(m.Entity) and m ~= origTarget and self:IsSameDepthBand(origTarget, m) then
+				local mp = m.Entity.TransformComponent.Position
+				local dx = mp.x - originPos.x
+				local dy = mp.y - originPos.y
+				table.insert(others, { mob = m, d2 = dx * dx + dy * dy })
+			end
+		end
+		table.sort(others, function(a, b) return a.d2 < b.d2 end)
+		local result = {}
+		if #others == 0 then return result end
+		for i = 1, count do
+			table.insert(result, others[((i - 1) % #others) + 1].mob)
+		end
+		return result
+	end
+
+	@ExecSpace("ServerOnly")
+	method void FlySplitFragmentArc(Entity map, Vector3 originPos, MonsterAI target, number fanX, integer cardId, string ballRUID, number ballScale, string hitRUID, number hitScale, boolean flipDefault, number fragmentDamage, boolean isCrit, integer castZoneIndex)
+		-- 분열 표창 1개: 2차 베지어 포물선(시작=분열 자리, 꼭짓점=위쪽, 끝=목표)으로 날아가 목표에 꽂힌다.
+		-- 날아가는 동안 목표가 움직이면 끝점이 따라간다. 목표가 죽거나 사라지면 마지막 위치에 떨어지고 대미지는 없다.
+		local fx = self:SpawnEffect(ballRUID, originPos, 0, self.Card204BallPlayRate, ballScale, 1)
+		if fx == nil then return end
+		local endX = originPos.x
+		local endY = originPos.y
+		if isvalid(target) and isvalid(target.Entity) then
+			local tp = target.Entity.TransformComponent.Position
+			endX = tp.x
+			endY = tp.y + self.Card204HitYOffset
+		end
+		-- 꼭짓점: 가운데 + 부채꼴 방향으로 조금 벌리고, 둘 중 높은 쪽보다 ArcHeight 위
+		local ctrlX = (originPos.x + endX) * 0.5 + fanX * self.Card204ArcSpreadX
+		local ctrlY = math.max(originPos.y, endY) + self.Card204ArcHeight
+		local renderer = fx.SpriteRendererComponent
+		if renderer ~= nil then
+			if endX >= originPos.x then renderer.FlipX = flipDefault else renderer.FlipX = not flipDefault end
+		end
+		local duration = self.Card204ArcDuration
+		local done = false
+		_TweenLogic:PlayTween(0.0, 1.0, duration, EaseType.Linear, function(t)
+			if not isvalid(fx) or done then return end
+			if castZoneIndex ~= _MapManager.CurrentMapIndex then
+				done = true
+				fx:Destroy(0.05)
+				return
+			end
+			-- 목표가 살아 있으면 끝점을 따라간다
+			if isvalid(target) and isvalid(target.Entity) and not target._dead then
+				local tp = target.Entity.TransformComponent.Position
+				endX = tp.x
+				endY = tp.y + self.Card204HitYOffset
+			end
+			local u = 1.0 - t
+			local x = u * u * originPos.x + 2 * u * t * ctrlX + t * t * endX
+			local y = u * u * originPos.y + 2 * u * t * ctrlY + t * t * endY
+			fx.TransformComponent.Position = Vector3(x, y, originPos.z)
+			if t >= 1.0 then
+				done = true
+				fx:Destroy()
+				if isvalid(target) and isvalid(target.Entity) and not target._dead then
+					if isCrit then _DpsMeterLogic:Tag(cardId, target):TakeDamageCrit(fragmentDamage * 2)
+					else _DpsMeterLogic:Tag(cardId, target):TakeDamage(fragmentDamage) end
+					local hitFx = self:SpawnEffect(hitRUID, Vector3(endX, endY, originPos.z), 0, 1.0, hitScale, 1)
+					if hitFx ~= nil then hitFx:Destroy(self.HitEffectLifetime) end
+				end
+			end
+		end)
+		-- Tween이 마지막 t=1 콜백을 못 부르는 경우의 안전장치
+		_TimerService:SetTimerOnce(function()
+			if isvalid(fx) then fx:Destroy() end
+		end, duration + 0.2)
 	end
 
 	-- 분열 표창 1개 — 원본의 1/2 크기로 직선으로 날아가고(중력 없음), 화면 밖까지 나가면서
@@ -4285,11 +4378,17 @@ script CardManager extends Logic
 		local fragmentDamage = damage * self:GetPhantomSplitFragmentPercent(self.PhantomSplitLevel)
 		local spread = self.Card219SplitSpreadX
 		local dirXList = { -spread, -spread * 0.5, 0.0, spread * 0.5, spread }
+		-- 2026-09-30 유저 지정: 분열 표창은 위로 튀어 올랐다가 포물선을 그리며 주변 적에게 떨어진다
+		-- (적이 없으면 예전처럼 위쪽 부채꼴 직선으로 화면 밖까지)
+		local targets = self:GetSplitFragmentTargets(map, originPos, self.Card219SplitCount, depthAnchor)
 		for i = 1, self.Card219SplitCount do
 			local dirX = dirXList[i]
-			-- SplitCount를 5보다 크게 올리면 남는 조각은 가운데(수직)로 보낸다
 			if dirX == nil then dirX = 0.0 end
-			self:FlyPhantomSplitFragment(map, originPos, dirX, 1.0, fragmentDamage, isCrit, depthAnchor, castZoneIndex)
+			if #targets > 0 then
+				self:FlySplitFragmentArc(map, originPos, targets[i], dirX, 219, self.Card219BallRUID, self.Card219BallScale * self.Card204SplitScaleRatio, self.Card219HitRUID, self.Card219HitScale * self.Card204SplitScaleRatio, self.Card219FlipDefault, fragmentDamage, isCrit, castZoneIndex)
+			else
+				self:FlyPhantomSplitFragment(map, originPos, dirX, 1.0, fragmentDamage, isCrit, depthAnchor, castZoneIndex)
+			end
 		end
 		log("PhantomSplitFragments: count=" .. self.Card219SplitCount .. " dmg=" .. math.floor(fragmentDamage))
 	end
@@ -5522,7 +5621,7 @@ script CardManager extends Logic
 	-- 타격 연출 — 팩의 hit/0(86e3db58…)이 깜빡이는 느낌이라 유저 지시로 교체(2026-09-04)
 	property string Card207HitRUID = "e9d08712afa2479f8d9b2fc60712c8e2"
 	property string Card207UseSoundRUID = "558fd53846a74e0db4f2c40e46eb613a"
-	property number Card207BallScale = 1.0
+	property number Card207BallScale = 1.15  -- 2026-09-30 유저 지정 +15%(1.0)
 	-- 톱니처럼 보이려면 클립이 빨리 돌아야 한다(유저 지정 2배속)
 	property number Card207BallPlayRate = 2.0
 	-- 지속 동안의 크기 성장 배율(유저 지정 1/2 → 3/2). 연출 크기와 판정 반경에 같이 곱한다.
@@ -5535,8 +5634,8 @@ script CardManager extends Logic
 	-- 그 차이만큼 깔린 채로 남는다.
 	property number Card207BallOffsetY = 0.45
 	-- 판정 타원(성장 배율 ×1.0 기준). 초반 ×0.5에서도 붙어 있는 타겟은 들어오도록 잡았다.
-	property number Card207HitRadiusX = 0.8
-	property number Card207HitRadiusY = 0.5
+	property number Card207HitRadiusX = 0.92  -- 2026-09-30 유저 지정 +15%(0.8)
+	property number Card207HitRadiusY = 0.575  -- 2026-09-30 유저 지정 +15%(0.5)
 	property number Card207HitOffsetX = 0.0
 	property number Card207HitOffsetY = -0.45
 	property number Card207CastScale = 0.8
@@ -5719,14 +5818,14 @@ script CardManager extends Logic
 	property string Card222UseSoundRUID = "558fd53846a74e0db4f2c40e46eb613a"
 	-- 볼 크기 — 아래 판정 타원은 207 볼(137px)의 화면 크기에 맞춰 잡은 값이라, 새 볼(166px)도 화면상
 	-- 폭이 같아야 그대로 유효하다. 137/166 ≈ 0.83.
-	property number Card222BallScale = 0.83
+	property number Card222BallScale = 0.9545  -- 2026-09-30 유저 지정 +15%(0.83)
 	property number Card222BallPlayRate = 2.0
 	property number Card222ScaleStart = 0.5
 	property number Card222ScaleEnd = 1.5
 	property number Card222BallOffsetX = 0.35
 	property number Card222BallOffsetY = 0.45
-	property number Card222HitRadiusX = 0.8
-	property number Card222HitRadiusY = 0.5
+	property number Card222HitRadiusX = 0.92  -- 2026-09-30 유저 지정 +15%(0.8)
+	property number Card222HitRadiusY = 0.575  -- 2026-09-30 유저 지정 +15%(0.5)
 	property number Card222HitOffsetX = 0.0
 	property number Card222HitOffsetY = -0.45
 	-- 타격 연출 크기 — 유저 지정 "크기 20% 축소"(기본 1.0 → 0.8).

@@ -14,6 +14,8 @@ script CharacterUnlockUI extends Logic
 	-- 맵21 비밀구역 탈출 이동이 따라붙고, 그 외(레이온 등)는 이미 해금 처리가 끝난 뒤 팝업만
 	-- 닫으면 된다(Ep2Map2ArenaLogic 참고).
 	property string _pendingCharacterName = ""
+	-- 이번 세션에 이미 띄운 로비 해금 팝업(서버 목록 갱신이 늦게 와도 같은 팝업을 두 번 띄우지 않게)
+	property table _shownPending = {}
 
 	@ExecSpace("ClientOnly")
 	method void OnBeginPlay()
@@ -45,6 +47,32 @@ script CharacterUnlockUI extends Logic
 	method void OnAcquireClicked()
 		self.popupGroup.Enable = false
 		self:RequestAcquire(self._pendingCharacterName)
+		-- 로비에서 보여줄 해금 팝업이 더 남아 있으면 이어서
+		self:TryShowPending()
+	end
+
+	-- 쉐이드/린 해금 축하 팝업은 로비에서만 띄운다(유저 지정 2026-09-30 — 판 도중에 뜨면 안 됨).
+	-- 호출: CharacterUnlockLogic.OnSyncProperty(목록 변경) / TitleUI.ShowLobby(로비 복귀) / 팝업 닫힘.
+	@ExecSpace("ClientOnly")
+	method void TryShowPending()
+		-- 로비가 보이고 다른 해금 팝업이 안 떠 있을 때, 목록의 첫 팝업을 띄우고 서버 목록에서 뺀다
+		if not isvalid(self.popupGroup) or self.popupGroup.Enable then return end
+		if not isvalid(_TitleUI.titleGroup) or not _TitleUI.titleGroup.Enable then return end
+		local list = _CharacterUnlockLogic:GetPendingUnlockPopups()
+		if list == nil or list == "" then return end
+		for part in string.gmatch(list, "[^,]+") do
+			if not self._shownPending[part] then
+				self._shownPending[part] = true
+				if part == "shade" then
+					self:Open("a8348a83ab4343409cd461ddd83c6730", "MLUA_CHARACTERUNLOCKLOGIC_001", "MLUA_CHARACTERUNLOCKLOGIC_002")
+				elseif part == "rin" then
+					self:Open("e64d2ef49017475b925f18c98510ee7f", "MLUA_CHARACTERUNLOCKLOGIC_003", "MLUA_CHARACTERUNLOCKLOGIC_004")
+				end
+				_CharacterUnlockLogic:ConsumePendingPopup(part)
+				log("CharacterUnlockUI: lobby unlock popup " .. part)
+				return
+			end
+		end
 	end
 
 	-- 실피드는 맵21 비밀구역이라 해금 후 탈출 이동까지 같이 처리해야 한다. 그 외 캐릭터(레이온 등)는
