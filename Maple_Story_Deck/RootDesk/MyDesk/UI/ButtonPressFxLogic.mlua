@@ -46,6 +46,18 @@ script ButtonPressFxLogic extends Logic
 		if on then self._suppressed[e.Id] = true else self._suppressed[e.Id] = nil end
 	end
 
+	-- 기준 배율을 고정한 대상(targetId → Vector3). 다른 스크립트가 같은 엔티티의 Scale을 따로 트윈하는 경우용 —
+	-- 그 트윈 도중에 누르면 "쉬고 있을 때의 크기"로 트윈 중간값(예: 1.3배)을 잡아 그대로 굳어버린다
+	-- (2026-09-30 인게임 스킬 슬롯: 카드 도착 펀치(CardManager.PunchSlotScale) 중에 슬롯을 누르면 슬롯이 커진 채 남음)
+	property table _fixedBase = {}
+
+	@ExecSpace("ClientOnly")
+	method void SetFixedBaseScale(Entity target, Vector3 scale)
+		-- 이 대상은 누를 때마다 현재 크기를 재지 않고 항상 이 값을 기준 배율로 쓴다
+		if not isvalid(target) then return end
+		self._fixedBase[target.Id] = scale
+	end
+
 	@ExecSpace("ClientOnly")
 	method void OnBeginPlay()
 		-- UI가 전부 로드된 뒤 한 번 전체(꺼진 화면 포함)를 훑어 연결한다
@@ -214,7 +226,12 @@ script ButtonPressFxLogic extends Logic
 			if self._suppressed[entry.entity.Id] == true then return end
 			if self:IsEmptyItemSlot(entry.entity) then return end
 			-- 쉬고 있을 때의 크기를 기준으로 잡는다(원래 배율이 1이 아닌 버튼도 있다). 되돌리기 중(오버슈트 포함)이면 기존 기준 유지
-			if entry.idle or entry.baseScale == nil then entry.baseScale = entry.target.TransformComponent.Scale end
+			local fixedBase = self._fixedBase[entry.target.Id]
+			if fixedBase ~= nil then
+				entry.baseScale = fixedBase
+			elseif entry.idle or entry.baseScale == nil then
+				entry.baseScale = entry.target.TransformComponent.Scale
+			end
 			entry.idle = false
 			entry.pressed = true
 			entry.pressedAt = _UtilLogic.ElapsedSeconds

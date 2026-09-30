@@ -533,6 +533,287 @@ script CardManager extends Logic
 		log("HailBurstAttack: cast hit=" .. hitCount .. "/" .. targetCount)
 	end
 
+	-- ── 프리징 브레스 (Card 26) / 프로즌 오브 (Card 27) / 라이트닝 오브 (Card 28) — 유저 지정 2026-09-30 ──
+	-- 프리징 브레스: 슬롯형 액티브(Lv1~5). 가까운 몬스터 N명(GetClosestTargets)을 골라 각각 브레스 연출을 띄우고, 그 연출 범위(타원) 안에
+	--   있는 몬스터 전부에게 대미지 + 슬로우 3초 + 빙결 스택 +1. 연출이 겹쳐도 한 번의 시전에 한 몬스터는 한 번만 맞는다.
+	--   Lv1 130·1명 / Lv2 150·2명 / Lv3 200 / Lv4 220 / Lv5 240. 쿨타임 5초 고정.
+	-- 프로즌 오브(조합: 프리징 브레스 Lv5 + 콜드빔 Lv5) / 라이트닝 오브(조합: 프리징 브레스 Lv5 + 에너지볼트 Lv5), 둘 다 Lv1~3.
+	--   프리징 브레스의 슬롯을 그대로 넘겨받고 콜드빔/에너지볼트 슬롯은 비운다(재료 둘 다 사라짐), 둘 중 하나를 만들면 브레스가
+	--   사라지므로 나머지 하나는 그 판에서 못 만든다.
+	--   브레스는 똑같이 나가고(타겟 3명, 대미지 100%), 맞은 몬스터마다 구슬이 생겼다가 터지면서 대미지 50%를 한 번 더 준다.
+	--   프로즌 오브: 260/290/320, 빙결 스택 +2.  라이트닝 오브: 280/310/340, 빙결 스택 +1, 치명타 +20%,
+	--   구슬이 터질 때 스턴 1.5초(보스·엘리트는 절반 0.75초).
+	-- 빙결 스택은 MonsterAI.AddFreezeStack 규칙 그대로라 프리징 이펙트(Card10) 보유 시에만 쌓인다.
+	@Sync property integer FreezingBreathLevel = 0
+	@Sync property integer FrozenOrbLevel = 0
+	@Sync property integer LightningOrbLevel = 0
+	property string Card26Name = "MLUA_CARDMANAGER_546"
+	property string Card27Name = "MLUA_CARDMANAGER_547"
+	property string Card28Name = "MLUA_CARDMANAGER_548"
+	property string Card26IconRUID = "fce4228656b546ac98793726418ffc86"
+	-- ⚠ 프로즌 오브 팩의 아이콘은 헤일 버스트(Card23)가 이미 쓰고 있는 것과 같은 그림이다(리소스팩이 같다)
+	property string Card27IconRUID = "412638a16dc643f595b035ba776ef425"
+	property string Card28IconRUID = "48d122c4eb43493bb1ad12758bc32418"
+	-- 사운드: 각 리소스팩의 audio/Use(시전) · audio/Hit(구슬 폭발).
+	-- 프리징 브레스만 audio/Use(295d66ef…) 대신 audio/End를 쓴다(유저 지정 2026-09-30)
+	property string Card26SoundRUID = "10e1aa3f117947fa91f8ea610ab191ae"
+	property string Card27SoundRUID = "da73ed29690748eb8cdc54636bd17a5d"
+	property string Card27HitSoundRUID = "0b92f3d3c5ce4b6dae25ac28123ad09e"
+	property string Card28SoundRUID = "aea2a4bff03e4243bd0c4d0dada84f01"
+	property string Card28HitSoundRUID = "085f434c82c948959ec78b12ad425577"
+	property number Card26Cooldown = 5.0  -- 세 카드 공통, 레벨 무관 고정
+	property number Card26SlowDuration = 3.0
+	-- 브레스 연출(리소스팩 "keydown" 8프레임, 원본 656x372px = 6.56x3.72유닛, pivot이 오른쪽 아래(0.80, 0.115)에 있다)
+	property number Card26EffectScale = 0.6
+	property number Card26FrameDuration = 0.07
+	property integer Card26EffectLoops = 2  -- 8프레임 × 2바퀴 = 1.12초
+	property number Card26EffectYOffset = 0.3  -- 몬스터 발밑이 아니라 몸통 높이에 연출 중심을 둔다
+	-- 브레스 그림만 위로 올리는 양(유저 지정 2026-09-30 "1정도 더 올려봐" → "다시 0.5만 내려") — 판정 중심은 그대로 몬스터 자리다
+	property number Card26EffectVisualYOffset = 0.5
+	property number Card26ImpactDelay = 0.35  -- 연출이 뜬 뒤 대미지가 들어가는 시점
+	-- 판정 범위(타원 반축, 유닛) — 연출 크기(0.6배 = 3.9x2.2유닛)보다 살짝 안쪽
+	property number Card26AreaHalfW = 1.7
+	property number Card26AreaHalfH = 0.9
+	-- 구슬(오브) 공통
+	property number OrbBallDamageRatio = 0.5  -- 구슬 폭발 = 브레스 대미지의 50%
+	property number OrbBallYOffset = 0.35
+	property number Card27BallScale = 0.35       -- 프로즌 오브 구슬(412x420px, pivot 0.77/0.39)
+	property number Card27BallFrameDuration = 0.06
+	property number Card27HitScale = 0.9         -- 폭발(208x184px)
+	property number Card27HitFrameDuration = 0.07
+	property integer Card27FreezeStacks = 2
+	property number Card28BallScale = 0.45       -- 라이트닝 오브 구슬(288x284px, pivot 0.50/0.32)
+	property number Card28BallFrameDuration = 0.05
+	property number Card28HitScale = 0.6         -- 폭발(416x304px, pivot 0.49/0.32)
+	property number Card28HitFrameDuration = 0.05
+	property number Card28CritBonus = 0.20
+	property number Card28StunDuration = 1.5     -- 보스·엘리트는 절반
+
+	method table GetFreezingBreathFrames()
+		-- 프리징 브레스 팩 "keydown" 클립의 프레임 스프라이트(순서대로)
+		return { "dc62ea9b2da848d0a55be0c611c438eb", "9cc36da5a3b74abd877e11605e1f4502", "06ed72a384cf4c34be166ef6fc35b5d4", "0a5605e054084160a9d3c9bec2f79830", "d127194e58a942a299e760c2ea31d4f2", "dd25ddd7c3b54c14b37690f550f3bcd0", "57fb2913576046c7921fc67773e58777", "0b35c74a26bf4fc8a0ee62144992a517" }
+	end
+
+	method table GetFrozenOrbBallFrames()
+		-- 프로즌 오브 강화 팩 "ball"
+		return { "caa4ce013c19411db92f658f2da20d66", "99672cd33d724eeeb2e1696e83d1d495", "0e0664d74d3e45208a577094c83e8b69", "5473fc0b826a4e7fa09a018c1f92a446", "834b0f5477df4171a18e8d97006dcf48", "4d423b8de5154577bd72abe79516adbc", "9fd1f42fbe9a4ea6bb922386c2da4ab7", "564943ce1a9040b090b6e599e74a0676" }
+	end
+
+	method table GetFrozenOrbHitFrames()
+		-- 프로즌 오브 강화 팩 "hit/0"
+		return { "c3ddf02954794f5bbfeb061f0a25b1c1", "4e00ce1c09d64066a454a363b157b65c", "c96e9b389f1f42b896483cc0929090fb", "550418598acb408fb267f5c80827e40b", "e7998a7df8944f379e4ec1a38c778364" }
+	end
+
+	method table GetLightningOrbBallFrames()
+		-- 라이트닝 오브 팩(skill/400021094) "ball"
+		return { "bbfdfc17e499479a8352ee3e7b304214", "1f56d51c6ae34e2c8dadc9d6f2e5da6f", "9a706c9e4fdf48a88e5e167b11505701", "4a8c8e57c47b4b77975a8d0a3562cde1", "000560ffbb4e472b81fa085a1c6e05e9", "2350d847fc2c469a955a6199e4b2ef75", "5310095f3a1349c4b4d0c60f6ea26f2d", "084c8450d77a4b378cda2272bd08fb2d", "8cc490f74d3e4ac1bdb56386ad29ee16", "a62469b74c464a81b36958b726a3bd2a", "88845231e1614569b824ded996fe2c0a", "3b675c1db63642188c649961f8115025" }
+	end
+
+	method table GetLightningOrbHitFrames()
+		-- 라이트닝 오브 팩 "hit/0"
+		return { "464529bdd42e463d8c0de81ec588b796", "e2991b9f0f974e02bdbb21f43108bb12", "746b82c2c42945239dd658425a79792c", "5a274b90439e492189f81d514ad56f91", "45e5b265189c4af7ae9bdaf823a981ee", "348093773bef4027a649ae02a710d361", "8ed357c474ea4f2bbe58dd092e9e7d71", "e4f83d6858674dbdb79da633bf41d48a", "2e76fbc841d54cc9b6a9bf1ea44ebb54", "42782a6b36864ec5935874c93cb17b81", "52f9e92b5ea44c2fabf90daecc94606c", "c6342c8c4d8142a1b419408402b2bb11" }
+	end
+
+	method number GetFreezingBreathDamage()
+		if self.FreezingBreathLevel >= 5 then return 240
+		elseif self.FreezingBreathLevel >= 4 then return 220
+		elseif self.FreezingBreathLevel >= 3 then return 200
+		elseif self.FreezingBreathLevel >= 2 then return 150
+		end
+		return 130
+	end
+
+	method integer GetFreezingBreathTargetCount()
+		if self.FreezingBreathLevel >= 2 then return 2 end
+		return 1
+	end
+
+	method number GetFrozenOrbDamage()
+		if self.FrozenOrbLevel >= 3 then return 320
+		elseif self.FrozenOrbLevel >= 2 then return 290
+		end
+		return 260
+	end
+
+	method number GetLightningOrbDamage()
+		if self.LightningOrbLevel >= 3 then return 340
+		elseif self.LightningOrbLevel >= 2 then return 310
+		end
+		return 280
+	end
+
+	method integer GetOrbTargetCount()
+		-- 프로즌 오브/라이트닝 오브 공통 — 전 레벨 3명
+		return 3
+	end
+
+	@ExecSpace("Multicast")
+	method void PlayBreathSfx(string soundRUID)
+		-- 브레스/오브 계열 효과음(클라에서만 재생)
+		if self:IsServer() then return end
+		_SoundOptionLogic:PlaySfx(soundRUID, 1.0)
+	end
+
+	@ExecSpace("ServerOnly")
+	method Vector3 OffsetByPivot(Vector3 center, number nx, number ny, number widthUnits, number heightUnits, number scale)
+		-- 스프라이트 pivot이 가운데가 아닐 때, 그림의 "가운데"가 center에 오도록 스폰 좌표를 보정한다
+		-- (밀리는 양 = (0.5 - n) × 크기 → 반대로 (n - 0.5) × 크기만큼 옮긴다. nx는 왼쪽 기준, ny는 아래쪽 기준)
+		return Vector3(center.x + (nx - 0.5) * widthUnits * scale, center.y + (ny - 0.5) * heightUnits * scale, center.z)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void PlayFrameEffect(table frames, Vector3 pos, number scale, number frameDur, integer loops)
+		-- 프레임 스프라이트를 직접 이어붙여 재생하는 공용 연출(네이티브 재생에 맡기면 공용 모델 수명에 잘린다 — 프로젝트 기본 기법)
+		self:PlayFrameEffectAlpha(frames, pos, scale, frameDur, loops, 1.0)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void PlayFrameEffectAlpha(table frames, Vector3 pos, number scale, number frameDur, integer loops, number alpha)
+		-- PlayFrameEffect와 같고 투명도만 지정한다(1 = 불투명)
+		self:PlayFrameEffectEx(frames, pos, scale, frameDur, loops, alpha, false)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void PlayFrameEffectEx(table frames, Vector3 pos, number scale, number frameDur, integer loops, number alpha, boolean flipX)
+		-- PlayFrameEffectAlpha + 좌우 반전(그림 기준점 중심으로 뒤집힌다)
+		local fx = self:SpawnEffectWithModel(frames[1], pos, 0, 1.0, scale, alpha, "skilleffectlong")
+		if fx == nil then return end
+		local renderer = fx.SpriteRendererComponent
+		if flipX and isvalid(renderer) then renderer.FlipX = true end
+		local total = #frames * loops
+		for step = 2, total do
+			local frameRUID = frames[((step - 1) % #frames) + 1]
+			_TimerService:SetTimerOnce(function()
+				if isvalid(fx) and isvalid(renderer) then renderer.SpriteRUID = frameRUID end
+			end, frameDur * (step - 1))
+		end
+		fx:Destroy(frameDur * total)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void FreezingBreathAttack(number damage, boolean isCrit)
+		self:PlayBreathSfx(self.Card26SoundRUID)
+		self:BreathCast(26, damage, isCrit, self:GetFreezingBreathTargetCount(), 1, 0)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void FrozenOrbAttack(number damage, boolean isCrit)
+		self:PlayBreathSfx(self.Card27SoundRUID)
+		self:BreathCast(27, damage, isCrit, self:GetOrbTargetCount(), self.Card27FreezeStacks, 1)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void LightningOrbAttack(number damage, boolean isCrit)
+		self:PlayBreathSfx(self.Card28SoundRUID)
+		self:BreathCast(28, damage, isCrit, self:GetOrbTargetCount(), 1, 2)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void BreathCast(integer cardIdx, number damage, boolean isCrit, integer targetCount, integer freezeStacks, integer orbKind)
+		-- 브레스 3종 공용 본체. orbKind: 0 = 구슬 없음(프리징 브레스) / 1 = 프로즌 오브 / 2 = 라이트닝 오브
+		local targets = self:GetClosestTargets(targetCount)
+		local map = self:GetCurrentMap()
+		local castZoneIndex = _MapManager.CurrentMapIndex
+		local frames = self:GetFreezingBreathFrames()
+		-- 연출 중심과 조준 대상의 깊이 구간을 시전 시점에 값으로 잡아 둔다(대상이 도중에 죽어도 판정·연출은 그대로)
+		local anchors = {}
+		for _, mob in ipairs(targets) do
+			---@type MonsterAI
+			local target = mob
+			if isvalid(target) and isvalid(target.Entity) then
+				local p = target.Entity.TransformComponent.Position
+				local scale = self.Card26EffectScale * self:GetEffectScaleRatio(target)
+				local center = Vector3(p.x, p.y + self.Card26EffectYOffset, p.z)
+				local fxCenter = Vector3(center.x, center.y + self.Card26EffectVisualYOffset, center.z)
+				self:PlayFrameEffect(frames, self:OffsetByPivot(fxCenter, 0.80, 0.115, 6.56, 3.72, scale), scale, self.Card26FrameDuration, self.Card26EffectLoops)
+				table.insert(anchors, { x = center.x, y = center.y, target = target, band = self:GetDepthBand(target) })
+			end
+		end
+		log("BreathCast: card=" .. cardIdx .. " anchors=" .. #anchors .. "/" .. targetCount .. " dmg=" .. math.floor(damage))
+		if #anchors == 0 or map == nil then return end
+
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) then return end
+			-- 존을 넘어간 뒤에 실행되면 다음 존 몬스터가 맞는다 — 시전 시점 존과 다르면 버린다
+			if castZoneIndex ~= _MapManager.CurrentMapIndex then return end
+			local hitCount = 0
+			local monsters = self:GetMonstersInCurrentZone(map)
+			for _, mob in ipairs(monsters) do
+				---@type MonsterAI
+				local m = mob
+				if isvalid(m) and isvalid(m.Entity) and not m._dead then
+					local mp = m.Entity.TransformComponent.Position
+					local inArea = false
+					for _, a in ipairs(anchors) do
+						if m == a.target then
+							inArea = true
+						elseif self:InEllipse(mp.x - a.x, mp.y - a.y, self.Card26AreaHalfW, self.Card26AreaHalfH) and self:IsInDepthBand(m, a.band) then
+							inArea = true
+						end
+						if inArea then break end
+					end
+					if inArea then
+						local finalDmg = damage * self:GetIceStackBonus(m)
+						if isCrit then _DpsMeterLogic:Tag(cardIdx, m):TakeDamageCrit(finalDmg * 2)
+						else _DpsMeterLogic:Tag(cardIdx, m):TakeDamage(finalDmg) end
+						m:ApplySlow(self.Card26SlowDuration)
+						for i = 1, freezeStacks do m:AddFreezeStack() end
+						hitCount = hitCount + 1
+						if orbKind > 0 and not m._dead then self:SpawnOrbBall(cardIdx, m, damage, isCrit, orbKind, castZoneIndex) end
+					end
+				end
+			end
+			log("BreathCast: card=" .. cardIdx .. " impact hit=" .. hitCount)
+		end, self.Card26ImpactDelay)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SpawnOrbBall(integer cardIdx, MonsterAI target, number damage, boolean isCrit, integer orbKind, integer castZoneIndex)
+		-- 브레스에 맞은 몬스터 위에 구슬을 띄웠다가 터뜨린다 — 폭발 대미지는 그 몬스터에게만(브레스 대미지의 OrbBallDamageRatio)
+		local p = target.Entity.TransformComponent.Position
+		local ratio = self:GetEffectScaleRatio(target)
+		local center = Vector3(p.x, p.y + self.OrbBallYOffset, p.z)
+		local ballFrames = self:GetFrozenOrbBallFrames()
+		local hitFrames = self:GetFrozenOrbHitFrames()
+		local ballScale = self.Card27BallScale * ratio
+		local hitScale = self.Card27HitScale * ratio
+		local ballDur = self.Card27BallFrameDuration
+		local hitDur = self.Card27HitFrameDuration
+		local ballPos = self:OffsetByPivot(center, 0.77, 0.39, 4.12, 4.20, ballScale)
+		local hitPos = self:OffsetByPivot(center, 0.54, 0.44, 2.08, 1.84, hitScale)
+		local hitSound = self.Card27HitSoundRUID
+		if orbKind == 2 then
+			ballFrames = self:GetLightningOrbBallFrames()
+			hitFrames = self:GetLightningOrbHitFrames()
+			ballScale = self.Card28BallScale * ratio
+			hitScale = self.Card28HitScale * ratio
+			ballDur = self.Card28BallFrameDuration
+			hitDur = self.Card28HitFrameDuration
+			ballPos = self:OffsetByPivot(center, 0.50, 0.32, 2.88, 2.84, ballScale)
+			hitPos = self:OffsetByPivot(center, 0.49, 0.32, 4.16, 3.04, hitScale)
+			hitSound = self.Card28HitSoundRUID
+		end
+		self:PlayFrameEffect(ballFrames, ballPos, ballScale, ballDur, 1)
+
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) then return end
+			if castZoneIndex ~= _MapManager.CurrentMapIndex then return end
+			-- 폭발 연출은 대상 생사와 무관하게 끝까지 보여준다(공통 정책) — 대미지만 살아 있을 때 넣는다
+			self:PlayFrameEffect(hitFrames, hitPos, hitScale, hitDur, 1)
+			self:PlayBreathSfx(hitSound)
+			if not isvalid(target) or not isvalid(target.Entity) or target._dead then return end
+			local ballDmg = damage * self.OrbBallDamageRatio * self:GetIceStackBonus(target)
+			if isCrit then _DpsMeterLogic:Tag(cardIdx, target):TakeDamageCrit(ballDmg * 2)
+			else _DpsMeterLogic:Tag(cardIdx, target):TakeDamage(ballDmg) end
+			if orbKind == 2 and not target._dead then
+				local stunDur = self.Card28StunDuration
+				if target._isBoss or target._isElite then stunDur = stunDur * 0.5 end
+				target:ApplyStun(stunDur, true)
+			end
+			log("SpawnOrbBall: card=" .. cardIdx .. " burst dmg=" .. math.floor(isCrit and ballDmg * 2 or ballDmg))
+		end, ballDur * #ballFrames)
+	end
+
 	-- 아이스 커터 (Card 11) — 레벨업으로 해금/강화하는 광역 스킬. 판정 반경은 전 레벨 고정(0.96,
 	-- 더 이상 레벨별로 커지지 않음). 대신 "타겟 수"만큼 서로 다른 몬스터를 각각 조준해서
 	-- 그 위치마다 반경 판정 광역 공격을 낸다(썬더 커터의 다중 조준과 동일한 방식, FindNextThunderTarget 재사용).
@@ -13848,6 +14129,288 @@ script CardManager extends Logic
 		fx:Destroy(perFrame * #frames)
 	end
 
+	-- ── 실피드: 윈드 오브 프레이 (Card 121) / 게일 오브 프레이 (Card 122) / 스네어 오브 프레이 (Card 123)
+	--          + 패시브 컨센트레이션 (Card 124) — 유저 지정 2026-09-30 ──
+	-- 윈드 오브 프레이: 슬롯형 액티브(Lv1~5). 가까운 몬스터 N명을 골라 각각 바람 연출을 띄우고, 그 연출 범위(타원) 안의
+	--   몬스터 전부에게 대미지. 한 번의 시전에 한 몬스터는 한 번만 맞는다. 130/150/170/190/210, 타겟 1 → Lv2부터 2명. 쿨타임 5초.
+	-- 게일 오브 프레이(원본 이름 "분출 : 돌개바람"은 쓰지 않는다) = 윈드 오브 프레이 Lv5 + 컨센트레이션 + 파이널 어택 : 활.
+	--   240/270/300, 타겟 3명. 맞은 몬스터마다 돌개바람이 생겨 대미지 30%를 한 번 더 주고 넉백(보스·엘리트는 절반).
+	-- 스네어 오브 프레이(원본 이름 "발현 : 바람 그네"는 쓰지 않는다) = 윈드 오브 프레이 Lv5 + 컨센트레이션 + 크리티컬 샷.
+	--   240/270/300, 타겟 2명, 치명타 +20%. 맞은 몬스터마다 바람 그네가 생겨 대미지 30%를 한 번 더 주고 2초 속박(보스·엘리트는 절반).
+	-- 두 조합 모두 윈드 오브 프레이의 슬롯을 그대로 넘겨받는다(패시브는 그대로 남는다). 하나를 만들면 윈드 오브 프레이가
+	-- 사라지므로 나머지 하나는 그 판에서 못 만든다(아르카나 프리징 브레스 → 프로즌/라이트닝 오브와 같은 양자택일).
+	-- 컨센트레이션: 슬롯 없는 패시브. 몬스터 공격 회피 3/5/7/9/12%(영구) — MonsterAI.OnReachPlayer가 굴린다.
+	@Sync property integer WindOfPreyLevel = 0
+	@Sync property integer GaleOfPreyLevel = 0
+	@Sync property integer SnareOfPreyLevel = 0
+	@Sync property integer ConcentrationLevel = 0
+	property string Card121Name = "MLUA_CARDMANAGER_555"
+	property string Card122Name = "MLUA_CARDMANAGER_556"
+	property string Card123Name = "MLUA_CARDMANAGER_557"
+	property string Card124Name = "MLUA_CARDMANAGER_558"
+	property string Card121IconRUID = "0c7429594f59465da53d31def2b1c566"
+	property string Card122IconRUID = "1145fd299098487cbbb083e611a3669e"
+	property string Card123IconRUID = "a848ac6a11194dc6a5c25bfa5cd5331b"
+	property string Card124IconRUID = "f0007cc9b4324713b0ad8ee938f40325"
+	-- 사운드: 각 리소스팩의 _audio/Use(시전) · 추가타(돌개바람 _audio/SummonedAttack1, 바람 그네 _audio/special)
+	property string Card121SoundRUID = "5c5d26576ac94474a341966a33a89bf3"
+	property string Card122SoundRUID = "c5933d4bab484846bce9235e6b4f7a79"
+	property string Card122HitSoundRUID = "c43e3a4a98414a51915dd69af074ea6c"
+	property string Card123SoundRUID = "f75bd4661dbe4ee482ba30a867a06933"
+	property string Card123HitSoundRUID = "d71283af9e324e309b9ccf36153eb95d"
+	property number Card121Cooldown = 5.0  -- 세 카드 공통, 레벨 무관 고정
+	-- 바람 연출(윈드 오브 프레이 팩 "effect" 17프레임, 원본 648x452px, pivot이 아래 가운데라 몬스터 발밑에 그대로 세운다)
+	property number Card121EffectScale = 0.6
+	property number Card121FrameDuration = 0.06
+	property number Card121ImpactDelay = 0.4  -- 연출이 뜬 뒤 대미지가 들어가는 시점
+	-- 판정 범위(타원 반축, 유닛)와 그 중심 높이(발밑 기준) — 연출 크기(0.6배 = 3.9x2.7유닛)보다 살짝 안쪽
+	property number Card121AreaHalfW = 1.7
+	property number Card121AreaHalfH = 1.0
+	property number Card121AreaYOffset = 0.6
+	-- 조합 공통: 추가타(돌개바람/바람 그네) = 본 대미지의 30%
+	property number PreySecondaryRatio = 0.3
+	-- 게일: 시전 연출(296x284px 10프레임) → 돌개바람(summon/attack1, 820x876px 48프레임)
+	property number Card122CastScale = 0.6  -- 유저 요청으로 25% 줄임(0.8 → 0.6)
+	property number Card122CastFrameDuration = 0.05
+	property number Card122TornadoScale = 0.225  -- 유저 요청으로 25% 줄임(0.3 → 0.225)
+	property number Card122TornadoFrameDuration = 0.035
+	property integer Card122TornadoAttackFrames = 20  -- attack1은 앞 20장만 쓰고 die로 넘어간다
+	property number Card122EffectAlpha = 0.8  -- 게일 시전 연출 투명도 — 유저 요청으로 20% 뺌
+	property number Card122TornadoAlpha = 0.75  -- 돌개바람 투명도 — 0.65까지 뺐다가 유저 요청으로 10% 다시 올림
+	property number Card122TornadoHitDelay = 0.5 -- 돌개바람이 뜬 뒤 추가타 + 넉백이 들어가는 시점
+	property number Card122KnockbackScale = 0.85  -- 썬더 커터와 같은 "맨 뒤" 스케일
+	-- 스네어: 시전 연출(272x268px 10프레임) → 속박 연출(special1 + special2, 548x500px 16 + 16프레임을 속박 시간에 맞춰 재생)
+	property number Card123CastScale = 0.8
+	property number Card123CastFrameDuration = 0.05
+	property number Card123BindScale = 0.45
+	property number Card123BindDuration = 2.0  -- 보스·엘리트는 절반
+	property number Card123BindPlayRatio = 0.55  -- 속박 연출 한 번의 길이 = 속박 시간 × 이 값(두 번을 겹쳐 재생)
+	property number Card123CritBonus = 0.20
+
+	method table GetWindOfPreyFrames()
+		-- 윈드 오브 프레이 팩 "effect"
+		return { "aeca73883ca6477a9dae07d1f8a486a3", "43a8d1f900234ab1ac73409e6980e60d", "716f062041ba4429b6f6a4ff40e86856", "3c5ae4917e3b47199817438f9055bb9d", "7572d1f7e3f24195b0fea87116f55af4", "370d08cdad434940ad4188ac373a4858", "ccca0e95b0eb45909076240fba02d0fd", "d2a09c8e2c394b289c56ee8cdb5e966e", "8b2dbd85fc6b407b8879455941378977", "16e7422b36c046b8bced86d10b663f6f", "00faf14110af4d59b7306148fd94fbb3", "989282c7309e40e0a4e2914c84619da1", "84dd92d2e39a4501b943bd808d363d70", "1a1c2890afed4d10a4879889e30973a1", "bf2354ae529543cfa83a573358cf117e", "6f1ebe635ec147a9be608639bae47b92", "2e7e1c3b979a4e56ad3cd56f7f6b1531" }
+	end
+
+	method table GetGaleCastFrames()
+		-- 분출 : 돌개바람 팩 "effect"
+		return { "6f3cf3e0cfdc417fa56f726bda7a622d", "c47fd812d61843149b21a3cf7b218c41", "858780993161474d920af31092aadacb", "e01e059a5c984a3daf23b9b1551848ec", "aeb1c4275aeb4113b5018655cdad871d", "ad5ce9f899194da5b19b4106c8e0ea5c", "fb8b7dc05e7842f5a0d06de0666e66dd", "9e697ce7b6a240a4a22bf301cc9b676b", "32cb826805b747bda359feaab705e79e", "98e80dd2dcbb4f7eb1c7cf04e1fe85d1" }
+	end
+
+	method table GetGaleTornadoFrames()
+		-- 돌개바람 재생 순서: "summon/attack1" 앞 Card122TornadoAttackFrames장 → "summon/die" 전체(자연스럽게 사라짐, 유저 지정 2026-10-01)
+		local frames = {}
+		local attack = self:GetGaleTornadoAttackFrames()
+		local useCount = math.min(self.Card122TornadoAttackFrames, #attack)
+		for i = 1, useCount do table.insert(frames, attack[i]) end
+		for _, ruid in ipairs(self:GetGaleTornadoDieFrames()) do table.insert(frames, ruid) end
+		return frames
+	end
+
+	method table GetGaleTornadoDieFrames()
+		-- 분출 : 돌개바람 팩 "summon/die"(9f756461…, 16프레임)
+		return { "7b312819641147f48f077987f606b910", "7231ce19da184486848c85fb0ee54119", "60410d0fed024dd3811048bb3f825273", "c18aad5e539640b89caf79668d08c70b", "f59557d984f142bfb68f8b1faab5dabc", "aa32bc0967154f5b963c5b72feb60e09", "57b87b951b204b88b9ba4f072fac8730", "18175a6f62ff423d8e2c95c625bddde3", "24ff6c9f6afb460e9af7f2ee00146931", "c532f7f8beb14139a7cf944edeb28182", "8de6675ac5004a618c44aec0e31fb54b", "f3fe95d6153047c8a6126b8d0f687867", "c53110cae0ad48958b2cc2d13b25259f", "48e9c932eabf4321ba093e3ce6fe2ba1", "9bd7d98ead304084a5fb2e4e0db8155c", "35046328264d4af4945a48fec25a4d13" }
+	end
+
+	method table GetGaleTornadoAttackFrames()
+		-- 분출 : 돌개바람 팩 "summon/attack1"
+		return { "d7e9e479a7b34e088fa2ea225effcce6", "17de5c1b8b514b1ba3d3ef3ae03e216c", "6dfae4caed2a4ad3bebdc82a9bfb555d", "5e8424e5d4594a2daf1b4d6a40a51bf3", "588879a81046473c922103d5433e1237", "441231411160404e8241ca9d72ee0ff7", "82f1a530fde44eb4848874f055441c15", "e2ef2c8a692d457580e0787180aee005", "de9da570a430428788efa3d87ebf5b62", "971a2c0f497e4e509c3dc8de80ad8f22", "306e0556cb21484d89008175521f1771", "73b32fa1f0d44e00890c419161dc1a76", "477c74f59d1e466d8dc930ed6a21d770", "601c63205e664e71adecc29c874eec2d", "3c49196bb497488690a955ec0f1091d0", "35d804eb272849daa8e37221f119f6d0", "9f4c5b79820e4b4ca6239a68d4ab8a2a", "f60ebe6b3d2d47b081bacef3bd1dd55e", "92d442303a5a46e8b842321492f830cb", "0132be5016b441fb857bb0d6943dd4c9", "3fcb183511014a139da59a55d1e5d7c5", "4e040a9a075944ca8bef491600b60dd8", "edd62fcb0ade4a709a4b334d84fc6538", "48d4e24ed5524580b4ef2647f0c05e96", "9511be8f941c40e890994b56ae39e5b3", "0e87962a346f4c4c9f188d74e6585d6b", "49ce6298dd9f4495866781aa1e916064", "8c1b8cf4a8df4617a0b430b82f42f52d", "63404e4d95ab4bc8b88ff2bc3de65009", "050fa79ffc3f4d58908b5686c770a179", "3cac2edd24f74344810edbbe51ad4dcb", "5243398577e24706b59a5b53b1d9b3e5", "c8b70190ccc54a31afe0872a5354a1fe", "af2b907fd9bf46758ada2b6c4b8dd7c0", "a1867562ae644b21bb48a9e940cd90d6", "d3891eeb9d934ff3a87201668e10e6be", "5616c7a20d4f4092b76e69c88cb79325", "4e284881c5c947bd9eb060dd5fa69229", "0c151f3276a94710ad1658ed93bb694a", "6590f518ccec410e948117a2a12ddc12", "80bf246a702e4b9996b52ca5f658578e", "9500e72c40c04c5885ff49057893503b", "e5db95689b524aa888e9e92d9a2eb3ee", "65871f121323421280fef922bfc65002", "9b5dc6750769454093421c8d30acf4ab", "6469bf34132f445aa9c4b18bc4a28d94", "62a8b49f81ab47929595969992360259", "ad0046f62c4f4bf3b99c51b5ede2b140" }
+	end
+
+	method table GetSnareCastFrames()
+		-- 발현 : 바람 그네 팩 "effect"
+		return { "5fe9a68b81f54d31a01c4108d81022a5", "a44165a45a02478cb317a94a97486bca", "ef43b01d177943da8774411e123f1a57", "c5c6aba110474007a11f71ca4f5a4d0c", "d260cdb5681b4c56811bf0ec81f65a85", "7e9842203b564f57b5e950a38e07cb24", "1f83a15607bc4404a24715ab806bfeed", "4ade2fb4c2c34271bae885d5126db47a", "d5ed840cb389426ebef3ed18d20536f7", "a456941558464e04bff19b619bfefeb0" }
+	end
+
+	method table GetSnareBindFrames()
+		-- 발현 : 바람 그네 팩 "special1"(90fba4b2…, 16프레임) — 유저 지정 2026-10-01: 속박 연출은 이것 하나만 쓴다
+		return { "97c645d4407e4a3caad21de7ea013e34", "8ade4bfe032c43a48592b6e9311fc8d7", "ee1c85afbb4e4aabba18813221c042ce", "1bc75060750e423a8960a8e81f1f23f5", "7e8ebdbab8a94970848c6ac763a4497c", "207b621097954d31b0171c46ec24e076", "af049efa41d14248a63c54151541b84f", "9d65d4cc58a64faf96f50487721dbe84", "d96f2467437244a9986c8dd28869fceb", "5f3fb45e08204b4a8df165e4fd903fd9", "a939ced465c1492f9aafe155ffc36803", "35fe125c08324cd2b54f07c92d095ba1", "7f6d0401bc5a473ba8d6145fc138e372", "1a02bb331103409a83d50cc6a7d60639", "1c012e2574fb48d2ad4c73fd6efd4988", "fec93dd4e12f43fba22f7f217ceee91f" }
+	end
+
+	method number GetWindOfPreyDamage()
+		if self.WindOfPreyLevel >= 5 then return 210
+		elseif self.WindOfPreyLevel >= 4 then return 190
+		elseif self.WindOfPreyLevel >= 3 then return 170
+		elseif self.WindOfPreyLevel >= 2 then return 150
+		end
+		return 130
+	end
+
+	method integer GetWindOfPreyTargetCount()
+		if self.WindOfPreyLevel >= 2 then return 2 end
+		return 1
+	end
+
+	method number GetPreyFusionDamage(integer level)
+		-- 게일/스네어 공통 — 240/270/300
+		if level >= 3 then return 300
+		elseif level >= 2 then return 270
+		end
+		return 240
+	end
+
+	method integer GetGaleOfPreyTargetCount()
+		return 3
+	end
+
+	method integer GetSnareOfPreyTargetCount()
+		return 2
+	end
+
+	-- 컨센트레이션 — 몬스터 공격 회피 확률. Lv1:3% / Lv2:5% / Lv3:7% / Lv4:9% / Lv5:12% (획득 즉시 영구 적용)
+	method number GetConcentrationEvadeChance()
+		if self.ConcentrationLevel >= 5 then return 0.12
+		elseif self.ConcentrationLevel >= 4 then return 0.09
+		elseif self.ConcentrationLevel >= 3 then return 0.07
+		elseif self.ConcentrationLevel >= 2 then return 0.05
+		elseif self.ConcentrationLevel >= 1 then return 0.03
+		end
+		return 0
+	end
+
+	@ExecSpace("ServerOnly")
+	method void WindOfPreyAttack(number damage, boolean isCrit)
+		self:PlayBreathSfx(self.Card121SoundRUID)
+		self:PreyCast(121, damage, isCrit, self:GetWindOfPreyTargetCount(), 0)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void GaleOfPreyAttack(number damage, boolean isCrit)
+		self:PlayBreathSfx(self.Card122SoundRUID)
+		self:PreyCast(122, damage, isCrit, self:GetGaleOfPreyTargetCount(), 1)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SnareOfPreyAttack(number damage, boolean isCrit)
+		self:PlayBreathSfx(self.Card123SoundRUID)
+		self:PreyCast(123, damage, isCrit, self:GetSnareOfPreyTargetCount(), 2)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void PreyCast(integer cardIdx, number damage, boolean isCrit, integer targetCount, integer kind)
+		-- 프레이 3종 공용 본체. kind: 0 = 추가타 없음(윈드 오브 프레이) / 1 = 돌개바람(게일) / 2 = 바람 그네(스네어)
+		local targets = self:GetClosestTargets(targetCount)
+		local map = self:GetCurrentMap()
+		local castZoneIndex = _MapManager.CurrentMapIndex
+		local frames = self:GetWindOfPreyFrames()
+		-- 판정 중심과 조준 대상의 깊이 구간을 시전 시점에 값으로 잡아 둔다(대상이 도중에 죽어도 판정·연출은 그대로)
+		local anchors = {}
+		for _, mob in ipairs(targets) do
+			---@type MonsterAI
+			local target = mob
+			if isvalid(target) and isvalid(target.Entity) then
+				local p = target.Entity.TransformComponent.Position
+				local scale = self.Card121EffectScale * self:GetEffectScaleRatio(target)
+				self:PlayFrameEffect(frames, Vector3(p.x, p.y, p.z), scale, self.Card121FrameDuration, 1)
+				table.insert(anchors, { x = p.x, y = p.y + self.Card121AreaYOffset, target = target, band = self:GetDepthBand(target) })
+			end
+		end
+		log("PreyCast: card=" .. cardIdx .. " anchors=" .. #anchors .. "/" .. targetCount .. " dmg=" .. math.floor(damage))
+		if #anchors == 0 or map == nil then return end
+
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) then return end
+			-- 존을 넘어간 뒤에 실행되면 다음 존 몬스터가 맞는다 — 시전 시점 존과 다르면 버린다
+			if castZoneIndex ~= _MapManager.CurrentMapIndex then return end
+			local hitCount = 0
+			local monsters = self:GetMonstersInCurrentZone(map)
+			for _, mob in ipairs(monsters) do
+				---@type MonsterAI
+				local m = mob
+				if isvalid(m) and isvalid(m.Entity) and not m._dead then
+					local mp = m.Entity.TransformComponent.Position
+					local inArea = false
+					for _, a in ipairs(anchors) do
+						if m == a.target then
+							inArea = true
+						elseif self:InEllipse(mp.x - a.x, mp.y - a.y, self.Card121AreaHalfW, self.Card121AreaHalfH) and self:IsInDepthBand(m, a.band) then
+							inArea = true
+						end
+						if inArea then break end
+					end
+					if inArea then
+						if isCrit then _DpsMeterLogic:Tag(cardIdx, m):TakeDamageCrit(damage * 2)
+						else _DpsMeterLogic:Tag(cardIdx, m):TakeDamage(damage) end
+						hitCount = hitCount + 1
+						if kind > 0 and not m._dead then self:SpawnPreySecondary(cardIdx, m, damage, isCrit, kind, castZoneIndex) end
+					end
+				end
+			end
+			log("PreyCast: card=" .. cardIdx .. " impact hit=" .. hitCount)
+		end, self.Card121ImpactDelay)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SpawnPreySecondary(integer cardIdx, MonsterAI target, number damage, boolean isCrit, integer kind, integer castZoneIndex)
+		-- 본 공격에 맞은 몬스터 자리에 시전 연출 → 돌개바람/바람 그네를 띄우고, 그 몬스터에게만 추가타(PreySecondaryRatio)와 CC를 준다
+		local p = target.Entity.TransformComponent.Position
+		local pos = Vector3(p.x, p.y, p.z)
+		local ratio = self:GetEffectScaleRatio(target)
+		local castFrames = self:GetGaleCastFrames()
+		local castScale = self.Card122CastScale * ratio
+		local castDur = self.Card122CastFrameDuration
+		if kind == 2 then
+			castFrames = self:GetSnareCastFrames()
+			castScale = self.Card123CastScale * ratio
+			castDur = self.Card123CastFrameDuration
+		end
+		local castAlpha = 1.0
+		if kind == 1 then castAlpha = self.Card122EffectAlpha end
+		self:PlayFrameEffectAlpha(castFrames, pos, castScale, castDur, 1, castAlpha)
+
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) then return end
+			if castZoneIndex ~= _MapManager.CurrentMapIndex then return end
+			local alive = isvalid(target) and isvalid(target.Entity) and not target._dead
+			local secondaryDmg = damage * self.PreySecondaryRatio
+			if kind == 1 then
+				-- 돌개바람: 연출은 대상 생사와 무관하게 끝까지, 추가타 + 넉백은 Card122TornadoHitDelay 뒤에
+				self:PlayFrameEffectAlpha(self:GetGaleTornadoFrames(), pos, self.Card122TornadoScale * ratio, self.Card122TornadoFrameDuration, 1, self.Card122TornadoAlpha)
+				self:PlayBreathSfx(self.Card122HitSoundRUID)
+				_TimerService:SetTimerOnce(function()
+					if not isvalid(self) or not isvalid(target) or not isvalid(target.Entity) or target._dead then return end
+					if isCrit then _DpsMeterLogic:Tag(cardIdx, target):TakeDamageCrit(secondaryDmg * 2)
+					else _DpsMeterLogic:Tag(cardIdx, target):TakeDamage(secondaryDmg) end
+					if not target._dead then
+						local kbScale = self.Card122KnockbackScale
+						if target._isBoss or target._isElite then
+							-- 보스/엘리트는 넉백 효율 50% — 목표 스케일을 현재 스케일과의 중간값으로(썬더 커터와 같은 규칙)
+							kbScale = target._currentScale - (target._currentScale - self.Card122KnockbackScale) * 0.5
+						end
+						target:ApplyKnockback(kbScale)
+					end
+					log("SpawnPreySecondary: card=" .. cardIdx .. " tornado dmg=" .. math.floor(isCrit and secondaryDmg * 2 or secondaryDmg))
+				end, self.Card122TornadoHitDelay)
+			else
+				-- 바람 그네: 추가타 + 속박을 걸고, 속박 시간 동안 special1 연출 하나만으로 버틴다(유저 지정 2026-10-01).
+				-- 한 번 재생 길이를 속박 시간의 Card123BindPlayRatio로 잡고, 두 번째를 첫 번째가 끝나기 전에 겹쳐 띄워
+				-- 끊김 없이 속박이 풀릴 때까지 이어지게 한다(2초 속박이면 1.1초짜리 두 번, 0.2초 겹침)
+				local bindDur = self.Card123BindDuration
+				if alive and (target._isBoss or target._isElite) then bindDur = bindDur * 0.5 end
+				local bindFrames = self:GetSnareBindFrames()
+				local bindScale = self.Card123BindScale * ratio
+				local playLen = bindDur * self.Card123BindPlayRatio
+				local bindFrameDur = playLen / #bindFrames
+				self:PlayFrameEffect(bindFrames, pos, bindScale, bindFrameDur, 1)
+				_TimerService:SetTimerOnce(function()
+					if not isvalid(self) then return end
+					if castZoneIndex ~= _MapManager.CurrentMapIndex then return end
+					self:PlayFrameEffect(bindFrames, pos, bindScale, bindFrameDur, 1)
+				end, bindDur - playLen)
+				self:PlayBreathSfx(self.Card123HitSoundRUID)
+				if not alive then return end
+				if isCrit then _DpsMeterLogic:Tag(cardIdx, target):TakeDamageCrit(secondaryDmg * 2)
+				else _DpsMeterLogic:Tag(cardIdx, target):TakeDamage(secondaryDmg) end
+				if not target._dead then
+					-- 속박 = 행동불가 + 공중으로 붕 뜸(아쿠아 트랩과 같은 조합 — 같은 시간으로 같이 건다)
+					target:ApplyStun(bindDur, false)
+					target:ApplyLevitate(bindDur)
+				end
+				log("SpawnPreySecondary: card=" .. cardIdx .. " snare dmg=" .. math.floor(isCrit and secondaryDmg * 2 or secondaryDmg) .. " bind=" .. bindDur)
+			end
+		end, castDur * #castFrames)
+	end
+
 	-- ── 실피드 전용 패시브 5종 (카드 109~113) — 아르카나의 매직 부스터(7)/매직 크리티컬(8)/매직
 	-- 아머(18)/메디테이션(22)과 동일한 패턴(슬롯 없음, 해금 즉시 영구 적용, 레벨업 선택지 풀에서
 	-- unlock→강화). 실피드 전용이라 GenerateLevelUpChoices의 isSylph 블록에서만 노출된다.
@@ -14245,6 +14808,8 @@ script CardManager extends Logic
 	property SpriteGUIRendererComponent finalAttackBowFill = "a5e989f2-61ac-45fe-94d5-95bd1065ffe1"
 	property Entity rapidFireBuff = "3889a510-9ad3-40ea-90b5-cc85a0f60ca1"
 	property SpriteGUIRendererComponent rapidFireFill = "29f51406-be4d-43a6-90fb-a2123d29eca7"
+	property Entity concentrationBuff = "8224da1d-a9c4-4569-92cc-d29d2277937b"
+	property SpriteGUIRendererComponent concentrationFill = "f00d4064-42a4-455c-b43a-a4563f66c0fb"
 	property Entity comboBuff = "bc7b9a21-5da3-44dc-9895-bd3170e7093f"
 	property SpriteGUIRendererComponent comboFill = "54ad40a0-3f3e-4c71-a9ca-d18e3a1ad4b8"
 	property Entity chanceAttackBuff = "54b67a54-5d4f-4bb6-a156-b49ff9d84560"
@@ -14253,6 +14818,8 @@ script CardManager extends Logic
 	property SpriteGUIRendererComponent comaFill = "5ae20fde-e01b-45f0-8bde-f4aec44d07be"
 	property Entity selfRecoveryBuff = "9f9d7422-5c95-4370-ac2d-62f52bcf1ab8"
 	property SpriteGUIRendererComponent selfRecoveryFill = "a8d5703c-5977-4518-b37e-5cdcc3a8edc3"
+	property Entity ironBodyBuff = "b6008562-f862-4575-a825-fc32341e8d50"
+	property SpriteGUIRendererComponent ironBodyFill = "6b69c7f9-82f3-490d-be05-ef0917b451f9"
 	property Entity warriorMasteryBuff = "1e3634cb-b193-4bb4-a50e-278a491f5113"
 	property SpriteGUIRendererComponent warriorMasteryFill = "d2a4e044-21d4-4c3c-b588-ce96296221ed"
 	property Entity daggerAccelBuff = "90557fbe-dde0-4450-bb63-f3735f3af85a"
@@ -14336,7 +14903,7 @@ script CardManager extends Logic
 
 	-- 에디터 디버그용 (배포 전 false로 변경) — 2026-09-17 출시 준비로 false 적용.
 	-- 개발 중 다시 켤 때만 true로. true면 L/K/P/O 디버그 키가 전부 열린다.
-	-- ⚠ 2026-09-28 테스트용 다시 ON(유저 지정 "치트기능 풀어줘") — 출시 전 false
+	-- 2026-09-30 테스트용으로 켰다가 2026-10-01 스킬 테스트 끝나 다시 false
 	property boolean DebugMode = false
 	property any _debugKeyHandler = nil
 
@@ -14759,6 +15326,597 @@ script CardManager extends Logic
 	method void PlaySpiritBladeSound()
 		if self:IsServer() then return end
 		_SoundOptionLogic:PlaySfx(self.SpiritBladeSoundRUID, 1.0)
+	end
+
+	-- ── 레이온: 인사이징 (Card 192) / 인사이징:관 (Card 193) / 인사이징:폭 (Card 194)
+	--          + 패시브 아이언 바디 (Card 195) — 유저 지정 2026-10-01 ──
+	-- 인사이징: 슬롯형 액티브(Lv1~5). 가까운 몬스터 N명을 골라 각각 불꽃 베기 연출을 띄우고, 그 연출 범위(타원) 안의
+	--   몬스터 전부에게 대미지 + 화상(100%, 1초마다 기준 대미지의 20%). 120/140/160/180/200, 타겟 1명, 화상 2초(Lv5는 3초). 쿨타임 5초.
+	-- 인사이징:관(관통) = 인사이징 Lv5 + 콤보 어택 + 아이언 바디. 230/250/270, 타겟 2명, 화상 3초(틱당 30%), 콤보스택 +1.
+	--   인사이징이 나간 뒤 타겟마다 불꽃 검기(용)가 좌/우로 날아가며 연출이 끝날 때까지 경로의 몬스터를 관통, 추가타 30/40/50%.
+	-- 인사이징:폭(폭발) = 인사이징 Lv5 + 찬스 어택 + 아이언 바디. 250/280/310, 타겟 2명, 화상 3초(틱당 30%).
+	--   인사이징이 나간 뒤 타겟마다 아래에서 위로 솟는 폭발이 터져 범위 안 몬스터에게 추가타 30/40/50% + 스턴 2초(보스·엘리트는 절반).
+	-- 두 조합 모두 인사이징의 슬롯을 그대로 넘겨받는다(패시브는 그대로 남는다). 하나를 만들면 인사이징이 사라지므로
+	-- 나머지 하나는 그 판에서 못 만든다(프리징 브레스 / 윈드 오브 프레이와 같은 양자택일).
+	-- 아이언 바디: 슬롯 없는 패시브. 최대 체력 3/6/9/12/15% 증가(영구). 이름/아이콘/태그는 CardRegistry(192~195).
+	@Sync property integer IncisingLevel = 0
+	@Sync property integer IncisingPierceLevel = 0
+	@Sync property integer IncisingBurstLevel = 0
+	@Sync property integer IronBodyLevel = 0
+	property integer _ironBodyBonusHp = 0  -- 아이언 바디가 지금 최대 체력에 올려 둔 몫(레벨이 오르면 빼고 다시 계산)
+	property number Card192Cooldown = 5.0  -- 세 카드 공통, 레벨 무관 고정
+	-- 사운드: 인사이징 팩 audio/Use · audio/Hit, 관/폭은 유저 지정
+	property string Card192SoundRUID = "1595d17f21e54eb4ac1eb88c8344c8b7"
+	property string Card192HitSoundRUID = "e3dedc59193f4ca586a1248794391ece"
+	property string Card193SpearSoundRUID = "90f0479557b149669c6af261c71ee671"
+	property string Card194BurstSoundRUID = "99e90c076dba4ba79c618cade2699ab6"
+	-- 연출 = "effect"(베기 불꽃 16프레임) + "effect0"(불꽃 검 낙하 → 바닥 대폭발 22프레임)을 같은 기준점에 겹쳐 재생(원작과 동일 구성, 유저 지적 2026-10-01: effect만 쓰면 휙 지나간다).
+	-- 두 그림의 기준점은 원작 캐릭터 위치다 — 폭발 중심이 기준점에서 왼쪽 2.56유닛(1배 기준)이라, 그만큼 오른쪽에 기준점을 둬서 폭발이 몬스터 자리에서 터지게 한다
+	property number Card192EffectScale = 0.5
+	property number Card192FrameDuration = 0.07
+	property integer Card192SwingFrames = 6  -- 베기 불꽃 앞의 "가로 칼" 프레임 수 — 이 구간은 칼을 직접 회전시켜 휘두른다
+	property number Card192SwingFromDeg = 0  -- 시작 각도(0 = 원본 그대로, 칼이 뒤쪽(오른쪽)을 향함)
+	property number Card192SwingToDeg = 200  -- 끝 각도(반시계 방향, 머리 위를 지나 앞쪽 아래로)
+	property number Card192SwingDuration = 0.2  -- 휘두르는 시간(0.42 → 0.2, 유저 "더 빠르게")
+	property number Card192SwingScaleMult = 1.95  -- 휘두르는 칼만 크기 배율(궤적·폭발은 그대로). 1.3에서 50% 더(유저 "너무 작다")
+	property number Card192SwingYOffset = 0.5  -- 휘두르는 칼만 위로
+	-- 휘두른 뒤 남는 불꽃 궤적(베기 겹 7~16장) — 실제로 화면에서 "칼"로 보이는 부분(칼 회전은 0.1초라 거의 안 보임).
+	-- 30% + 50% = 1.95배, 위로 0.5. 공격 판정 범위(Card192AreaHalfW/H)와는 무관
+	property number Card192SlashScaleMult = 1.95
+	property number Card192SlashYOffset = 0.5
+	property number Card192SlashCenterDX = 1.17
+	property number Card192SlashCenterDY = 0.83
+	property boolean Card192ShowDropSword = false  -- 위에서 내리꽂히는 세로 칼(폭발 겹 앞부분) 표시 여부
+	property integer Card192DropSwordFrames = 9  -- 폭발 겹 앞의 빈 1장 + 내리꽂히는 칼 8장
+	property number Card192DropSwordScaleMult = 1.3
+	property number Card192DropSwordYOffset = 0.5
+	property number Card192PivotOffsetX = 2.56
+	property number Card192PivotOffsetY = -0.28
+	property number Card192ImpactDelay = 0.63  -- 바닥 폭발(effect0 10번째 프레임)이 뜨는 시점에 대미지
+	-- 판정 범위(타원 반축, 유닛)와 그 중심 높이(발밑 기준)
+	property number Card192AreaHalfW = 1.6
+	property number Card192AreaHalfH = 1.1
+	property number Card192AreaYOffset = 0.6
+	property number Card192HitScale = 0.8
+	property number Card192HitFrameDuration = 0.05
+	property number Card192BurnTickInterval = 1.0
+	-- 관: 불꽃 검기(skill/61001207 "effect" 6프레임, 위를 향한 그림을 ±90도 돌려 좌/우로 쏜다)
+	property number Card193SpearDelay = 0.15  -- 인사이징 대미지 뒤 검기가 나가기까지
+	property number Card193SpearScale = 0.6
+	property number Card193SpearDuration = 0.5  -- 이 시간 동안 날아가며 관통(연출이 끝나면 판정도 끝)
+	property number Card193SpearSpeed = 9.0
+	property number Card193SpearStartBack = 1.0  -- 타겟 뒤쪽에서 출발
+	property number Card193SpearYOffset = 0.6
+	property number Card193SpearHalfW = 1.0
+	property number Card193SpearHalfH = 0.48  -- 판정 대조대 유저 지정(세로 0.96 = 검기 두께), 높이는 발밑 기준
+	property number Card193SpearTick = 0.033
+	-- 폭: 폭발(캐논 점프 팩 "effect" 5프레임)을 발밑에서 위로 솟구치며 커지게 재생
+	property number Card194BurstDelay = 0.15
+	property number Card194BurstScale = 0.6  -- 새 클립(51fc0de5…)은 1배에 약 4.9유닛 길이라 줄여서 시작(예전 클립 때는 1.265)
+	property number Card194BurstRotation = -90  -- 왼쪽으로 날아가는 그림을 시계 방향 90도 → 위로 솟게
+	property number Card194BurstGrowFrom = 0.55  -- 시작 크기 비율
+	property number Card194BurstFrameDuration = 0.08
+	property number Card194BurstStartY = 0.2  -- 발밑 기준 시작 높이(꼬리)
+	property number Card194BurstRise = 1.6  -- 솟구치는 거리
+	property number Card194ScreenHalfHeight = 3.6  -- 화면 세로 절반(PC 7.2유닛 기준)
+	property number Card194BurstLength = 4.9  -- 그림 길이(1배 기준, 꼬리→머리)
+	property number Card194BurstHitDelay = 0.08  -- 첫 장이 빈 그림이라 불덩이가 보이기 시작하는 시점부터 판정
+	property number Card194BurstHitTick = 0.033
+	-- 불덩이 판정(판정 대조대 유저 지정 2026-10-01: 불덩이 모양 가로 0.74 × 세로 1.84). 날아가는 불덩이의 머리(맨 위)에서
+	-- 아래로 HalfH×2 구간을 매 틱 따라가며, 몬스터 몸통(발밑 + Card192AreaYOffset)이 그 안에 들어오면 맞은 것으로 본다
+	property number Card194BurstHalfW = 0.37
+	property number Card194BurstHalfH = 0.92
+	property number Card194BurstOffsetX = 0.18
+	-- 불덩이에 맞은 자리의 폭발(2155625c…): 0.8배면 불꽃 고리 지름 약 2.2유닛 → 판정 반지름 1.1(발밑 기준, 원근 배율 적용)
+	property number Card194BlastScale = 0.91  -- 1.2(지름 3.3) → 0.91(지름 약 2.5, 유저 지정 2026-10-01 "3.3은 너무 크고 2.5로"). 원근 배율 없이 고정
+	property number Card194BlastFrameDuration = 0.07
+	property number Card194BlastHalfW = 1.25  -- 0.91배 불꽃 고리 지름 약 2.5유닛
+	property number Card194BlastHalfH = 1.25
+	property number Card194StunDuration = 2.0  -- 보스·엘리트는 절반
+
+	method table GetIncisingFrames()
+		-- 인사이징 팩 "effect"(클립 13장 + 낱장 effect/13~15) — 캐릭터 쪽 베기 불꽃
+		return { "2ec6f0ea16534d3e9e83214975836ab3", "63e5ff485908420fb2987265cdd37af5", "ef08801a24794ff89fe263c8d7e18d8b", "bde7ce6dc1ee4a18bcd6e6a0581d270b", "1c61eb556fa34a338f4051c830ca3181", "0fde21e09bf94b328fe09baa0091734a", "67ec80352d5b4f0ba04752609830982f", "78b7daa6113a44e79ddf052723797213", "74bf77cb7c284a28bbdfe52aaa968eb1", "5aaa488a028349999ae03930baa38602", "1d80710957de4bd98f52198dec91dfe3", "206f83d8b0424613a1e9a57d0c2d3ae6", "3d1798ffde3a468d9ef7433abd364052", "2e7112005c514e29884cbfeee1df77df", "57998ec27c544b50a441404d73858b0f", "9c63c28ba64a4f9f846229801477b45b" }
+	end
+
+	method table GetIncisingExplosionFrames()
+		-- 인사이징 팩 "effect0"(클립 9장 + 낱장 effect0/9~21) — 불꽃 검이 내리꽂힌 뒤(1~8) 바닥에서 크게 터진다(9~21). 원작 연출의 본체
+		return { "632fa05ef6154771b1ca401028341fec", "4ff7c5dffbd8478e806a07bfe3fc9fa3", "c886ceeab39940b9b9e81523b000e870", "9f31a1cc1f9844e0889df018a0fa8065", "1b7daa98e96047e89161948b61072005", "adbf3b146d30445d8e7fed1aab5580b9", "6a92fe629c804d26b52712bb93211ca7", "fc1fff5d741842b4b2a7c3731b79bf0b", "b1bd5ce5ea644849ae317609d2d16093", "1650138c23674f2a8e76f8438cc0bab2", "35f0e9e3f991436c8f65dd0411596253", "a230034b79e04495814c0d393e188c56", "944f6c6f242246219b6e3ddb95253694", "79acebf3cd3f43f6a64e585fbf83084a", "d4ad236fee844ae68eb7870276528685", "e9bf765719624283a56362726a6868eb", "1f29f176933740f9ab293ed298f0a039", "fd78177e5f524552b8dfd18f061fafed", "bfa2a276e70548e39ffcacd4df320688", "2db09af209704e9c95f978405075fc22", "89ff09ca2353419db58ef149bb99a32d", "308f7790b7ba4e1f837aa212b6b635c7" }
+	end
+
+	method table GetIncisingHitFrames()
+		-- 인사이징 팩 "hit/0"
+		return { "8c59267702e644fa98e29a8d9c0c25e3", "7aa2d0ee96b146cc81320fbfcc23456d", "e38823fd1b6e4a42a26a240250a36f1d", "9938ecba168f4e5481ffda30413bbc35", "385db14636db45baacce71b73b674d24", "0aebd71bc4b84b00aadddae829c30eb1" }
+	end
+
+	method table GetIncisingSpearFrames()
+		-- skill/61001207 팩 "effect"
+		return { "abc2aed6927b4ddf8f35a2e136be98aa", "1bfdf0396a774ee79b0ecff067697557", "375ff4df29ad474fbf038f29b790f5a2", "239b85a83db642958df491f3e5ad7f4f", "21f4b16e2c9d4c32911d8698fc8f8c39", "44b69fb9f47a48bfbe200473333bf65a" }
+	end
+
+	method table GetIncisingBlastFrames()
+		-- 인사이징:폭 — 불덩이에 맞은 자리에서 터지는 폭발(유저 지정 클립 2155625c…, 7프레임, pivot이 오른쪽(0.94, 0.455))
+		return { "d41e007ecc944bba92372a355787db18", "0bbb34e72c0f4826bc230b59e5b8e1df", "386410163d1f4c8793f46d071146e953", "2e1a57c027fa4946b9b380444620ea52", "7a5bd7a962fb44a5a582e79dd1967253", "2dcc99f56d624c2fb71024c7f57d9d4f", "d8a763318ec54853b3ddc6da64772ab5" }
+	end
+
+	method table GetIncisingBurstFrames()
+		-- 유저 지정 클립 51fc0de5…(2026-10-01, 캐논 점프 13f1d57e…에서 교체). 원본은 왼쪽으로 날아가는 불덩이(기준점 = 오른쪽 꼬리)라
+		-- Card194BurstRotation(-90도)으로 세워서 위로 솟게 한다. 첫 장은 빈 그림
+		return { "176ec5c20f2e46bfbd3ff5a947be31bc", "1541a667074545afb6bc7e1369167fa7", "1a105a091c40408b8966a8f3c0e5f092", "514c939a4074460998b4ff3170537ca0", "a1113e399a6b497b996ffca4da6b071e", "616c750d96154bac940eccc667c32d78", "1cdc2f63c3604746aa434c60007f8245", "b70cb7d408d743748f1813df0ee34b42", "31cf57d8bd1849728c6036d1b00acb8d", "f059a4e704f14cd9979fa1cec77835d1" }
+	end
+
+	method number GetIncisingDamage()
+		if self.IncisingLevel >= 5 then return 200
+		elseif self.IncisingLevel >= 4 then return 180
+		elseif self.IncisingLevel >= 3 then return 160
+		elseif self.IncisingLevel >= 2 then return 140
+		end
+		return 120
+	end
+
+	method number GetIncisingPierceDamage(integer level)
+		if level >= 3 then return 270
+		elseif level >= 2 then return 250
+		end
+		return 230
+	end
+
+	method number GetIncisingBurstDamage(integer level)
+		if level >= 3 then return 310
+		elseif level >= 2 then return 280
+		end
+		return 250
+	end
+
+	method integer GetIncisingTargetCount(integer cardIdx)
+		if cardIdx == 192 then return 1 end
+		return 2
+	end
+
+	method integer GetIncisingBurnSeconds(integer cardIdx)
+		-- 화상 지속(초) = 틱 수. 인사이징 2초(Lv5는 3초), 관/폭 3초
+		if cardIdx == 192 and self.IncisingLevel < 5 then return 2 end
+		return 3
+	end
+
+	method number GetIncisingBurnRatio(integer cardIdx)
+		-- 화상 1틱 대미지 비율(기준 대미지 대비). 인사이징 20%, 관/폭 30%
+		if cardIdx == 192 then return 0.2 end
+		return 0.3
+	end
+
+	method number GetIncisingExtraPercent(integer level)
+		-- 관통/폭발 추가타 비율 — 30/40/50%
+		if level >= 3 then return 0.5
+		elseif level >= 2 then return 0.4
+		end
+		return 0.3
+	end
+
+	-- 아이언 바디 — 최대 체력 % 증가. Lv1:3 / Lv2:6 / Lv3:9 / Lv4:12 / Lv5:15
+	method integer GetIronBodyPercent()
+		if self.IronBodyLevel >= 5 then return 15
+		elseif self.IronBodyLevel >= 4 then return 12
+		elseif self.IronBodyLevel >= 3 then return 9
+		elseif self.IronBodyLevel >= 2 then return 6
+		elseif self.IronBodyLevel >= 1 then return 3
+		end
+		return 0
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ApplyIronBodyHp()
+		-- 지금까지 올려 둔 몫을 빼고 현재 레벨 몫으로 다시 올린다. 늘어난 만큼 현재 체력도 같이 채운다
+		local base = _GameManager.PlayerMaxHp - self._ironBodyBonusHp
+		local bonus = math.floor(base * self:GetIronBodyPercent() / 100)
+		local gained = bonus - self._ironBodyBonusHp
+		_GameManager.PlayerMaxHp = base + bonus
+		if gained > 0 then
+			_GameManager.PlayerHp = math.min(_GameManager.PlayerHp + gained, _GameManager.PlayerMaxHp)
+		end
+		self._ironBodyBonusHp = bonus
+		log("IronBody: maxHp " .. base .. " -> " .. _GameManager.PlayerMaxHp .. " (+" .. self:GetIronBodyPercent() .. "%)")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void IncisingAttack(number damage, boolean isCrit)
+		self:PlayBreathSfx(self.Card192SoundRUID)
+		self:IncisingCast(192, damage, isCrit, 0)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void IncisingPierceAttack(number damage, boolean isCrit)
+		self:PlayBreathSfx(self.Card192SoundRUID)
+		self:IncisingCast(193, damage, isCrit, 1)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void IncisingBurstAttack(number damage, boolean isCrit)
+		self:PlayBreathSfx(self.Card192SoundRUID)
+		self:IncisingCast(194, damage, isCrit, 2)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void IncisingCast(integer cardIdx, number damage, boolean isCrit, integer kind)
+		-- 인사이징 3종 공용 본체. kind: 0 = 추가타 없음(인사이징) / 1 = 관통 검기(관) / 2 = 폭발(폭)
+		local targetCount = self:GetIncisingTargetCount(cardIdx)
+		local targets = self:GetClosestTargets(targetCount)
+		local map = self:GetCurrentMap()
+		local castZoneIndex = _MapManager.CurrentMapIndex
+		local frames = self:GetIncisingFrames()
+		local explosionFrames = self:GetIncisingExplosionFrames()
+		-- 판정 중심과 조준 대상의 깊이 구간을 시전 시점에 값으로 잡아 둔다(대상이 도중에 죽어도 판정·연출은 그대로)
+		local anchors = {}
+		for _, mob in ipairs(targets) do
+			---@type MonsterAI
+			local target = mob
+			if isvalid(target) and isvalid(target.Entity) then
+				local p = target.Entity.TransformComponent.Position
+				local ratio = self:GetEffectScaleRatio(target)
+				local scale = self.Card192EffectScale * ratio
+				local center = Vector3(p.x, p.y + self.Card192AreaYOffset, p.z)
+				-- 방향(유저 지정 2026-10-01): 휘두르기·궤적·폭발·타격·관통 검기가 전부 같은 쪽을 향한다(인사이징/관/폭 공통).
+				-- 몬스터가 더 많은 쪽으로 벤다. 원본 그림은 왼쪽을 향하므로 오른쪽(dir = 1)이면 전부 좌우 반전 + 기준점을 반대편에 둔다
+				local dir = self:GetIncisingDirection(map, target, p.x)
+				local flip = (dir > 0)
+				local pivotPos = Vector3(p.x - dir * self.Card192PivotOffsetX * scale, p.y + self.Card192PivotOffsetY * scale, p.z)
+				-- 유저 지정 2026-10-01:
+				--  · 베기 불꽃 앞 Card192SwingFrames장(가로로 누운 불꽃 칼)은 그림이 거의 안 변해 멈춰 보인다 — 칼을 직접 돌려서
+				--    뒤쪽(오른쪽)에서 머리 위를 지나 앞쪽(왼쪽 아래)으로 휘두르게 하고, 이어서 불꽃 궤적 프레임을 재생
+				--  · 폭발 겹의 앞 Card192DropSwordFrames장(위에서 내리꽂히는 세로 불꽃 칼)만 더 크게·더 위에, 바닥 폭발부터는 원래 자리·크기
+				local swingFrames = {}
+				local slashRest = {}
+				for i, ruid in ipairs(frames) do
+					if i <= self.Card192SwingFrames then table.insert(swingFrames, ruid) else table.insert(slashRest, ruid) end
+				end
+				self:PlaySwingFrameEffect(swingFrames, Vector3(pivotPos.x, pivotPos.y + self.Card192SwingYOffset, pivotPos.z), scale * self.Card192SwingScaleMult, self.Card192SwingDuration, self.Card192SwingFromDeg, self.Card192SwingToDeg, flip)
+				local dropSword = {}
+				local blastFrames = {}
+				for i, ruid in ipairs(explosionFrames) do
+					if i <= self.Card192DropSwordFrames then table.insert(dropSword, ruid) else table.insert(blastFrames, ruid) end
+				end
+				-- 세로 칼은 거의 안 움직여 "멈춰 있는 칼"로 보여 기본은 뺀다(유저 지정 2026-10-01). 바닥 폭발 타이밍은 그대로 둔다
+				if self.Card192ShowDropSword then
+					self:PlayFrameEffectEx(dropSword, Vector3(pivotPos.x, pivotPos.y + self.Card192DropSwordYOffset, pivotPos.z), scale * self.Card192DropSwordScaleMult, self.Card192FrameDuration, 1, 1.0, flip)
+				end
+				_TimerService:SetTimerOnce(function()
+					if not isvalid(self) then return end
+					if castZoneIndex ~= _MapManager.CurrentMapIndex then return end
+					-- 불꽃 궤적(화면에 보이는 "칼 휘두르기")만 키운다. 궤적 그림의 가운데는 기준점에서 앞쪽 1.17·위 0.83(1배 기준)이라,
+					-- 키워도 가운데가 제자리에 있도록 기준점을 다시 잡는다. 공격 판정 범위는 그대로(유저 지정 2026-10-01)
+					local slashScale = scale * self.Card192SlashScaleMult
+					local cx = pivotPos.x + dir * self.Card192SlashCenterDX * scale
+					local cy = pivotPos.y + self.Card192SlashCenterDY * scale
+					local slashPivot = Vector3(cx - dir * self.Card192SlashCenterDX * slashScale, cy - self.Card192SlashCenterDY * slashScale + self.Card192SlashYOffset, pivotPos.z)
+					self:PlayFrameEffectEx(slashRest, slashPivot, slashScale, self.Card192FrameDuration, 1, 1.0, flip)
+				end, self.Card192SwingDuration)
+				_TimerService:SetTimerOnce(function()
+					if not isvalid(self) then return end
+					if castZoneIndex ~= _MapManager.CurrentMapIndex then return end
+					self:PlayFrameEffectEx(blastFrames, pivotPos, scale, self.Card192FrameDuration, 1, 1.0, flip)
+				end, self.Card192FrameDuration * #dropSword)
+				table.insert(anchors, { x = p.x, y = center.y, z = p.z, footY = p.y, ratio = ratio, target = target, band = self:GetDepthBand(target), dir = dir })
+			end
+		end
+		log("IncisingCast: card=" .. cardIdx .. " anchors=" .. #anchors .. "/" .. targetCount .. " dmg=" .. math.floor(damage))
+		if #anchors == 0 or map == nil then return end
+
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) then return end
+			-- 존을 넘어간 뒤에 실행되면 다음 존 몬스터가 맞는다 — 시전 시점 존과 다르면 버린다
+			if castZoneIndex ~= _MapManager.CurrentMapIndex then return end
+			local burnTicks = self:GetIncisingBurnSeconds(cardIdx)
+			local burnPerTick = damage * self:GetIncisingBurnRatio(cardIdx)
+			local hitFrames = self:GetIncisingHitFrames()
+			local hitCount = 0
+			for _, mob in ipairs(self:GetMonstersInCurrentZone(map)) do
+				---@type MonsterAI
+				local m = mob
+				if isvalid(m) and isvalid(m.Entity) and not m._dead then
+					local mp = m.Entity.TransformComponent.Position
+					local inArea = false
+					local hitDir = -1
+					for _, a in ipairs(anchors) do
+						if m == a.target then
+							inArea = true
+						elseif self:InEllipse(mp.x - a.x, mp.y + self.Card192AreaYOffset - a.y, self.Card192AreaHalfW, self.Card192AreaHalfH) and self:IsInDepthBand(m, a.band) then
+							inArea = true
+						end
+						if inArea then
+							hitDir = a.dir
+							break
+						end
+					end
+					if inArea then
+						local applied = damage
+						if isCrit then
+							applied = damage * 2
+							_DpsMeterLogic:Tag(cardIdx, m):TakeDamageCrit(applied)
+						else
+							_DpsMeterLogic:Tag(cardIdx, m):TakeDamage(applied)
+						end
+						hitCount = hitCount + 1
+						self:PlayFrameEffectEx(hitFrames, Vector3(mp.x, mp.y + self.Card192AreaYOffset, mp.z), self.Card192HitScale * self:GetEffectScaleRatio(m), self.Card192HitFrameDuration, 1, 1.0, hitDir > 0)
+						if not m._dead then
+							-- 화상 100% — 1초마다 기준 대미지(치명타 전)의 일정 비율
+							m:ApplyDot(burnPerTick, burnTicks, self.Card192BurnTickInterval)
+							if kind == 1 then m:AddComboStack(applied) end
+						end
+					end
+				end
+			end
+			if hitCount > 0 then self:PlayBreathSfx(self.Card192HitSoundRUID) end
+			log("IncisingCast: card=" .. cardIdx .. " impact hit=" .. hitCount .. " burn=" .. math.floor(burnPerTick) .. "x" .. burnTicks)
+			if kind == 0 then return end
+			local secondDelay = self.Card193SpearDelay
+			if kind == 2 then secondDelay = self.Card194BurstDelay end
+			for _, a in ipairs(anchors) do
+				local anchor = a
+				_TimerService:SetTimerOnce(function()
+					if not isvalid(self) then return end
+					if kind == 1 then self:LaunchIncisingSpear(cardIdx, anchor, damage, isCrit, castZoneIndex)
+					else self:SpawnIncisingBurst(cardIdx, anchor, damage, isCrit, castZoneIndex) end
+				end, secondDelay)
+			end
+		end, self.Card192ImpactDelay)
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer GetIncisingDirection(Entity map, MonsterAI target, number x)
+		-- 타겟 기준 좌/우 중 같은 깊이 구간 몬스터가 더 많은 쪽(-1 = 왼쪽, 1 = 오른쪽). 같으면 존 가운데 쪽
+		local left = 0
+		local right = 0
+		if map ~= nil then
+			local band = self:GetDepthBand(target)
+			for _, mob in ipairs(self:GetMonstersInCurrentZone(map)) do
+				---@type MonsterAI
+				local m = mob
+				if isvalid(m) and isvalid(m.Entity) and not m._dead and m ~= target and self:IsInDepthBand(m, band) then
+					local mx = m.Entity.TransformComponent.Position.x
+					if mx < x then left = left + 1 elseif mx > x then right = right + 1 end
+				end
+			end
+		end
+		if left > right then return -1 end
+		if right > left then return 1 end
+		if x > self:GetZoneCenterX() then return -1 end
+		return 1
+	end
+
+	@ExecSpace("ServerOnly")
+	method void LaunchIncisingSpear(integer cardIdx, table anchor, number damage, boolean isCrit, integer castZoneIndex)
+		-- 관: 타겟 자리에서 불꽃 검기가 좌/우로 날아가며, 연출이 끝날 때까지 경로의 몬스터를 한 번씩 관통한다
+		if castZoneIndex ~= _MapManager.CurrentMapIndex then return end
+		local map = self:GetCurrentMap()
+		if map == nil then return end
+		-- 인사이징을 벤 방향(시전 때 정한 anchor.dir) 그대로 쏜다
+		local dir = anchor.dir
+		local frames = self:GetIncisingSpearFrames()
+		local startX = anchor.x - dir * self.Card193SpearStartBack
+		-- 원본 그림은 머리가 위를 향한다 — 오른쪽으로 쏠 땐 -90도, 왼쪽은 +90도
+		-- 오른쪽은 -90도로만 돌리면 용 그림이 위아래로 뒤집혀 보인다(유저 지적) — 왼쪽 그림의 거울상이 되도록 좌우 반전을 같이 건다
+		local rot = -90
+		if dir < 0 then rot = 90 end
+		local fx = self:SpawnEffectWithModel(frames[1], Vector3(startX, anchor.footY + self.Card193SpearYOffset, anchor.z), rot, 1.0, self.Card193SpearScale * anchor.ratio, 1.0, "skilleffectlong")
+		if fx == nil then return end
+		if dir > 0 then fx.SpriteRendererComponent.FlipX = true end
+		self:PlayBreathSfx(self.Card193SpearSoundRUID)
+		local extra = damage * self:GetIncisingExtraPercent(self.IncisingPierceLevel)
+		local hitFrames = self:GetIncisingHitFrames()
+		local hitSet = {}
+		local hitCount = 0
+		local elapsed = 0
+		local lastFrame = 1
+		local tickId = 0
+		tickId = _TimerService:SetTimerRepeat(function()
+			if not isvalid(self) or not isvalid(fx) then
+				_TimerService:ClearTimer(tickId)
+				return
+			end
+			elapsed = elapsed + self.Card193SpearTick
+			local t = math.min(elapsed / self.Card193SpearDuration, 1)
+			local curX = startX + dir * self.Card193SpearSpeed * elapsed
+			local fp = fx.TransformComponent.Position
+			fx.TransformComponent.Position = Vector3(curX, fp.y, fp.z)
+			-- 앞 40%는 온전한 첫 그림으로 날고, 나머지 구간에 흩어지는 프레임을 넘긴다
+			local idx = 1
+			if t >= 0.4 then idx = math.min(2 + math.floor((t - 0.4) / 0.6 * (#frames - 1)), #frames) end
+			if idx ~= lastFrame then
+				lastFrame = idx
+				fx.SpriteRendererComponent.SpriteRUID = frames[idx]
+			end
+			if castZoneIndex == _MapManager.CurrentMapIndex then
+				for _, mob in ipairs(self:GetMonstersInCurrentZone(map)) do
+					---@type MonsterAI
+					local m = mob
+					if isvalid(m) and isvalid(m.Entity) and not m._dead and not hitSet[m] then
+						local mp = m.Entity.TransformComponent.Position
+						if self:InRect(mp.x - curX, mp.y - anchor.footY, self.Card193SpearHalfW, self.Card193SpearHalfH) and self:IsInDepthBand(m, anchor.band) then
+							hitSet[m] = true
+							hitCount = hitCount + 1
+							if isCrit then _DpsMeterLogic:Tag(cardIdx, m):TakeDamageCrit(extra * 2)
+							else _DpsMeterLogic:Tag(cardIdx, m):TakeDamage(extra) end
+							self:PlayFrameEffect(hitFrames, Vector3(mp.x, mp.y + self.Card192AreaYOffset, mp.z), self.Card192HitScale * self:GetEffectScaleRatio(m), self.Card192HitFrameDuration, 1)
+						end
+					end
+				end
+			end
+			if t >= 1 then
+				_TimerService:ClearTimer(tickId)
+				fx:Destroy()
+				log("LaunchIncisingSpear: card=" .. cardIdx .. " dir=" .. dir .. " pierced=" .. hitCount .. " dmg=" .. math.floor(isCrit and extra * 2 or extra))
+			end
+		end, self.Card193SpearTick)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SpawnIncisingBurst(integer cardIdx, table anchor, number damage, boolean isCrit, integer castZoneIndex)
+		-- 폭: 타겟 발밑에서 불덩이가 위로 솟구치고, 처음 닿은 몬스터(타겟 제외) 자리에서 폭발 — 추가타 + 스턴
+		if castZoneIndex ~= _MapManager.CurrentMapIndex then return end
+		local map = self:GetCurrentMap()
+		if map == nil then return end
+		local frames = self:GetIncisingBurstFrames()
+		local scale = self.Card194BurstScale * anchor.ratio
+		-- 처음 버전으로 복귀(유저 지정 2026-10-01): 꼬리가 발밑+Card194BurstStartY에서 Card194BurstRise만큼 솟는다. 화면 위까지 올라가도 자르지 않는다
+		-- 공중 타겟도 자기 자리(발밑)에서 위로 솟는다(유저 지정 2026-10-01) — 그 위에 있는 공중 몬스터가 맞는다
+		local fromPos = Vector3(anchor.x, anchor.footY + self.Card194BurstStartY, anchor.z)
+		local toPos = Vector3(anchor.x, anchor.footY + self.Card194BurstStartY + self.Card194BurstRise, anchor.z)
+		local burstFx = self:PlayMovingFrameEffect(frames, fromPos, toPos, scale * self.Card194BurstGrowFrom, scale, #frames * self.Card194BurstFrameDuration, self.Card194BurstRotation, 99999, self.Card194BurstLength)
+		self:PlayBreathSfx(self.Card194BurstSoundRUID)
+		local extra = damage * self:GetIncisingExtraPercent(self.IncisingBurstLevel)
+		if not isvalid(burstFx) then return end
+		-- 불덩이 = 솟아오르는 투사체(유저 지정 2026-10-01). 예전엔 0.2초에 한 번, 본타 맞은 타겟을 무조건 "불덩이에 맞음"으로 넣고
+		-- 발밑 높이만 봐서 불덩이가 매번 타겟 자리에서 바로 터졌다(공중 몬스터에 닿을 일이 없음). 지금은:
+		--  · 본타 맞은 타겟(anchor.target)은 불덩이 판정에서 뺀다
+		--  · 날아가는 불덩이의 실제 위치·크기(burstFx)를 매 틱 읽어 머리 쪽 구간에 처음 닿은 몬스터(공중 포함)에서 터진다
+		--  · 아무것도 안 닿고 끝까지 올라가면 그대로 사라지고 추가타 없음(유저 선택 "가")
+		local burstStartedAt = _UtilLogic.ElapsedSeconds
+		local burstTickId = 0
+		burstTickId = _TimerService:SetTimerRepeat(function()
+			if not isvalid(self) or not isvalid(burstFx) or castZoneIndex ~= _MapManager.CurrentMapIndex then
+				_TimerService:ClearTimer(burstTickId)
+				if isvalid(self) and not isvalid(burstFx) then log("SpawnIncisingBurst: card=" .. cardIdx .. " flew off, no hit") end
+				return
+			end
+			if _UtilLogic.ElapsedSeconds - burstStartedAt < self.Card194BurstHitDelay then return end
+			local fxPos = burstFx.TransformComponent.Position
+			local headY = fxPos.y + self.Card194BurstLength * burstFx.TransformComponent.Scale.x
+			local bottomY = headY - self.Card194BurstHalfH * 2
+			local hitCount = 0
+			local struck = {}
+			local struckSet = {}
+			local struckNames = {}
+			for _, mob in ipairs(self:GetMonstersInCurrentZone(map)) do
+				---@type MonsterAI
+				local m = mob
+				-- 타겟(지상·공중 모두)은 자기 자리에서 나온 불덩이에 또 맞지 않게 뺀다
+				if isvalid(m) and isvalid(m.Entity) and not m._dead and m ~= anchor.target then
+					local mp = m.Entity.TransformComponent.Position
+					local bodyY = mp.y + self.Card192AreaYOffset
+					-- 공중 몬스터는 원근 배율이 고정(1.0)이라 깊이 구간 비교가 맞지 않는다 — 불덩이가 위로 솟으니 깊이 구간은 지상 몬스터에만 적용
+					local sameDepth = m._isFlying or self:IsInDepthBand(m, anchor.band)
+					if math.abs(mp.x - (fxPos.x + self.Card194BurstOffsetX)) <= self.Card194BurstHalfW and bodyY >= bottomY and bodyY <= headY and sameDepth then
+						hitCount = hitCount + 1
+						table.insert(struck, { x = mp.x, y = mp.y, z = mp.z, ratio = self:GetEffectScaleRatio(m), band = self:GetDepthBand(m), flying = m._isFlying })
+						struckSet[m] = true
+						table.insert(struckNames, m.Entity.Name)
+						if isCrit then _DpsMeterLogic:Tag(cardIdx, m):TakeDamageCrit(extra * 2)
+						else _DpsMeterLogic:Tag(cardIdx, m):TakeDamage(extra) end
+						if not m._dead then
+							local stunDur = self.Card194StunDuration
+							if m._isBoss or m._isElite then stunDur = stunDur * 0.5 end
+							m:ApplyStun(stunDur, true)
+						end
+					end
+				end
+			end
+			if hitCount == 0 then return end
+			-- 맞은 순간 불덩이는 사라지고, 맞은 몬스터 자리마다 폭발(2155625c…)이 터져 그 범위 안 몬스터에게 같은 비율(30/40/50%)의
+			-- 광역 추가타 + 스턴. 불덩이에 직접 맞은 몬스터는 제외, 본타 맞은 타겟은 폭발 범위 안이면 맞는다
+			_TimerService:ClearTimer(burstTickId)
+			burstFx:Destroy()
+			local blastHit = 0
+			local blastFrames = self:GetIncisingBlastFrames()
+			for _, st in ipairs(struck) do
+				-- 폭발 크기·판정은 고정(유저 지정 2026-10-01: 원근 배율 없이 연출 크기 그대로 — 0.91배 불꽃 고리 지름 약 2.5 = 반지름 1.25)
+				local bs = self.Card194BlastScale
+				local center = Vector3(st.x, st.y + self.Card192AreaYOffset, st.z)
+				self:PlayFrameEffect(blastFrames, self:OffsetByPivot(center, 0.94, 0.455, 3.4, 3.6, bs), bs, self.Card194BlastFrameDuration, 1)
+				for _, mob in ipairs(self:GetMonstersInCurrentZone(map)) do
+					---@type MonsterAI
+					local m = mob
+					if isvalid(m) and isvalid(m.Entity) and not m._dead and not struckSet[m] then
+						local mp = m.Entity.TransformComponent.Position
+						if self:InEllipse(mp.x - st.x, mp.y - st.y, self.Card194BlastHalfW, self.Card194BlastHalfH) and (st.flying or m._isFlying or self:IsInDepthBand(m, st.band)) then
+							struckSet[m] = true
+							blastHit = blastHit + 1
+							if isCrit then _DpsMeterLogic:Tag(cardIdx, m):TakeDamageCrit(extra * 2)
+							else _DpsMeterLogic:Tag(cardIdx, m):TakeDamage(extra) end
+							if not m._dead then
+								local stunDur = self.Card194StunDuration
+								if m._isBoss or m._isElite then stunDur = stunDur * 0.5 end
+								m:ApplyStun(stunDur, true)
+							end
+						end
+					end
+				end
+			end
+			if #struck > 0 then self:PlayBreathSfx(self.Card192HitSoundRUID) end
+			log("SpawnIncisingBurst: card=" .. cardIdx .. " hit=" .. hitCount .. " (first " .. struckNames[1] .. " y=" .. string.format("%.2f", struck[1].y - anchor.footY) .. " above target foot, at " .. string.format("%.2f", _UtilLogic.ElapsedSeconds - burstStartedAt) .. "s) blast=" .. blastHit .. " dmg=" .. math.floor(isCrit and extra * 2 or extra))
+		end, self.Card194BurstHitTick)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void PlaySwingFrameEffect(table frames, Vector3 pos, number scale, number duration, number fromDeg, number toDeg, boolean flipX)
+		-- 프레임을 넘기면서 그림을 기준점(스프라이트 pivot) 중심으로 돌려 휘두르는 연출. 처음엔 느리게, 끝으로 갈수록 빠르게.
+		-- flipX면 그림을 뒤집고 회전도 거울로(각도 부호 반대) 돌린다
+		if flipX then
+			fromDeg = -fromDeg
+			toDeg = -toDeg
+		end
+		local fx = self:SpawnEffectWithModel(frames[1], pos, fromDeg, 1.0, scale, 1.0, "skilleffectlong")
+		if fx == nil then return end
+		if flipX then fx.SpriteRendererComponent.FlipX = true end
+		local tick = 0.033
+		-- 타이머 틱 수가 아니라 실제 경과 시간으로 진행도를 잡는다(틱을 더하면 실제보다 빨리 끝난다)
+		local startedAt = _UtilLogic.ElapsedSeconds
+		local lastFrame = 1
+		local tickId = 0
+		tickId = _TimerService:SetTimerRepeat(function()
+			if not isvalid(self) or not isvalid(fx) then
+				_TimerService:ClearTimer(tickId)
+				return
+			end
+			local elapsed = _UtilLogic.ElapsedSeconds - startedAt
+			local t = math.min(elapsed / duration, 1)
+			fx.TransformComponent.ZRotation = fromDeg + (toDeg - fromDeg) * t * t
+			local idx = math.min(math.floor(t * #frames) + 1, #frames)
+			if idx ~= lastFrame then
+				lastFrame = idx
+				fx.SpriteRendererComponent.SpriteRUID = frames[idx]
+			end
+			if t >= 1 then
+				_TimerService:ClearTimer(tickId)
+				fx:Destroy()
+			end
+		end, tick)
+	end
+
+	@ExecSpace("ServerOnly")
+	method Entity PlayMovingFrameEffect(table frames, Vector3 fromPos, Vector3 toPos, number scaleFrom, number scaleTo, number duration, number rotDeg, number cutTopY, number headLen)
+		-- 프레임을 넘기면서 위치·크기를 같이 옮기는 연출(처음에 빠르고 끝에서 느려진다). rotDeg = 그림 회전 각도(고정).
+		-- 기준점 위로 headLen×크기만큼 뻗은 그림의 맨 위가 cutTopY를 넘으면 그 자리에서 없앤다(안 쓰면 아주 큰 값)
+		local fx = self:SpawnEffectWithModel(frames[1], fromPos, rotDeg, 1.0, scaleFrom, 1.0, "skilleffectlong")
+		if fx == nil then return nil end
+		local z = fx.TransformComponent.Position.z
+		local tick = 0.033
+		-- 타이머 틱 수가 아니라 실제 경과 시간으로 진행도를 잡는다(틱을 더하면 실제보다 빨리 끝난다)
+		local startedAt = _UtilLogic.ElapsedSeconds
+		local lastFrame = 1
+		local tickId = 0
+		tickId = _TimerService:SetTimerRepeat(function()
+			if not isvalid(self) or not isvalid(fx) then
+				_TimerService:ClearTimer(tickId)
+				return
+			end
+			local elapsed = _UtilLogic.ElapsedSeconds - startedAt
+			local t = math.min(elapsed / duration, 1)
+			local e = 1 - (1 - t) * (1 - t)
+			fx.TransformComponent.Position = Vector3(fromPos.x + (toPos.x - fromPos.x) * e, fromPos.y + (toPos.y - fromPos.y) * e, z)
+			local s = scaleFrom + (scaleTo - scaleFrom) * e
+			fx.TransformComponent.Scale = Vector3(s, s, 1)
+			local idx = math.min(math.floor(t * #frames) + 1, #frames)
+			if idx ~= lastFrame then
+				lastFrame = idx
+				fx.SpriteRendererComponent.SpriteRUID = frames[idx]
+			end
+			local headY = fromPos.y + (toPos.y - fromPos.y) * e + headLen * s
+			if t >= 1 or headY >= cutTopY then
+				_TimerService:ClearTimer(tickId)
+				fx:Destroy()
+			end
+		end, tick)
+		return fx
 	end
 
 	-- ── 레이온 전용 조합 스킬: 버닝 러시 (카드 166) — 돌진(155) Lv5 + 워리어 마스터리(164) +
@@ -15346,6 +16504,9 @@ script CardManager extends Logic
 		if cardIdx == 22 then return self.MeditationLevel > 0 end
 		if cardIdx == 23 then return self.HailBurstLevel > 0 end
 		if cardIdx == 24 then return self.AquaSurgeLevel > 0 end
+		if cardIdx == 26 then return self.FreezingBreathLevel > 0 end
+		if cardIdx == 27 then return self.FrozenOrbLevel > 0 end
+		if cardIdx == 28 then return self.LightningOrbLevel > 0 end
 		if cardIdx == 101 then return self.WindPoemLevel > 0 end
 		if cardIdx == 102 then return self.ArrowBlowLevel > 0 end
 		if cardIdx == 103 then return self.IceQuiverLevel > 0 end
@@ -15356,6 +16517,9 @@ script CardManager extends Logic
 		if cardIdx == 118 then return self.ArrowFletterLevel > 0 end
 		if cardIdx == 119 then return self.UncounterArrowVLevel > 0 end
 		if cardIdx == 120 then return self.FlashBomberLevel > 0 end
+		if cardIdx == 121 then return self.WindOfPreyLevel > 0 end
+		if cardIdx == 122 then return self.GaleOfPreyLevel > 0 end
+		if cardIdx == 123 then return self.SnareOfPreyLevel > 0 end
 		if cardIdx == 108 then return self.FleshMirageLevel > 0 end
 		if cardIdx == 114 then return self.ArrowIllusionLevel > 0 end
 		if cardIdx == 115 then return self.EvolveLevel > 0 end
@@ -15366,6 +16530,7 @@ script CardManager extends Logic
 		if cardIdx == 111 then return self.CriticalShotLevel > 0 end
 		if cardIdx == 112 then return self.FinalAttackBowLevel > 0 end
 		if cardIdx == 113 then return self.RapidFireLevel > 0 end
+		if cardIdx == 124 then return self.ConcentrationLevel > 0 end
 		if cardIdx == 151 then return self.ComboAttackLevel > 0 end
 		if cardIdx == 152 then return self.SlashLevel > 0 end
 		if cardIdx == 153 then return self.BrandishLevel > 0 end
@@ -15386,6 +16551,10 @@ script CardManager extends Logic
 		if cardIdx == 168 then return self.SolarBladeLevel > 0 end
 		if cardIdx == 169 then return self.ScarringBladeLevel > 0 end
 		if cardIdx == 170 then return self.FuriousBlowLevel > 0 end
+		if cardIdx == 192 then return self.IncisingLevel > 0 end
+		if cardIdx == 193 then return self.IncisingPierceLevel > 0 end
+		if cardIdx == 194 then return self.IncisingBurstLevel > 0 end
+		if cardIdx == 195 then return self.IronBodyLevel > 0 end
 		if cardIdx == 171 then return self.DoubleStepLevel > 0 end
 		if cardIdx == 201 then return self.LuckySevenLevel > 0 end
 		if cardIdx == 202 then return self.ShurikenBurstLevel > 0 end
@@ -15700,6 +16869,9 @@ script CardManager extends Logic
 		elseif cardIdx == 21 then base = self:GetGrandPepeDamage()
 		elseif cardIdx == 23 then base = self:GetHailBurstDamage()
 		elseif cardIdx == 24 then base = self:GetAquaSurgeDamage()
+		elseif cardIdx == 26 then base = self:GetFreezingBreathDamage()
+		elseif cardIdx == 27 then base = self:GetFrozenOrbDamage()
+		elseif cardIdx == 28 then base = self:GetLightningOrbDamage()
 		elseif cardIdx == 101 then base = self:GetWindPoemDamage()
 		elseif cardIdx == 102 then base = self:GetArrowBlowDamage()
 		elseif cardIdx == 103 then base = self:GetIceQuiverDamage()
@@ -15709,6 +16881,9 @@ script CardManager extends Logic
 		elseif cardIdx == 118 then base = self:GetArrowFletterDamage(self.ArrowFletterLevel)
 		elseif cardIdx == 119 then base = self:GetUncounterArrowVDamage(self.UncounterArrowVLevel)
 		elseif cardIdx == 120 then base = self:GetFlashBomberDamage(self.FlashBomberLevel)
+		elseif cardIdx == 121 then base = self:GetWindOfPreyDamage()
+		elseif cardIdx == 122 then base = self:GetPreyFusionDamage(self.GaleOfPreyLevel)
+		elseif cardIdx == 123 then base = self:GetPreyFusionDamage(self.SnareOfPreyLevel)
 		elseif cardIdx == 107 then base = self:GetUncounterArrowDamage()
 		elseif cardIdx == 108 then base = self:GetFleshMirageDamage()
 		elseif cardIdx == 114 then base = self:GetArrowIllusionDamage(self.ArrowIllusionLevel)
@@ -15729,6 +16904,9 @@ script CardManager extends Logic
 		elseif cardIdx == 168 then base = self:GetSolarBladeDamage(self.SolarBladeLevel)
 		elseif cardIdx == 169 then base = self:GetScarringBladeDamage(self.ScarringBladeLevel)
 		elseif cardIdx == 170 then base = self:GetFuriousBlowDamage(self.FuriousBlowLevel)
+		elseif cardIdx == 192 then base = self:GetIncisingDamage()
+		elseif cardIdx == 193 then base = self:GetIncisingPierceDamage(self.IncisingPierceLevel)
+		elseif cardIdx == 194 then base = self:GetIncisingBurstDamage(self.IncisingBurstLevel)
 		elseif cardIdx == 159 then base = self:GetScarringSwordDamage(self.ScarringSwordLevel)
 		elseif cardIdx == 171 then base = self:GetDoubleStepDamage(self.DoubleStepLevel)
 		elseif cardIdx == 201 then base = self:GetLuckySevenDamage(self.LuckySevenLevel)
@@ -15945,6 +17123,7 @@ script CardManager extends Logic
 		elseif cardIdx == 21 then return self.Card21Cooldown
 		elseif cardIdx == 23 then return self.Card23Cooldown
 		elseif cardIdx == 24 then return self.Card24Cooldown
+		elseif cardIdx == 26 or cardIdx == 27 or cardIdx == 28 then return self.Card26Cooldown
 		elseif cardIdx == 101 then return self.Card101Cooldown
 		elseif cardIdx == 102 then return self.Card102Cooldown
 		elseif cardIdx == 103 then return self.Card103Cooldown
@@ -15955,6 +17134,7 @@ script CardManager extends Logic
 		elseif cardIdx == 118 then return self:GetArrowFletterCooldown(self.ArrowFletterLevel)
 		elseif cardIdx == 119 then return self.Card119Cooldown
 		elseif cardIdx == 120 then return self.Card120Cooldown
+		elseif cardIdx == 121 or cardIdx == 122 or cardIdx == 123 then return self.Card121Cooldown
 		elseif cardIdx == 108 then return self.Card108Cooldown
 		elseif cardIdx == 114 then return self.Card114Cooldown
 		elseif cardIdx == 115 then return self:GetEvolveCooldown(self.EvolveLevel)
@@ -15975,6 +17155,7 @@ script CardManager extends Logic
 		elseif cardIdx == 168 then return self.Card168Cooldown
 		elseif cardIdx == 169 then return self.Card169Cooldown
 		elseif cardIdx == 170 then return self.Card170Cooldown
+		elseif cardIdx == 192 or cardIdx == 193 or cardIdx == 194 then return self.Card192Cooldown
 		elseif cardIdx == 171 then return self.Card171Cooldown
 		elseif cardIdx == 201 then return self.Card201Cooldown
 		elseif cardIdx == 202 then return self.Card202Cooldown
@@ -16031,6 +17212,9 @@ script CardManager extends Logic
 		elseif cardIdx == 22 then return self.Card22IconRUID
 		elseif cardIdx == 23 then return self.Card23IconRUID
 		elseif cardIdx == 24 then return self.Card24IconRUID
+		elseif cardIdx == 26 then return self.Card26IconRUID
+		elseif cardIdx == 27 then return self.Card27IconRUID
+		elseif cardIdx == 28 then return self.Card28IconRUID
 		elseif cardIdx == 101 then return self.Card101IconRUID
 		elseif cardIdx == 102 then return self.Card102IconRUID
 		elseif cardIdx == 103 then return self.Card103IconRUID
@@ -16041,6 +17225,9 @@ script CardManager extends Logic
 		elseif cardIdx == 118 then return self.Card118IconRUID
 		elseif cardIdx == 119 then return self.Card119IconRUID
 		elseif cardIdx == 120 then return self.Card120IconRUID
+		elseif cardIdx == 121 then return self.Card121IconRUID
+		elseif cardIdx == 122 then return self.Card122IconRUID
+		elseif cardIdx == 123 then return self.Card123IconRUID
 		elseif cardIdx == 108 then return self.Card108IconRUID
 		elseif cardIdx == 114 then return self.Card114IconRUID
 		elseif cardIdx == 115 then return self.Card115IconRUID
@@ -16051,6 +17238,7 @@ script CardManager extends Logic
 		elseif cardIdx == 111 then return self.Card111IconRUID
 		elseif cardIdx == 112 then return self.Card112IconRUID
 		elseif cardIdx == 113 then return self.Card113IconRUID
+		elseif cardIdx == 124 then return self.Card124IconRUID
 		elseif _CardRegistry:HasCard(cardIdx) then return _CardRegistry:GetIcon(cardIdx)
 		end
 		return ""
@@ -16061,6 +17249,8 @@ script CardManager extends Logic
 	-- 이 값을 매번 명시적으로 다시 적용해야 다른 카드로 바뀔 때 회전이 그대로 남는 걸 막을 수 있다.
 	method number GetCardIconRotation(integer cardIdx)
 		if cardIdx == 169 then return -90 end
+		-- 인사이징:폭 — 유저 지정 아이콘(662464c2…)을 시계 방향 90도(2026-10-01)
+		if cardIdx == 194 then return -90 end
 		return 0
 	end
 
@@ -16099,6 +17289,9 @@ script CardManager extends Logic
 		elseif cardIdx == 22 then return self.Card22Name
 		elseif cardIdx == 23 then return self.Card23Name
 		elseif cardIdx == 24 then return self.Card24Name
+		elseif cardIdx == 26 then return self.Card26Name
+		elseif cardIdx == 27 then return self.Card27Name
+		elseif cardIdx == 28 then return self.Card28Name
 		elseif cardIdx == 101 then return self.Card101Name
 		elseif cardIdx == 102 then return self.Card102Name
 		elseif cardIdx == 103 then return self.Card103Name
@@ -16109,6 +17302,9 @@ script CardManager extends Logic
 		elseif cardIdx == 118 then return self.Card118Name
 		elseif cardIdx == 119 then return self.Card119Name
 		elseif cardIdx == 120 then return self.Card120Name
+		elseif cardIdx == 121 then return self.Card121Name
+		elseif cardIdx == 122 then return self.Card122Name
+		elseif cardIdx == 123 then return self.Card123Name
 		elseif cardIdx == 108 then return self.Card108Name
 		elseif cardIdx == 114 then return self.Card114Name
 		elseif cardIdx == 115 then return self.Card115Name
@@ -16119,6 +17315,7 @@ script CardManager extends Logic
 		elseif cardIdx == 111 then return self.Card111Name
 		elseif cardIdx == 112 then return self.Card112Name
 		elseif cardIdx == 113 then return self.Card113Name
+		elseif cardIdx == 124 then return self.Card124Name
 		elseif _CardRegistry:HasCard(cardIdx) then return _CardRegistry:GetName(cardIdx)
 		end
 		return ""
@@ -16130,7 +17327,7 @@ script CardManager extends Logic
 	-- Lv1~5 고정 시스템으로 전환된 슬롯 카드(3/4/9/10/11/12/13/14/15)만 대상 — 아직 구식
 	-- (배율 곱연산 누적이라 "레벨"만으로 되돌릴 수 없는) 1/2/5번 카드는 순환 대상에서 제외한다.
 	-- 2026-09-17 출시 준비로 false 적용. 개발 재개 시에만 true로 되돌린다.
-	-- ⚠ 2026-09-28 테스트용 다시 ON(유저 지정 "치트기능 풀어줘") — 출시 전 false
+	-- 2026-09-30 테스트용으로 켰다가 2026-10-01 스킬 테스트 끝나 다시 false
 	property boolean CheatCycleLevelOnClick = false
 
 	-- ── 디버그: 플레이어 기본 공격 임시 차단(개발자 전용) ──────────────
@@ -16166,6 +17363,7 @@ script CardManager extends Logic
 		elseif cardIdx == 13 then return "thundercutter_up"
 		elseif cardIdx == 14 then return "aquatrap_up"
 		elseif cardIdx == 15 then return "hailstone_up"
+		elseif cardIdx == 26 then return "freezingbreath_up"
 		elseif cardIdx == 101 then return "windpoem_up"
 		elseif cardIdx == 102 then return "arrowblow_up"
 		elseif cardIdx == 103 then return "icequiver_up"
@@ -16174,6 +17372,7 @@ script CardManager extends Logic
 		elseif cardIdx == 106 then return "retreatshot_up"
 		elseif cardIdx == 107 then return "uncounterarrow_up"
 		elseif cardIdx == 108 then return "fleshmirage_up"
+		elseif cardIdx == 121 then return "windofprey_up"
 		elseif cardIdx == 152 then return "slash_up"
 		elseif cardIdx == 153 then return "brandish_up"
 		elseif cardIdx == 154 then return "flashslash_up"
@@ -16182,6 +17381,7 @@ script CardManager extends Logic
 		elseif cardIdx == 157 then return "ragingblow_up"
 		elseif cardIdx == 158 then return "leapattack_up"
 		elseif cardIdx == 159 then return "scarringsword_up"
+		elseif cardIdx == 192 then return "incising_up"
 		elseif cardIdx == 171 then return "doublestep_up"
 		elseif cardIdx == 201 then return "luckyseven_up"
 		elseif cardIdx == 202 then return "shurikenburst_up"
@@ -16217,6 +17417,7 @@ script CardManager extends Logic
 		elseif cardIdx == 13 then self.ThunderCutterLevel = 1
 		elseif cardIdx == 14 then self.AquaTrapLevel = 1
 		elseif cardIdx == 15 then self.HailStoneLevel = 1
+		elseif cardIdx == 26 then self.FreezingBreathLevel = 1
 		elseif cardIdx == 101 then self.WindPoemLevel = 1
 		elseif cardIdx == 102 then self.ArrowBlowLevel = 1
 		elseif cardIdx == 103 then self.IceQuiverLevel = 1
@@ -16225,6 +17426,7 @@ script CardManager extends Logic
 		elseif cardIdx == 106 then self.RetreatShotLevel = 1
 		elseif cardIdx == 107 then self.UncounterArrowLevel = 1
 		elseif cardIdx == 108 then self.FleshMirageLevel = 1
+		elseif cardIdx == 121 then self.WindOfPreyLevel = 1
 		elseif cardIdx == 152 then self.SlashLevel = 1
 		elseif cardIdx == 153 then self.BrandishLevel = 1
 		elseif cardIdx == 154 then self.FlashSlashLevel = 1
@@ -16233,6 +17435,7 @@ script CardManager extends Logic
 		elseif cardIdx == 157 then self.RagingBlowLevel = 1
 		elseif cardIdx == 158 then self.LeapAttackLevel = 1
 		elseif cardIdx == 159 then self.ScarringSwordLevel = 1
+		elseif cardIdx == 192 then self.IncisingLevel = 1
 		elseif cardIdx == 171 then self.DoubleStepLevel = 1
 		elseif cardIdx == 201 then self.LuckySevenLevel = 1
 		elseif cardIdx == 202 then self.ShurikenBurstLevel = 1
@@ -16278,6 +17481,9 @@ script CardManager extends Logic
 		elseif cardIdx == 22 then return self.MeditationLevel
 		elseif cardIdx == 23 then return self.HailBurstLevel
 		elseif cardIdx == 24 then return self.AquaSurgeLevel
+		elseif cardIdx == 26 then return self.FreezingBreathLevel
+		elseif cardIdx == 27 then return self.FrozenOrbLevel
+		elseif cardIdx == 28 then return self.LightningOrbLevel
 		elseif cardIdx == 101 then return self.WindPoemLevel
 		elseif cardIdx == 102 then return self.ArrowBlowLevel
 		elseif cardIdx == 103 then return self.IceQuiverLevel
@@ -16293,11 +17499,15 @@ script CardManager extends Logic
 		elseif cardIdx == 118 then return self.ArrowFletterLevel
 		elseif cardIdx == 119 then return self.UncounterArrowVLevel
 		elseif cardIdx == 120 then return self.FlashBomberLevel
+		elseif cardIdx == 121 then return self.WindOfPreyLevel
+		elseif cardIdx == 122 then return self.GaleOfPreyLevel
+		elseif cardIdx == 123 then return self.SnareOfPreyLevel
 		elseif cardIdx == 109 then return self.BowAccelerationLevel
 		elseif cardIdx == 110 then return self.PiercingWillLevel
 		elseif cardIdx == 111 then return self.CriticalShotLevel
 		elseif cardIdx == 112 then return self.FinalAttackBowLevel
 		elseif cardIdx == 113 then return self.RapidFireLevel
+		elseif cardIdx == 124 then return self.ConcentrationLevel
 		elseif cardIdx == 151 then return self.ComboAttackLevel
 		elseif cardIdx == 152 then return self.SlashLevel
 		elseif cardIdx == 153 then return self.BrandishLevel
@@ -16318,6 +17528,10 @@ script CardManager extends Logic
 		elseif cardIdx == 168 then return self.SolarBladeLevel
 		elseif cardIdx == 169 then return self.ScarringBladeLevel
 		elseif cardIdx == 170 then return self.FuriousBlowLevel
+		elseif cardIdx == 192 then return self.IncisingLevel
+		elseif cardIdx == 193 then return self.IncisingPierceLevel
+		elseif cardIdx == 194 then return self.IncisingBurstLevel
+		elseif cardIdx == 195 then return self.IronBodyLevel
 		elseif cardIdx == 171 then return self.DoubleStepLevel
 		elseif cardIdx == 201 then return self.LuckySevenLevel
 		elseif cardIdx == 202 then return self.ShurikenBurstLevel
@@ -16392,6 +17606,9 @@ script CardManager extends Logic
 		elseif cardIdx == 22 then self.MeditationLevel = level
 		elseif cardIdx == 23 then self.HailBurstLevel = level
 		elseif cardIdx == 24 then self.AquaSurgeLevel = level
+		elseif cardIdx == 26 then self.FreezingBreathLevel = level
+		elseif cardIdx == 27 then self.FrozenOrbLevel = level
+		elseif cardIdx == 28 then self.LightningOrbLevel = level
 		elseif cardIdx == 101 then self.WindPoemLevel = level
 		elseif cardIdx == 102 then self.ArrowBlowLevel = level
 		elseif cardIdx == 103 then self.IceQuiverLevel = level
@@ -16407,11 +17624,15 @@ script CardManager extends Logic
 		elseif cardIdx == 118 then self.ArrowFletterLevel = level
 		elseif cardIdx == 119 then self.UncounterArrowVLevel = level
 		elseif cardIdx == 120 then self.FlashBomberLevel = level
+		elseif cardIdx == 121 then self.WindOfPreyLevel = level
+		elseif cardIdx == 122 then self.GaleOfPreyLevel = level
+		elseif cardIdx == 123 then self.SnareOfPreyLevel = level
 		elseif cardIdx == 109 then self.BowAccelerationLevel = level
 		elseif cardIdx == 110 then self.PiercingWillLevel = level
 		elseif cardIdx == 111 then self.CriticalShotLevel = level
 		elseif cardIdx == 112 then self.FinalAttackBowLevel = level
 		elseif cardIdx == 113 then self.RapidFireLevel = level
+		elseif cardIdx == 124 then self.ConcentrationLevel = level
 		elseif cardIdx == 151 then self.ComboAttackLevel = level
 		elseif cardIdx == 152 then self.SlashLevel = level
 		elseif cardIdx == 153 then self.BrandishLevel = level
@@ -16432,6 +17653,10 @@ script CardManager extends Logic
 		elseif cardIdx == 168 then self.SolarBladeLevel = level
 		elseif cardIdx == 169 then self.ScarringBladeLevel = level
 		elseif cardIdx == 170 then self.FuriousBlowLevel = level
+		elseif cardIdx == 192 then self.IncisingLevel = level
+		elseif cardIdx == 193 then self.IncisingPierceLevel = level
+		elseif cardIdx == 194 then self.IncisingBurstLevel = level
+		elseif cardIdx == 195 then self.IronBodyLevel = level
 		elseif cardIdx == 171 then self.DoubleStepLevel = level
 		elseif cardIdx == 201 then self.LuckySevenLevel = level
 		elseif cardIdx == 202 then self.ShurikenBurstLevel = level
@@ -16631,6 +17856,26 @@ script CardManager extends Logic
 				"MLUA_CARDMANAGER_123",
 				"MLUA_CARDMANAGER_123",
 			}
+		elseif cardIdx == 26 then
+			return {
+				"MLUA_CARDMANAGER_549",
+				"MLUA_CARDMANAGER_180",
+				"MLUA_CARDMANAGER_066",
+				"MLUA_CARDMANAGER_125",
+				"MLUA_CARDMANAGER_125",
+			}
+		elseif cardIdx == 27 then
+			return {
+				"MLUA_CARDMANAGER_550",
+				"MLUA_CARDMANAGER_181",
+				"MLUA_CARDMANAGER_181",
+			}
+		elseif cardIdx == 28 then
+			return {
+				"MLUA_CARDMANAGER_551",
+				"MLUA_CARDMANAGER_181",
+				"MLUA_CARDMANAGER_181",
+			}
 		elseif cardIdx == 101 then
 			return {
 				"MLUA_CARDMANAGER_124",
@@ -16735,6 +17980,14 @@ script CardManager extends Logic
 				"MLUA_CARDMANAGER_155",
 				"MLUA_CARDMANAGER_155",
 			}
+		elseif cardIdx == 124 then
+			return {
+				"MLUA_CARDMANAGER_562",
+				"MLUA_CARDMANAGER_563",
+				"MLUA_CARDMANAGER_563",
+				"MLUA_CARDMANAGER_563",
+				"MLUA_CARDMANAGER_564",
+			}
 		elseif cardIdx == 114 then
 			return {
 				"MLUA_CARDMANAGER_156",
@@ -16776,6 +18029,26 @@ script CardManager extends Logic
 				"MLUA_CARDMANAGER_173",
 				"MLUA_CARDMANAGER_174",
 				"MLUA_CARDMANAGER_175",
+			}
+		elseif cardIdx == 121 then
+			return {
+				"MLUA_CARDMANAGER_559",
+				"MLUA_CARDMANAGER_180",
+				"MLUA_CARDMANAGER_125",
+				"MLUA_CARDMANAGER_125",
+				"MLUA_CARDMANAGER_125",
+			}
+		elseif cardIdx == 122 then
+			return {
+				"MLUA_CARDMANAGER_560",
+				"MLUA_CARDMANAGER_181",
+				"MLUA_CARDMANAGER_181",
+			}
+		elseif cardIdx == 123 then
+			return {
+				"MLUA_CARDMANAGER_561",
+				"MLUA_CARDMANAGER_181",
+				"MLUA_CARDMANAGER_181",
 			}
 		elseif cardIdx == 151 then
 			return {
@@ -16870,6 +18143,34 @@ script CardManager extends Logic
 				"MLUA_CARDMANAGER_192",
 				"MLUA_CARDMANAGER_192",
 				"MLUA_CARDMANAGER_192",
+			}
+		elseif cardIdx == 192 then
+			return {
+				"MLUA_CARDMANAGER_577",
+				"MLUA_CARDMANAGER_125",
+				"MLUA_CARDMANAGER_125",
+				"MLUA_CARDMANAGER_125",
+				"MLUA_CARDMANAGER_578",
+			}
+		elseif cardIdx == 193 then
+			return {
+				"MLUA_CARDMANAGER_579",
+				"MLUA_CARDMANAGER_580",
+				"MLUA_CARDMANAGER_580",
+			}
+		elseif cardIdx == 194 then
+			return {
+				"MLUA_CARDMANAGER_581",
+				"MLUA_CARDMANAGER_582",
+				"MLUA_CARDMANAGER_582",
+			}
+		elseif cardIdx == 195 then
+			return {
+				"MLUA_CARDMANAGER_583",
+				"MLUA_CARDMANAGER_584",
+				"MLUA_CARDMANAGER_584",
+				"MLUA_CARDMANAGER_584",
+				"MLUA_CARDMANAGER_584",
 			}
 		elseif cardIdx == 163 then
 			return {
@@ -17362,6 +18663,10 @@ script CardManager extends Logic
 		if cardIdx == 201 then chance = chance + self.Card201CritBonus end
 		-- 슈퍼 세븐(카드215, 럭키 세븐 조합) 전용 — 레벨 무관 +20%(유저 표). 4연타도 타마다 따로 굴린다.
 		if cardIdx == 215 then chance = chance + self.Card215CritBonus end
+		-- 라이트닝 오브(카드28) 전용 — 레벨 무관 +20%(유저 표)
+		if cardIdx == 28 then chance = chance + self.Card28CritBonus end
+		-- 스네어 오브 프레이(카드123) 전용 — 레벨 무관 +20%(유저 표)
+		if cardIdx == 123 then chance = chance + self.Card123CritBonus end
 		-- 언카운트에로우V(카드119) 전용 크리티컬 확률 보너스(유저 지정: 10%/15%/20%)
 		if cardIdx == 119 then chance = chance + self:GetUncounterArrowVCritChance(self.UncounterArrowVLevel) end
 		-- 무스펠하임(카드175) 전용 크리티컬 확률 보너스(유저 지정: 10/15/20/25/30%)
@@ -17474,6 +18779,13 @@ script CardManager extends Logic
 			self.SlashStormSwingFrame11RUID, self.SlashStormSwingFrame12RUID, self.SlashStormSwingFrame13RUID, self.SlashStormCastEffectRUID, self.SlashStormOverlayEffectRUID,
 			self.SlashStormHitFrame5RUID, self.SlashStormHitFrame6RUID, self.SlashStormHitOverlayRUID, self.SlashStormHitAnimClipRUID,
 		}
+		-- 프리징 브레스/프로즌 오브/라이트닝 오브는 프레임 RUID를 프로퍼티가 아니라 표(Get*Frames)로 들고 있다 — 여기서 같이 예열한다
+		local breathFrameLists = { self:GetFreezingBreathFrames(), self:GetFrozenOrbBallFrames(), self:GetFrozenOrbHitFrames(), self:GetLightningOrbBallFrames(), self:GetLightningOrbHitFrames(),
+			self:GetWindOfPreyFrames(), self:GetGaleCastFrames(), self:GetGaleTornadoFrames(), self:GetSnareCastFrames(), self:GetSnareBindFrames(),
+			self:GetIncisingFrames(), self:GetIncisingExplosionFrames(), self:GetIncisingHitFrames(), self:GetIncisingSpearFrames(), self:GetIncisingBurstFrames(), self:GetIncisingBlastFrames() }
+		for _, list in ipairs(breathFrameLists) do
+			for _, frameRUID in ipairs(list) do table.insert(ruids, frameRUID) end
+		end
 		local count = #ruids
 		-- 목록을 크게 늘렸으므로 소요시간을 같이 남긴다. 로딩 화면(최소 2초)보다 오래 걸려도
 		-- 치명적이지는 않다 — 런을 시작하고 카드를 얻기까지가 훨씬 기니까. 다만 이 값이 크게
@@ -17666,6 +18978,9 @@ script CardManager extends Logic
 		elseif name == "GrandPepeLevel" then self:RefreshSlotIfHoldsCard(21)
 		elseif name == "HailBurstLevel" then self:RefreshSlotIfHoldsCard(23)
 		elseif name == "AquaSurgeLevel" then self:RefreshSlotIfHoldsCard(24)
+		elseif name == "FreezingBreathLevel" then self:RefreshSlotIfHoldsCard(26)
+		elseif name == "FrozenOrbLevel" then self:RefreshSlotIfHoldsCard(27)
+		elseif name == "LightningOrbLevel" then self:RefreshSlotIfHoldsCard(28)
 		elseif name == "ColdBeamLevel" then self:RefreshSlotIfHoldsCard(3)
 		elseif name == "Card2UpgradeCount" then self:RefreshSlotIfHoldsCard(2)
 		elseif name == "Card5UpgradeCount" then self:RefreshSlotIfHoldsCard(5)
@@ -17679,6 +18994,9 @@ script CardManager extends Logic
 		elseif name == "ArrowFletterLevel" then self:RefreshSlotIfHoldsCard(118)
 		elseif name == "UncounterArrowVLevel" then self:RefreshSlotIfHoldsCard(119)
 		elseif name == "FlashBomberLevel" then self:RefreshSlotIfHoldsCard(120)
+		elseif name == "WindOfPreyLevel" then self:RefreshSlotIfHoldsCard(121)
+		elseif name == "GaleOfPreyLevel" then self:RefreshSlotIfHoldsCard(122)
+		elseif name == "SnareOfPreyLevel" then self:RefreshSlotIfHoldsCard(123)
 		elseif name == "FleshMirageLevel" then self:RefreshSlotIfHoldsCard(108)
 		elseif name == "ArrowIllusionLevel" then self:RefreshSlotIfHoldsCard(114)
 		elseif name == "EvolveLevel" then self:RefreshSlotIfHoldsCard(115)
@@ -17694,6 +19012,8 @@ script CardManager extends Logic
 			if self.FinalAttackBowLevel > 0 then self:NotifyFinalAttackBowOnPermanent() end
 		elseif name == "RapidFireLevel" then
 			if self.RapidFireLevel > 0 then self:NotifyRapidFireOnPermanent() end
+		elseif name == "ConcentrationLevel" then
+			if self.ConcentrationLevel > 0 then self:NotifyConcentrationOnPermanent() end
 		elseif name == "ComboAttackLevel" then
 			if self.ComboAttackLevel > 0 then self:NotifyComboOnPermanent() end
 		elseif name == "SlashLevel" then self:RefreshSlotIfHoldsCard(152)
@@ -17711,6 +19031,11 @@ script CardManager extends Logic
 			if self.ComaLevel > 0 then self:NotifyComaOnPermanent() end
 		elseif name == "SelfRecoveryLevel" then
 			if self.SelfRecoveryLevel > 0 then self:NotifySelfRecoveryOnPermanent() end
+		elseif name == "IronBodyLevel" then
+			if self.IronBodyLevel > 0 then self:NotifyIronBodyOnPermanent() end
+		elseif name == "IncisingLevel" then self:RefreshSlotIfHoldsCard(192)
+		elseif name == "IncisingPierceLevel" then self:RefreshSlotIfHoldsCard(193)
+		elseif name == "IncisingBurstLevel" then self:RefreshSlotIfHoldsCard(194)
 		elseif name == "WarriorMasteryLevel" then
 			if self.WarriorMasteryLevel > 0 then self:NotifyWarriorMasteryOnPermanent() end
 		-- 버그 실측(2026-08-12, 유저 지적: "스킬카드 뽑았는데 슬롯에 레벨이 갱신 안되는 케이스가 또
@@ -18050,6 +19375,12 @@ script CardManager extends Logic
 	end
 
 	@ExecSpace("Multicast")
+	method void NotifyConcentrationOnPermanent()
+		if self:IsServer() then return end
+		self:ShowBuffIconPermanent(self.concentrationBuff, self.concentrationFill)
+	end
+
+	@ExecSpace("Multicast")
 	method void NotifyComboOnPermanent()
 		if self:IsServer() then return end
 		self:ShowBuffIconPermanent(self.comboBuff, self.comboFill)
@@ -18071,6 +19402,12 @@ script CardManager extends Logic
 	method void NotifySelfRecoveryOnPermanent()
 		if self:IsServer() then return end
 		self:ShowBuffIconPermanent(self.selfRecoveryBuff, self.selfRecoveryFill)
+	end
+
+	@ExecSpace("Multicast")
+	method void NotifyIronBodyOnPermanent()
+		if self:IsServer() then return end
+		self:ShowBuffIconPermanent(self.ironBodyBuff, self.ironBodyFill)
 	end
 
 	@ExecSpace("Multicast")
@@ -18161,10 +19498,12 @@ script CardManager extends Logic
 		elseif panel == self.criticalShotBuff then return "criticalshot"
 		elseif panel == self.finalAttackBowBuff then return "finalattackbow"
 		elseif panel == self.rapidFireBuff then return "rapidfire"
+		elseif panel == self.concentrationBuff then return "concentration"
 		elseif panel == self.comboBuff then return "combo"
 		elseif panel == self.chanceAttackBuff then return "chanceattack"
 		elseif panel == self.comaBuff then return "coma"
 		elseif panel == self.selfRecoveryBuff then return "selfrecovery"
+		elseif panel == self.ironBodyBuff then return "ironbody"
 		elseif panel == self.warriorMasteryBuff then return "warriormastery"
 		elseif panel == self.daggerAccelBuff then return "daggeraccel"
 		elseif panel == self.criticalEdgeBuff then return "criticaledge"
@@ -18195,10 +19534,12 @@ script CardManager extends Logic
 		elseif buffName == "criticalshot" then return self.criticalShotBuff
 		elseif buffName == "finalattackbow" then return self.finalAttackBowBuff
 		elseif buffName == "rapidfire" then return self.rapidFireBuff
+		elseif buffName == "concentration" then return self.concentrationBuff
 		elseif buffName == "combo" then return self.comboBuff
 		elseif buffName == "chanceattack" then return self.chanceAttackBuff
 		elseif buffName == "coma" then return self.comaBuff
 		elseif buffName == "selfrecovery" then return self.selfRecoveryBuff
+		elseif buffName == "ironbody" then return self.ironBodyBuff
 		elseif buffName == "warriormastery" then return self.warriorMasteryBuff
 		elseif buffName == "daggeraccel" then return self.daggerAccelBuff
 		elseif buffName == "criticaledge" then return self.criticalEdgeBuff
@@ -18232,10 +19573,12 @@ script CardManager extends Logic
 		self:HideBuffIcon(self.criticalShotBuff, self.criticalShotFill)
 		self:HideBuffIcon(self.finalAttackBowBuff, self.finalAttackBowFill)
 		self:HideBuffIcon(self.rapidFireBuff, self.rapidFireFill)
+		self:HideBuffIcon(self.concentrationBuff, self.concentrationFill)
 		self:HideBuffIcon(self.comboBuff, self.comboFill)
 		self:HideBuffIcon(self.chanceAttackBuff, self.chanceAttackFill)
 		self:HideBuffIcon(self.comaBuff, self.comaFill)
 		self:HideBuffIcon(self.selfRecoveryBuff, self.selfRecoveryFill)
+		self:HideBuffIcon(self.ironBodyBuff, self.ironBodyFill)
 		self:HideBuffIcon(self.warriorMasteryBuff, self.warriorMasteryFill)
 		self:HideBuffIcon(self.daggerAccelBuff, self.daggerAccelFill)
 		self:HideBuffIcon(self.criticalEdgeBuff, self.criticalEdgeFill)
@@ -18497,6 +19840,9 @@ script CardManager extends Logic
 		elseif cardIdx == 22 then name = _LocText:Resolve(self.Card22Name) .. " Lv." .. self.MeditationLevel
 		elseif cardIdx == 23 then name = _LocText:Resolve(self.Card23Name) .. " Lv." .. self.HailBurstLevel
 		elseif cardIdx == 24 then name = _LocText:Resolve(self.Card24Name) .. " Lv." .. self.AquaSurgeLevel
+		elseif cardIdx == 26 then name = _LocText:Resolve(self.Card26Name) .. " Lv." .. self.FreezingBreathLevel
+		elseif cardIdx == 27 then name = _LocText:Resolve(self.Card27Name) .. " Lv." .. self.FrozenOrbLevel
+		elseif cardIdx == 28 then name = _LocText:Resolve(self.Card28Name) .. " Lv." .. self.LightningOrbLevel
 		elseif cardIdx == 101 then name = _LocText:Resolve(self.Card101Name) .. " Lv." .. self.WindPoemLevel
 		elseif cardIdx == 102 then name = _LocText:Resolve(self.Card102Name) .. " Lv." .. self.ArrowBlowLevel
 		elseif cardIdx == 103 then name = _LocText:Resolve(self.Card103Name) .. " Lv." .. self.IceQuiverLevel
@@ -18507,6 +19853,9 @@ script CardManager extends Logic
 		elseif cardIdx == 118 then name = _LocText:Resolve(self.Card118Name) .. " Lv." .. self.ArrowFletterLevel
 		elseif cardIdx == 119 then name = _LocText:Resolve(self.Card119Name) .. " Lv." .. self.UncounterArrowVLevel
 		elseif cardIdx == 120 then name = _LocText:Resolve(self.Card120Name) .. " Lv." .. self.FlashBomberLevel
+		elseif cardIdx == 121 then name = _LocText:Resolve(self.Card121Name) .. " Lv." .. self.WindOfPreyLevel
+		elseif cardIdx == 122 then name = _LocText:Resolve(self.Card122Name) .. " Lv." .. self.GaleOfPreyLevel
+		elseif cardIdx == 123 then name = _LocText:Resolve(self.Card123Name) .. " Lv." .. self.SnareOfPreyLevel
 		elseif cardIdx == 108 then name = _LocText:Resolve(self.Card108Name) .. " Lv." .. self.FleshMirageLevel
 		elseif cardIdx == 114 then name = _LocText:Resolve(self.Card114Name) .. " Lv." .. self.ArrowIllusionLevel
 		elseif cardIdx == 115 then name = _LocText:Resolve(self.Card115Name) .. " Lv." .. self.EvolveLevel
@@ -18517,6 +19866,7 @@ script CardManager extends Logic
 		elseif cardIdx == 111 then name = _LocText:Resolve(self.Card111Name) .. " Lv." .. self.CriticalShotLevel
 		elseif cardIdx == 112 then name = _LocText:Resolve(self.Card112Name) .. " Lv." .. self.FinalAttackBowLevel
 		elseif cardIdx == 113 then name = _LocText:Resolve(self.Card113Name) .. " Lv." .. self.RapidFireLevel
+		elseif cardIdx == 124 then name = _LocText:Resolve(self.Card124Name) .. " Lv." .. self.ConcentrationLevel
 		elseif _CardRegistry:HasCard(cardIdx) then name = _LocText:Resolve(_CardRegistry:GetName(cardIdx)) .. " Lv." .. self:GetSlotLevelNum(cardIdx)
 		end
 
@@ -18574,6 +19924,11 @@ script CardManager extends Logic
 			dmg = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_006", math.floor(self:GetCardDamage(cardIdx)))
 		elseif cardIdx == 24 then
 			dmg = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_006", math.floor(self:GetCardDamage(cardIdx)))
+		elseif cardIdx == 26 then
+			dmg = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_006", math.floor(self:GetCardDamage(cardIdx)))
+		elseif cardIdx == 27 or cardIdx == 28 then
+			-- 브레스 + 구슬 폭발(50%)을 합산한 숫자 1개로 보여준다(다단타 표기 통일 규칙)
+			dmg = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_006", math.floor(self:GetCardDamage(cardIdx) * (1 + self.OrbBallDamageRatio)))
 		elseif cardIdx == 101 then
 			dmg = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_006", math.floor(self:GetCardDamage(cardIdx)))
 		elseif cardIdx == 102 then
@@ -18594,6 +19949,11 @@ script CardManager extends Logic
 			dmg = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_006", math.floor(self:GetCardDamage(cardIdx)))
 		elseif cardIdx == 120 then
 			dmg = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_006", math.floor(self:GetCardDamage(cardIdx)))
+		elseif cardIdx == 121 then
+			dmg = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_006", math.floor(self:GetCardDamage(cardIdx)))
+		elseif cardIdx == 122 or cardIdx == 123 then
+			-- 본 대미지 + 추가타(30%)를 합산한 숫자 1개로 보여준다(다단타 표기 통일 규칙)
+			dmg = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_006", math.floor(self:GetCardDamage(cardIdx) * (1 + self.PreySecondaryRatio)))
 		elseif cardIdx == 108 then
 			dmg = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_006", math.floor(self:GetCardDamage(cardIdx)))
 		elseif cardIdx == 114 then
@@ -18616,6 +19976,8 @@ script CardManager extends Logic
 			dmg = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_014", math.floor(self:GetFinalAttackBowChance() * 100))
 		elseif cardIdx == 113 then
 			dmg = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_011", self:GetRapidFirePercent())
+		elseif cardIdx == 124 then
+			dmg = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_105", math.floor(self:GetConcentrationEvadeChance() * 100 + 0.5))
 		elseif cardIdx == 151 then
 			dmg = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_015", math.floor(_CardRegistry:GetChance(151, self.ComboAttackLevel) * 100))
 		elseif cardIdx == 152 then
@@ -18679,6 +20041,15 @@ script CardManager extends Logic
 			dmg = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_006", math.floor(self:GetCardDamage(cardIdx)))
 		elseif cardIdx == 170 then
 			dmg = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_006", math.floor(self:GetCardDamage(cardIdx)))
+		elseif cardIdx == 192 then
+			dmg = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_006", math.floor(self:GetCardDamage(cardIdx)))
+		elseif cardIdx == 193 then
+			-- 본 대미지 + 관통 추가타를 합산한 숫자 1개로 보여준다(다단타 표기 통일 규칙). 화상은 아래 줄에 따로
+			dmg = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_006", math.floor(self:GetCardDamage(cardIdx) * (1 + self:GetIncisingExtraPercent(self.IncisingPierceLevel))))
+		elseif cardIdx == 194 then
+			dmg = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_006", math.floor(self:GetCardDamage(cardIdx) * (1 + self:GetIncisingExtraPercent(self.IncisingBurstLevel))))
+		elseif cardIdx == 195 then
+			dmg = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_109", self:GetIronBodyPercent())
 		elseif cardIdx == 171 then
 			dmg = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_006", math.floor(self:GetCardDamage(cardIdx) * self:GetDoubleStepPercent(self.DoubleStepLevel, 1) + self:GetCardDamage(cardIdx) * self:GetDoubleStepPercent(self.DoubleStepLevel, 2)))
 		elseif cardIdx == 185 then
@@ -18730,8 +20101,8 @@ script CardManager extends Logic
 		local cd = self:GetCardCooldown(cardIdx)
 		-- ⚠ 매직 부스터(7)·매직 크리티컬(8)도 패시브다 — 목록에 빠져 있어서 쿨타임 줄에 "30.0s"가 찍혔다(2026-09-26 유저 리포트)
 		local isPassiveCard = cardIdx == 7 or cardIdx == 8 or cardIdx == 10 or cardIdx == 18 or cardIdx == 22
-			or cardIdx == 109 or cardIdx == 110 or cardIdx == 111 or cardIdx == 112 or cardIdx == 113
-			or cardIdx == 151 or cardIdx == 161 or cardIdx == 162 or cardIdx == 163 or cardIdx == 164
+			or cardIdx == 109 or cardIdx == 110 or cardIdx == 111 or cardIdx == 112 or cardIdx == 113 or cardIdx == 124
+			or cardIdx == 151 or cardIdx == 161 or cardIdx == 162 or cardIdx == 163 or cardIdx == 164 or cardIdx == 195
 			or cardIdx == 180 or cardIdx == 181 or cardIdx == 182 or cardIdx == 183 or cardIdx == 184
 			or cardIdx == 209 or cardIdx == 210 or cardIdx == 211 or cardIdx == 212 or cardIdx == 213
 			or cardIdx == 214
@@ -18825,6 +20196,12 @@ script CardManager extends Logic
 		elseif cardIdx == 24 then
 			local extraPct = math.floor(self:GetAquaSurgeExtraPercent() * 100)
 			extraStr = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_045", self:GetAquaSurgeTargetCount(), extraPct)
+		elseif cardIdx == 26 then
+			extraStr = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_102", self:GetFreezingBreathTargetCount())
+		elseif cardIdx == 27 then
+			extraStr = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_103", self:GetOrbTargetCount(), math.floor(self.OrbBallDamageRatio * 100))
+		elseif cardIdx == 28 then
+			extraStr = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_104", self:GetOrbTargetCount(), string.format("%.1f", self.Card28StunDuration), math.floor(self.OrbBallDamageRatio * 100))
 		elseif cardIdx == 101 then
 			extraStr = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_030", self:GetWindPoemTargetCount())
 		elseif cardIdx == 102 then
@@ -18863,6 +20240,12 @@ script CardManager extends Logic
 			local collidePct = math.floor(self:GetFlashBomberCollisionPercent(fbLv) * 100)
 			local explosionPct = math.floor(self:GetFlashBomberExplosionPercent(fbLv) * 100)
 			extraStr = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_055", collidePct, explosionPct)
+		elseif cardIdx == 121 then
+			extraStr = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_106", self:GetWindOfPreyTargetCount())
+		elseif cardIdx == 122 then
+			extraStr = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_107", self:GetGaleOfPreyTargetCount(), math.floor(self.PreySecondaryRatio * 100))
+		elseif cardIdx == 123 then
+			extraStr = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_108", self:GetSnareOfPreyTargetCount(), string.format("%.0f", self.Card123BindDuration), math.floor(self.PreySecondaryRatio * 100))
 		elseif cardIdx == 108 then
 			extraStr = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_056", self:GetFleshMirageTargetCount(), math.floor(self:GetFleshMirageCollisionPercent() * 100))
 		elseif cardIdx == 114 then
@@ -18919,6 +20302,12 @@ script CardManager extends Logic
 			extraStr = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_067", string.format("%.0f", self:GetScarringBladeDuration(self.ScarringBladeLevel)))
 		elseif cardIdx == 170 then
 			extraStr = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_065", self:GetFuriousBlowTargetCount(self.FuriousBlowLevel), math.floor(self:GetFuriousBlowEnhanceChance(self.FuriousBlowLevel) * 100))
+		elseif cardIdx == 192 then
+			extraStr = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_110", self:GetIncisingTargetCount(192), self:GetIncisingBurnSeconds(192), math.floor(self:GetIncisingBurnRatio(192) * 100 + 0.5))
+		elseif cardIdx == 193 then
+			extraStr = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_111", self:GetIncisingTargetCount(193), self:GetIncisingBurnSeconds(193), math.floor(self:GetIncisingBurnRatio(193) * 100 + 0.5), math.floor(self:GetIncisingExtraPercent(self.IncisingPierceLevel) * 100 + 0.5))
+		elseif cardIdx == 194 then
+			extraStr = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_112", self:GetIncisingTargetCount(194), self:GetIncisingBurnSeconds(194), math.floor(self:GetIncisingBurnRatio(194) * 100 + 0.5), math.floor(self:GetIncisingExtraPercent(self.IncisingBurstLevel) * 100 + 0.5), string.format("%.0f", self.Card194StunDuration))
 		elseif cardIdx == 203 then
 			extraStr = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_073", self:GetWindTalismanTargetCount(self.WindTalismanLevel))
 		elseif cardIdx == 204 then
@@ -19053,8 +20442,8 @@ script CardManager extends Logic
 		-- 버프 아이콘 키 → 그 패시브 카드 번호(ApplyCardUpgrade에서 Notify*OnPermanent를 부르는 cardIdx와 같다)
 		local map = {
 			booster = 7, crit = 8, freeze = 10, armor = 18, meditation = 22,
-			bowaccel = 109, piercingwill = 110, criticalshot = 111, finalattackbow = 112, rapidfire = 113,
-			combo = 151, chanceattack = 161, coma = 162, selfrecovery = 163, warriormastery = 164,
+			bowaccel = 109, piercingwill = 110, criticalshot = 111, finalattackbow = 112, rapidfire = 113, concentration = 124,
+			combo = 151, chanceattack = 161, coma = 162, selfrecovery = 163, warriormastery = 164, ironbody = 195,
 			daggeraccel = 180, criticaledge = 181, karma = 182, physicaltraining = 183, darksight = 184,
 			throwingaccel = 209, javelinmastery = 210, spiritjavelin = 211, radicaldarkness = 212,
 			thiefcunning = 213, shurikenmastery = 214,
@@ -19067,7 +20456,7 @@ script CardManager extends Logic
 	method table GetPassiveBuffKeys()
 		-- 패시브 버프 아이콘 키 전체(GetPassiveCardForBuffKey 표와 같은 목록)
 		return { "booster", "crit", "freeze", "armor", "meditation", "bowaccel", "piercingwill", "criticalshot",
-			"finalattackbow", "rapidfire", "combo", "chanceattack", "coma", "selfrecovery", "warriormastery",
+			"finalattackbow", "rapidfire", "concentration", "combo", "chanceattack", "coma", "selfrecovery", "warriormastery", "ironbody",
 			"daggeraccel", "criticaledge", "karma", "physicaltraining", "darksight", "throwingaccel",
 			"javelinmastery", "spiritjavelin", "radicaldarkness", "thiefcunning", "shurikenmastery" }
 	end
@@ -19552,6 +20941,12 @@ script CardManager extends Logic
 					self:HailBurstAttack(damage, isCrit)
 				elseif cardIndex == 24 then
 					self:AquaSurgeAttack(damage, isCrit)
+				elseif cardIndex == 26 then
+					self:FreezingBreathAttack(damage, isCrit)
+				elseif cardIndex == 27 then
+					self:FrozenOrbAttack(damage, isCrit)
+				elseif cardIndex == 28 then
+					self:LightningOrbAttack(damage, isCrit)
 				elseif cardIndex == 101 then
 					self:WindPoemAttack(damage, isCrit)
 				elseif cardIndex == 102 then
@@ -19582,6 +20977,12 @@ script CardManager extends Logic
 					self:UncounterArrowVAttack(damage, isCrit)
 				elseif cardIndex == 120 then
 					self:FlashBomberAttack(damage, isCrit)
+				elseif cardIndex == 121 then
+					self:WindOfPreyAttack(damage, isCrit)
+				elseif cardIndex == 122 then
+					self:GaleOfPreyAttack(damage, isCrit)
+				elseif cardIndex == 123 then
+					self:SnareOfPreyAttack(damage, isCrit)
 				elseif cardIndex == 150 then
 					self:LeionBasicAttack(damage, isCrit, target)
 				elseif cardIndex == 152 then
@@ -19614,6 +21015,12 @@ script CardManager extends Logic
 					self:ScarringBladeAttack(damage, isCrit)
 				elseif cardIndex == 170 then
 					self:FuriousBlowAttack(damage, isCrit)
+				elseif cardIndex == 192 then
+					self:IncisingAttack(damage, isCrit)
+				elseif cardIndex == 193 then
+					self:IncisingPierceAttack(damage, isCrit)
+				elseif cardIndex == 194 then
+					self:IncisingBurstAttack(damage, isCrit)
 				elseif cardIndex == 171 then
 					self:DoubleStepAttack(damage, isCrit, nil)
 				elseif cardIndex == 172 then
@@ -22267,7 +23674,7 @@ script CardManager extends Logic
 		-- 그 캐릭터의 슬롯형 액티브 번호대(실피드 101~108 등)를 여기에 같이 넣어야 한다
 		if cardIdx == 3 or cardIdx == 4 or cardIdx == 9 then return true end
 		if cardIdx == 11 or cardIdx == 12 or cardIdx == 13 then return true end
-		if cardIdx == 14 or cardIdx == 15 then return true end
+		if cardIdx == 14 or cardIdx == 15 or cardIdx == 26 then return true end
 		return false
 	end
 
@@ -22375,7 +23782,8 @@ script CardManager extends Logic
 		-- 에너지볼트: 미해금이면 해금(슬롯 여유 있을 때만), 해금 후 레벨 < 5이면 강화
 		-- 단, 체인 라이트닝으로 이미 조합된 뒤(ChainLightningLevel>0)에는 에너지볼트 자체의 강화
 		-- 선택지를 더 안 준다(에너지볼트가 그 슬롯을 이미 떠났으므로).
-		if self.ChainLightningLevel == 0 then
+		-- 라이트닝 오브의 재료로 쓰인 뒤(LightningOrbLevel>0)에도 같은 이유로 더 안 준다
+		if self.ChainLightningLevel == 0 and self.LightningOrbLevel == 0 then
 			if self.EnergyBoltLevel == 0 then
 				if hasEmptySlot then table.insert(pool, { card = 9, type = "unlock" }) end
 			elseif self.EnergyBoltLevel < 5 then
@@ -22385,7 +23793,8 @@ script CardManager extends Logic
 
 		-- 체인 라이트닝(Card 19, 조합 스킬): 에너지볼트 Lv5 + 매직 부스터 보유 시 등장 — 새 슬롯이
 		-- 필요없고 에너지볼트가 있던 슬롯을 그대로 넘겨받으므로 hasEmptySlot 체크를 건너뛴다.
-		if self.EnergyBoltLevel >= 5 and self:IsCardUnlocked(7) and self.ChainLightningLevel == 0 then
+		-- (에너지볼트가 라이트닝 오브의 재료로 이미 사라졌으면 넘겨받을 슬롯이 없으므로 등장하지 않는다)
+		if self.EnergyBoltLevel >= 5 and self:IsCardUnlocked(7) and self.ChainLightningLevel == 0 and self.LightningOrbLevel == 0 then
 			table.insert(pool, { card = 19, type = "unlock" })
 		elseif self.ChainLightningLevel > 0 and self.ChainLightningLevel < 3 then
 			table.insert(pool, { card = 19, type = "chainlightning_up" })
@@ -22470,6 +23879,32 @@ script CardManager extends Logic
 			table.insert(pool, { card = 23, type = "hailburst_up" })
 		end
 
+		-- 프리징 브레스(Card 26): 미해금이면 해금(슬롯 여유 있을 때만), 해금 후 레벨 < 5이면 강화
+		-- (프로즌 오브/라이트닝 오브로 조합된 뒤에는 더 이상 등장하지 않음 — 그 슬롯을 이미 떠났으므로)
+		if self.FrozenOrbLevel == 0 and self.LightningOrbLevel == 0 then
+			if self.FreezingBreathLevel == 0 then
+				if hasEmptySlot then table.insert(pool, { card = 26, type = "unlock" }) end
+			elseif self.FreezingBreathLevel < 5 then
+				table.insert(pool, { card = 26, type = "freezingbreath_up" })
+			end
+		end
+
+		-- 프로즌 오브(Card 27) / 라이트닝 오브(Card 28) — 프리징 브레스의 두 갈래 조합(유저 지정 2026-09-30).
+		-- 프리징 브레스 Lv5 + 콜드빔 Lv5 → 프로즌 오브, 프리징 브레스 Lv5 + 에너지볼트 Lv5 → 라이트닝 오브.
+		-- 브레스 슬롯을 넘겨받으므로 새 슬롯이 필요 없고, 하나를 만들면 나머지는 그 판에서 등장하지 않는다.
+		-- 조합하면 재료 둘 다 사라진다(브레스 슬롯 → 오브, 콜드빔/에너지볼트 슬롯은 비움). 그래서 재료가 "지금 슬롯에 있을 때"만
+		-- 등장한다 — 콜드빔이 아이스 스트라이크로, 에너지볼트가 체인 라이트닝으로 이미 넘어갔으면 그 오브는 못 만든다.
+		if self.FrozenOrbLevel == 0 and self.LightningOrbLevel == 0 and self.FreezingBreathLevel >= 5 then
+			if self.ColdBeamLevel >= 5 and self:GetSlotForCard(3) > 0 then table.insert(pool, { card = 27, type = "unlock" }) end
+			if self.EnergyBoltLevel >= 5 and self:GetSlotForCard(9) > 0 then table.insert(pool, { card = 28, type = "unlock" }) end
+		end
+		if self.FrozenOrbLevel > 0 and self.FrozenOrbLevel < 3 then
+			table.insert(pool, { card = 27, type = "frozenorb_up" })
+		end
+		if self.LightningOrbLevel > 0 and self.LightningOrbLevel < 3 then
+			table.insert(pool, { card = 28, type = "lightningorb_up" })
+		end
+
 		-- Card1(파이어샷)은 더 이상 일반 선택지 풀에 상시로 끼지 않는다 — 다른 모든 카드가 업그레이드할
 		-- 게 남아있지 않을 때만(아래 "풀이 3개 미만이면 패딩" 로직) 등장한다. 유일하게 상한이 없어서
 		-- 항상 채워줄 수 있는 카드이기 때문.
@@ -22491,7 +23926,8 @@ script CardManager extends Logic
 		-- 콜드 빔: 미해금이면 해금(슬롯 여유 있을 때만), 해금 후 레벨 < 5이면 강화 (카드9~15와 동일한 Lv1~5 트랙)
 		-- 단, 아이스 스트라이크로 이미 조합된 뒤(IceStrikeLevel>0)에는 콜드빔 자체의 강화 선택지를 더 안 준다
 		-- (콜드빔이 그 슬롯을 이미 떠났으므로).
-		if self.IceStrikeLevel == 0 then
+		-- 프로즌 오브의 재료로 쓰인 뒤(FrozenOrbLevel>0)에도 같은 이유로 더 안 준다
+		if self.IceStrikeLevel == 0 and self.FrozenOrbLevel == 0 then
 			if self.ColdBeamLevel == 0 then
 				if hasEmptySlot then table.insert(pool, { card = 3, type = "unlock" }) end
 			elseif self.ColdBeamLevel < 5 then
@@ -22501,7 +23937,8 @@ script CardManager extends Logic
 
 		-- 아이스 스트라이크(Card 17, 조합 스킬): 콜드빔 Lv5 + 프리징 이펙트 보유 시 등장 — 새 슬롯이
 		-- 필요없고 콜드빔이 있던 슬롯을 그대로 넘겨받으므로 hasEmptySlot 체크를 건너뛴다.
-		if self.ColdBeamLevel >= 5 and self:IsCardUnlocked(10) and self.IceStrikeLevel == 0 then
+		-- (콜드빔이 프로즌 오브의 재료로 이미 사라졌으면 넘겨받을 슬롯이 없으므로 등장하지 않는다)
+		if self.ColdBeamLevel >= 5 and self:IsCardUnlocked(10) and self.IceStrikeLevel == 0 and self.FrozenOrbLevel == 0 then
 			table.insert(pool, { card = 17, type = "unlock" })
 		elseif self.IceStrikeLevel > 0 and self.IceStrikeLevel < 3 then
 			table.insert(pool, { card = 17, type = "icestrike_up" })
@@ -22682,6 +24119,30 @@ script CardManager extends Logic
 				table.insert(pool, { card = 114, type = "arrowillusion_up" })
 			end
 
+			-- 윈드 오브 프레이(Card 121): 미해금이면 해금(슬롯 여유 있을 때만), 해금 후 레벨 < 5이면 강화
+			-- (게일/스네어 오브 프레이로 조합된 뒤에는 더 이상 등장하지 않음 — 그 슬롯을 이미 떠났으므로)
+			if self.GaleOfPreyLevel == 0 and self.SnareOfPreyLevel == 0 then
+				if self.WindOfPreyLevel == 0 then
+					if hasEmptySlot then table.insert(pool, { card = 121, type = "unlock" }) end
+				elseif self.WindOfPreyLevel < 5 then
+					table.insert(pool, { card = 121, type = "windofprey_up" })
+				end
+			end
+
+			-- 게일 오브 프레이(Card 122) / 스네어 오브 프레이(Card 123) — 윈드 오브 프레이의 두 갈래 조합(유저 지정 2026-09-30).
+			-- 윈드 오브 프레이 Lv5 + 컨센트레이션 + 파이널 어택 : 활 → 게일 / + 크리티컬 샷 → 스네어.
+			-- 슬롯을 넘겨받으므로 새 슬롯이 필요 없고, 하나를 만들면 나머지는 그 판에서 등장하지 않는다.
+			if self.GaleOfPreyLevel == 0 and self.SnareOfPreyLevel == 0 and self.WindOfPreyLevel >= 5 and self:IsCardUnlocked(124) then
+				if self:IsCardUnlocked(112) then table.insert(pool, { card = 122, type = "unlock" }) end
+				if self:IsCardUnlocked(111) then table.insert(pool, { card = 123, type = "unlock" }) end
+			end
+			if self.GaleOfPreyLevel > 0 and self.GaleOfPreyLevel < 3 then
+				table.insert(pool, { card = 122, type = "galeofprey_up" })
+			end
+			if self.SnareOfPreyLevel > 0 and self.SnareOfPreyLevel < 3 then
+				table.insert(pool, { card = 123, type = "snareofprey_up" })
+			end
+
 			-- 실피드 전용 패시브 5종 (카드 109~113) — 슬롯 없이 레벨만 증가하므로 hasEmptySlot 체크 없이
 			-- 항상 pool에 들어간다(매직 부스터/매직 크리티컬 등 아르카나 패시브와 동일한 패턴).
 			if not self:IsCardUnlocked(109) then
@@ -22708,6 +24169,12 @@ script CardManager extends Logic
 				table.insert(pool, { card = 113, type = "unlock" })
 			elseif self.RapidFireLevel < 5 then
 				table.insert(pool, { card = 113, type = "rapidfire_up" })
+			end
+			-- 컨센트레이션(Card 124, 패시브)
+			if not self:IsCardUnlocked(124) then
+				table.insert(pool, { card = 124, type = "unlock" })
+			elseif self.ConcentrationLevel < 5 then
+				table.insert(pool, { card = 124, type = "concentration_up" })
 			end
 		end
 
@@ -22746,6 +24213,37 @@ script CardManager extends Logic
 				table.insert(pool, { card = 164, type = "unlock" })
 			elseif self.WarriorMasteryLevel < 5 then
 				table.insert(pool, { card = 164, type = "warriormastery_up" })
+			end
+
+			-- 아이언 바디(Card195, 패시브 — 슬롯 없이 레벨만 증가)
+			if self.IronBodyLevel == 0 then
+				table.insert(pool, { card = 195, type = "unlock" })
+			elseif self.IronBodyLevel < 5 then
+				table.insert(pool, { card = 195, type = "ironbody_up" })
+			end
+
+			-- 인사이징(Card192, 슬롯형 액티브) — 미해금이면 슬롯 여유 있을 때만 해금
+			-- (인사이징:관/폭으로 조합된 뒤에는 더 이상 등장하지 않음 — 그 슬롯을 이미 떠났으므로)
+			if self.IncisingPierceLevel == 0 and self.IncisingBurstLevel == 0 then
+				if self.IncisingLevel == 0 then
+					if hasEmptySlot then table.insert(pool, { card = 192, type = "unlock" }) end
+				elseif self.IncisingLevel < 5 then
+					table.insert(pool, { card = 192, type = "incising_up" })
+				end
+			end
+
+			-- 인사이징:관(Card193) / 인사이징:폭(Card194) — 인사이징의 두 갈래 조합(유저 지정 2026-10-01).
+			-- 인사이징 Lv5 + 아이언 바디 + 콤보 어택 → 관 / + 찬스 어택 → 폭.
+			-- 슬롯을 넘겨받으므로 새 슬롯이 필요 없고, 하나를 만들면 나머지는 그 판에서 등장하지 않는다.
+			if self.IncisingPierceLevel == 0 and self.IncisingBurstLevel == 0 and self.IncisingLevel >= 5 and self:IsCardUnlocked(195) then
+				if self:IsCardUnlocked(151) then table.insert(pool, { card = 193, type = "unlock" }) end
+				if self:IsCardUnlocked(161) then table.insert(pool, { card = 194, type = "unlock" }) end
+			end
+			if self.IncisingPierceLevel > 0 and self.IncisingPierceLevel < 3 then
+				table.insert(pool, { card = 193, type = "incisingpierce_up" })
+			end
+			if self.IncisingBurstLevel > 0 and self.IncisingBurstLevel < 3 then
+				table.insert(pool, { card = 194, type = "incisingburst_up" })
 			end
 
 			-- 슬래시(Card152, 슬롯형 액티브) — 미해금이면 슬롯 여유 있을 때만 해금
@@ -23347,6 +24845,9 @@ script CardManager extends Logic
 		elseif cardIdx == 22 then return "MLUA_CARDMANAGER_481"
 		elseif cardIdx == 23 then return "MLUA_CARDMANAGER_482"
 		elseif cardIdx == 24 then return "MLUA_CARDMANAGER_483"
+		elseif cardIdx == 26 then return "MLUA_CARDMANAGER_552"
+		elseif cardIdx == 27 then return "MLUA_CARDMANAGER_553"
+		elseif cardIdx == 28 then return "MLUA_CARDMANAGER_554"
 		elseif cardIdx == 101 then return "MLUA_CARDMANAGER_484"
 		elseif cardIdx == 102 then return "MLUA_CARDMANAGER_485"
 		elseif cardIdx == 103 then return "MLUA_CARDMANAGER_486"
@@ -23357,6 +24858,9 @@ script CardManager extends Logic
 		elseif cardIdx == 118 then return "MLUA_CARDMANAGER_491"
 		elseif cardIdx == 119 then return "MLUA_CARDMANAGER_492"
 		elseif cardIdx == 120 then return "MLUA_CARDMANAGER_493"
+		elseif cardIdx == 121 then return "MLUA_CARDMANAGER_565"
+		elseif cardIdx == 122 then return "MLUA_CARDMANAGER_566"
+		elseif cardIdx == 123 then return "MLUA_CARDMANAGER_567"
 		elseif cardIdx == 108 then return "MLUA_CARDMANAGER_494"
 		elseif cardIdx == 114 then return "MLUA_CARDMANAGER_495"
 		elseif cardIdx == 115 then return "MLUA_CARDMANAGER_496"
@@ -23367,6 +24871,7 @@ script CardManager extends Logic
 		elseif cardIdx == 111 then return "MLUA_CARDMANAGER_501"
 		elseif cardIdx == 112 then return "MLUA_CARDMANAGER_502"
 		elseif cardIdx == 113 then return "MLUA_CARDMANAGER_481"
+		elseif cardIdx == 124 then return "MLUA_CARDMANAGER_568"
 		elseif _CardRegistry:HasCard(cardIdx) then return _CardRegistry:GetTags(cardIdx)
 		end
 		return ""
@@ -23459,6 +24964,30 @@ script CardManager extends Logic
 			icon.ImageRUID = self.Card24IconRUID
 			title.Text = "Lv" .. nextLevel
 			name.Text  = _LocText:Resolve(self.Card24Name)
+			return
+		end
+
+		if cardIdx == 26 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.FreezingBreathLevel + 1)
+			icon.ImageRUID = self.Card26IconRUID
+			title.Text = "Lv" .. nextLevel
+			name.Text  = _LocText:Resolve(self.Card26Name)
+			return
+		end
+
+		if cardIdx == 27 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.FrozenOrbLevel + 1)
+			icon.ImageRUID = self.Card27IconRUID
+			title.Text = "Lv" .. nextLevel
+			name.Text  = _LocText:Resolve(self.Card27Name)
+			return
+		end
+
+		if cardIdx == 28 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.LightningOrbLevel + 1)
+			icon.ImageRUID = self.Card28IconRUID
+			title.Text = "Lv" .. nextLevel
+			name.Text  = _LocText:Resolve(self.Card28Name)
 			return
 		end
 
@@ -23679,6 +25208,38 @@ script CardManager extends Logic
 			icon.ImageRUID = _CardRegistry:GetIcon(162)
 			title.Text = "Lv" .. nextLevel
 			name.Text  = _LocText:Resolve(_CardRegistry:GetName(162))
+			return
+		end
+
+		if cardIdx == 192 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.IncisingLevel + 1)
+			icon.ImageRUID = _CardRegistry:GetIcon(192)
+			title.Text = "Lv" .. nextLevel
+			name.Text  = _LocText:Resolve(_CardRegistry:GetName(192))
+			return
+		end
+
+		if cardIdx == 193 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.IncisingPierceLevel + 1)
+			icon.ImageRUID = _CardRegistry:GetIcon(193)
+			title.Text = "Lv" .. nextLevel
+			name.Text  = _LocText:Resolve(_CardRegistry:GetName(193))
+			return
+		end
+
+		if cardIdx == 194 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.IncisingBurstLevel + 1)
+			icon.ImageRUID = _CardRegistry:GetIcon(194)
+			title.Text = "Lv" .. nextLevel
+			name.Text  = _LocText:Resolve(_CardRegistry:GetName(194))
+			return
+		end
+
+		if cardIdx == 195 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.IronBodyLevel + 1)
+			icon.ImageRUID = _CardRegistry:GetIcon(195)
+			title.Text = "Lv" .. nextLevel
+			name.Text  = _LocText:Resolve(_CardRegistry:GetName(195))
 			return
 		end
 
@@ -24245,6 +25806,38 @@ script CardManager extends Logic
 			return
 		end
 
+		if cardIdx == 121 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.WindOfPreyLevel + 1)
+			icon.ImageRUID = self.Card121IconRUID
+			title.Text = "Lv" .. nextLevel
+			name.Text  = _LocText:Resolve(self.Card121Name)
+			return
+		end
+
+		if cardIdx == 122 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.GaleOfPreyLevel + 1)
+			icon.ImageRUID = self.Card122IconRUID
+			title.Text = "Lv" .. nextLevel
+			name.Text  = _LocText:Resolve(self.Card122Name)
+			return
+		end
+
+		if cardIdx == 123 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.SnareOfPreyLevel + 1)
+			icon.ImageRUID = self.Card123IconRUID
+			title.Text = "Lv" .. nextLevel
+			name.Text  = _LocText:Resolve(self.Card123Name)
+			return
+		end
+
+		if cardIdx == 124 then
+			local nextLevel = (upgradeType == "unlock") and 1 or (self.ConcentrationLevel + 1)
+			icon.ImageRUID = self.Card124IconRUID
+			title.Text = "Lv" .. nextLevel
+			name.Text  = _LocText:Resolve(self.Card124Name)
+			return
+		end
+
 		-- 카드 2/5(매직 클로/메테오)
 		local skillNames = {self.Card1Name, self.Card2Name, self.Card3Name, self.Card4Name, self.Card5Name}
 		local skillName = (cardIdx >= 1 and cardIdx <= 5) and skillNames[cardIdx] or ("FMT_CARDMANAGER_101|" .. tostring(cardIdx))
@@ -24491,11 +26084,13 @@ script CardManager extends Logic
 		if self:IsCardUnlocked(111) and self.CriticalShotLevel < 5 then table.insert(pool, 111) end
 		if self:IsCardUnlocked(112) and self.FinalAttackBowLevel < 5 then table.insert(pool, 112) end
 		if self:IsCardUnlocked(113) and self.RapidFireLevel < 5 then table.insert(pool, 113) end
+		if self:IsCardUnlocked(124) and self.ConcentrationLevel < 5 then table.insert(pool, 124) end
 		-- 레이온
 		if self:IsCardUnlocked(151) and self.ComboAttackLevel < 5 then table.insert(pool, 151) end
 		if self:IsCardUnlocked(161) and self.ChanceAttackLevel < 5 then table.insert(pool, 161) end
 		if self:IsCardUnlocked(162) and self.ComaLevel < 5 then table.insert(pool, 162) end
 		if self:IsCardUnlocked(163) and self.SelfRecoveryLevel < 5 then table.insert(pool, 163) end
+		if self:IsCardUnlocked(195) and self.IronBodyLevel < 5 then table.insert(pool, 195) end
 		if self:IsCardUnlocked(164) and self.WarriorMasteryLevel < 5 then table.insert(pool, 164) end
 		-- 쉐이드
 		if self:IsCardUnlocked(180) and self.DaggerAccelLevel < 5 then table.insert(pool, 180) end
@@ -24935,6 +26530,83 @@ script CardManager extends Logic
 			return
 		end
 
+		-- 윈드 오브 프레이 (슬롯 해금 또는 레벨 강화)
+		if cardIdx == 121 then
+			if upgradeType == "unlock" then
+				self.WindOfPreyLevel = 1
+				local slotIdx = self:GetNextEmptySlot()
+				if slotIdx > 0 then
+					self:AssignCardToSlot(slotIdx, 121)
+					self:ResetSlotTimer(slotIdx)
+					log("Card121(WindOfPrey) -> Slot" .. slotIdx)
+				end
+			elseif upgradeType == "windofprey_up" and self.WindOfPreyLevel < 5 then
+				self.WindOfPreyLevel = self.WindOfPreyLevel + 1
+			end
+			log("WindOfPrey L" .. self.WindOfPreyLevel)
+			return
+		end
+
+		-- 게일 / 스네어 오브 프레이 (조합 스킬 — 윈드 오브 프레이(Card121) 슬롯을 그대로 넘겨받는다. 둘 중 하나만 만들 수 있다.
+		-- 재료 패시브(컨센트레이션/파이널 어택 : 활/크리티컬 샷)는 슬롯이 없어 그대로 남는다)
+		if cardIdx == 122 then
+			if upgradeType == "unlock" then
+				if self.SnareOfPreyLevel > 0 then
+					log_warning("GaleOfPrey: the other Prey fusion is already made — ignored")
+					return
+				end
+				self.GaleOfPreyLevel = 1
+				local preySlot = self:GetSlotForCard(121)
+				if preySlot > 0 then
+					self:AssignCardToSlot(preySlot, 122)
+					self:ResetSlotTimer(preySlot)
+					self:PlayThunderStormFusionEffect(preySlot)
+					log("Card122(GaleOfPrey) fused into Slot" .. preySlot .. " (was WindOfPrey)")
+				else
+					log_warning("GaleOfPrey: WindOfPrey not found in any slot — fusion could not place the card")
+				end
+			elseif upgradeType == "galeofprey_up" and self.GaleOfPreyLevel < 3 then
+				self.GaleOfPreyLevel = self.GaleOfPreyLevel + 1
+			end
+			log("GaleOfPrey L" .. self.GaleOfPreyLevel)
+			return
+		end
+
+		if cardIdx == 123 then
+			if upgradeType == "unlock" then
+				if self.GaleOfPreyLevel > 0 then
+					log_warning("SnareOfPrey: the other Prey fusion is already made — ignored")
+					return
+				end
+				self.SnareOfPreyLevel = 1
+				local preySlot = self:GetSlotForCard(121)
+				if preySlot > 0 then
+					self:AssignCardToSlot(preySlot, 123)
+					self:ResetSlotTimer(preySlot)
+					self:PlayThunderStormFusionEffect(preySlot)
+					log("Card123(SnareOfPrey) fused into Slot" .. preySlot .. " (was WindOfPrey)")
+				else
+					log_warning("SnareOfPrey: WindOfPrey not found in any slot — fusion could not place the card")
+				end
+			elseif upgradeType == "snareofprey_up" and self.SnareOfPreyLevel < 3 then
+				self.SnareOfPreyLevel = self.SnareOfPreyLevel + 1
+			end
+			log("SnareOfPrey L" .. self.SnareOfPreyLevel)
+			return
+		end
+
+		-- 컨센트레이션 (실피드 전용 패시브 — 슬롯 없이 레벨만 증가)
+		if cardIdx == 124 then
+			if upgradeType == "unlock" then
+				self.ConcentrationLevel = 1
+			elseif upgradeType == "concentration_up" and self.ConcentrationLevel < 5 then
+				self.ConcentrationLevel = self.ConcentrationLevel + 1
+			end
+			self:NotifyConcentrationOnPermanent()
+			log("Concentration L" .. self.ConcentrationLevel .. " (회피 " .. math.floor(self:GetConcentrationEvadeChance() * 100 + 0.5) .. "%)")
+			return
+		end
+
 		-- 연속 사격 (실피드 전용 패시브 — 슬롯 없이 레벨만 증가)
 		if cardIdx == 113 then
 			if upgradeType == "unlock" then
@@ -25022,6 +26694,82 @@ script CardManager extends Logic
 				self.AquaSurgeLevel = self.AquaSurgeLevel + 1
 			end
 			log("AquaSurge L" .. self.AquaSurgeLevel)
+			return
+		end
+
+		-- 프리징 브레스 (슬롯 해금 또는 레벨 강화)
+		if cardIdx == 26 then
+			if upgradeType == "unlock" then
+				self.FreezingBreathLevel = 1
+				local slotIdx = self:GetNextEmptySlot()
+				if slotIdx > 0 then
+					self:AssignCardToSlot(slotIdx, 26)
+					self:ResetSlotTimer(slotIdx)
+					log("Card26(FreezingBreath) -> Slot" .. slotIdx)
+				end
+			elseif upgradeType == "freezingbreath_up" and self.FreezingBreathLevel < 5 then
+				self.FreezingBreathLevel = self.FreezingBreathLevel + 1
+			end
+			log("FreezingBreath L" .. self.FreezingBreathLevel)
+			return
+		end
+
+		-- 프로즌 오브 / 라이트닝 오브 (조합 스킬 — 프리징 브레스(Card26) 슬롯을 그대로 넘겨받는다. 둘 중 하나만 만들 수 있다)
+		if cardIdx == 27 then
+			if upgradeType == "unlock" then
+				if self.LightningOrbLevel > 0 then
+					log_warning("FrozenOrb: the other orb is already fused — ignored")
+					return
+				end
+				self.FrozenOrbLevel = 1
+				local breathSlot = self:GetSlotForCard(26)
+				if breathSlot > 0 then
+					self:AssignCardToSlot(breathSlot, 27)
+					self:ResetSlotTimer(breathSlot)
+					self:PlayThunderStormFusionEffect(breathSlot)
+					log("Card27(FrozenOrb) fused into Slot" .. breathSlot .. " (was FreezingBreath)")
+				else
+					log_warning("FrozenOrb: FreezingBreath not found in any slot — fusion could not place the card")
+				end
+				-- 재료 둘 다 사라진다(유저 지정 2026-09-30) — 콜드빔 슬롯은 완전히 비운다(더블 커터와 같은 방식)
+				local coldSlot = self:GetSlotForCard(3)
+				if coldSlot > 0 then
+					self:AssignCardToSlot(coldSlot, 0)
+					log("FrozenOrb: ColdBeam's Slot" .. coldSlot .. " emptied")
+				end
+			elseif upgradeType == "frozenorb_up" and self.FrozenOrbLevel < 3 then
+				self.FrozenOrbLevel = self.FrozenOrbLevel + 1
+			end
+			log("FrozenOrb L" .. self.FrozenOrbLevel)
+			return
+		end
+
+		if cardIdx == 28 then
+			if upgradeType == "unlock" then
+				if self.FrozenOrbLevel > 0 then
+					log_warning("LightningOrb: the other orb is already fused — ignored")
+					return
+				end
+				self.LightningOrbLevel = 1
+				local breathSlot = self:GetSlotForCard(26)
+				if breathSlot > 0 then
+					self:AssignCardToSlot(breathSlot, 28)
+					self:ResetSlotTimer(breathSlot)
+					self:PlayThunderStormFusionEffect(breathSlot)
+					log("Card28(LightningOrb) fused into Slot" .. breathSlot .. " (was FreezingBreath)")
+				else
+					log_warning("LightningOrb: FreezingBreath not found in any slot — fusion could not place the card")
+				end
+				-- 재료 둘 다 사라진다(유저 지정 2026-09-30) — 에너지볼트 슬롯은 완전히 비운다
+				local boltSlot = self:GetSlotForCard(9)
+				if boltSlot > 0 then
+					self:AssignCardToSlot(boltSlot, 0)
+					log("LightningOrb: EnergyBolt's Slot" .. boltSlot .. " emptied")
+				end
+			elseif upgradeType == "lightningorb_up" and self.LightningOrbLevel < 3 then
+				self.LightningOrbLevel = self.LightningOrbLevel + 1
+			end
+			log("LightningOrb L" .. self.LightningOrbLevel)
 			return
 		end
 
@@ -25382,6 +27130,84 @@ script CardManager extends Logic
 			end
 			self:NotifyComaOnPermanent()
 			log("Coma L" .. self.ComaLevel .. " (폭발 배율 " .. self:GetComaBurstPercent(self.ComaLevel) .. "%)")
+			return
+		end
+
+		-- 인사이징 (슬롯 해금 또는 레벨 강화)
+		if cardIdx == 192 then
+			if upgradeType == "unlock" then
+				self.IncisingLevel = 1
+				local slotIdx = self:GetNextEmptySlot()
+				if slotIdx > 0 then
+					self:AssignCardToSlot(slotIdx, 192)
+					self:ResetSlotTimer(slotIdx)
+					log("Card192(Incising) -> Slot" .. slotIdx)
+				end
+			elseif upgradeType == "incising_up" and self.IncisingLevel < 5 then
+				self.IncisingLevel = self.IncisingLevel + 1
+			end
+			log("Incising L" .. self.IncisingLevel)
+			return
+		end
+
+		-- 인사이징:관 / 인사이징:폭 (조합 스킬 — 인사이징(Card192) 슬롯을 그대로 넘겨받는다. 둘 중 하나만 만들 수 있다.
+		-- 재료 패시브(아이언 바디/콤보 어택/찬스 어택)는 슬롯이 없어 그대로 남는다)
+		if cardIdx == 193 then
+			if upgradeType == "unlock" then
+				if self.IncisingBurstLevel > 0 then
+					log_warning("IncisingPierce: the other Incising fusion is already made — ignored")
+					return
+				end
+				self.IncisingPierceLevel = 1
+				local incisingSlot = self:GetSlotForCard(192)
+				if incisingSlot > 0 then
+					self:AssignCardToSlot(incisingSlot, 193)
+					self:ResetSlotTimer(incisingSlot)
+					self:PlayThunderStormFusionEffect(incisingSlot)
+					log("Card193(IncisingPierce) fused into Slot" .. incisingSlot .. " (was Incising)")
+				else
+					log_warning("IncisingPierce: Incising not found in any slot — fusion could not place the card")
+				end
+			elseif upgradeType == "incisingpierce_up" and self.IncisingPierceLevel < 3 then
+				self.IncisingPierceLevel = self.IncisingPierceLevel + 1
+			end
+			log("IncisingPierce L" .. self.IncisingPierceLevel)
+			return
+		end
+
+		if cardIdx == 194 then
+			if upgradeType == "unlock" then
+				if self.IncisingPierceLevel > 0 then
+					log_warning("IncisingBurst: the other Incising fusion is already made — ignored")
+					return
+				end
+				self.IncisingBurstLevel = 1
+				local incisingSlot = self:GetSlotForCard(192)
+				if incisingSlot > 0 then
+					self:AssignCardToSlot(incisingSlot, 194)
+					self:ResetSlotTimer(incisingSlot)
+					self:PlayThunderStormFusionEffect(incisingSlot)
+					log("Card194(IncisingBurst) fused into Slot" .. incisingSlot .. " (was Incising)")
+				else
+					log_warning("IncisingBurst: Incising not found in any slot — fusion could not place the card")
+				end
+			elseif upgradeType == "incisingburst_up" and self.IncisingBurstLevel < 3 then
+				self.IncisingBurstLevel = self.IncisingBurstLevel + 1
+			end
+			log("IncisingBurst L" .. self.IncisingBurstLevel)
+			return
+		end
+
+		-- 아이언 바디(패시브 — 슬롯 없이 레벨만 증가, 최대 체력 %)
+		if cardIdx == 195 then
+			if upgradeType == "unlock" then
+				self.IronBodyLevel = 1
+			elseif upgradeType == "ironbody_up" and self.IronBodyLevel < 5 then
+				self.IronBodyLevel = self.IronBodyLevel + 1
+			end
+			self:ApplyIronBodyHp()
+			self:NotifyIronBodyOnPermanent()
+			log("IronBody L" .. self.IronBodyLevel .. " (최대 체력 +" .. self:GetIronBodyPercent() .. "%)")
 			return
 		end
 
@@ -26653,6 +28479,9 @@ script CardManager extends Logic
 		self.MeditationLevel = 0
 		self.HailBurstLevel = 0
 		self.AquaSurgeLevel = 0
+		self.FreezingBreathLevel = 0
+		self.FrozenOrbLevel = 0
+		self.LightningOrbLevel = 0
 		self.WindPoemLevel = 0
 		self.ArrowBlowLevel = 0
 		self.IceQuiverLevel = 0
@@ -26673,6 +28502,10 @@ script CardManager extends Logic
 		self.CriticalShotLevel = 0
 		self.FinalAttackBowLevel = 0
 		self.RapidFireLevel = 0
+		self.WindOfPreyLevel = 0
+		self.GaleOfPreyLevel = 0
+		self.SnareOfPreyLevel = 0
+		self.ConcentrationLevel = 0
 
 		-- 레이온 전용 (기존엔 여기서 누락되어 "다시하기"해도 레벨이 그대로 남아있는 버그가 있었다)
 		self.LeionAttackDamage = 100
@@ -26746,6 +28579,11 @@ script CardManager extends Logic
 		self.SolarBladeLevel = 0
 		self.ScarringBladeLevel = 0
 		self.FuriousBlowLevel = 0
+		self.IncisingLevel = 0
+		self.IncisingPierceLevel = 0
+		self.IncisingBurstLevel = 0
+		self.IronBodyLevel = 0
+		self._ironBodyBonusHp = 0
 
 		-- 린 전용 (버그 수정, 유저 리포트: "다시하기하면 방금 만든 스킬을 뽑아도 슬롯에 안 들어와")
 		-- 린 카드(200~206)가 여기서 통째로 빠져 있어서 "다시하기" 후에도 레벨이 그대로 남아 있었다.
@@ -26905,6 +28743,10 @@ script CardManager extends Logic
 			if self:IsCardUnlocked(118) and self.ArrowFletterLevel < 3 then table.insert(pool, 118) end
 			if self:IsCardUnlocked(119) and self.UncounterArrowVLevel < 3 then table.insert(pool, 119) end
 			if self:IsCardUnlocked(120) and self.FlashBomberLevel < 3 then table.insert(pool, 120) end
+			-- 윈드 오브 프레이는 게일/스네어로 조합되면 슬롯을 떠나므로 그 뒤엔 풀에서 뺀다
+			if self:IsCardUnlocked(121) and self.WindOfPreyLevel < 5 and self.GaleOfPreyLevel == 0 and self.SnareOfPreyLevel == 0 then table.insert(pool, 121) end
+			if self:IsCardUnlocked(122) and self.GaleOfPreyLevel < 3 then table.insert(pool, 122) end
+			if self:IsCardUnlocked(123) and self.SnareOfPreyLevel < 3 then table.insert(pool, 123) end
 			return pool
 		end
 		-- 레이온도 아르카나 카드가 안 틱되므로 별도 풀을 쓴다 — 이 분기가 없으면 아래 아르카나 카드
@@ -26931,6 +28773,10 @@ script CardManager extends Logic
 			if self:IsCardUnlocked(168) and self.SolarBladeLevel < 3 then table.insert(pool, 168) end
 			if self:IsCardUnlocked(169) and self.ScarringBladeLevel < 3 then table.insert(pool, 169) end
 			if self:IsCardUnlocked(170) and self.FuriousBlowLevel < 3 then table.insert(pool, 170) end
+			-- 인사이징은 관/폭으로 조합되면 슬롯을 떠나므로 그 뒤엔 풀에서 뺀다
+			if self:IsCardUnlocked(192) and self.IncisingLevel < 5 and self.IncisingPierceLevel == 0 and self.IncisingBurstLevel == 0 then table.insert(pool, 192) end
+			if self:IsCardUnlocked(193) and self.IncisingPierceLevel < 3 then table.insert(pool, 193) end
+			if self:IsCardUnlocked(194) and self.IncisingBurstLevel < 3 then table.insert(pool, 194) end
 			return pool
 		end
 		-- 쉐이드도 아르카나 카드가 안 틱되므로 별도 풀을 쓴다(레이온과 동일한 이유 — 위 2026-08-02 주석 참고).
@@ -26992,6 +28838,10 @@ script CardManager extends Logic
 		if self:IsCardUnlocked(21) and self.GrandPepeLevel < 3 then table.insert(pool, 21) end
 		if self:IsCardUnlocked(23) and self.HailBurstLevel < 3 then table.insert(pool, 23) end
 		if self:IsCardUnlocked(24) and self.AquaSurgeLevel < 3 then table.insert(pool, 24) end
+		-- 프리징 브레스는 오브로 조합되면 슬롯을 떠나므로 그 뒤엔 풀에서 뺀다
+		if self:IsCardUnlocked(26) and self.FreezingBreathLevel < 5 and self.FrozenOrbLevel == 0 and self.LightningOrbLevel == 0 then table.insert(pool, 26) end
+		if self:IsCardUnlocked(27) and self.FrozenOrbLevel < 3 then table.insert(pool, 27) end
+		if self:IsCardUnlocked(28) and self.LightningOrbLevel < 3 then table.insert(pool, 28) end
 		return pool
 	end
 
@@ -27023,6 +28873,8 @@ script CardManager extends Logic
 		elseif cardIdx == 111 then return "criticalshot_up"
 		elseif cardIdx == 112 then return "finalattackbow_up"
 		elseif cardIdx == 113 then return "rapidfire_up"
+		elseif cardIdx == 121 then return "windofprey_up"
+		elseif cardIdx == 124 then return "concentration_up"
 		elseif cardIdx == 151 then return "comboattack_up"
 		elseif cardIdx == 152 then return "slash_up"
 		elseif cardIdx == 153 then return "brandish_up"
@@ -27036,6 +28888,8 @@ script CardManager extends Logic
 		elseif cardIdx == 162 then return "coma_up"
 		elseif cardIdx == 163 then return "selfrecovery_up"
 		elseif cardIdx == 164 then return "warriormastery_up"
+		elseif cardIdx == 192 then return "incising_up"
+		elseif cardIdx == 195 then return "ironbody_up"
 		elseif cardIdx == 171 then return "doublestep_up"
 		elseif cardIdx == 201 then return "luckyseven_up"
 		elseif cardIdx == 202 then return "shurikenburst_up"
@@ -27086,6 +28940,9 @@ script CardManager extends Logic
 		elseif cardIdx == 21 then return "grandpepe_up"
 		elseif cardIdx == 23 then return "hailburst_up"
 		elseif cardIdx == 24 then return "aquasurge_up"
+		elseif cardIdx == 26 then return "freezingbreath_up"
+		elseif cardIdx == 27 then return "frozenorb_up"
+		elseif cardIdx == 28 then return "lightningorb_up"
 		elseif cardIdx == 114 then return "arrowillusion_up"
 		elseif cardIdx == 115 then return "evolve_up"
 		elseif cardIdx == 116 then return "stormpoem_up"
@@ -27093,6 +28950,8 @@ script CardManager extends Logic
 		elseif cardIdx == 118 then return "arrowfletter_up"
 		elseif cardIdx == 119 then return "uncounterarrowv_up"
 		elseif cardIdx == 120 then return "flashbomber_up"
+		elseif cardIdx == 122 then return "galeofprey_up"
+		elseif cardIdx == 123 then return "snareofprey_up"
 		elseif cardIdx == 160 then return "braveslash_up"
 		elseif cardIdx == 165 then return "spiritblade_up"
 		elseif cardIdx == 166 then return "burningrush_up"
@@ -27100,6 +28959,8 @@ script CardManager extends Logic
 		elseif cardIdx == 168 then return "solarblade_up"
 		elseif cardIdx == 169 then return "scarringblade_up"
 		elseif cardIdx == 170 then return "furiousblow_up"
+		elseif cardIdx == 193 then return "incisingpierce_up"
+		elseif cardIdx == 194 then return "incisingburst_up"
 		elseif cardIdx == 222 then return "bloodthrow_up"
 		end
 		return (_UtilLogic:RandomDouble() < 0.5) and "dmg" or "cd"
@@ -27479,6 +29340,9 @@ script CardManager extends Logic
 		-- 드롭이 도착한 슬롯을 잠깐 확대-축소시키고 반짝이 파티클을 재생해 도착감을 준다
 		local slot = self:GetSlotRenderer(slotIdx)
 		if slot == nil then return end
+		-- 이 펀치 도중에 슬롯을 누르면 공용 눌림 연출이 1.3배를 "원래 크기"로 잘못 기억해 슬롯이 커진 채 굳는다
+		-- (2026-09-30 유저 리포트) — 슬롯의 기준 배율은 항상 1로 고정해 둔다
+		_ButtonPressFxLogic:SetFixedBaseScale(slot.Entity, Vector3(1, 1, 1))
 		_TweenLogic:ScaleTo(slot.Entity, Vector2(1.3, 1.3), 0.12, EaseType.BackEaseOut)
 		self:PlaySlotSparkle(slotIdx)
 		_TimerService:SetTimerOnce(function()

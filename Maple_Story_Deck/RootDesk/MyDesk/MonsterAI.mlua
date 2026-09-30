@@ -793,6 +793,12 @@ script MonsterAI extends Component
 
 	property boolean _chargeDashActive = false
 
+	-- 돌진 도착 첫 타(유저 지정 2026-10-01: "황소처럼 뛰어온 채로 들이박기") — true면 다음 OnReachPlayer가
+	-- 제자리 홉 대신 달리던 자세 그대로 앞으로 확 커지는 들이받기를 쓴다. 첫 타 한 번만 쓰고 끈다
+	property boolean _chargeRamPending = false
+
+	property number ChargeRamBoost = 0.4  -- 들이받기 순간 추가 스케일(일반 공격 들이받기 0.25보다 크게)
+
 	property number _chargeSpawnX = 0
 
 	property number _chargeSpawnY = 0
@@ -1054,6 +1060,8 @@ script MonsterAI extends Component
 			end
 		else
 			hp = _GameManager:GetTimeStepHp(_GameManager:GetTimeStep())
+			-- ⚠ 테스트 전용 체력 고정(GameManager.TestMonsterHp, 0이면 꺼짐) — 출시 전 0으로
+			if _GameManager.TestMonsterHp > 0 then hp = _GameManager.TestMonsterHp end
 		end
 		self.MaxHp = hp
 		self.CurrentHp = hp
@@ -3106,8 +3114,19 @@ script MonsterAI extends Component
 			self._attackTimer = self:GetEffectiveAttackInterval()
 			-- 도달했으니 걷는 포즈(move)에서 정지 포즈(stand)로 되돌린다 — move가 아예 없던 종(moveRUID=="")은
 			-- 이미 MonsterSprite가 stand였으므로 그대로 다시 대입해도 무해하다.
-			self.MonsterSprite = self._standRUID
-			self:SyncDepthOverlaySprite()
+			-- 돌진 도착(공격 모션 없는 종)은 멈춰 서서 홉하면 "멈췄다 공격"으로 보인다(유저 지적 2026-10-01) —
+			-- 달리던 자세 그대로 들이받고(OnReachPlayer의 _chargeRamPending 분기), 들이받기가 끝난 뒤 stand로 바꾼다
+			if self._isCharge and self._chargeDashActive and self._attackRUID == "" then
+				self._chargeRamPending = true
+				_TimerService:SetTimerOnce(function()
+					if not isvalid(self) or self._dead or not self._reachedPlayer then return end
+					self.MonsterSprite = self._standRUID
+					self:SyncDepthOverlaySprite()
+				end, 0.2)
+			else
+				self.MonsterSprite = self._standRUID
+				self:SyncDepthOverlaySprite()
+			end
 			-- 소환기를 가진 보스(스텀피)는 도달 직후 **첫 행동을 소환으로** 쓴다(유저 지정 2026-09-08:
 			-- "어택2를 맨 처음에 사용하게 해줘, 일반 어택 말고"). 소환 타이머가 이미 돌고 있으면
 			-- (= 존 이동으로 재배치된 뒤 다시 도달한 경우) 평소대로 일반 공격을 한다.
@@ -5751,7 +5770,14 @@ script MonsterAI extends Component
 				log("Monster attack missed (radical darkness " .. math.floor(radicalDarkChance * 100) .. "%)")
 				missed = true
 			end
-		
+
+			-- 컨센트레이션(카드124, 실피드 전용 패시브) — 같은 방식의 영구 회피 확률(3/5/7/9/12%)
+			local concentrationChance = _CardManager:GetConcentrationEvadeChance()
+			if not missed and concentrationChance > 0 and _UtilLogic:RandomDouble() < concentrationChance then
+				log("Monster attack missed (concentration " .. math.floor(concentrationChance * 100 + 0.5) .. "%)")
+				missed = true
+			end
+
 			if not missed then
 				-- 플레이어 HP 감소 (엘리트는 공격력 15% 추가, 보스는 BossAttackMultiplier 배)
 				-- 2026-09-12 유저 지정: 보스·엘리트의 공격은 일반 몬스터가 걸어둔 피격 무적(0.8초)을 무시하고
@@ -5768,6 +5794,9 @@ script MonsterAI extends Component
 				dmgMultiplier = dmgMultiplier * self._rushDamageMultiplier
 				-- 2마리가 같이 뜨는 보스(픽시맘·파파픽시)는 각자 공격력을 나눠 갖는다(기본 1.0이면 무영향)
 				dmgMultiplier = dmgMultiplier * self._bossAtkMultiplier
+				-- 피격 연출(HitFeelLogic)이 "어느 쪽에서 맞았는지"를 정할 때 쓰는 이 몬스터의 위치
+				local myWorldPos = self.Entity.TransformComponent.WorldPosition
+				local attackerWorldPos = Vector2(myWorldPos.x, myWorldPos.y)
 				if self._isRangedSlash then
 					-- 발톱자국 이펙트가 실제로 최대 스케일(화면에 닿는 시점)에 도달했을 때 대미지가 들어가도록
 					-- PlaySlashEffect와 동일한 지연(공격모션 절반 + 이펙트 성장 시간)만큼 늦춘다(유저 요청 —
@@ -5775,7 +5804,7 @@ script MonsterAI extends Component
 					local hitDelay = self._attackDuration * 0.5 + self.SlashEffectDuration
 					_TimerService:SetTimerOnce(function()
 						if not isvalid(self) or self._dead then return end
-						_GameManager:OnMonsterReached(dmgMultiplier, self._isSwarmMember or self._ignoresHitImmune or self._isBoss or (self._isElite and not self._isEp1BossSplit), self._isBoss)
+						_GameManager:OnMonsterReached(dmgMultiplier, self._isSwarmMember or self._ignoresHitImmune or self._isBoss or (self._isElite and not self._isEp1BossSplit), self._isBoss, attackerWorldPos, false)
 					end, hitDelay)
 				else
 					-- 무리 공격(_isSwarmMember)은 TryClaimGroupAttack으로 이미 무리 내부에서 1회로 제한해뒀는데,
@@ -5784,7 +5813,8 @@ script MonsterAI extends Component
 					-- 때리면 대미지 안들어가게 딜레이 걸었잖아? 쟤는 무시하라는말임"). 무리 공격은 이 무적
 					-- 프레임을 무시하고 항상 들어가게 한다 — 다른 몬스터끼리의 무적 프레임 상호작용은 그대로 유지.
 					-- _ignoresHitImmune(Tired Knight)도 동일한 경로로 무적 프레임을 무시한다.
-					_GameManager:OnMonsterReached(dmgMultiplier, self._isSwarmMember or self._ignoresHitImmune or self._isBoss or (self._isElite and not self._isEp1BossSplit), self._isBoss)
+					-- 돌진 도착 첫 타면 피격 연출이 화면을 뒤로 밀리게 한다(_chargeRamPending은 이 함수 끝에서 꺼진다)
+					_GameManager:OnMonsterReached(dmgMultiplier, self._isSwarmMember or self._ignoresHitImmune or self._isBoss or (self._isElite and not self._isEp1BossSplit), self._isBoss, attackerWorldPos, self._chargeRamPending)
 				end
 			end
 		end
@@ -5856,9 +5886,14 @@ script MonsterAI extends Component
 		elseif self._isRangedInk then
 			self:PlayInkAttack()
 			self:PlayAttackHop()
+		elseif self._chargeRamPending then
+			-- 돌진 도착 첫 타: 제자리 홉 없이 달려온 기세 그대로 앞으로 확 커지며 들이받는다
+			self:PlayLungeAnimation(self.ChargeRamBoost, 0)
+			log("MonsterAI: charge ram on arrival")
 		else
 			self:PlayLungeAnimation(0.25, self.AttackHopHeight)
 		end
+		self._chargeRamPending = false
 
 		-- ── 에피2 보스 엘리쟈 전용 ────────────────────────────────────────────────
 		-- (1) 공격할 때마다 공속이 빨라진다(유저 지정: 5%씩, 최대 60%). 피격 성장(ApplyBossHitGrowth)과

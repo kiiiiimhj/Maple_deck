@@ -1,0 +1,224 @@
+@Logic
+script HitFeelLogic extends Logic
+
+	-- 플레이어 피격 연출 2종(유저 지정 2026-09-30, "한번 적용해서 보자") — 기존 화면 흔들림(GameManager.ShakeCameraOnHit /
+	-- PlayBossHitShake)은 그대로 두고 그 위에 얹는다.
+	--   ① 가장자리 플래시: 때린 몬스터가 화면 왼쪽이면 왼쪽 테두리, 오른쪽이면 오른쪽 테두리가 붉은 주황색으로 번쩍(가운데면 양쪽).
+	--      ui/HitFeelGroup.ui의 Left / Right(세로 띠 12장으로 만든 그라데이션, CanvasGroup 알파로 한꺼번에 페이드).
+	--   ② 순간 줌: 맞는 순간 카메라가 살짝 확대됐다 돌아온다(2D 직교 카메라라 FOV 대신 ZoomRatio).
+	-- 서버(GameManager.OnMonsterReached)가 피해가 실제로 들어간 뒤에만 PlayHit을 부른다 — 무효화/허수아비 경로에선 안 뜬다.
+	-- 세기·시간은 아래 프로퍼티로 조절하고, 마음에 안 들면 EdgeFlashEnabled / ZoomPunchEnabled만 끄면 된다.
+
+	property Entity rootGroup = "972edc4a-c058-40c4-992e-0e8e05482d7a"
+	property Entity leftEdge = "861d94b3-047b-4f72-be30-cff264b67d2a"
+	property Entity rightEdge = "3508f95e-38ff-4a8b-8345-b75ee2d15691"
+	property CanvasGroupComponent leftCanvas = "861d94b3-047b-4f72-be30-cff264b67d2a"
+	property CanvasGroupComponent rightCanvas = "3508f95e-38ff-4a8b-8345-b75ee2d15691"
+
+	-- ── 스위치 ──
+	property boolean EdgeFlashEnabled = true
+	property boolean ZoomPunchEnabled = true
+
+	-- ── 가장자리 플래시 ──
+	-- 번쩍 뜬 뒤 이 시간 동안 사라진다(초)
+	property number EdgeFlashDuration = 0.18
+	-- 가장 진할 때의 불투명도(일반 / 보스)
+	property number EdgeFlashAlpha = 0.55
+	property number BossEdgeFlashAlpha = 0.95
+	-- 띠 묶음의 가로 폭(ui/HitFeelGroup.ui의 Left/Right 폭과 같아야 한다)
+	property number EdgeWidth = 240
+	-- 몬스터가 화면 가운데에서 이 비율(화면 가로 대비) 안쪽이면 "정면"으로 보고 양쪽을 다 번쩍인다
+	property number CenterBandRatio = 0.12
+
+	-- ── 순간 줌 ──
+	-- 확대량(%) — 일반 / 보스. 크면 멀미가 나니 2~5 안에서만
+	property number ZoomPunchPercent = 2
+	property number BossZoomPunchPercent = 4
+	-- 확대됐다 돌아오기까지 전체 시간(초)과, 그중 확대에 쓰는 비율
+	property number ZoomPunchDuration = 0.16
+	property number ZoomPunchRiseRatio = 0.3
+
+	-- ── 돌진 들이받기 밀림(유저 지정 2026-10-01) ──
+	-- 돌진 몬스터 도착 첫 타에만, 맞고 살짝 뒤에 화면이 뒤로 밀리듯 줌이 빠져 맵이 조금 더 넓게 보였다가 원위치.
+	-- 이때는 위 순간 줌(당기기) 대신 이것만 쓴다
+	property boolean RamPushEnabled = true
+	property number RamPushPercent = 1.5  -- 5 → 3 → 1.5(유저 지정 2026-10-01)
+	property number RamPushDelay = 0.06
+	property number RamPushOutTime = 0.1  -- 0.1 → 0.35 → 0.6 → 0.1(유저 지정 2026-10-01)
+	property number RamPushBackTime = 0.1  -- 0.35 → 0.15 → 0.1(유저 지정 2026-10-01)
+
+	-- 연출 사이 최소 간격(초) — 무적시간을 무시하는 무리/엘리트가 연달아 때려도 화면이 계속 번쩍이지 않게(보스는 예외)
+	property number MinInterval = 0.25
+
+	-- 내부 상태(클라 로컬)
+	property number _lastPlayAt = -100
+	property number _leftRemain = 0
+	property number _rightRemain = 0
+	property number _leftPeak = 0
+	property number _rightPeak = 0
+	property number _zoomElapsed = -1
+	property number _zoomAmount = 0
+	-- 이번 줌 연출의 시작 지연·전체 시간·그중 변하는 쪽 비율(순간 줌과 들이받기 밀림이 같은 진행기를 쓴다)
+	property number _zoomDelay = 0
+	property number _zoomDuration = 0.16
+	property number _zoomRise = 0.3
+	-- 연출 시작 때의 줌 값(끝나면 이 값으로 되돌린다)과, 마지막으로 연출이 끝난 시각
+	property number _zoomBase = 0
+	property number _zoomEndedAt = -100
+	-- 연출이 끝난 뒤 이 시간 안에 다시 시작하면 줌을 새로 읽지 않고 기억해 둔 기준값을 쓴다(초)
+	property number ZoomBaseReuseSeconds = 0.2
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		-- 띠는 꺼 둔 채로 시작한다
+		if isvalid(self.leftEdge) then self.leftEdge.Enable = false end
+		if isvalid(self.rightEdge) then self.rightEdge.Enable = false end
+		log("HitFeelLogic: ready (left=" .. tostring(isvalid(self.leftEdge)) .. ", right=" .. tostring(isvalid(self.rightEdge)) .. ")")
+	end
+
+	@ExecSpace("Multicast")
+	method void PlayHit(Vector2 attackerWorldPos, boolean isBoss, boolean isChargeRam)
+		-- 서버가 피해 적용 직후 호출 — 때린 몬스터의 화면 위치로 방향을 정해 플래시 + 줌을 건다(클라에서만 실행).
+		-- isChargeRam = 돌진 몬스터 도착 첫 타 — 순간 줌(당기기) 대신 뒤로 밀리는 줌 아웃을 건다
+		if self:IsServer() then return end
+		local now = _UtilLogic.ElapsedSeconds
+		if not isBoss and not isChargeRam and now - self._lastPlayAt < self.MinInterval then return end
+		self._lastPlayAt = now
+
+		local side = self:ResolveSide(attackerWorldPos)
+		if self.EdgeFlashEnabled then
+			local peak = self.EdgeFlashAlpha
+			if isBoss then peak = self.BossEdgeFlashAlpha end
+			self:PlaceEdges()
+			if side <= 0 then self:StartFlash(true, peak) end
+			if side >= 0 then self:StartFlash(false, peak) end
+		end
+		if isChargeRam and self.RamPushEnabled then
+			local total = self.RamPushOutTime + self.RamPushBackTime
+			self:StartZoom(-self.RamPushPercent, self.RamPushDelay, total, self.RamPushOutTime / total)
+		elseif self.ZoomPunchEnabled then
+			local percent = self.ZoomPunchPercent
+			if isBoss then percent = self.BossZoomPunchPercent end
+			self:StartZoom(percent, 0, self.ZoomPunchDuration, self.ZoomPunchRiseRatio)
+		end
+		log("HitFeelLogic: hit side=" .. tostring(side) .. " boss=" .. tostring(isBoss) .. " ram=" .. tostring(isChargeRam))
+	end
+
+	@ExecSpace("ClientOnly")
+	method integer ResolveSide(Vector2 attackerWorldPos)
+		-- 몬스터가 화면 어느 쪽에 있는지: -1 왼쪽 / 1 오른쪽 / 0 가운데(또는 판정 불가 → 양쪽)
+		local sw = _UILogic.ScreenWidth
+		if sw <= 0 then return 0 end
+		local screenPos = _UILogic:WorldToScreenPosition(attackerWorldPos)
+		if screenPos == nil then return 0 end
+		local offset = (screenPos.x - sw / 2) / sw
+		if offset < -self.CenterBandRatio then return -1 end
+		if offset > self.CenterBandRatio then return 1 end
+		return 0
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlaceEdges()
+		-- 띠를 실제 화면 양 끝에 붙인다 — 아이폰은 UI 캔버스가 안전영역 안쪽이라 캔버스 끝(±960)에 두면 화면 끝과 틈이 생긴다
+		if not isvalid(self.rootGroup) or not isvalid(self.leftEdge) or not isvalid(self.rightEdge) then return end
+		local x0 = -960
+		local x1 = 960
+		local m = _MobileScreenFitLogic:MeasureScreenLocal(self.rootGroup.UITransformComponent, 1920, 1080)
+		if m ~= nil then
+			x0 = m.x0
+			x1 = m.x1
+		end
+		self.leftEdge.UITransformComponent.anchoredPosition = Vector2(x0 + self.EdgeWidth / 2, 0)
+		self.rightEdge.UITransformComponent.anchoredPosition = Vector2(x1 - self.EdgeWidth / 2, 0)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void StartFlash(boolean isLeft, number peak)
+		-- 한쪽 띠를 즉시 최대 밝기로 켜고, OnUpdate가 EdgeFlashDuration 동안 서서히 끈다
+		if isLeft then
+			if not isvalid(self.leftEdge) or not isvalid(self.leftCanvas) then return end
+			self._leftPeak = peak
+			self._leftRemain = self.EdgeFlashDuration
+			self.leftCanvas.GroupAlpha = peak
+			self.leftEdge.Enable = true
+		else
+			if not isvalid(self.rightEdge) or not isvalid(self.rightCanvas) then return end
+			self._rightPeak = peak
+			self._rightRemain = self.EdgeFlashDuration
+			self.rightCanvas.GroupAlpha = peak
+			self.rightEdge.Enable = true
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void StartZoom(number percent, number delay, number duration, number riseRatio)
+		-- 지금 줌 값을 기준으로 delay 뒤 잠깐 percent만큼(+ 확대 / - 축소 = 시야 넓어짐) 바꿨다 되돌린다.
+		-- 이미 도는 중이면 기준값은 그대로 두고 처음부터 다시 재생한다.
+		-- ⚠ cam.ZoomRatio는 쓴 직후 프레임에 읽으면 한 프레임 전 값이 나올 수 있다(2026-09-30 실측) — 그래서 연출 중에는
+		--   절대 되읽지 않고, 방금 끝난 직후(ZoomBaseReuseSeconds 이내)에 다시 시작할 때도 기억해 둔 기준값을 그대로 쓴다.
+		local cam = _CameraService:GetCurrentCameraComponent()
+		if cam == nil then return end
+		local now = _UtilLogic.ElapsedSeconds
+		if self._zoomElapsed < 0 and now - self._zoomEndedAt > self.ZoomBaseReuseSeconds then
+			self._zoomBase = cam.ZoomRatio
+		end
+		self._zoomAmount = percent / 100
+		self._zoomDelay = delay
+		self._zoomDuration = duration
+		self._zoomRise = riseRatio
+		self._zoomElapsed = 0
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUpdate(number delta)
+		-- 플래시 페이드와 줌 복귀를 프레임마다 진행한다(도는 게 없으면 바로 끝)
+		if self._leftRemain > 0 then
+			self._leftRemain = self._leftRemain - delta
+			if self._leftRemain <= 0 then
+				if isvalid(self.leftEdge) then self.leftEdge.Enable = false end
+			elseif isvalid(self.leftCanvas) then
+				self.leftCanvas.GroupAlpha = self._leftPeak * (self._leftRemain / self.EdgeFlashDuration)
+			end
+		end
+		if self._rightRemain > 0 then
+			self._rightRemain = self._rightRemain - delta
+			if self._rightRemain <= 0 then
+				if isvalid(self.rightEdge) then self.rightEdge.Enable = false end
+			elseif isvalid(self.rightCanvas) then
+				self.rightCanvas.GroupAlpha = self._rightPeak * (self._rightRemain / self.EdgeFlashDuration)
+			end
+		end
+		if self._zoomElapsed >= 0 then self:TickZoomPunch(delta) end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void TickZoomPunch(number delta)
+		-- 줌 연출 한 프레임 — 기준값 × (1 + 확대량 × 곡선)을 쓰고, 끝나면 기준값으로 정확히 되돌린다
+		local cam = _CameraService:GetCurrentCameraComponent()
+		if cam == nil then
+			self._zoomElapsed = -1
+			return
+		end
+		self._zoomElapsed = self._zoomElapsed + delta
+		local t = self._zoomElapsed - self._zoomDelay
+		if t < 0 then return end
+		local p = t / self._zoomDuration
+		if p >= 1 then
+			cam.ZoomRatio = self._zoomBase
+			self._zoomElapsed = -1
+			self._zoomEndedAt = _UtilLogic.ElapsedSeconds
+			return
+		end
+		local curve = 0
+		if p < self._zoomRise then
+			curve = p / self._zoomRise
+		else
+			curve = 1 - (p - self._zoomRise) / (1 - self._zoomRise)
+		end
+		local zoom = self._zoomBase * (1 + self._zoomAmount * curve)
+		if zoom > cam.ZoomRatioMax then zoom = cam.ZoomRatioMax end
+		if zoom < cam.ZoomRatioMin then zoom = cam.ZoomRatioMin end
+		cam.ZoomRatio = zoom
+	end
+
+end
