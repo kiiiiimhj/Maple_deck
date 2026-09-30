@@ -31,7 +31,10 @@ script GameOverUI extends Logic
 	-- 다시하기 버튼 사이(중앙)에 위치. 그 순간엔 원래 두 버튼을 숨기고 이것만 보여준다.
 	property ButtonComponent btnRestartOvertime = "e4d263f1-004c-49b3-b97b-cab030ab1b1c"
 
-	property integer itemSlotCount = 26
+	-- 칸 수 = ui/GameOverGroup.ui의 ItemSlot_0 ~ ItemSlot_41 (잡템 + 이번 판 획득물이 같이 쓴다)
+	property integer itemSlotCount = 42
+	-- 지금 화면에 그려져 있는 "이번 판 획득물" 문자열(RunLootLogic.Summary) — 떠 있는 동안 바뀌면 다시 그린다
+	property string _shownLoot = ""
 	property number scrollableRangePx = 670
 
 	-- 내부 상태
@@ -78,6 +81,8 @@ script GameOverUI extends Logic
 		end
 		if isOver and isvalid(self.gameOverGroup) and self.gameOverGroup.Enable then
 			self:RefreshContinueButton()
+			-- 죽는 순간 날아오던 드롭(다이아/뽑기권)이 결과창이 뜬 뒤에 적립될 수 있다 — 바뀌면 칸을 다시 그린다
+			if _RunLootLogic:GetSummary() ~= self._shownLoot then self:RefreshScore() end
 		end
 	end
 
@@ -103,28 +108,57 @@ script GameOverUI extends Logic
 		local defs = _PlayerInventory:GetAllItemDefs()
 		local orderedIds = _PlayerInventory:GetOrderedItemIds()
 		local totalScore = 0
+		-- 맨 앞: 이번 판에 얻은 다이아/뽑기권/장비/주문서(유저 지정 2026-09-30) — 보여주기만 하고 점수에는 안 넣는다
+		local used = self:FillLootSlots()
 		for i, itemId in ipairs(orderedIds) do
 			local count = _PlayerInventory:GetItemCount(itemId)
 			local def = defs[itemId]
 			totalScore = totalScore + count * def.coinValue
-			local slot = self.itemList:GetChildByName("ItemSlot_" .. tostring(i - 1))
-			if isvalid(slot) then
-				slot.Enable = true
-				local icon = slot:GetChildByName("Icon")
-				if isvalid(icon) then
-					icon.SpriteGUIRendererComponent.ImageRUID = DataRef(def.icon)
-					self:ApplyIconAspect(icon, def.keepAspect == true)
-				end
-				local countText = slot:GetChildByName("CountText")
-				if isvalid(countText) then countText.TextComponent.Text = "x" .. tostring(count) end
-			end
+			self:FillSlot(used, def.icon, count, def.keepAspect == true)
+			used = used + 1
 		end
-		-- 이번 런에 안 나온 아이템 슬롯은 숨긴다
-		for i = #orderedIds, self.itemSlotCount - 1 do
+		-- 이번 런에 안 쓰인 슬롯은 숨긴다
+		for i = used, self.itemSlotCount - 1 do
 			local slot = self.itemList:GetChildByName("ItemSlot_" .. tostring(i))
 			if isvalid(slot) then slot.Enable = false end
 		end
 		self.scoreValueText.Text = _LocalizationService:GetTextFormat("FMT_GAMEOVERUI_001", self:FormatNumber(totalScore))
+	end
+
+	@ExecSpace("ClientOnly")
+	method integer FillLootSlots()
+		-- RunLootLogic.Summary("아이콘|개수;...")를 앞쪽 칸에 채우고, 쓴 칸 수를 돌려준다
+		local summary = _RunLootLogic:GetSummary()
+		self._shownLoot = summary
+		local used = 0
+		if summary == nil or summary == "" then return used end
+		for part in string.gmatch(summary, "[^;]+") do
+			local sep = (string.find(part, "|", 1, true))
+			if sep ~= nil and used < self.itemSlotCount then
+				local iconRUID = string.sub(part, 1, sep - 1)
+				local count = tonumber(string.sub(part, sep + 1)) or 0
+				-- 장비 아이콘은 가로세로 비율이 제각각이라 칸 안에 원본 비율로 맞춘다
+				self:FillSlot(used, iconRUID, math.floor(count), true)
+				used = used + 1
+			end
+		end
+		log("GameOverUI: run loot slots=" .. tostring(used))
+		return used
+	end
+
+	@ExecSpace("ClientOnly")
+	method void FillSlot(integer index, string iconRUID, integer count, boolean keepAspect)
+		-- 결과창 칸 하나(ItemSlot_N)에 아이콘과 "x개수"를 넣고 켠다 — 칸이 모자라면 조용히 넘긴다
+		local slot = self.itemList:GetChildByName("ItemSlot_" .. tostring(index))
+		if not isvalid(slot) then return end
+		slot.Enable = true
+		local icon = slot:GetChildByName("Icon")
+		if isvalid(icon) then
+			icon.SpriteGUIRendererComponent.ImageRUID = DataRef(iconRUID)
+			self:ApplyIconAspect(icon, keepAspect)
+		end
+		local countText = slot:GetChildByName("CountText")
+		if isvalid(countText) then countText.TextComponent.Text = "x" .. tostring(count) end
 	end
 
 	@ExecSpace("ClientOnly")
