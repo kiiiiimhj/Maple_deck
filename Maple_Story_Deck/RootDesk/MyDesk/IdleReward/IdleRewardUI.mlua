@@ -25,6 +25,9 @@ script IdleRewardUI extends Logic
 	property Entity scene = "2e9150a4-9a67-4219-b702-f256c0ba1bd8"
 	property Entity sceneBg = "b228aaa8-bcc0-479d-bf67-1306dca9cb55"
 	property Entity avatar = "f6005846-ffd3-4143-97be-cd2abd7b3a7b"
+	-- 장면 양끝 < > — 열어 본(5분 이상 버틴) 에피소드 사이에서만 넘긴다. 첫 에피면 <, 최고 에피면 >를 숨긴다(유저 지정 2026-10-01)
+	property ButtonComponent btnEpPrev = "e62ffe96-27ea-4387-8d31-a922c04c1901"
+	property ButtonComponent btnEpNext = "a35313b6-0647-440d-9d3e-a50f89654289"
 	property ButtonComponent lobbyButton = "b4663786-54bd-4e24-853d-eca8e240c194"
 	property Entity lobbyRedDot = "0ccffead-15bd-4ba5-9ea7-9f34573ba562"
 	-- 장비 인벤토리 부족 확인창(유저 지정 2026-09-15) — 옵션의 게임 종료 확인창과 같은 모양
@@ -89,6 +92,8 @@ script IdleRewardUI extends Logic
 		if isvalid(self.lobbyButton) then
 			self:ConnectClick(self.lobbyButton.Entity, function() self:Open() end)
 		end
+		if isvalid(self.btnEpPrev) then self:ConnectClick(self.btnEpPrev.Entity, function() self:OnEpisodeArrow(-1) end) end
+		if isvalid(self.btnEpNext) then self:ConnectClick(self.btnEpNext.Entity, function() self:OnEpisodeArrow(1) end) end
 		self:CloseConfirm()
 		if isvalid(self.btnConfirmYes) then
 			self:ConnectClick(self.btnConfirmYes.Entity, function() self:OnConfirmDiscardYes() end)
@@ -151,13 +156,14 @@ script IdleRewardUI extends Logic
 		_IdleRewardLogic:RequestRefresh()
 		-- 장면 속 아르카나에 지금 장착한 장비를 입힌다(뽑기 캐릭터와 같은 규칙)
 		_GachaUI:ApplyPlayerAvatarTo(self.avatar)
-		local ep = _IdleRewardLogic:GetMaxEpisode()
+		local ep = _IdleRewardLogic:GetSceneEpisode()
 		self.chapterText.Text = _LocText:Resolve(_IdleRewardLogic:GetEpisodeName(ep))
 		self:StartScene(ep)
+		self:RefreshEpisodeArrows(ep)
 		self:RefreshCounters()
 		if self._tickTimerId ~= 0 then _TimerService:ClearTimer(self._tickTimerId) end
 		self._tickTimerId = _TimerService:SetTimerRepeat(function() self:RefreshCounters() end, 0.25)
-		log("IdleRewardUI: opened maxEp=" .. ep .. " sec=" .. self:GetDisplaySeconds())
+		log("IdleRewardUI: opened ep=" .. ep .. " maxEp=" .. _IdleRewardLogic:GetMaxEpisode() .. " sec=" .. self:GetDisplaySeconds())
 	end
 
 	@ExecSpace("ClientOnly")
@@ -174,6 +180,31 @@ script IdleRewardUI extends Logic
 		self.popupGroup.Enable = false
 		self._isOpen = false
 		self:RefreshLobbyButton()
+	end
+
+	-- ── 에피소드 < > ─────────────────────────────────────────────────────────
+	@ExecSpace("ClientOnly")
+	method void RefreshEpisodeArrows(integer ep)
+		-- 갈 수 있는 쪽만 보인다: 첫 에피소드면 < 숨김, 열어 본 가장 높은 에피소드면 > 숨김
+		local maxEp = _IdleRewardLogic:GetMaxEpisode()
+		if isvalid(self.btnEpPrev) then self.btnEpPrev.Entity.Enable = ep > 1 end
+		if isvalid(self.btnEpNext) then self.btnEpNext.Entity.Enable = ep < maxEp end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEpisodeArrow(integer delta)
+		-- 장면은 바로 바꾸고, 서버에 알려 장비 부위를 바꾼다(이미 쌓인 장비는 서버가 그대로 고정해 둔다)
+		if not self._isOpen then return end
+		local cur = self._sceneEp
+		if cur < 1 then cur = _IdleRewardLogic:GetSceneEpisode() end
+		local ep = cur + delta
+		local maxEp = _IdleRewardLogic:GetMaxEpisode()
+		if ep < 1 or ep > maxEp then return end
+		_IdleRewardLogic:RequestSetEpisode(ep)
+		self.chapterText.Text = _LocText:Resolve(_IdleRewardLogic:GetEpisodeName(ep))
+		self:StartScene(ep)
+		self:RefreshEpisodeArrows(ep)
+		log("IdleRewardUI: episode arrow -> ep=" .. ep)
 	end
 
 	-- ── 서버 동기화 ─────────────────────────────────────────────────────────
@@ -214,7 +245,7 @@ script IdleRewardUI extends Logic
 		-- 같은 장비끼리 묶어 "아이콘 x개수"로 보여준다(4시간마다 1개라 하루 최대 6개 — 칸 4개면 충분)
 		if not isvalid(self.gearBox) then return end
 		local logic = _IdleRewardLogic
-		local ids = logic:GetGearItemIds(logic:GetMaxEpisode(), logic:GetGearSeed(), count)
+		local ids = logic:GetGearItemIds(logic:GetGearSeed(), count)
 		local order = {}
 		local counts = {}
 		for _, id in ipairs(ids) do
@@ -441,7 +472,8 @@ script IdleRewardUI extends Logic
 		-- groundY = 사진 속 바닥(발판 윗면) 높이(장면 로컬 y). 사진 비율은 장면(900x190)과 같게 잘랐다
 		-- 캡처법: 그 맵을 Maker에서 연 채 play → UI 그룹 전부 끄기(플레이어는 원래 숨김) → 스샷(1833x1031)에서
 		-- 플레이어 발밑(화면 y≈748) 기준 x316~1516, y551~804(1200x253 = 장면 비율)를 잘라 계정 리소스로 업로드.
-		-- Deck_Idle_EP1_Game = map01 / EP2_Game = ep2_map1 / EP3_Game = ep3_map1
+		-- Deck_Idle_EP1_Game = map01 / EP2_Game = ep2_map1 / EP3_Game = ep3_map1 / EP4_Game = ep4_map1(2026-10-01, 바닥 스샷 y≈820 → y632~885)
+		if ep == 4 then return { bg = "54e88adbcd444af2806552b62f66d5e3", groundY = -46 } end
 		if ep == 2 then return { bg = "47ee7f1d83684b539323cdd593e58b62", groundY = -49 } end
 		if ep == 3 then return { bg = "f52a47a2c6d44726939d3035c73072c4", groundY = -46 } end
 		return { bg = "5faf274e5adf47cc97dcb8ea754440f7", groundY = -47 }
@@ -454,6 +486,12 @@ script IdleRewardUI extends Logic
 			return {
 				{ stand = "ca136923b7e84267af993bdbabada385", move = "a25f27e01d7446c6910550d595ef08b6", hit = "f0f493b1149e4b6a863890a82d82fca6", die = "8bff7824fb974b69b02d576b7c6ed257", dieDur = 0.55 },  -- 스타픽시
 				{ stand = "ff4a57bc3d4a4488b0053c33f4c3369f", move = "6c09e340af2f4ca697463ef36a95f523", hit = "187b73445d4645d68750ed12f924203a", die = "64990174c8d2411a82a12a9569abf085", dieDur = 0.55 },  -- 루나픽시
+			}
+		elseif ep == 4 then
+			-- 에피4 첫 존(134) — GameManager._ep4Species brown_teddy / pink_teddy
+			return {
+				{ stand = "46fd51a318b64738a36beeb3db02a970", move = "dcdfa9fce83949229330906599350caa", hit = "5266f286ebc749198328728131670684", die = "014e06210ad6433185b2d923520dd846", dieDur = 0.55 },  -- 브라운 테니
+				{ stand = "c1da8423a262404a8823d5bb998b642a", move = "cd2ed823679b4b3cadc65b2c7f399945", hit = "9e6ba258dc9e4d6fba1e8f05e51d614f", die = "e91dd69b83f743bfac592f1e4ab7c197", dieDur = 0.55 },  -- 핑크 테니
 			}
 		elseif ep == 3 then
 			return {

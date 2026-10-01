@@ -14,7 +14,7 @@ script SkillInventory extends Logic
 
 	-- 스킬별 획득 조각 개수 / 현재 레벨 — key = 스킬 인덱스 "0".."17" 문자열, value = 개수/레벨.
 	-- RelicInventory와 완전히 동일한 구조. SyncTable은 next/pairs를 못 쓰므로 항상 0~skillCount-1 범위를 직접 순회한다
-	property integer skillCount = 102
+	property integer skillCount = 113
 
 	-- 강화 안 한 기본 상태가 Lv.1이고, 9번 강화하면 Lv.10이 최대(9줄짜리 비용표와 1:1 대응).
 	-- 보너스는 Lv3/6/9에서만 상승(Lv1,2,4,5,7,8,10은 효과 없이 조각/골드만 소모)
@@ -36,7 +36,9 @@ script SkillInventory extends Logic
 
 	-- 스킬탭 슬롯 인덱스(0~19) ↔ 실제 스킬 정보. grade는 1=일반/2=매직/3=레어이며, 등급 오름차순으로
 	-- 이미 정렬해뒀다 — SkillUI가 슬롯 순서 그대로(SkillSlot_0..19) 그리기만 하면 "낮은 등급부터" 노출된다.
-	-- 나중에 스킬이 추가되면 이 배열에 등급 순서에 맞는 자리로 끼워 넣고 skillCount만 늘리면 된다.
+	-- ⚠ 스킬 추가는 반드시 **배열 끝에 이어 붙인다**(2026-10-01). 유저 저장 데이터(Skill.Counts/Levels)가 인덱스 문자열을
+	-- 키로 쓰므로 중간에 끼워 넣으면 뒤 번호가 밀려 남의 스킬 레벨/조각이 된다. 끝에 붙인 스킬은 GetSkillCharacter의
+	-- _extraSkillCharacter 표에 캐릭터를 적고, 스킬탭(TitleGroup.ui SkillSlot_N)·확률공시(GachaGroup.ui Row_N) 칸도 늘릴 것.
 	property any _skillDefs = {
 		{ name = "MLUA_CARDMANAGER_006", icon = "5ef24c581426423f9919bef97ab23f56", grade = 1 },
 		{ name = "MLUA_SKILLINVENTORY_001", icon = "234aca1a4ce946119b68e3717991e775", grade = 1 },
@@ -153,6 +155,19 @@ script SkillInventory extends Logic
 		{ name = "MLUA_CARDREGISTRY_077", icon = "d0156a43b7f649dbb88ef13e324436db", grade = 1 },
 		{ name = "MLUA_CARDREGISTRY_076", icon = "1f3c103ca9b2406194deafd0989bc790", grade = 1 },
 		{ name = "MLUA_CARDREGISTRY_075", icon = "cc6f04c6134241369d67edb9ad6bff8c", grade = 2 },
+
+		-- 인덱스 102~112: 2026-10-01 신규 11종(끝에 이어 붙임 — 캐릭터는 _extraSkillCharacter). 기본기 매직 / 조합 레어 / 패시브 매직.
+		{ name = "MLUA_CARDMANAGER_546", icon = "fce4228656b546ac98793726418ffc86", grade = 2 },  -- 102 프리징 브레스(26)
+		{ name = "MLUA_CARDMANAGER_547", icon = "412638a16dc643f595b035ba776ef425", grade = 3 },  -- 103 프로즌 오브(27)
+		{ name = "MLUA_CARDMANAGER_548", icon = "48d122c4eb43493bb1ad12758bc32418", grade = 3 },  -- 104 라이트닝 오브(28)
+		{ name = "MLUA_CARDMANAGER_555", icon = "0c7429594f59465da53d31def2b1c566", grade = 2 },  -- 105 윈드 오브 프레이(121)
+		{ name = "MLUA_CARDMANAGER_556", icon = "1145fd299098487cbbb083e611a3669e", grade = 3 },  -- 106 게일 오브 프레이(122)
+		{ name = "MLUA_CARDMANAGER_557", icon = "a848ac6a11194dc6a5c25bfa5cd5331b", grade = 3 },  -- 107 스네어 오브 프레이(123)
+		{ name = "MLUA_CARDMANAGER_569", icon = "69acc0a1482143d5a25f80da945e0f22", grade = 2 },  -- 108 인사이징(192)
+		{ name = "MLUA_CARDMANAGER_570", icon = "b507f575ffb9478d9d98a6ff3c727954", grade = 3 },  -- 109 인사이징:관(193)
+		{ name = "MLUA_CARDMANAGER_571", icon = "662464c2c40d4600a75e3e70cd576346", grade = 3 },  -- 110 인사이징:폭(194, 아이콘 -90도 회전)
+		{ name = "MLUA_CARDMANAGER_558", icon = "f0007cc9b4324713b0ad8ee938f40325", grade = 2 },  -- 111 컨센트레이션(124, 패시브)
+		{ name = "MLUA_CARDMANAGER_572", icon = "52162587bc534b9385af8c77513d93d4", grade = 2 },  -- 112 아이언 바디(195, 패시브)
 	}
 
 	property any _storage = nil
@@ -249,6 +264,19 @@ script SkillInventory extends Logic
 		end
 	end
 
+	-- 뽑기 해금 스킬(2026-10-01 신규 102~112, 유저 지정 "자물쇠 걸자"): 조각을 한 번도 못 받았고 강화 기록도 없으면 잠김.
+	-- 잠긴 스킬은 스킬탭에 자물쇠가 덮이고, 인게임 레벨업 선택지에 "새로 배우기(unlock)"로 나오지 않는다(CardManager.IsGachaLockedCard).
+	-- 강화하면 조각이 0이 될 수 있어서 Levels(강화한 적 있으면 2 이상 저장)도 같이 본다
+	method boolean IsSkillLocked(integer skillIndex)
+		if skillIndex < 102 then return false end
+		local key = tostring(skillIndex)
+		local count = self.Counts[key]
+		if count ~= nil and count > 0 then return false end
+		local level = self.Levels[key]
+		if level ~= nil and level > 0 then return false end
+		return true
+	end
+
 	method boolean IsSkillNew(integer skillIndex)
 		local key = tostring(skillIndex)
 		return self.NewSet[key] == true
@@ -324,6 +352,13 @@ script SkillInventory extends Logic
 		return def.icon
 	end
 
+	method number GetSkillIconRotation(integer skillIndex)
+		-- 스킬탭/강화 팝업 아이콘 회전(도). 인게임 카드(CardManager.GetCardIconRotation)와 같은 그림을 같은 방향으로 보이게 한다
+		if skillIndex == 53 then return -90 end  -- 스카링 블레이드(카드 169)
+		if skillIndex == 110 then return -90 end  -- 인사이징:폭(카드 194)
+		return 0
+	end
+
 	method integer GetSkillCount()
 		-- 다른 Logic(GachaUI 등)이 스킬 전체를 순회할 때 쓴다 — skillCount 필드를 로직 밖에서
 		-- 직접 읽으면 런타임에 nil이 잡힐 수 있어서 접근자로 노출한다
@@ -385,7 +420,21 @@ script SkillInventory extends Logic
 	-- 0~19=아르카나(20) / 20~39=실피드(20) / 40~59=레이온(20) / 60~79=쉐이드(20) / 80~101=린(22).
 	-- ⚠ 린만 22종이라 "캐릭터당 20개"로 계산하면 안 된다(_skillDefs 주석 참고).
 	-- SkillUI의 _characterFilter(0/1/2/3/4)와 동일한 번호 체계.
+	-- 102 이후(끝에 이어 붙인 스킬)는 구간이 아니라 이 표로 캐릭터를 정한다(없으면 아르카나 취급하지 않게 로그를 남긴다).
+	property any _extraSkillCharacter = {
+		[102] = 0, [103] = 0, [104] = 0,
+		[105] = 1, [106] = 1, [107] = 1, [111] = 1,
+		[108] = 2, [109] = 2, [110] = 2, [112] = 2,
+	}
+
 	method integer GetSkillCharacter(integer skillIndex)
+		-- 스킬 인덱스 → 캐릭터 번호(0=아르카나/1=실피드/2=레이온/3=쉐이드/4=린)
+		if skillIndex >= 102 then
+			local c = self._extraSkillCharacter[skillIndex]
+			if c ~= nil then return c end
+			log_warning("SkillInventory: no character for skill " .. tostring(skillIndex))
+			return 0
+		end
 		if skillIndex >= 80 then return 4
 		elseif skillIndex >= 60 then return 3
 		elseif skillIndex >= 40 then return 2

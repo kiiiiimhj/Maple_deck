@@ -588,6 +588,22 @@ script CardManager extends Logic
 	property number Card28HitFrameDuration = 0.05
 	property number Card28CritBonus = 0.20
 	property number Card28StunDuration = 1.5     -- 보스·엘리트는 절반
+	-- 로비 스킬 강화 Lv9(2026-10-01): 프리징 브레스 빙결 +1 확률 / 프로즌 오브 폭발 비율 / 라이트닝 오브 스턴 추가 시간
+	property number Card26InvLv9FreezeChance = 0.2
+	property number Card27InvLv9BallRatio = 0.65
+	property number Card28InvLv9StunBonus = 0.5
+
+	method number GetOrbBallDamageRatio(integer cardIdx)
+		-- 오브 폭발 = 브레스 대미지의 이 비율. 프로즌 오브만 로비 강화 Lv9에서 50% → 65%
+		if cardIdx == 27 and self:GetSkillInvLevel2(27) >= 9 then return self.Card27InvLv9BallRatio end
+		return self.OrbBallDamageRatio
+	end
+
+	method number GetLightningOrbStunDuration()
+		-- 라이트닝 오브 스턴(보스·엘리트는 호출하는 쪽에서 절반). 로비 강화 Lv9에서 +0.5초
+		if self:GetSkillInvLevel2(28) >= 9 then return self.Card28StunDuration + self.Card28InvLv9StunBonus end
+		return self.Card28StunDuration
+	end
 
 	method table GetFreezingBreathFrames()
 		-- 프리징 브레스 팩 "keydown" 클립의 프레임 스프라이트(순서대로)
@@ -758,6 +774,7 @@ script CardManager extends Logic
 						else _DpsMeterLogic:Tag(cardIdx, m):TakeDamage(finalDmg) end
 						m:ApplySlow(self.Card26SlowDuration)
 						for i = 1, freezeStacks do m:AddFreezeStack() end
+						if cardIdx == 26 and self:GetSkillInvLevel2(26) >= 9 and _UtilLogic:RandomDouble() < self.Card26InvLv9FreezeChance then m:AddFreezeStack() end
 						hitCount = hitCount + 1
 						if orbKind > 0 and not m._dead then self:SpawnOrbBall(cardIdx, m, damage, isCrit, orbKind, castZoneIndex) end
 					end
@@ -802,11 +819,11 @@ script CardManager extends Logic
 			self:PlayFrameEffect(hitFrames, hitPos, hitScale, hitDur, 1)
 			self:PlayBreathSfx(hitSound)
 			if not isvalid(target) or not isvalid(target.Entity) or target._dead then return end
-			local ballDmg = damage * self.OrbBallDamageRatio * self:GetIceStackBonus(target)
+			local ballDmg = damage * self:GetOrbBallDamageRatio(cardIdx) * self:GetIceStackBonus(target)
 			if isCrit then _DpsMeterLogic:Tag(cardIdx, target):TakeDamageCrit(ballDmg * 2)
 			else _DpsMeterLogic:Tag(cardIdx, target):TakeDamage(ballDmg) end
 			if orbKind == 2 and not target._dead then
-				local stunDur = self.Card28StunDuration
+				local stunDur = self:GetLightningOrbStunDuration()
 				if target._isBoss or target._isElite then stunDur = stunDur * 0.5 end
 				target:ApplyStun(stunDur, true)
 			end
@@ -14186,6 +14203,28 @@ script CardManager extends Logic
 	property number Card123BindDuration = 2.0  -- 보스·엘리트는 절반
 	property number Card123BindPlayRatio = 0.55  -- 속박 연출 한 번의 길이 = 속박 시간 × 이 값(두 번을 겹쳐 재생)
 	property number Card123CritBonus = 0.20
+	-- 로비 스킬 강화 Lv9(2026-10-01): 윈드 판정 범위 배율 / 게일 추가타 비율 / 스네어 속박 추가 시간
+	property number Card121InvLv9AreaMult = 1.15
+	property number Card122InvLv9SecondaryRatio = 0.45
+	property number Card123InvLv9BindBonus = 0.5
+
+	method number GetPreyAreaMult(integer cardIdx)
+		-- 프레이 판정 타원 배율 — 윈드 오브 프레이만 로비 강화 Lv9에서 15% 넓어진다(연출 그림 3.9x2.7유닛보다는 여전히 안쪽)
+		if cardIdx == 121 and self:GetSkillInvLevel2(121) >= 9 then return self.Card121InvLv9AreaMult end
+		return 1.0
+	end
+
+	method number GetPreySecondaryRatio(integer cardIdx)
+		-- 추가타(돌개바람/바람 그네) 비율 — 게일만 로비 강화 Lv9에서 30% → 45%
+		if cardIdx == 122 and self:GetSkillInvLevel2(122) >= 9 then return self.Card122InvLv9SecondaryRatio end
+		return self.PreySecondaryRatio
+	end
+
+	method number GetSnareBindDuration()
+		-- 스네어 속박 시간(보스·엘리트는 호출하는 쪽에서 절반). 로비 강화 Lv9에서 +0.5초
+		if self:GetSkillInvLevel2(123) >= 9 then return self.Card123BindDuration + self.Card123InvLv9BindBonus end
+		return self.Card123BindDuration
+	end
 
 	method table GetWindOfPreyFrames()
 		-- 윈드 오브 프레이 팩 "effect"
@@ -14259,13 +14298,16 @@ script CardManager extends Logic
 
 	-- 컨센트레이션 — 몬스터 공격 회피 확률. Lv1:3% / Lv2:5% / Lv3:7% / Lv4:9% / Lv5:12% (획득 즉시 영구 적용)
 	method number GetConcentrationEvadeChance()
-		if self.ConcentrationLevel >= 5 then return 0.12
-		elseif self.ConcentrationLevel >= 4 then return 0.09
-		elseif self.ConcentrationLevel >= 3 then return 0.07
-		elseif self.ConcentrationLevel >= 2 then return 0.05
-		elseif self.ConcentrationLevel >= 1 then return 0.03
+		-- 카드 레벨 회피 + 로비 스킬 강화(인덱스 111) Lv3/6/9 = +1/2/4%. 카드를 안 가진 판(레벨 0)엔 강화분도 없다
+		local base = 0
+		if self.ConcentrationLevel >= 5 then base = 0.12
+		elseif self.ConcentrationLevel >= 4 then base = 0.09
+		elseif self.ConcentrationLevel >= 3 then base = 0.07
+		elseif self.ConcentrationLevel >= 2 then base = 0.05
+		elseif self.ConcentrationLevel >= 1 then base = 0.03
 		end
-		return 0
+		if base <= 0 then return 0 end
+		return base + self:GetSkillInvTierPercent(111, 0.01, 0.02, 0.04)
 	end
 
 	@ExecSpace("ServerOnly")
@@ -14305,7 +14347,10 @@ script CardManager extends Logic
 				table.insert(anchors, { x = p.x, y = p.y + self.Card121AreaYOffset, target = target, band = self:GetDepthBand(target) })
 			end
 		end
-		log("PreyCast: card=" .. cardIdx .. " anchors=" .. #anchors .. "/" .. targetCount .. " dmg=" .. math.floor(damage))
+		local areaMult = self:GetPreyAreaMult(cardIdx)
+		local areaHalfW = self.Card121AreaHalfW * areaMult
+		local areaHalfH = self.Card121AreaHalfH * areaMult
+		log("PreyCast: card=" .. cardIdx .. " anchors=" .. #anchors .. "/" .. targetCount .. " dmg=" .. math.floor(damage) .. " area=" .. areaHalfW .. "x" .. areaHalfH)
 		if #anchors == 0 or map == nil then return end
 
 		_TimerService:SetTimerOnce(function()
@@ -14323,7 +14368,7 @@ script CardManager extends Logic
 					for _, a in ipairs(anchors) do
 						if m == a.target then
 							inArea = true
-						elseif self:InEllipse(mp.x - a.x, mp.y - a.y, self.Card121AreaHalfW, self.Card121AreaHalfH) and self:IsInDepthBand(m, a.band) then
+						elseif self:InEllipse(mp.x - a.x, mp.y - a.y, areaHalfW, areaHalfH) and self:IsInDepthBand(m, a.band) then
 							inArea = true
 						end
 						if inArea then break end
@@ -14362,7 +14407,7 @@ script CardManager extends Logic
 			if not isvalid(self) then return end
 			if castZoneIndex ~= _MapManager.CurrentMapIndex then return end
 			local alive = isvalid(target) and isvalid(target.Entity) and not target._dead
-			local secondaryDmg = damage * self.PreySecondaryRatio
+			local secondaryDmg = damage * self:GetPreySecondaryRatio(cardIdx)
 			if kind == 1 then
 				-- 돌개바람: 연출은 대상 생사와 무관하게 끝까지, 추가타 + 넉백은 Card122TornadoHitDelay 뒤에
 				self:PlayFrameEffectAlpha(self:GetGaleTornadoFrames(), pos, self.Card122TornadoScale * ratio, self.Card122TornadoFrameDuration, 1, self.Card122TornadoAlpha)
@@ -14383,20 +14428,39 @@ script CardManager extends Logic
 				end, self.Card122TornadoHitDelay)
 			else
 				-- 바람 그네: 추가타 + 속박을 걸고, 속박 시간 동안 special1 연출 하나만으로 버틴다(유저 지정 2026-10-01).
-				-- 한 번 재생 길이를 속박 시간의 Card123BindPlayRatio로 잡고, 두 번째를 첫 번째가 끝나기 전에 겹쳐 띄워
-				-- 끊김 없이 속박이 풀릴 때까지 이어지게 한다(2초 속박이면 1.1초짜리 두 번, 0.2초 겹침)
-				local bindDur = self.Card123BindDuration
-				if alive and (target._isBoss or target._isElite) then bindDur = bindDur * 0.5 end
+				-- 한 번 재생 길이는 **기본 속박 시간**(2초, 보스·엘리트 1초) × Card123BindPlayRatio로 고정하고(재생 속도 유지),
+				-- 앞 장이 끝나기 전에 다음 장을 겹쳐 띄워 속박이 풀리는 순간 마지막 장이 끝나게 한다.
+				-- 기본 2초 = 1.1초짜리 두 번(0.9초 간격, 0.2초 겹침). 로비 강화 Lv9(+0.5초)면 같은 속도로 세 번(0 / 0.9 / 1.4초 시작)
+				-- — 유저 지정 2026-10-01 "겹치게 해주고"(속도를 늦추지 말고 한 번 더 겹쳐 띄우기)
+				local bindDur = self:GetSnareBindDuration()
+				local baseBindDur = self.Card123BindDuration
+				if alive and (target._isBoss or target._isElite) then
+					bindDur = bindDur * 0.5
+					baseBindDur = baseBindDur * 0.5
+				end
 				local bindFrames = self:GetSnareBindFrames()
 				local bindScale = self.Card123BindScale * ratio
-				local playLen = bindDur * self.Card123BindPlayRatio
+				local playLen = baseBindDur * self.Card123BindPlayRatio
+				local playStep = baseBindDur - playLen  -- 다음 장이 뜨는 간격(기본 속박의 두 장 배치와 같은 간격)
 				local bindFrameDur = playLen / #bindFrames
-				self:PlayFrameEffect(bindFrames, pos, bindScale, bindFrameDur, 1)
-				_TimerService:SetTimerOnce(function()
-					if not isvalid(self) then return end
-					if castZoneIndex ~= _MapManager.CurrentMapIndex then return end
-					self:PlayFrameEffect(bindFrames, pos, bindScale, bindFrameDur, 1)
-				end, bindDur - playLen)
+				local starts = { 0 }
+				local nextStart = playStep
+				while nextStart + playLen < bindDur do
+					table.insert(starts, nextStart)
+					nextStart = nextStart + playStep
+				end
+				if bindDur - playLen > starts[#starts] then table.insert(starts, bindDur - playLen) end
+				for _, startAt in ipairs(starts) do
+					if startAt <= 0 then
+						self:PlayFrameEffect(bindFrames, pos, bindScale, bindFrameDur, 1)
+					else
+						_TimerService:SetTimerOnce(function()
+							if not isvalid(self) then return end
+							if castZoneIndex ~= _MapManager.CurrentMapIndex then return end
+							self:PlayFrameEffect(bindFrames, pos, bindScale, bindFrameDur, 1)
+						end, startAt)
+					end
+				end
 				self:PlayBreathSfx(self.Card123HitSoundRUID)
 				if not alive then return end
 				if isCrit then _DpsMeterLogic:Tag(cardIdx, target):TakeDamageCrit(secondaryDmg * 2)
@@ -14406,7 +14470,7 @@ script CardManager extends Logic
 					target:ApplyStun(bindDur, false)
 					target:ApplyLevitate(bindDur)
 				end
-				log("SpawnPreySecondary: card=" .. cardIdx .. " snare dmg=" .. math.floor(isCrit and secondaryDmg * 2 or secondaryDmg) .. " bind=" .. bindDur)
+				log("SpawnPreySecondary: card=" .. cardIdx .. " snare dmg=" .. math.floor(isCrit and secondaryDmg * 2 or secondaryDmg) .. " bind=" .. bindDur .. " plays=" .. #starts)
 			end
 		end, castDur * #castFrames)
 	end
@@ -15480,8 +15544,11 @@ script CardManager extends Logic
 	end
 
 	method number GetIncisingBurnRatio(integer cardIdx)
-		-- 화상 1틱 대미지 비율(기준 대미지 대비). 인사이징 20%, 관/폭 30%
-		if cardIdx == 192 then return 0.2 end
+		-- 화상 1틱 대미지 비율(기준 대미지 대비). 인사이징 20%(로비 강화 Lv9면 30%), 관/폭 30%
+		if cardIdx == 192 then
+			if self:GetSkillInvLevel2(192) >= 9 then return 0.3 end
+			return 0.2
+		end
 		return 0.3
 	end
 
@@ -15493,15 +15560,34 @@ script CardManager extends Logic
 		return 0.3
 	end
 
+	method number GetIncisingExtraPercentFor(integer cardIdx)
+		-- 카드 레벨 기준 추가타 비율 + 로비 강화 Lv9 보너스(관 = +15%p). 193 = 관, 그 외 = 폭
+		if cardIdx == 193 then
+			local pct = self:GetIncisingExtraPercent(self.IncisingPierceLevel)
+			if self:GetSkillInvLevel2(193) >= 9 then pct = pct + 0.15 end
+			return pct
+		end
+		return self:GetIncisingExtraPercent(self.IncisingBurstLevel)
+	end
+
+	method number GetIncisingBlastMult()
+		-- 폭 폭발(불꽃 고리) 크기·판정 배율 — 로비 강화 Lv9에서 20% 커진다(지름 2.5 → 3.0, 그림도 같이 키워 판정과 맞춤)
+		if self:GetSkillInvLevel2(194) >= 9 then return 1.2 end
+		return 1.0
+	end
+
 	-- 아이언 바디 — 최대 체력 % 증가. Lv1:3 / Lv2:6 / Lv3:9 / Lv4:12 / Lv5:15
 	method integer GetIronBodyPercent()
-		if self.IronBodyLevel >= 5 then return 15
-		elseif self.IronBodyLevel >= 4 then return 12
-		elseif self.IronBodyLevel >= 3 then return 9
-		elseif self.IronBodyLevel >= 2 then return 6
-		elseif self.IronBodyLevel >= 1 then return 3
+		-- 카드 레벨 % + 로비 스킬 강화(인덱스 112) Lv3/6/9 = +1/2/3%. 카드를 안 가진 판(레벨 0)엔 강화분도 없다
+		local base = 0
+		if self.IronBodyLevel >= 5 then base = 15
+		elseif self.IronBodyLevel >= 4 then base = 12
+		elseif self.IronBodyLevel >= 3 then base = 9
+		elseif self.IronBodyLevel >= 2 then base = 6
+		elseif self.IronBodyLevel >= 1 then base = 3
 		end
-		return 0
+		if base <= 0 then return 0 end
+		return base + math.floor(self:GetSkillInvTierPercent(112, 1, 2, 3))
 	end
 
 	@ExecSpace("ServerOnly")
@@ -15701,7 +15787,7 @@ script CardManager extends Logic
 		if fx == nil then return end
 		if dir > 0 then fx.SpriteRendererComponent.FlipX = true end
 		self:PlayBreathSfx(self.Card193SpearSoundRUID)
-		local extra = damage * self:GetIncisingExtraPercent(self.IncisingPierceLevel)
+		local extra = damage * self:GetIncisingExtraPercentFor(193)
 		local hitFrames = self:GetIncisingHitFrames()
 		local hitSet = {}
 		local hitCount = 0
@@ -15763,7 +15849,7 @@ script CardManager extends Logic
 		local toPos = Vector3(anchor.x, anchor.footY + self.Card194BurstStartY + self.Card194BurstRise, anchor.z)
 		local burstFx = self:PlayMovingFrameEffect(frames, fromPos, toPos, scale * self.Card194BurstGrowFrom, scale, #frames * self.Card194BurstFrameDuration, self.Card194BurstRotation, 99999, self.Card194BurstLength)
 		self:PlayBreathSfx(self.Card194BurstSoundRUID)
-		local extra = damage * self:GetIncisingExtraPercent(self.IncisingBurstLevel)
+		local extra = damage * self:GetIncisingExtraPercentFor(194)
 		if not isvalid(burstFx) then return end
 		-- 불덩이 = 솟아오르는 투사체(유저 지정 2026-10-01). 예전엔 0.2초에 한 번, 본타 맞은 타겟을 무조건 "불덩이에 맞음"으로 넣고
 		-- 발밑 높이만 봐서 불덩이가 매번 타겟 자리에서 바로 터졌다(공중 몬스터에 닿을 일이 없음). 지금은:
@@ -15819,7 +15905,8 @@ script CardManager extends Logic
 			local blastFrames = self:GetIncisingBlastFrames()
 			for _, st in ipairs(struck) do
 				-- 폭발 크기·판정은 고정(유저 지정 2026-10-01: 원근 배율 없이 연출 크기 그대로 — 0.91배 불꽃 고리 지름 약 2.5 = 반지름 1.25)
-				local bs = self.Card194BlastScale
+				local blastMult = self:GetIncisingBlastMult()  -- 로비 강화 Lv9 = 1.2(그림·판정 같이)
+				local bs = self.Card194BlastScale * blastMult
 				local center = Vector3(st.x, st.y + self.Card192AreaYOffset, st.z)
 				self:PlayFrameEffect(blastFrames, self:OffsetByPivot(center, 0.94, 0.455, 3.4, 3.6, bs), bs, self.Card194BlastFrameDuration, 1)
 				for _, mob in ipairs(self:GetMonstersInCurrentZone(map)) do
@@ -15827,7 +15914,7 @@ script CardManager extends Logic
 					local m = mob
 					if isvalid(m) and isvalid(m.Entity) and not m._dead and not struckSet[m] then
 						local mp = m.Entity.TransformComponent.Position
-						if self:InEllipse(mp.x - st.x, mp.y - st.y, self.Card194BlastHalfW, self.Card194BlastHalfH) and (st.flying or m._isFlying or self:IsInDepthBand(m, st.band)) then
+						if self:InEllipse(mp.x - st.x, mp.y - st.y, self.Card194BlastHalfW * blastMult, self.Card194BlastHalfH * blastMult) and (st.flying or m._isFlying or self:IsInDepthBand(m, st.band)) then
 							struckSet[m] = true
 							blastHit = blastHit + 1
 							if isCrit then _DpsMeterLogic:Tag(cardIdx, m):TakeDamageCrit(extra * 2)
@@ -16764,7 +16851,36 @@ script CardManager extends Logic
 		[222] = { idx = 93, grade = 3, dmg = 0.15, cd = 0.92 },               -- 블러드 스로우(Lv9=지속 +1초)
 		[221] = { idx = 94, grade = 3, dmg = 0.10, cd = 0.92, crit = 0.08 },  -- 쇼다운 임팩트(표상 10%)
 		[218] = { idx = 95, grade = 3, dmg = 0.15, cd = 0.92, crit = 0.08 },  -- 스톰 탈리스만
+
+		-- 2026-10-01 신규 9종(인덱스 102~110) — 기본기 매직(10%/5%) · 조합 레어(15%/8%), 등급 규칙 그대로.
+		-- Lv9 고유효과는 각 스킬 getter에서 GetSkillInvLevel2(cardIdx) >= 9로 따로 처리한다.
+		-- 패시브 컨센트레이션(111)/아이언 바디(112)는 카드 슬롯이 없어 인덱스로 직접 조회(GetConcentrationEvadeChance/GetIronBodyPercent).
+		[26] = { idx = 102, grade = 2 },   -- 프리징 브레스(Lv9 = 20% 확률로 빙결 스택 +1)
+		[27] = { idx = 103, grade = 3 },   -- 프로즌 오브(Lv9 = 오브 폭발 50% → 65%)
+		[28] = { idx = 104, grade = 3 },   -- 라이트닝 오브(Lv9 = 스턴 +0.5초)
+		[121] = { idx = 105, grade = 2 },  -- 윈드 오브 프레이(Lv9 = 판정 범위 +15%)
+		[122] = { idx = 106, grade = 3 },  -- 게일 오브 프레이(Lv9 = 돌개바람 추가타 30% → 45%)
+		[123] = { idx = 107, grade = 3 },  -- 스네어 오브 프레이(Lv9 = 속박 +0.5초)
+		[192] = { idx = 108, grade = 2 },  -- 인사이징(Lv9 = 화상 틱 20% → 30%)
+		[193] = { idx = 109, grade = 3 },  -- 인사이징:관(Lv9 = 관통 추가타 +15%p)
+		[194] = { idx = 110, grade = 3 },  -- 인사이징:폭(Lv9 = 폭발 범위 +20%)
 	}
+
+	-- 뽑기 해금 카드(유저 지정 2026-10-01 "자물쇠 걸자, 뽑기로 뽑아야 인게임에서 활성화") — cardIdx -> SkillInventory 인덱스.
+	-- 로비 뽑기로 그 스킬 조각을 한 번이라도 받아야 레벨업 선택지에 "새로 배우기"로 나온다. 조합 카드도 따로 잠겨서
+	-- 조합 스킬만 뽑고 기본기를 안 뽑았으면 기본기가 안 나오므로 그 판에선 조합도 못 본다(유저 확인).
+	property any _gachaLockCardSkillIdx = {
+		[26] = 102, [27] = 103, [28] = 104,
+		[121] = 105, [122] = 106, [123] = 107, [124] = 111,
+		[192] = 108, [193] = 109, [194] = 110, [195] = 112,
+	}
+
+	method boolean IsGachaLockedCard(integer cardIdx)
+		-- true면 아직 뽑기로 못 얻은 카드 — 레벨업 선택지에서 해금(unlock) 항목을 뺀다
+		local skillIdx = self._gachaLockCardSkillIdx[cardIdx]
+		if skillIdx == nil then return false end
+		return _SkillInventory:IsSkillLocked(skillIdx)
+	end
 
 	-- 버그 수정(2026-08-28, 유저 리포트 "스틸은 왜 데미지 0인데") — 이 아래 SkillInventory 조회 6개
 	-- (GetSkillInvLevel/Level2/LevelByIndex/DamageMult/CooldownMult/TierPercent)가 전부 ServerOnly였다.
@@ -19928,7 +20044,7 @@ script CardManager extends Logic
 			dmg = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_006", math.floor(self:GetCardDamage(cardIdx)))
 		elseif cardIdx == 27 or cardIdx == 28 then
 			-- 브레스 + 구슬 폭발(50%)을 합산한 숫자 1개로 보여준다(다단타 표기 통일 규칙)
-			dmg = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_006", math.floor(self:GetCardDamage(cardIdx) * (1 + self.OrbBallDamageRatio)))
+			dmg = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_006", math.floor(self:GetCardDamage(cardIdx) * (1 + self:GetOrbBallDamageRatio(cardIdx))))
 		elseif cardIdx == 101 then
 			dmg = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_006", math.floor(self:GetCardDamage(cardIdx)))
 		elseif cardIdx == 102 then
@@ -19953,7 +20069,7 @@ script CardManager extends Logic
 			dmg = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_006", math.floor(self:GetCardDamage(cardIdx)))
 		elseif cardIdx == 122 or cardIdx == 123 then
 			-- 본 대미지 + 추가타(30%)를 합산한 숫자 1개로 보여준다(다단타 표기 통일 규칙)
-			dmg = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_006", math.floor(self:GetCardDamage(cardIdx) * (1 + self.PreySecondaryRatio)))
+			dmg = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_006", math.floor(self:GetCardDamage(cardIdx) * (1 + self:GetPreySecondaryRatio(cardIdx))))
 		elseif cardIdx == 108 then
 			dmg = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_006", math.floor(self:GetCardDamage(cardIdx)))
 		elseif cardIdx == 114 then
@@ -20045,9 +20161,9 @@ script CardManager extends Logic
 			dmg = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_006", math.floor(self:GetCardDamage(cardIdx)))
 		elseif cardIdx == 193 then
 			-- 본 대미지 + 관통 추가타를 합산한 숫자 1개로 보여준다(다단타 표기 통일 규칙). 화상은 아래 줄에 따로
-			dmg = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_006", math.floor(self:GetCardDamage(cardIdx) * (1 + self:GetIncisingExtraPercent(self.IncisingPierceLevel))))
+			dmg = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_006", math.floor(self:GetCardDamage(cardIdx) * (1 + self:GetIncisingExtraPercentFor(193))))
 		elseif cardIdx == 194 then
-			dmg = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_006", math.floor(self:GetCardDamage(cardIdx) * (1 + self:GetIncisingExtraPercent(self.IncisingBurstLevel))))
+			dmg = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_006", math.floor(self:GetCardDamage(cardIdx) * (1 + self:GetIncisingExtraPercentFor(194))))
 		elseif cardIdx == 195 then
 			dmg = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_109", self:GetIronBodyPercent())
 		elseif cardIdx == 171 then
@@ -20199,9 +20315,9 @@ script CardManager extends Logic
 		elseif cardIdx == 26 then
 			extraStr = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_102", self:GetFreezingBreathTargetCount())
 		elseif cardIdx == 27 then
-			extraStr = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_103", self:GetOrbTargetCount(), math.floor(self.OrbBallDamageRatio * 100))
+			extraStr = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_103", self:GetOrbTargetCount(), math.floor(self:GetOrbBallDamageRatio(27) * 100 + 0.5))
 		elseif cardIdx == 28 then
-			extraStr = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_104", self:GetOrbTargetCount(), string.format("%.1f", self.Card28StunDuration), math.floor(self.OrbBallDamageRatio * 100))
+			extraStr = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_104", self:GetOrbTargetCount(), string.format("%.1f", self:GetLightningOrbStunDuration()), math.floor(self:GetOrbBallDamageRatio(28) * 100 + 0.5))
 		elseif cardIdx == 101 then
 			extraStr = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_030", self:GetWindPoemTargetCount())
 		elseif cardIdx == 102 then
@@ -20243,9 +20359,9 @@ script CardManager extends Logic
 		elseif cardIdx == 121 then
 			extraStr = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_106", self:GetWindOfPreyTargetCount())
 		elseif cardIdx == 122 then
-			extraStr = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_107", self:GetGaleOfPreyTargetCount(), math.floor(self.PreySecondaryRatio * 100))
+			extraStr = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_107", self:GetGaleOfPreyTargetCount(), math.floor(self:GetPreySecondaryRatio(122) * 100 + 0.5))
 		elseif cardIdx == 123 then
-			extraStr = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_108", self:GetSnareOfPreyTargetCount(), string.format("%.0f", self.Card123BindDuration), math.floor(self.PreySecondaryRatio * 100))
+			extraStr = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_108", self:GetSnareOfPreyTargetCount(), string.format("%g", self:GetSnareBindDuration()), math.floor(self:GetPreySecondaryRatio(123) * 100 + 0.5))
 		elseif cardIdx == 108 then
 			extraStr = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_056", self:GetFleshMirageTargetCount(), math.floor(self:GetFleshMirageCollisionPercent() * 100))
 		elseif cardIdx == 114 then
@@ -20305,9 +20421,9 @@ script CardManager extends Logic
 		elseif cardIdx == 192 then
 			extraStr = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_110", self:GetIncisingTargetCount(192), self:GetIncisingBurnSeconds(192), math.floor(self:GetIncisingBurnRatio(192) * 100 + 0.5))
 		elseif cardIdx == 193 then
-			extraStr = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_111", self:GetIncisingTargetCount(193), self:GetIncisingBurnSeconds(193), math.floor(self:GetIncisingBurnRatio(193) * 100 + 0.5), math.floor(self:GetIncisingExtraPercent(self.IncisingPierceLevel) * 100 + 0.5))
+			extraStr = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_111", self:GetIncisingTargetCount(193), self:GetIncisingBurnSeconds(193), math.floor(self:GetIncisingBurnRatio(193) * 100 + 0.5), math.floor(self:GetIncisingExtraPercentFor(193) * 100 + 0.5))
 		elseif cardIdx == 194 then
-			extraStr = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_112", self:GetIncisingTargetCount(194), self:GetIncisingBurnSeconds(194), math.floor(self:GetIncisingBurnRatio(194) * 100 + 0.5), math.floor(self:GetIncisingExtraPercent(self.IncisingBurstLevel) * 100 + 0.5), string.format("%.0f", self.Card194StunDuration))
+			extraStr = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_112", self:GetIncisingTargetCount(194), self:GetIncisingBurnSeconds(194), math.floor(self:GetIncisingBurnRatio(194) * 100 + 0.5), math.floor(self:GetIncisingExtraPercentFor(194) * 100 + 0.5), string.format("%.0f", self.Card194StunDuration))
 		elseif cardIdx == 203 then
 			extraStr = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_073", self:GetWindTalismanTargetCount(self.WindTalismanLevel))
 		elseif cardIdx == 204 then
@@ -24729,6 +24845,16 @@ script CardManager extends Logic
 				table.insert(pool, { card = 184, type = "darksight_up" })
 			end
 		end
+
+		-- 뽑기 해금 카드는 로비에서 한 번도 못 뽑았으면 "새로 배우기"로 나오지 않는다(이미 배운 카드의 강화 항목은 그대로)
+		local lockedOut = 0
+		for i = #pool, 1, -1 do
+			if pool[i].type == "unlock" and self:IsGachaLockedCard(pool[i].card) then
+				table.remove(pool, i)
+				lockedOut = lockedOut + 1
+			end
+		end
+		if lockedOut > 0 then log("GenerateLevelUpChoices: gacha-locked unlock entries removed=" .. lockedOut) end
 
 		-- Fisher-Yates 셔플
 		for i = #pool, 2, -1 do

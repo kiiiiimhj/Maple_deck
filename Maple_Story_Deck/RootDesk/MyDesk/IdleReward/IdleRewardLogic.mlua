@@ -4,7 +4,8 @@ script IdleRewardLogic extends Logic
 	-- 방치 보상(유저 지정 2026-09-15, 탕탕특공대 순찰 방식).
 	--   · 마지막으로 받은 뒤 흐른 실제 시간(서버 UTC)만큼 골드/경험치/장비가 쌓인다. 최대 24시간(MaxSeconds).
 	--   · 최소 10분(MinClaimSeconds)은 쌓여야 받을 수 있다 — 그 전엔 받기 버튼에 남은 시간이 거꾸로 흐른다.
-	--   · 진행도 = "최고 에피소드": 한 판에 5분 이상 버틴 가장 높은 에피소드(에피소드 생존 보상 첫 칸 조건과 같다).
+	--   · 진행도 = "최고 에피소드": 해금된(월드 선택에서 열린) 가장 높은 에피소드(2026-10-01 변경 — 예전엔 5분 생존 기록).
+	--     < > 버튼으로 해금된 에피소드 중 장면·장비 부위 에피소드를 고를 수 있다(SelectedEpisode).
 	--     진행이 높을수록 골드/경험치가 조금씩 더 쌓이고(EpisodeBonus), 팝업 전투 장면도 그 에피소드 맵/몬스터로 나온다.
 	--   · 장비는 4시간마다 1개. 부위는 지금까지 연 에피소드(1~최고)의 드롭 부위를 합친 풀에서 나온다
 	--     (WeaponTierDataLogic.GearItemIdsByEpisode — 태초의 마을=무기 / 구름정원=갑옷·모자 / 엘라스 산맥=장갑·망토).
@@ -28,14 +29,20 @@ script IdleRewardLogic extends Logic
 	@Sync property integer SyncSerial = 0
 	@Sync property integer GearSeed = 0
 	@Sync property boolean Loaded = false
+	-- 방치 장면/장비 부위 에피소드 선택(유저 지정 2026-10-01, < > 버튼). 0 = 따로 안 고름(최고 에피소드를 따라감).
+	-- 골드/경험치 배율은 여전히 최고 에피소드 기준이다 — 바뀌는 건 장면(배경·몬스터)과 장비 부위뿐.
+	@Sync property integer SelectedEpisode = 0
+	-- 에피소드를 바꾸기 전에 이미 쌓인 장비의 에피소드(순서대로, 예 "1,1,2"). 그 장비는 바꾼 뒤에도 그대로 나오고,
+	-- 이 목록 뒤 순번의 장비부터 지금 고른 에피소드 부위로 나온다(유저 지정 "받을 장비는 안 바뀌고 그때부터 변경"). 수령하면 비운다
+	@Sync property string GearEpsCsv = ""
 
 	property integer MaxSeconds = 86400
 	property integer MinClaimSeconds = 600
 	property integer GoldPerHour = 100
 	property integer ExpPerHour = 600
 	property integer GearIntervalSeconds = 14400
-	-- 최고 에피소드별 골드/경험치 배율(EP1/EP2/EP3)
-	property any EpisodeBonus = { 1.0, 1.25, 1.5 }
+	-- 최고 에피소드별 골드/경험치 배율(EP1/EP2/EP3/EP4) — EP4는 같은 간격(+0.25)으로 이어 붙임(2026-10-01)
+	property any EpisodeBonus = { 1.0, 1.25, 1.5, 1.75 }
 	-- 이 초 이상 버틴 에피소드를 "진행한" 에피소드로 친다
 	property integer ProgressSeconds = 300
 	-- 로비 버튼 레드닷을 켜는 누적 시간
@@ -47,11 +54,31 @@ script IdleRewardLogic extends Logic
 
 	-- ── 공용 계산(서버/클라 공용 — ExecSpace 없음) ──────────────────────────────
 	method integer GetMaxEpisode()
-		-- 한 판에 ProgressSeconds 이상 버틴 가장 높은 에피소드(없으면 1). 에피소드 보상 Best는 서버/클라 모두 동기화돼 있다
-		for ep = 3, 2, -1 do
-			if _EpisodeRewardLogic:GetBest(ep) >= self.ProgressSeconds then return ep end
+		-- 해금된 가장 높은 에피소드(유저 지정 2026-10-01 "기록이 없어도 해금되면") — 월드 선택과 같은 기준
+		-- (EpisodeRewardLogic.IsEpisodeUnlocked: 이전 에피 한 판 10분). 예전엔 "그 에피를 5분 버틴" 기록 기준이었다.
+		-- 장면(배경·몬스터)이 있는 에피소드까지만 본다 — 지금 1~4(GetSceneDef/GetSpeciesList)
+		for ep = 4, 2, -1 do
+			if _EpisodeRewardLogic:IsEpisodeUnlocked(ep) then return ep end
 		end
 		return 1
+	end
+
+	method integer GetSceneEpisode()
+		-- 장면·새로 쌓일 장비 부위의 에피소드 — 고른 게 없거나 범위를 벗어나면 최고 에피소드
+		local maxEp = self:GetMaxEpisode()
+		local sel = self.SelectedEpisode
+		if sel < 1 or sel > maxEp then return maxEp end
+		return sel
+	end
+
+	method table ParseGearEps(string csv)
+		-- "1,1,2" → { 1, 1, 2 }
+		local list = {}
+		for token in string.gmatch(csv, "[^,]+") do
+			local v = math.floor(tonumber(token) or 0)
+			if v > 0 then table.insert(list, v) end
+		end
+		return list
 	end
 
 	method number GetEpisodeBonus(integer ep)
@@ -111,14 +138,21 @@ script IdleRewardLogic extends Logic
 		return pool
 	end
 
-	method table GetGearItemIds(integer maxEp, integer seed, integer count)
-		-- k번째로 쌓인 장비의 ItemId — 시드와 순번만으로 정해지는 해시라 서버/클라가 같은 결과를 낸다
-		local pool = self:GetGearPool(maxEp)
+	method table GetGearItemIds(integer seed, integer count)
+		-- k번째로 쌓인 장비의 ItemId — 시드와 순번만으로 정해지는 해시라 서버/클라가 같은 결과를 낸다.
+		-- 부위 풀은 그 장비의 에피소드 하나(EP1=무기 / EP2=갑옷·모자 / EP3=장갑·망토): 에피소드를 바꾸기 전에 쌓인 순번은
+		-- GearEpsCsv에 적힌 에피소드, 그 뒤 순번은 지금 고른 에피소드(GetSceneEpisode)
+		local locked = self:ParseGearEps(self.GearEpsCsv)
+		local currentEp = self:GetSceneEpisode()
 		local ids = {}
-		if #pool == 0 then return ids end
 		for k = 1, count do
-			local h = (seed * 31 + k * 2654435761) % 1000003
-			table.insert(ids, pool[h % #pool + 1])
+			local ep = locked[k]
+			if ep == nil then ep = currentEp end
+			local pool = _WeaponTierDataLogic:GetGearItemIdsByEpisode(ep)
+			if pool ~= nil and #pool > 0 then
+				local h = (seed * 31 + k * 2654435761) % 1000003
+				table.insert(ids, pool[h % #pool + 1])
+			end
 		end
 		return ids
 	end
@@ -192,6 +226,8 @@ script IdleRewardLogic extends Logic
 			if t ~= nil then
 				self._startSec = math.floor(tonumber(t["s"]) or 0)
 				found = self._startSec > 0
+				self.SelectedEpisode = math.floor(tonumber(t["e"]) or 0)
+				if t["g"] ~= nil then self.GearEpsCsv = tostring(t["g"]) end
 			end
 		elseif code ~= 0 and code ~= 1000002 then
 			log_warning("IdleRewardLogic: load failed code=" .. tostring(code))
@@ -209,11 +245,13 @@ script IdleRewardLogic extends Logic
 
 	@ExecSpace("ServerOnly")
 	method void Save()
-		-- 수령 때만 부른다(값이 바뀐 순간에만 1회)
+		-- 수령 / 에피소드 변경 때만 부른다(값이 바뀐 순간에만 1회)
 		if self._profileCode == "" then return end
 		local ds = _DataStorageService:GetUserDataStorage(self._profileCode)
 		local t = {}
 		t["s"] = self._startSec
+		t["e"] = self.SelectedEpisode
+		t["g"] = self.GearEpsCsv
 		ds:SetAsync(self.StorageKey, _HttpService:JSONEncode(t), function(code, key)
 			if code ~= 0 then log_warning("IdleRewardLogic: save failed code=" .. tostring(code)) end
 		end)
@@ -232,6 +270,32 @@ script IdleRewardLogic extends Logic
 		-- 팝업을 열 때마다 부른다 — 클라 표시 시계를 서버 기준으로 다시 맞춘다
 		if not self.Loaded then return end
 		self:PushSync()
+	end
+
+	@ExecSpace("Server")
+	method void RequestSetEpisode(integer ep)
+		-- < > 버튼 — 지금까지 쌓인 장비는 그때 에피소드로 고정해 두고, 앞으로 쌓일 장비·장면만 새 에피소드로 바꾼다
+		if not self.Loaded then return end
+		local maxEp = self:GetMaxEpisode()
+		if ep < 1 or ep > maxEp then
+			log_warning("IdleRewardLogic: set episode rejected ep=" .. tostring(ep) .. " max=" .. tostring(maxEp))
+			return
+		end
+		local prevEp = self:GetSceneEpisode()
+		if ep == prevEp then return end
+		local locked = self:ParseGearEps(self.GearEpsCsv)
+		local accruedGear = self:GetGearCountFor(self:GetAccruedSeconds())
+		for k = #locked + 1, accruedGear do table.insert(locked, prevEp) end
+		local csv = ""
+		for i, v in ipairs(locked) do
+			if i > 1 then csv = csv .. "," end
+			csv = csv .. tostring(v)
+		end
+		self.GearEpsCsv = csv
+		self.SelectedEpisode = ep
+		self:Save()
+		self:PushSync()
+		log("IdleRewardLogic: episode " .. prevEp .. " -> " .. ep .. " lockedGear=[" .. csv .. "]")
 	end
 
 	@ExecSpace("Server")
@@ -259,7 +323,7 @@ script IdleRewardLogic extends Logic
 		local maxEp = self:GetMaxEpisode()
 		local gold = self:GetGoldFor(sec)
 		local exp = self:GetExpFor(sec)
-		local gearIds = self:GetGearItemIds(maxEp, self._startSec % 1000003, self:GetGearCountFor(sec))
+		local gearIds = self:GetGearItemIds(self._startSec % 1000003, self:GetGearCountFor(sec))
 		local gearCsv = ""
 		local lost = 0
 		if #gearIds > 0 then
@@ -299,6 +363,7 @@ script IdleRewardLogic extends Logic
 		if gold > 0 then _GameManager:AddCoins(gold) end
 		self:GrantExp(exp)
 		self._startSec = self:NowSec()
+		self.GearEpsCsv = ""  -- 새로 쌓이는 장비는 전부 지금 고른 에피소드 부위
 		self:Save()
 		-- 지급한 골드·장비를 바로 저장 — 날아가는 연출 중에 앱이 꺼져도 수령은 남는다(2026-09-24)
 		_GameManager:PersistRewardNow(userId)
@@ -358,7 +423,7 @@ script IdleRewardLogic extends Logic
 	-- ── 클라: 동기화되면 UI 갱신 ──────────────────────────────────────────────
 	@ExecSpace("ClientOnly")
 	method void OnSyncProperty(string name, any value)
-		if name == "AccruedAtSync" or name == "SyncSerial" or name == "Loaded" or name == "GearSeed" then
+		if name == "AccruedAtSync" or name == "SyncSerial" or name == "Loaded" or name == "GearSeed" or name == "SelectedEpisode" or name == "GearEpsCsv" then
 			_IdleRewardUI:OnStateSynced(name)
 		end
 	end
