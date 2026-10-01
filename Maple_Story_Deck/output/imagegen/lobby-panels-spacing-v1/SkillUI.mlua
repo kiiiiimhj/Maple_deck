@@ -1,0 +1,421 @@
+@Logic
+script SkillUI extends Logic
+
+	property ScrollLayoutGroupComponent skillScroll = "69d26c23-c095-4b87-b830-576271f284ca"
+	property Entity scrollTouchArea = "60dae9c2-f2b6-492f-9cd6-2a7e4f0171f2"
+	property SliderComponent scrollBar = "cbae2326-3e77-4bd1-b607-82549c0280d5"
+	-- 그리드 총 폭(10칸) - 뷰포트 폭(1300) = 실제로 드래그 가능한 스크롤 폭(px)
+	property number scrollableRangePx = 1416
+
+	property any _dragHandler = nil
+	property any _scrollBarHandler = nil
+	-- 카드 쪽 스크롤(드래그)이 스크롤바 핸들 위치를 코드로 갱신할 때 true로 세워서,
+	-- 그 갱신이 다시 SliderValueChangedEvent로 되돌아와 카드를 또 움직이는 무한 루프를 막는다
+	property boolean _syncingScrollBar = false
+
+	-- 드래그(스크롤)와 탭(클릭)을 구분하는 최대 이동 거리(px) — 이보다 적게 움직였으면 탭으로 간주
+	property number _tapMoveThreshold = 12
+	-- 슬롯별 Down/Up/Drag 핸들러 목록 — OnEndPlay에서 전부 해제한다
+	property any _slotHandlers = nil
+	-- 슬롯별 터치 시작 좌표 (한 번에 하나의 터치만 가정)
+	property any _slotTouchDownPoints = nil
+
+	-- 등급 필터 드롭다운 — 0=전체(기본) / 1=일반 / 2=매직 / 3=레어
+	property integer _gradeFilter = 0
+	property ButtonComponent gradeFilterBtn = "1c20f564-9f18-414d-a59e-7b988f943e5b"
+	property Entity gradeFilterList = "b5d00ddf-2cc1-4549-9f43-496d1a3eca8c"
+	property ButtonComponent btnGradeAll = "0e9a077f-b82a-49c0-a183-32d552531228"
+	property ButtonComponent btnGradeNormal = "51003d72-db87-4ba6-ac1b-69cf593e87c9"
+	property ButtonComponent btnGradeMagic = "8461d3f2-18f5-4f54-bd92-0937c425f62a"
+	property ButtonComponent btnGradeRare = "7f706512-fbfe-474f-8fde-908dba52b0f2"
+	property any _filterBtnHandler = nil
+	property any _filterAllHandler = nil
+	property any _filterNormalHandler = nil
+	property any _filterMagicHandler = nil
+	property any _filterRareHandler = nil
+
+	-- 캐릭터 필터 드롭다운 — 실피드/레이온/쉐이드/린 스킬이 SkillInventory(인덱스 20~39/40~59/60~79/
+	-- 80~101)에 등록되면서 데이터 연결까지 완료됨(OnCharacterOptionClicked -> ApplyGradeFilter가 등급과 함께 적용).
+	-- -1=전체(기본) / 0=아르카나 / 1=실피드 / 2=레이온 / 3=쉐이드 / 4=린. SelectedCharacter와 동일한 번호 체계.
+	-- 유저 지정(2026-08-18): "전체를 누르면 우리가 만든 모든 스킬이 나와야하는데" — 등급 필터의
+	-- "전체"만으로는 캐릭터 필터가 여전히 특정 캐릭터로 고정돼 있어 그 캐릭터 것만 보였다. 캐릭터
+	-- 필터에도 "전체" 옵션을 추가하고 기본값으로 삼는다.
+	-- 캐릭터 추가할 때마다 이 옵션 4곳(프로퍼티/ConnectCharacterFilterUI/OnEndPlay 해제/.ui 드롭다운 버튼)에
+	-- 새 캐릭터를 추가할 것. .ui 쪽은 드롭다운 패널(CharacterFilterList) 높이도 같이 늘려야 한다.
+	property integer _characterFilter = -1
+	property ButtonComponent characterFilterBtn = "a9b634da-9a7e-4597-9c12-18f3d73ee653"
+	property Entity characterFilterList = "449de229-75ef-4704-b533-fde0a53e85c8"
+	property ButtonComponent btnCharAll = "76a192ec-642e-4059-b993-647c8f4de1e9"
+	property ButtonComponent btnCharArcana = "ed898bec-e485-4358-80c4-b8efbcb5f2d6"
+	property ButtonComponent btnCharSylph = "3e3338a4-ce41-4c96-8d64-351a6535b68b"
+	property ButtonComponent btnCharReion = "d5f0ddb3-cffc-4f26-bc38-e7e6115915da"
+	property ButtonComponent btnCharShade = "e382b414-5490-4645-948d-3eec9c983398"
+	property ButtonComponent btnCharRin = "2c53900a-526d-4def-9f57-0fa4ca2535ce"
+	property any _characterFilterBtnHandler = nil
+	property any _filterCharAllHandler = nil
+	property any _filterArcanaHandler = nil
+	property any _filterSylphHandler = nil
+	property any _filterReionHandler = nil
+	property any _filterShadeHandler = nil
+	property any _filterRinHandler = nil
+
+	-- 강화 가능 필터 드롭다운(유저 지정 2026-09-29) — false=전체 / true=지금 바로 강화할 수 있는 스킬만
+	-- (조각이 다음 레벨 비용 이상 + 코인 충분 + 만렙 아님). 등급·캐릭터 필터와 AND로 결합된다
+	property boolean _upgradableOnly = false
+	property ButtonComponent upgradeFilterBtn = "da10688f-c259-481d-8569-93c890003222"
+	property Entity upgradeFilterList = "6f0e3a7b-5978-4075-b49f-f43a643b54c3"
+	property ButtonComponent btnUpgAll = "8a26dc5b-3e94-41f0-adf0-d4b79af12344"
+	property ButtonComponent btnUpgOnly = "b4aec129-3996-44f2-8960-a1171b699ba2"
+	property any _upgFilterBtnHandler = nil
+	property any _upgAllHandler = nil
+	property any _upgOnlyHandler = nil
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		-- 스킬 그리드를 좌우로 끌면 스크롤되고, 하단 스크롤바를 직접 끌어도 그리드가 같이 움직이도록 연결한다
+		self._dragHandler = self.scrollTouchArea:ConnectEvent(UITouchDragEvent, self.OnScrollDrag)
+		self._scrollBarHandler = self.scrollBar.Entity:ConnectEvent(SliderValueChangedEvent, self.OnScrollBarChanged)
+		self._slotHandlers = {}
+		self._slotTouchDownPoints = {}
+		self:PopulateSkillSlotsAndConnectSlots()
+		self:ConnectGradeFilterUI()
+		self:ConnectCharacterFilterUI()
+		self:ConnectUpgradeFilterUI()
+		self:ApplyGradeFilter(0)
+		self:RefreshAllSkillSlots()
+		-- 스크롤/스크롤바가 항상 맨 처음(왼쪽)부터 시작하도록 강제한다
+		self.skillScroll:SetScrollNormalizedPosition(UITransformAxis.Horizontal, 0)
+		self:SyncScrollBar(0)
+		log("SkillUI started")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PopulateSkillSlotsAndConnectSlots()
+		-- 슬롯 인덱스는 SkillInventory._skillDefs에 등급 오름차순으로 미리 정렬돼 있으므로,
+		-- 여기서 인덱스 순서 그대로 이름/아이콘을 채우기만 하면 "낮은 등급부터" 노출된다.
+		-- SkillSlot_N에는 ButtonComponent 대신 UITouchReceiveComponent가 붙어있다 — RelicUI와 동일 패턴
+		local list = self.skillScroll.Entity
+		if not isvalid(list) then return end
+		for i = 0, _SkillInventory.skillCount - 1 do
+			local slot = list:GetChildByName("SkillSlot_" .. tostring(i))
+			if isvalid(slot) then
+				local nameEntity = slot:GetChildByName("Name")
+				if isvalid(nameEntity) then
+					-- 이름이 칸보다 길면 글씨를 줄이거나 두 줄로 넘기지 않고 "…"로 자른다(유저 지정 2026-10-01)
+					local nameComp = nameEntity.TextComponent
+					nameComp.Text = self:FitTextEllipsis(nameComp, _SkillInventory:GetSkillName(i), nameEntity.UITransformComponent.RectSize.x - self.NameEllipsisPadding)
+				end
+				local iconEntity = slot:GetChildByName("Icon")
+				if isvalid(iconEntity) then
+					iconEntity.SpriteGUIRendererComponent.ImageRUID = DataRef(_SkillInventory:GetSkillIconRuid(i))
+					iconEntity.UITransformComponent.UIRotation = Vector3(0, 0, _SkillInventory:GetSkillIconRotation(i))
+				end
+				local capturedIndex = i
+				local downH = slot:ConnectEvent(UITouchDownEvent, function(event) self:OnSlotTouchDown(event, capturedIndex) end)
+				local upH = slot:ConnectEvent(UITouchUpEvent, function(event) self:OnSlotTouchUp(event, capturedIndex) end)
+				local dragH = slot:ConnectEvent(UITouchDragEvent, self.OnScrollDrag)
+				table.insert(self._slotHandlers, { entity = slot, downHandler = downH, upHandler = upH, dragHandler = dragH })
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ConnectGradeFilterUI()
+		self._filterBtnHandler = self.gradeFilterBtn.Entity:ConnectEvent(ButtonClickEvent, self.OnGradeFilterBtnClicked)
+		self._filterAllHandler = self.btnGradeAll.Entity:ConnectEvent(ButtonClickEvent, function() self:OnGradeOptionClicked(0) end)
+		self._filterNormalHandler = self.btnGradeNormal.Entity:ConnectEvent(ButtonClickEvent, function() self:OnGradeOptionClicked(1) end)
+		self._filterMagicHandler = self.btnGradeMagic.Entity:ConnectEvent(ButtonClickEvent, function() self:OnGradeOptionClicked(2) end)
+		self._filterRareHandler = self.btnGradeRare.Entity:ConnectEvent(ButtonClickEvent, function() self:OnGradeOptionClicked(3) end)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ConnectCharacterFilterUI()
+		-- 캐릭터 추가할 때마다 여기 핸들러(btnCharArcana/Sylph/Reion/Shade/Rin 패턴)를 새 캐릭터만큼 늘릴 것
+		self._characterFilterBtnHandler = self.characterFilterBtn.Entity:ConnectEvent(ButtonClickEvent, self.OnCharacterFilterBtnClicked)
+		self._filterCharAllHandler = self.btnCharAll.Entity:ConnectEvent(ButtonClickEvent, function() self:OnCharacterOptionClicked(-1) end)
+		self._filterArcanaHandler = self.btnCharArcana.Entity:ConnectEvent(ButtonClickEvent, function() self:OnCharacterOptionClicked(0) end)
+		self._filterSylphHandler = self.btnCharSylph.Entity:ConnectEvent(ButtonClickEvent, function() self:OnCharacterOptionClicked(1) end)
+		self._filterReionHandler = self.btnCharReion.Entity:ConnectEvent(ButtonClickEvent, function() self:OnCharacterOptionClicked(2) end)
+		self._filterShadeHandler = self.btnCharShade.Entity:ConnectEvent(ButtonClickEvent, function() self:OnCharacterOptionClicked(3) end)
+		self._filterRinHandler = self.btnCharRin.Entity:ConnectEvent(ButtonClickEvent, function() self:OnCharacterOptionClicked(4) end)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ConnectUpgradeFilterUI()
+		-- "전체 ▼ / 강화 가능 ▼" 드롭다운
+		if not isvalid(self.upgradeFilterBtn) then return end
+		self._upgFilterBtnHandler = self.upgradeFilterBtn.Entity:ConnectEvent(ButtonClickEvent, function()
+			self.upgradeFilterList.Enable = not self.upgradeFilterList.Enable
+		end)
+		self._upgAllHandler = self.btnUpgAll.Entity:ConnectEvent(ButtonClickEvent, function() self:OnUpgradeOptionClicked(false) end)
+		self._upgOnlyHandler = self.btnUpgOnly.Entity:ConnectEvent(ButtonClickEvent, function() self:OnUpgradeOptionClicked(true) end)
+		self:RefreshUpgradeFilterLabel()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUpgradeOptionClicked(boolean upgradableOnly)
+		self.upgradeFilterList.Enable = false
+		self._upgradableOnly = upgradableOnly
+		self:RefreshUpgradeFilterLabel()
+		self:ApplyGradeFilter(self._gradeFilter)
+		log("SkillUI: upgradable filter = " .. tostring(upgradableOnly))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshUpgradeFilterLabel()
+		-- 버튼 글자 = 지금 고른 값("전체 ▼" / "강화 가능 ▼")
+		if not isvalid(self.upgradeFilterBtn) then return end
+		local key = "MLUA_SKILLUI_001"
+		if self._upgradableOnly then key = "MLUA_SKILLUI_002" end
+		-- 버튼 글자 컴포넌트는 IsLocalizationKey=true라 키를 그대로 넣는다(엔진이 언어별로 푼다)
+		local tc = self.upgradeFilterBtn.Entity.TextComponent
+		if tc ~= nil then tc.Text = key end
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean IsSkillUpgradable(integer i)
+		-- 지금 바로 강화할 수 있는가 — SkillInventory.RequestLevelUpSkill과 같은 조건(만렙 아님 + 조각 + 코인)
+		local key = tostring(i)
+		local level = 1
+		if _SkillInventory.Levels[key] ~= nil and _SkillInventory.Levels[key] > 0 then level = _SkillInventory.Levels[key] end
+		if level >= _SkillInventory:GetMaxLevelForSkill(i) then return false end
+		local grade = _SkillInventory:GetSkillGrade(i)
+		local count = 0
+		if _SkillInventory.Counts[key] ~= nil then count = _SkillInventory.Counts[key] end
+		if count < _SkillInventory:GetFragmentCostForLevel(level, grade) then return false end
+		return _TitleUI:GetLastCurrency("gold") >= _SkillInventory:GetGoldCostForLevel(level, grade)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnCharacterFilterBtnClicked()
+		self.characterFilterList.Enable = not self.characterFilterList.Enable
+	end
+
+	-- 실피드/레이온 스킬이 SkillInventory에 등록되면서(인덱스 20~39/40~59) 데이터 연결 완료 —
+	-- 등급 필터와 동일하게 실제로 그리드를 다시 그린다(유저 지정: "일단 UI만" 단계는 끝났다).
+	@ExecSpace("ClientOnly")
+	method void OnCharacterOptionClicked(integer character)
+		self.characterFilterList.Enable = false
+		self._characterFilter = character
+		self:ApplyGradeFilter(self._gradeFilter)
+		log("SkillUI: character filter selected = " .. tostring(character))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnGradeFilterBtnClicked()
+		self.gradeFilterList.Enable = not self.gradeFilterList.Enable
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnGradeOptionClicked(integer grade)
+		self.gradeFilterList.Enable = false
+		self:ApplyGradeFilter(grade)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ApplyGradeFilter(integer grade)
+		-- 0=전체 / 1=일반 / 2=매직 / 3=레어. 슬롯은 ScrollLayoutGroupComponent(Grid)의 자식이라
+		-- Enable=false로 끈 슬롯은 레이아웃에서도 빠져서, 보이는 카드들이 자동으로 앞쪽 칸부터 다시 채워진다.
+		-- 캐릭터 필터(self._characterFilter, -1=전체/0=아르카나/1=실피드/2=레이온)와 AND로 결합해서 적용한다.
+		self._gradeFilter = grade
+		self:ApplySlotVisibility()
+		self.skillScroll:SetScrollNormalizedPosition(UITransformAxis.Horizontal, 0)
+		self:SyncScrollBar(0)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ApplySlotVisibility()
+		-- 등급 × 캐릭터 × 강화 가능 필터를 AND로 적용(스크롤은 안 건드린다 — 조각/코인이 바뀔 때도 불린다)
+		local list = self.skillScroll.Entity
+		if not isvalid(list) then return end
+		for i = 0, _SkillInventory.skillCount - 1 do
+			local slot = list:GetChildByName("SkillSlot_" .. tostring(i))
+			if isvalid(slot) then
+				local skillGrade = _SkillInventory:GetSkillGrade(i)
+				local skillChar = _SkillInventory:GetSkillCharacter(i)
+				local gradeOk = (self._gradeFilter == 0) or (skillGrade == self._gradeFilter)
+				local charOk = (self._characterFilter == -1) or (self._characterFilter == skillChar)
+				local upgOk = (not self._upgradableOnly) or self:IsSkillUpgradable(i)
+				slot.Enable = gradeOk and charOk and upgOk
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnSlotTouchDown(UITouchDownEvent event, integer skillIndex)
+		self._slotTouchDownPoints[tostring(skillIndex)] = event.TouchPoint
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnSlotTouchUp(UITouchUpEvent event, integer skillIndex)
+		-- 누른 지점과 뗀 지점이 거의 같으면(드래그가 아니면) 탭으로 판정한다
+		local downPoint = self._slotTouchDownPoints[tostring(skillIndex)]
+		if downPoint == nil then return end
+		local dx = event.TouchPoint.x - downPoint.x
+		local dy = event.TouchPoint.y - downPoint.y
+		local distance = math.sqrt(dx * dx + dy * dy)
+		if distance > self._tapMoveThreshold then return end
+		self:OnSkillSlotClicked(skillIndex)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnSkillSlotClicked(integer skillIndex)
+		-- 스킬을 누르면 바로 레벨업하지 않고, 상세/업그레이드 팝업을 띄운다
+		-- 유저 요청: 확인(클릭)하는 순간 레드닷을 끈다
+		_SkillInventory:MarkSkillSeen(skillIndex)
+		_SkillUpgradeUI:OpenForSkill(skillIndex)
+	end
+
+	-- 이름 말줄임 — 칸 너비에서 이만큼 빼고 잰다(테두리에 글자가 닿지 않게)
+	property number NameEllipsisPadding = 8
+
+	@ExecSpace("ClientOnly")
+	method string FitTextEllipsis(TextComponent comp, string text, number maxWidth)
+		-- 글씨 크기는 그대로 두고, 한 줄 폭(maxWidth)을 넘으면 뒤에서부터 한 글자씩 줄여 "..."를 붙인다
+		-- (유저 지정 2026-10-01: 두 줄 넘김·베스트핏 축소 대신 "나는오늘도 컴..."처럼). 베스트핏이 켜져 있으면 끈다.
+		-- 한글이 섞여 있어서 UTF-8 글자 단위로 자른다(바이트로 자르면 글자가 깨진다)
+		if comp == nil or text == nil then return text end
+		comp.BestFit = false
+		if maxWidth <= 0 or comp:GetPreferredWidth(text) <= maxWidth then return text end
+		local chars = {}
+		local i = 1
+		local len = string.len(text)
+		while i <= len do
+			local b = string.byte(text, i)
+			local n = 1
+			if b >= 240 then n = 4 elseif b >= 224 then n = 3 elseif b >= 192 then n = 2 end
+			table.insert(chars, string.sub(text, i, i + n - 1))
+			i = i + n
+		end
+		for keep = #chars - 1, 1, -1 do
+			local candidate = table.concat(chars, "", 1, keep) .. "..."
+			if comp:GetPreferredWidth(candidate) <= maxWidth then return candidate end
+		end
+		return "..."
+	end
+
+	@ExecSpace("ClientOnly")
+	method string GetSkillBaseName(integer skillIndex)
+		return _SkillInventory:GetSkillName(skillIndex)
+	end
+
+	@ExecSpace("ClientOnly")
+	method string GetSkillIconRuid(integer skillIndex)
+		return _SkillInventory:GetSkillIconRuid(skillIndex)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshAllSkillSlots()
+		-- 스킬 획득 개수/레벨(SkillInventory.Counts/Levels)이 바뀔 때마다 슬롯을 전부 다시 그린다
+		local list = self.skillScroll.Entity
+		if not isvalid(list) then return end
+		for i = 0, _SkillInventory.skillCount - 1 do
+			local slot = list:GetChildByName("SkillSlot_" .. tostring(i))
+			if isvalid(slot) then
+				local key = tostring(i)
+				local count = 0
+				if _SkillInventory.Counts[key] ~= nil then count = _SkillInventory.Counts[key] end
+				-- 강화 안 한 기본 상태는 Lv.1(0이 아니다)
+				local level = 1
+				if _SkillInventory.Levels[key] ~= nil then level = _SkillInventory.Levels[key] end
+				local maxLevel = _SkillInventory.maxLevel
+
+				local progressText = slot:GetChildByName("ProgressText")
+				local progressFill = slot:GetChildByName("ProgressFill")
+				if level >= maxLevel then
+					if isvalid(progressText) then progressText.TextComponent.Text = "MAX" end
+					if isvalid(progressFill) then progressFill.SpriteGUIRendererComponent.FillAmount = 1 end
+				else
+					local nextFragmentCost = _SkillInventory:GetFragmentCostForLevel(level, _SkillInventory:GetSkillGrade(i))
+					if isvalid(progressText) then
+						progressText.TextComponent.Text = tostring(count) .. "/" .. tostring(nextFragmentCost)
+					end
+					if isvalid(progressFill) then
+						local amount = count / nextFragmentCost
+						if amount > 1 then amount = 1 end
+						progressFill.SpriteGUIRendererComponent.FillAmount = amount
+					end
+				end
+
+				local levelEntity = slot:GetChildByName("Level")
+				if isvalid(levelEntity) then
+					levelEntity.TextComponent.Text = "Lv." .. tostring(level)
+				end
+
+				-- 뽑기 해금 스킬(102~112)은 한 번도 못 뽑았으면 유물 칸처럼 카드 전체를 어둡게 덮고 자물쇠를 얹는다
+				-- (Dim/Lock은 그 칸에만 있다 — 유물 RelicSlot의 딤을 복제한 것). 인게임 잠금은 CardManager.IsGachaLockedCard
+				local dim = slot:GetChildByName("Dim")
+				if isvalid(dim) then
+					local locked = _SkillInventory:IsSkillLocked(i)
+					dim.Enable = locked
+					if locked and isvalid(progressText) then
+						progressText.TextComponent.Text = _LocalizationService:GetText("MLUA_RELICUI_001")
+					end
+				end
+
+				-- 유저 요청: 처음 뽑힌 뒤 아직 확인 안 한 스킬에 레드닷 표시.
+				-- 배지는 "베이스 원 + 하이라이트 + 느낌표" 자식 구조라 엔티티 단위로 토글해야 한다
+				local redDot = slot:GetChildByName("RedDot")
+				if isvalid(redDot) then
+					redDot.Enable = _SkillInventory:IsSkillNew(i)
+				end
+			end
+		end
+		-- 강화 가능 필터를 켜 둔 상태면 강화 직후(조각·레벨 변화) 목록도 다시 거른다
+		if self._upgradableOnly then self:ApplySlotVisibility() end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnScrollDrag(UITouchDragEvent event)
+		-- 좌로 끌면(TouchDelta.x < 0) 오른쪽 열 쪽(정규화 값 증가)으로, 우로 끌면 반대로 스크롤한다
+		local current = self.skillScroll:GetScrollNormalizedPosition(UITransformAxis.Horizontal)
+		local delta = -event.TouchDelta.x / self.scrollableRangePx
+		local newValue = math.max(0, math.min(1, current + delta))
+		self.skillScroll:SetScrollNormalizedPosition(UITransformAxis.Horizontal, newValue)
+		self:SyncScrollBar(newValue)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SyncScrollBar(number normalizedValue)
+		self._syncingScrollBar = true
+		self.scrollBar.Value = normalizedValue
+		self._syncingScrollBar = false
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnScrollBarChanged(SliderValueChangedEvent event)
+		if self._syncingScrollBar then return end
+		self.skillScroll:SetScrollNormalizedPosition(UITransformAxis.Horizontal, event.Value)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		if self._dragHandler then self.scrollTouchArea:DisconnectEvent(UITouchDragEvent, self._dragHandler) end
+		if self._scrollBarHandler then self.scrollBar.Entity:DisconnectEvent(SliderValueChangedEvent, self._scrollBarHandler) end
+		if self._slotHandlers then
+			for _, rec in ipairs(self._slotHandlers) do
+				if isvalid(rec.entity) then
+					rec.entity:DisconnectEvent(UITouchDownEvent, rec.downHandler)
+					rec.entity:DisconnectEvent(UITouchUpEvent, rec.upHandler)
+					rec.entity:DisconnectEvent(UITouchDragEvent, rec.dragHandler)
+				end
+			end
+		end
+		if self._filterBtnHandler then self.gradeFilterBtn.Entity:DisconnectEvent(ButtonClickEvent, self._filterBtnHandler) end
+		if self._filterAllHandler then self.btnGradeAll.Entity:DisconnectEvent(ButtonClickEvent, self._filterAllHandler) end
+		if self._filterNormalHandler then self.btnGradeNormal.Entity:DisconnectEvent(ButtonClickEvent, self._filterNormalHandler) end
+		if self._filterMagicHandler then self.btnGradeMagic.Entity:DisconnectEvent(ButtonClickEvent, self._filterMagicHandler) end
+		if self._filterRareHandler then self.btnGradeRare.Entity:DisconnectEvent(ButtonClickEvent, self._filterRareHandler) end
+		if self._characterFilterBtnHandler then self.characterFilterBtn.Entity:DisconnectEvent(ButtonClickEvent, self._characterFilterBtnHandler) end
+		if self._filterCharAllHandler then self.btnCharAll.Entity:DisconnectEvent(ButtonClickEvent, self._filterCharAllHandler) end
+		if self._filterArcanaHandler then self.btnCharArcana.Entity:DisconnectEvent(ButtonClickEvent, self._filterArcanaHandler) end
+		if self._filterSylphHandler then self.btnCharSylph.Entity:DisconnectEvent(ButtonClickEvent, self._filterSylphHandler) end
+		if self._filterReionHandler then self.btnCharReion.Entity:DisconnectEvent(ButtonClickEvent, self._filterReionHandler) end
+		if self._filterShadeHandler then self.btnCharShade.Entity:DisconnectEvent(ButtonClickEvent, self._filterShadeHandler) end
+		if self._filterRinHandler then self.btnCharRin.Entity:DisconnectEvent(ButtonClickEvent, self._filterRinHandler) end
+		if self._upgFilterBtnHandler then self.upgradeFilterBtn.Entity:DisconnectEvent(ButtonClickEvent, self._upgFilterBtnHandler) end
+		if self._upgAllHandler then self.btnUpgAll.Entity:DisconnectEvent(ButtonClickEvent, self._upgAllHandler) end
+		if self._upgOnlyHandler then self.btnUpgOnly.Entity:DisconnectEvent(ButtonClickEvent, self._upgOnlyHandler) end
+	end
+
+end

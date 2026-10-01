@@ -1,0 +1,482 @@
+@Logic
+script SkillUpgradeUI extends Logic
+
+	property Entity popupGroup = "7233983e-f2c7-43f2-aacd-64596ab2459a"
+	property ButtonComponent btnClose = "f6a7377b-4b3e-4e45-9213-b43726e21a70"
+	property ButtonComponent btnUpgrade = "a80001a0-bc09-43fd-85e3-b7ed893c76e2"
+	property TextComponent levelText = "7b32452e-e9b1-4dfc-a51d-0957bd542e50"
+	property SpriteGUIRendererComponent iconSprite = "6f8a9bb9-bbfa-4def-99d8-08f38fb4294b"
+	property TextComponent nameText = "d23ee014-65a4-4fd9-aee3-daa1d85dfbf6"
+	property TextComponent optionText = "eabf1a42-e091-4aa6-8563-a8a4a825f7ef"
+	property TextComponent costText = "331ebb1e-6f3c-4ef5-ba3c-68e81329fa7c"
+	property TextComponent upgradeTitleText = "ad2fc439-017d-4b24-8987-26239f239b5d"
+	-- 스킬명 아래 조각 진행바 — 버튼의 코인 비용과 분리해서 여기서 "N/다음레벨요구치"를 보여준다
+	property SpriteGUIRendererComponent fragmentBarFill = "a02b3b4a-e856-492f-a83e-145d3a1038e6"
+	property TextComponent fragmentBarText = "ce3a08fc-06cf-4454-bad3-b6c2e755b64f"
+	-- 팝업 배경 프레임 — 스킬 등급(1=일반/2=매직/3=레어)에 맞춰 스킬탭 카드와 동일한 이미지로 갈아끼운다
+	property SpriteGUIRendererComponent bgSprite = "d4c348db-b828-4d48-95a1-315405dbb02c"
+	property string _normalBgRuid = "c1cc4d2d92104fbdbd53971477fa4364"
+	property string _magicBgRuid = "c1cc4d2d92104fbdbd53971477fa4364"
+	property string _rareBgRuid = "c1cc4d2d92104fbdbd53971477fa4364"
+
+	property integer _currentSkillIndex = -1
+	property any _closeHandler = nil
+	property any _upgradeHandler = nil
+	property any _closeStateHandler = nil
+	property any _upgradeStateHandler = nil
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		-- 월드 시작 시점엔 무조건 숨겨둔다 — CharacterUnlockUI/GachaUI 등과 동일한 이유(유저 지적:
+		-- "팝업같은 UI가 떴다 로비화면으로 변경되는 경우가있어" — SkillUpgradeGroup의 displayOrder가
+		-- TitleGroup보다 높아서 .ui 저장 기본값(Enable=true)이 그대로면 로비 위에 덮여 그려진다).
+		self.popupGroup.Enable = false
+		self._closeHandler = self.btnClose.Entity:ConnectEvent(ButtonClickEvent, self.Close)
+		self._upgradeHandler = self.btnUpgrade.Entity:ConnectEvent(ButtonClickEvent, self.OnUpgradeClicked)
+		-- 패딩(눌림) 연출 — 누르는 순간 작아지고 떼는 순간 원래 크기로 돌아온다
+		self._closeStateHandler = self.btnClose.Entity:ConnectEvent(ButtonStateChangeEvent, function(event) self:OnButtonStateChanged(event, self.btnClose.Entity) end)
+		self._upgradeStateHandler = self.btnUpgrade.Entity:ConnectEvent(ButtonStateChangeEvent, function(event) self:OnButtonStateChanged(event, self.btnUpgrade.Entity) end)
+		log("SkillUpgradeUI started")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OpenForSkill(integer skillIndex)
+		-- 스킬 탭에서 아이콘을 눌렀을 때 SkillUI가 호출 — 상세/업그레이드 팝업을 연다
+		self._currentSkillIndex = skillIndex
+		self.popupGroup.Enable = true
+		self:ApplyGradeBackground(skillIndex)
+		self:RefreshPanel()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ApplyGradeBackground(integer skillIndex)
+		-- 1=일반 / 2=매직 / 3=레어 — 스킬탭 카드와 동일한 등급별 배경으로 맞춘다
+		local grade = _SkillInventory:GetSkillGrade(skillIndex)
+		local ruid = self._rareBgRuid
+		if grade == 1 then
+			ruid = self._normalBgRuid
+		elseif grade == 2 then
+			ruid = self._magicBgRuid
+		end
+		self.bgSprite.ImageRUID = DataRef(ruid)
+		log("SkillUpgradeUI: popup bg for skill " .. tostring(skillIndex) .. " grade=" .. tostring(grade) .. " ruid=" .. ruid)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Close()
+		self._currentSkillIndex = -1
+		self.popupGroup.Enable = false
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnButtonStateChanged(ButtonStateChangeEvent event, Entity buttonEntity)
+		if not isvalid(buttonEntity) then return end
+		-- 눌림 연출은 이제 공용 ButtonPressFxLogic이 모든 버튼에 건다(2026-09-26) — 여기서 또 크기를 바꾸면
+		-- 같은 버튼을 두 곳이 다퉈 중심 보정이 틀어진다. 연결은 남겨두되 아무것도 하지 않는다
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshPanel()
+		-- 현재 선택된 스킬의 레벨/조각/골드 상태를 다시 그린다. 업그레이드 성공 후에도 이 메서드로 갱신한다
+		if self._currentSkillIndex < 0 then return end
+		local key = tostring(self._currentSkillIndex)
+
+		-- 강화 안 한 기본 상태는 Lv.1(0이 아니다). 서버(SkillInventory.RequestLevelUpSkill)와 같은 규칙으로
+		-- nil이 아니라 "0보다 큰가"를 본다 — 저장된 0이 기본 레벨을 덮으면 Lv.0으로 표시된다
+		local level = 1
+		local storedLevel = _SkillInventory.Levels[key]
+		if storedLevel ~= nil and storedLevel > 0 then level = storedLevel end
+		local fragments = 0
+		if _SkillInventory.Counts[key] ~= nil then fragments = _SkillInventory.Counts[key] end
+
+		self.levelText.Text = "Lv." .. tostring(level)
+		-- 긴 이름은 "…"로 자른다(스킬탭 칸과 같은 규칙, SkillUI.FitTextEllipsis)
+		self.nameText.Text = _SkillUI:FitTextEllipsis(self.nameText, _SkillUI:GetSkillBaseName(self._currentSkillIndex), self.nameText.Entity.UITransformComponent.RectSize.x - 8)
+		self.iconSprite.ImageRUID = DataRef(_SkillUI:GetSkillIconRuid(self._currentSkillIndex))
+		-- 아이콘 엔티티는 모든 스킬이 같이 쓰므로 회전 없는 스킬이면 0으로 되돌린다
+		self.iconSprite.Entity.UITransformComponent.UIRotation = Vector3(0, 0, _SkillInventory:GetSkillIconRotation(self._currentSkillIndex))
+
+		-- 레벨/조각/코인 흐름은 유물과 동일하게 동작하고, 실제 게임 효과는 CardManager가 카드 자체
+		-- 레벨과 별개로 가산 적용한다(ApplyGradeBackground 근처 참고 없음 — CardManager Get* 게이트웨이 참고)
+		local maxLevel = _SkillInventory:GetMaxLevelForSkill(self._currentSkillIndex)
+		if level >= maxLevel then
+			self.optionText.Text = _LocalizationService:GetText("MLUA_RELICUPGRADEUI_003")
+			self.costText.Text = "MAX"
+			self.fragmentBarText.Text = "MAX"
+			self.fragmentBarFill.FillAmount = 1
+			self:SetUpgradeEnabled(false)
+			return
+		end
+
+		local nextLevel = level + 1
+		local grade = _SkillInventory:GetSkillGrade(self._currentSkillIndex)
+		local fragmentCost = _SkillInventory:GetFragmentCostForLevel(level, grade)
+		local coinCost = _SkillInventory:GetGoldCostForLevel(level, grade)
+		self.optionText.Text = _LocalizationService:GetTextFormat("FMT_SKILLUPGRADEUI_001", tostring(nextLevel), self:GetSkillLevelUpDescription(self._currentSkillIndex, nextLevel))
+		self.costText.Text = _LocalizationService:GetTextFormat("FMT_RELICUPGRADEUI_003", tostring(coinCost))
+
+		self.fragmentBarText.Text = tostring(fragments) .. "/" .. tostring(fragmentCost)
+		local fragmentRatio = fragments / fragmentCost
+		if fragmentRatio > 1 then fragmentRatio = 1 end
+		self.fragmentBarFill.FillAmount = fragmentRatio
+
+		local canAfford = fragments >= fragmentCost and _TitleUI:GetLastCurrency("gold") >= coinCost
+		self:SetUpgradeEnabled(canAfford)
+	end
+
+	-- 스킬탭 카드 자체 레벨과 별개로 항상 가산되는 SkillInventory 레벨업 보너스 설명(CardManager 실제
+	-- 적용 로직과 1:1로 맞춘 텍스트). 20개 전부 최대레벨9, 보너스는 Lv3/6/9에서만 상승 —
+	-- Lv1,2,4,5,7,8은 조각/골드만 소모하고 효과는 없다.
+	@ExecSpace("ClientOnly")
+	method string GetSkillLevelUpDescription(integer skillIndex, integer nextLevel)
+		if nextLevel ~= 3 and nextLevel ~= 6 and nextLevel ~= 9 then
+			return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_002")
+		end
+		if skillIndex == 0 then -- 매직 부스터
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_003")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_004")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_005") end
+		elseif skillIndex == 1 then -- 포션
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_006")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_007")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_008") end
+		elseif skillIndex == 2 then -- 매직 아머
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_009")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_010")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_011") end
+		elseif skillIndex == 3 then -- 썬더볼트
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_012")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_013")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_014") end
+		elseif skillIndex == 4 then -- 콜드빔
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_012")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_015")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_016") end
+		elseif skillIndex == 5 then -- 아이스커터
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_012")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_015")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_017") end
+		elseif skillIndex == 6 then -- 에너지볼트
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_012")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_015")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_018") end
+		elseif skillIndex == 7 then -- 썬더커터
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_012")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_015")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_018") end
+		elseif skillIndex == 8 then -- 매직 크리티컬
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_CARDMANAGER_077")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_019")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_020") end
+		elseif skillIndex == 9 then -- 프리징 이펙트
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_021")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_022")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_023") end
+		elseif skillIndex == 10 then -- 메디테이션
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_024")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_025")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_026") end
+		elseif skillIndex == 11 then -- 페페
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_012")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_015")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_027") end
+		elseif skillIndex == 12 then -- 헤일 스톤
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_012")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_015")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_028") end
+		elseif skillIndex == 13 then -- 아쿠아 트랩
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_012")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_015")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_018") end
+		elseif skillIndex == 14 then -- 썬더스톰
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_012")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_015")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_014") end
+		elseif skillIndex == 15 then -- 아이스 스트라이크
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_012")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_015")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_029") end
+		elseif skillIndex == 16 then -- 체인 라이트닝
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_012")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_015")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_030") end
+		elseif skillIndex == 17 then -- 더블 커터
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_012")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_015")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_030") end
+		elseif skillIndex == 18 then -- 킹페페
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_012")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_015")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_031") end
+		elseif skillIndex == 19 then -- 헤일 버스트
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_012")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_015")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_032") end
+
+		-- 실피드 전용 20종(인덱스 20~39) — 유저 확정표. 바람의 시/폭풍의 시는 원본 표에서 Lv6/Lv9
+		-- 효과가 서로 뒤바뀌어 있었던 것을 다른 18개와 동일한 (대미지/쿨타임/고유효과) 패턴으로
+		-- 정규화했다(유저 확인 필요 — CardManager 적용 로직도 동일하게 정규화된 텍스트 기준).
+		elseif skillIndex == 20 then -- 바람의 시
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_012")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_015")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_033") end
+		elseif skillIndex == 21 then -- 애로우 블로우
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_012")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_015")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_033") end
+		elseif skillIndex == 22 then -- 아이스 퀴버
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_012")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_015")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_034") end
+		elseif skillIndex == 23 then -- 파이어 퀴버
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_012")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_015")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_035") end
+		elseif skillIndex == 24 then -- 피닉스
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_012")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_015")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_036") end
+		elseif skillIndex == 25 then -- 리트리트 샷
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_012")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_015")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_037") end
+		elseif skillIndex == 26 then -- 언카운터 에로우
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_012")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_015")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_037") end
+		elseif skillIndex == 27 then -- 플레시 미라주
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_012")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_015")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_038") end
+		elseif skillIndex == 28 then -- 에로우 일루전
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_012")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_039")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_040") end
+		elseif skillIndex == 29 then -- 이볼브
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_041")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_039")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_036") end
+		elseif skillIndex == 30 then -- 폭풍의 시
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_041")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_039")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_042") end
+		elseif skillIndex == 31 then -- 강화 애로우 블로우
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_041")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_039")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_042") end
+		elseif skillIndex == 32 then -- 에로우 플레터
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_041")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_039")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_043") end
+		elseif skillIndex == 33 then -- 언카운트에로우V
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_041")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_039")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_043") end
+		elseif skillIndex == 34 then -- 플레시 봄버
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_041")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_039")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_043") end
+		elseif skillIndex == 35 then -- 보우 액셀레이션
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_044")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_045")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_046") end
+		elseif skillIndex == 36 then -- 꿰뚫는 의지
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_CARDMANAGER_077")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_019")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_020") end
+		elseif skillIndex == 37 then -- 크리티컬 샷
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_047")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_048")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_049") end
+		elseif skillIndex == 38 then -- 파이널 어택 : 활
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_050")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_051")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_052") end
+		elseif skillIndex == 39 then -- 연속 사격
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_053")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_054")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_055") end
+
+		-- 레이온 전용 20종(인덱스 40~59) — 유저 확정표
+		elseif skillIndex == 40 then -- 슬래시
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_012")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_015")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_056") end
+		elseif skillIndex == 41 then -- 브랜디쉬
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_012")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_015")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_056") end
+		elseif skillIndex == 42 then -- 플래시 슬래시
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_012")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_015")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_056") end
+		elseif skillIndex == 43 then -- 돌진
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_012")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_015")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_057") end
+		elseif skillIndex == 44 then -- 오라 블레이드
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_012")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_015")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_056") end
+		elseif skillIndex == 45 then -- 레이징 블로우
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_012")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_015")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_058") end
+		elseif skillIndex == 46 then -- 리프 어택
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_012")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_015")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_056") end
+		elseif skillIndex == 47 then -- 스카링 소드
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_012")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_015")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_059") end
+		elseif skillIndex == 48 then -- 브레이브 슬래시
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_041")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_039")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_060") end
+		elseif skillIndex == 49 then -- 스피릿 블레이드
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_041")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_039")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_061") end
+		elseif skillIndex == 50 then -- 버닝 러시
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_041")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_039")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_062") end
+		elseif skillIndex == 51 then -- 슬래시 스톰
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_041")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_039")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_063") end
+		elseif skillIndex == 52 then -- 솔라 블레이드
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_041")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_039")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_064") end
+		elseif skillIndex == 53 then -- 스카링 블레이드
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_041")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_039")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_065") end
+		elseif skillIndex == 54 then -- 퓨리어스 블로우
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_041")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_039")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_058") end
+		elseif skillIndex == 55 then -- 콤보 어택
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_066")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_067")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_068") end
+		elseif skillIndex == 56 then -- 찬스 어택
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_CARDMANAGER_077")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_019")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_020") end
+		elseif skillIndex == 57 then -- 코마
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_069")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_070")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_071") end
+		elseif skillIndex == 58 then -- 셀프 리커버리
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_006")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_007")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_008") end
+		elseif skillIndex == 59 then -- 워리어 마스터리
+			if nextLevel == 3 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_053")
+			elseif nextLevel == 6 then return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_054")
+			else return _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_055") end
+		end
+
+		-- 쉐이드(60~79) / 린(80~101) — 2026-09-15 추가(예전엔 이 구간이 전부 빈 문구였다).
+		-- 액티브는 CardManager._skillInvCardIdxMap2의 dmg/cd/crit, 패시브는 각 getter의 GetSkillInvTierPercent
+		-- 값과 1:1로 맞춘 문구다. { Lv3, Lv6, Lv9 }
+		local extra = {
+			[60] = { _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_012"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_015"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_037") },  -- 더블 스탭
+			[61] = { _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_012"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_015"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_037") },  -- 새비지 블로우
+			[62] = { _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_012"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_015"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_037") },  -- 연막탄
+			[63] = { _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_012"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_015"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_037") },  -- 무스펠하임
+			[64] = { _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_012"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_015"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_037") },  -- 스틸
+			[65] = { _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_012"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_015"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_037") },  -- 메소 익스플로젼
+			[66] = { _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_012"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_015"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_072") },       -- 쉐도우 파트너
+			[67] = { _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_073"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_015"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_037") },   -- 다크 플레어
+			[68] = { _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_041"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_039"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_043") },  -- 암살
+			[69] = { _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_041"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_039"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_043") },  -- 소닉 블로우
+			[70] = { _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_041"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_039"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_043") },  -- 연막난무
+			[71] = { _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_041"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_039"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_043") },  -- 아주르 엣지
+			[72] = { _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_041"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_039"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_043") },  -- 메소 데토네이션
+			[73] = { _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_041"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_039"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_074") },       -- 듀얼 쉐도우 파트너
+			[74] = { _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_012"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_039"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_043") },  -- 어비설 플레어
+			[75] = { _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_044"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_045"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_046") },       -- 대거 액셀레이션
+			[76] = { _LocalizationService:GetText("MLUA_CARDMANAGER_078"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_020"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_075") },  -- 크리티컬 엣지
+			[77] = { _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_047"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_048"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_049") },  -- 카르마
+			[78] = { _LocalizationService:GetText("MLUA_CARDMANAGER_276"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_076"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_077") },           -- 다크 사이트
+			[79] = { _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_053"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_054"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_055") },       -- 피지컬 트레이닝
+			[80] = { _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_012"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_015"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_037") },  -- 럭키 세븐
+			[81] = { _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_012"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_015"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_037") },  -- 슈리켄 버스트
+			[82] = { _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_012"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_015"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_037") },  -- 쉐도우 트랩
+			[83] = { _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_012"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_015"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_037") },  -- 윈드 탈리스만
+			[84] = { _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_012"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_015"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_037") },  -- 쉐도우 스플릿
+			[85] = { _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_012"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_015"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_037") },  -- 스로잉 윙대거
+			[86] = { _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_073"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_015"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_037") },   -- 쇼다운 챌린지
+			[87] = { _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_012"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_015"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_037") },  -- 스핀 스로우
+			[88] = { _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_041"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_039"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_043") },  -- 슈퍼 세븐
+			[89] = { _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_041"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_039"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_043") },  -- 슈리켄 봄버
+			[90] = { _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_041"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_039"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_043") },  -- 데스 트랩
+			[91] = { _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_041"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_039"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_043") },  -- 팬텀 스플릿
+			[92] = { _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_041"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_039"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_043") },  -- 스로잉 붐대거
+			[93] = { _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_041"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_039"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_072") },       -- 블러드 스로우
+			[94] = { _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_012"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_039"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_043") },  -- 쇼다운 임팩트
+			[95] = { _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_041"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_039"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_043") },  -- 스톰 탈리스만
+			[96] = { _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_044"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_045"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_046") },       -- 스로잉 액셀레이션
+			[97] = { _LocalizationService:GetText("MLUA_CARDMANAGER_078"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_020"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_075") },  -- 자벨린 마스터리
+			[98] = { _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_047"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_048"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_049") },  -- 스피릿 자벨린
+			[99] = { _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_050"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_051"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_052") },  -- 표창술
+			[100] = { _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_053"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_054"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_055") },      -- 시프 커닝
+			[101] = { _LocalizationService:GetText("MLUA_CARDMANAGER_276"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_076"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_077") },          -- 래디컬 다크니스
+			-- 2026-10-01 신규 11종(102~112) — 기본기 매직(10%/5%) · 조합 레어(15%/8%), Lv9는 CardManager 각 getter와 1:1
+			[102] = { _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_012"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_015"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_078") },  -- 프리징 브레스
+			[103] = { _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_041"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_039"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_079") },  -- 프로즌 오브
+			[104] = { _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_041"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_039"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_080") },  -- 라이트닝 오브
+			[105] = { _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_012"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_015"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_081") },  -- 윈드 오브 프레이
+			[106] = { _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_041"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_039"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_082") },  -- 게일 오브 프레이
+			[107] = { _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_041"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_039"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_083") },  -- 스네어 오브 프레이
+			[108] = { _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_012"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_015"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_084") },  -- 인사이징
+			[109] = { _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_041"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_039"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_085") },  -- 인사이징:관
+			[110] = { _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_041"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_039"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_086") },  -- 인사이징:폭
+			[111] = { _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_087"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_088"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_089") },  -- 컨센트레이션
+			[112] = { _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_090"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_091"), _LocalizationService:GetText("MLUA_SKILLUPGRADEUI_092") },  -- 아이언 바디
+		}
+		local row = extra[skillIndex]
+		if row ~= nil then
+			if nextLevel == 3 then return row[1]
+			elseif nextLevel == 6 then return row[2]
+			end
+			return row[3]
+		end
+		return ""
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetUpgradeEnabled(boolean enabled)
+		-- 공통 프레임과 실제 강화 가능 상태를 유지하며 버튼 그림만 초록/회색으로 구분한다.
+		self.btnUpgrade.Enable = enabled
+		local sprite = self.btnUpgrade.Entity.SpriteGUIRendererComponent
+		if enabled then
+			sprite.ImageRUID = DataRef("73a50596371b43bea72b8222a7b8881d")
+			self.upgradeTitleText.FontColor = Color(0.169, 0.141, 0.071, 1)
+			self.costText.FontColor = Color(0.169, 0.141, 0.071, 1)
+		else
+			sprite.ImageRUID = DataRef("6a34f87232c649cfaa6d770aae45e293")
+			self.upgradeTitleText.FontColor = Color(1, 1, 1, 1)
+			self.costText.FontColor = Color(1, 1, 1, 1)
+		end
+		sprite.Color = Color(1, 1, 1, 1)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUpgradeClicked()
+		_SkillInventory:RequestLevelUpSkill(self._currentSkillIndex)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		if self._closeHandler then self.btnClose.Entity:DisconnectEvent(ButtonClickEvent, self._closeHandler) end
+		if self._upgradeHandler then self.btnUpgrade.Entity:DisconnectEvent(ButtonClickEvent, self._upgradeHandler) end
+		if self._closeStateHandler then self.btnClose.Entity:DisconnectEvent(ButtonStateChangeEvent, self._closeStateHandler) end
+		if self._upgradeStateHandler then self.btnUpgrade.Entity:DisconnectEvent(ButtonStateChangeEvent, self._upgradeStateHandler) end
+	end
+
+end
