@@ -1,0 +1,214 @@
+@Logic
+script AcquisitionFxUI extends Logic
+	property Entity template = "b37460b4-7079-4399-83e4-f65962b61e60"
+	property Entity layer = "81b8f66c-8506-4d5b-a66b-e4fbef41a1bd"
+	property number Duration = 1.05
+	property table _effects = {}
+	property table _pending = {}
+	property table _seenGear = {}
+	property table _gearQueue = {}
+	property number _poll = 0
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		self._effects = {}; self._pending = {}; self._seenGear = {}; self._gearQueue = {}
+		if isvalid(self.template) then self.template.Enable = false end
+		log("AcquisitionFxUI started")
+	end
+
+	-- The grant methods notify only a genuine locked-to-owned transition; loading saves never queues effects.
+	@ExecSpace("Client")
+	method void QueueUnlock(string kind, integer index)
+		self._pending[kind .. tostring(index)] = {kind = kind, index = index}
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean IsSlotVisible(Entity slot, Entity viewport)
+		if not isvalid(slot) or not slot.EnabledInHierarchy or not isvalid(viewport) then return false end
+		local point = viewport.UITransformComponent:ToLocalPoint(slot.UITransformComponent.WorldPosition)
+		local size = viewport.UITransformComponent.RectSize
+		local half = slot.UITransformComponent.RectSize / 2
+		return math.abs(point.x) + half.x <= size.x / 2 + 2 and math.abs(point.y) + half.y <= size.y / 2 + 2
+	end
+
+	@ExecSpace("ClientOnly")
+	method void FlushUnlocks()
+		if isvalid(_GachaUI.gachaGroup) and _GachaUI.gachaGroup.Enable then return end
+		for key, pending in pairs(self._pending) do
+			local prefix = "Relic"
+			local owned = _RelicInventory:GetEffectiveLevel(pending.index) > 0
+			if pending.kind == "skill" then prefix = "Skill"; owned = not _SkillInventory:IsSkillLocked(pending.index) end
+			local path = "/ui/TitleGroup/" .. prefix .. "Panel/ScrollArea"
+			local view = _EntityService:GetEntityByPath(path)
+			local slot = _EntityService:GetEntityByPath(path .. "/List/" .. prefix .. "Slot_" .. tostring(pending.index))
+			if owned and self:IsSlotVisible(slot, view) then
+				self:Play(slot, "unlock", 0)
+				self._pending[key] = nil
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void StopTarget(Entity target)
+		for i = #self._effects, 1, -1 do
+			local effect = self._effects[i]
+			if effect.target == target then self:Finish(i) end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Play(Entity target, string kind, number delay)
+		if not isvalid(self.template) or not isvalid(target) then return end
+		self:StopTarget(target)
+		-- UI templates may serialize a zero Z scale. Reparenting divides by the parent's scale.
+		local targetScale = target.UITransformComponent.Scale
+		if targetScale.z == 0 then target.UITransformComponent.Scale = Vector3(targetScale.x, targetScale.y, 1) end
+		local fx = self.template:Clone("AcquireFx_" .. kind .. tostring(_UtilLogic.ElapsedSeconds))
+		target:AttachChild(fx)
+		fx.UITransformComponent.anchoredPosition = Vector2(0, 0)
+		if kind == "character" and isvalid(target.Parent) then
+			target.Parent:AttachChild(fx)
+			fx.UITransformComponent.anchoredPosition = target.UITransformComponent.anchoredPosition
+		end
+		_UILogic:SetSiblingIndex(fx.UITransformComponent, 0)
+		fx.UITransformComponent.Scale = Vector3(1, 1, 1)
+		fx.Enable = true
+		local lock = kind == "unlock"
+		fx:GetChildByName("LockBody").Enable = lock
+		fx:GetChildByName("LockShackle").Enable = lock
+		fx:GetChildByName("RareIcon").Enable = false
+		fx:GetChildByName("Frame").Enable = lock
+		fx:GetChildByName("Frame").SpriteGUIRendererComponent.FillCenter = false
+		fx:GetChildByName("Glow").SpriteGUIRendererComponent.Color = Color(1, 1, 1, 0.45)
+		local size = target.UITransformComponent.RectSize
+		fx:GetChildByName("Frame").UITransformComponent.RectSize = size - Vector2(20, 20)
+		local scale = size.x / 220
+		if kind == "gacha" then scale = 0.7 end
+		fx:GetChildByName("Glow").UITransformComponent.RectSize = Vector2(230 * scale, 230 * scale)
+		local color = nil
+		if kind == "character" then
+			color = target.SpriteGUIRendererComponent.Color
+			target.SpriteGUIRendererComponent.Color = Color(0.06, 0.06, 0.08, color.a)
+		end
+		if kind == "gacha" then target.UITransformComponent.Scale = Vector3(0, 0, 1) end
+		table.insert(self._effects, {fx = fx, target = target, kind = kind, start = _UtilLogic.ElapsedSeconds + delay, duration = self.Duration, color = color, scale = scale})
+		log("AcquisitionFxUI create " .. kind)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayRareGear(string iconRuid, integer grade)
+		if grade < 2 or iconRuid == "" or not isvalid(self.layer) then return end
+		self:Play(self.layer, "gear", 0)
+		local effect = self._effects[#self._effects]
+		if effect == nil or effect.kind ~= "gear" then return end
+		effect.scale = 1.25
+		effect.fx.UITransformComponent.anchoredPosition = Vector2(0, 130)
+		effect.fx:GetChildByName("Glow").UITransformComponent.RectSize = Vector2(310, 310)
+		local icon = effect.fx:GetChildByName("RareIcon")
+		icon.Enable = true; icon.SpriteGUIRendererComponent.ImageRUID = iconRuid
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Finish(integer index)
+		local effect = self._effects[index]
+		if isvalid(effect.target) then
+			if effect.color ~= nil then effect.target.SpriteGUIRendererComponent.Color = effect.color end
+			if effect.kind == "gacha" then effect.target.UITransformComponent.Scale = Vector3(1, 1, 1) end
+		end
+		if isvalid(effect.fx) then effect.fx:Destroy() end
+		log("AcquisitionFxUI finish " .. effect.kind)
+		table.remove(self._effects, index)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUpdate(number delta)
+		self._poll = self._poll + delta
+		if self._poll >= 0.2 then self._poll = 0; self:FlushUnlocks() end
+		local gearBusy = false
+		for _, effect in ipairs(self._effects) do if effect.kind == "gear" then gearBusy = true end end
+		if not gearBusy and #self._gearQueue > 0 then
+			local gear = table.remove(self._gearQueue, 1)
+			self:PlayRareGear(gear.ruid, gear.grade)
+		end
+		for i = #self._effects, 1, -1 do
+			local effect = self._effects[i]
+			local target = effect.target
+			local elapsed = _UtilLogic.ElapsedSeconds - effect.start
+			if not isvalid(target) or not target.EnabledInHierarchy or not isvalid(effect.fx) or elapsed >= effect.duration then
+				self:Finish(i)
+			else
+				local u = math.max(0, elapsed / effect.duration)
+				local fx = effect.fx
+				fx.CanvasGroupComponent.GroupAlpha = math.min(1, u * 10) * math.min(1, (1 - u) * 3)
+				local glow = fx:GetChildByName("Glow")
+				local g = 0.65 + math.min(1, u * 3) * 0.5
+				glow.UITransformComponent.Scale = Vector3(g, g, 1)
+				glow.UITransformComponent.UIRotation = Vector3(0, 0, u * 25)
+				if effect.kind == "gear" then
+					glow.UITransformComponent.anchoredPosition = Vector2(0, u * 38)
+					glow.UITransformComponent.Scale = Vector3(g * 0.8, g * 1.35, 1)
+				end
+				if effect.kind == "character" then
+					local c = effect.color
+					local reveal = math.min(1, u * 2.2)
+					target.SpriteGUIRendererComponent.Color = Color(0.06 + (c.r - 0.06) * reveal, 0.06 + (c.g - 0.06) * reveal, 0.08 + (c.b - 0.08) * reveal, c.a)
+				elseif effect.kind == "gacha" then
+					local v = math.min(1, u * 4)
+					local s = 1 + 2.7 * (v - 1) ^ 3 + 1.7 * (v - 1) ^ 2
+					target.UITransformComponent.Scale = Vector3(s, s, 1)
+				elseif effect.kind == "unlock" then
+					local open = math.min(1, u * 4)
+					fx:GetChildByName("LockShackle").UITransformComponent.anchoredPosition = Vector2(-5 * open, 34 + 12 * open)
+					fx:GetChildByName("LockBody").UITransformComponent.anchoredPosition = Vector2(0, 34 - math.max(0, u - 0.3) * 90)
+					local alpha = math.max(0, 1 - u * 2)
+					fx:GetChildByName("LockBody").SpriteGUIRendererComponent.Color = Color(1, 1, 1, alpha)
+					fx:GetChildByName("LockShackle").SpriteGUIRendererComponent.Color = Color(1, 1, 1, alpha)
+					fx:GetChildByName("Glow").UITransformComponent.anchoredPosition = Vector2(0, 34)
+				end
+				for leafIndex = 1, 8 do
+					local leaf = fx:GetChildByName("Leaf" .. tostring(leafIndex))
+					local angle = (leafIndex - 1) * math.pi / 4
+					local radius = (18 + u * 95) * effect.scale
+					local x = math.cos(angle) * radius
+					local y = math.sin(angle) * radius - u * u * 35
+					if effect.kind == "character" then y = -110 + u * 160 + math.sin(angle) * 32 end
+					if effect.kind == "unlock" then
+						local p = (u + (leafIndex - 1) / 8) % 1 * 4
+						local half = (target.UITransformComponent.RectSize - Vector2(26, 26)) / 2
+						if p < 1 then x = -half.x + p * half.x * 2; y = half.y
+						elseif p < 2 then x = half.x; y = half.y - (p - 1) * half.y * 2
+						elseif p < 3 then x = half.x - (p - 2) * half.x * 2; y = -half.y
+						else x = -half.x; y = -half.y + (p - 3) * half.y * 2 end
+					end
+					leaf.UITransformComponent.anchoredPosition = Vector2(x, y)
+					leaf.UITransformComponent.UIRotation = Vector3(0, 0, leafIndex * 38 + u * 95)
+				end
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	@EventSender("LocalPlayer")
+	handler HandleInvenItemAddedEvent(InvenItemAddedEvent event)
+		local player = _UserService.LocalPlayer
+		if not isvalid(player) or not isvalid(player.PkgPlayerInventory) then return end
+		for _, guid in ipairs(event.GUIDs) do
+			if not self._seenGear[guid] then
+				self._seenGear[guid] = true
+				local item = player.PkgPlayerInventory.Items[guid]
+				if item ~= nil then
+					local gear = item:GetGearStruct()
+					if gear ~= nil and gear.Grade >= 2 then table.insert(self._gearQueue, {ruid = item:GetDisplayRUID(), grade = gear.Grade}) end
+				end
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		for i = #self._effects, 1, -1 do self:Finish(i) end
+		self._pending = {}
+		self._gearQueue = {}
+	end
+end
+

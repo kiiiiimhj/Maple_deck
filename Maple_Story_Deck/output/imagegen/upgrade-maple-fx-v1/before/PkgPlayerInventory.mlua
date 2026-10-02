@@ -1,0 +1,1781 @@
+@Component
+script PkgPlayerInventory extends Component
+
+	property boolean IsSaveDB = false
+
+	@TargetUserSync
+	property boolean InitSyncEnd = false
+
+	property integer InventoryCapacity = 100
+
+	property table Items = {}
+
+	property table AttachedNormalGearItems = {}
+
+	property table NewItemsSet = {}
+
+	property integer CurrentJob = nil
+
+	@ExecSpace("ServerOnly")
+	method void LoadFromDB(table loadKeys)
+		table.insert(loadKeys, _GMInventoryToolLogic.StorageName)
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean OnLoadedDataFromDB(table loadedData)
+		--[[
+			"JobLevels" : {"110" : 1, "120" : 99},
+			"Items" : [],
+			"GearItems" : 
+			[
+				JobCode1 : [1,2,3...],
+				JobCode2 : [4,5,6...]
+			]
+		]]
+		local userId = self.Entity.PlayerComponent.UserId
+		
+		---@type DataStorageItem
+		local storageData = loadedData[_GMInventoryToolLogic.StorageName]
+		if storageData ~= nil and (_Util:IsNilorEmptyString(storageData.Value) == false) then
+			local inventoryTable = _HttpService:JSONDecode(storageData.Value)
+			
+			local dbItems = inventoryTable[_GMInventoryToolLogic.StorageItemsKey]
+			if dbItems ~= nil then
+				local invenItems = self.Items
+				for i, dbItem in ipairs(dbItems) do
+					local itemStruct = ItemStruct()
+					if itemStruct:Deserialize(dbItem) == false then
+						continue
+					end
+					
+					invenItems[itemStruct.GUID] = itemStruct
+				end
+			end
+			
+			local gearItems = self:DeserializeAttachedNormalGearItems(inventoryTable[_GMInventoryToolLogic.StorageGearItemsKey])
+			if gearItems ~= nil then
+				for jobCode, categoryGUIDPairs in pairs(gearItems) do
+					for category, guid in pairs(categoryGUIDPairs) do
+						if self:CanAttachNormalGear(jobCode, guid) == _ErrorCodeEnum.Success then
+							self:Inner_AttachNormalGear(jobCode, guid)
+						end
+					end
+				end
+			end
+		end
+		
+		-- 스탯 표가 바뀐 뒤 접속한 기존 장비를 보정한다(2026-09-02). 투구/장갑/망토는 원래 스탯이
+		-- 없어서 Atk/Hp 가 0으로 저장돼 있고, 그대로 두면 강화 수치만 붙고 기본 능력치가 0으로 보인다.
+		self:BackfillMissingGearStats()
+
+		self:CleanupExpiredItems(false)
+		
+		local dbItems = {}
+		for guid, v in pairs(self.Items) do
+			---@type ItemStruct
+			local itemStruct = v
+			local dbItem = {}
+			itemStruct:Serialize(dbItem)
+			table.insert(dbItems, dbItem)
+		end
+		
+		self:SyncInitItems(_HttpService:JSONEncode(dbItems), userId)
+		
+		local attachedNormalGearItemsStr = self:SerializeAttachedNormalGearItems()
+		self:SyncInitGearItems(attachedNormalGearItemsStr, userId)
+		
+		self.InitSyncEnd = true
+		
+		return true
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SaveToDB(table saveData)
+		if self.IsSaveDB == false then
+			return
+		end
+		
+		local dbTable = {}
+		
+		local dbItems = {}
+		for guid, v in pairs(self.Items) do
+			---@type ItemStruct
+			local itemStruct = v
+			
+			local dbItem = {}
+			itemStruct:Serialize(dbItem)
+			table.insert(dbItems, dbItem)
+		end
+		
+		if #dbItems ~= 0 then
+			dbTable[_GMInventoryToolLogic.StorageItemsKey] = dbItems
+		end
+		
+		local gearItemsStr = self:SerializeAttachedNormalGearItems()
+		if not _Util:IsNilorEmptyString(gearItemsStr) then
+			dbTable[_GMInventoryToolLogic.StorageGearItemsKey] = gearItemsStr
+		end
+		
+		local dbString = ""
+		if not _Util:IsNilorEmptyTable(dbTable) then
+			dbString = _HttpService:JSONEncode(dbTable)
+		end
+		
+		saveData[_GMInventoryToolLogic.StorageName] = dbString
+	end
+
+	@ExecSpace("Client")
+	method void SyncInitItems(string dbItemsStr)
+		if _Util:IsNilorEmptyString(dbItemsStr) then
+			return
+		end
+		
+		local invenItems = self.Items
+		local dbItems = _HttpService:JSONDecode(dbItemsStr)
+		for _, dbItem in ipairs(dbItems) do
+			local itemStruct = ItemStruct()
+			if itemStruct:Deserialize(dbItem) then
+				invenItems[itemStruct.GUID] = itemStruct
+			end
+		end
+	end
+
+	@ExecSpace("Client")
+	method void SyncInitGearItems(string itemsStr)
+		if _Util:IsNilorEmptyString(itemsStr) then
+			return
+		end
+		
+		self.AttachedNormalGearItems = self:DeserializeAttachedNormalGearItems(itemsStr)
+		
+		local invenItems = self.Items
+		for job, categoryGuidPairs in pairs(self.AttachedNormalGearItems) do
+			for category, guid in pairs(categoryGuidPairs) do
+				---@type ItemStruct
+				local itemStruct = invenItems[guid]
+				if itemStruct == nil then
+					continue
+				end
+				
+				local gearStruct = itemStruct:GetGearStruct()
+				if gearStruct == nil then
+					continue
+				end
+				
+				gearStruct.IsAttached = true
+			end
+		end
+	end
+
+	@ExecSpace("Server")
+	method void RequestDetachNormalGear(integer job, integer gearCategory)
+		self:DetachNormalGear(job, gearCategory)
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean DetachNormalGear(integer job, integer gearCategory)
+		local userId = self.Entity.PlayerComponent.UserId
+		if not self:CanDetachNormalGear() then
+			self:SendErrorCodeToClient(_ErrorCodeEnum.Inven_LackCapacity, nil, userId)
+			return false
+		end
+		
+		if not self:Inner_DetachNormalGear(job, gearCategory) then
+			self:SendErrorCodeToClient(_ErrorCodeEnum.Item_NoItemToDetach, nil, userId)
+			return false
+		end
+		
+		self.IsSaveDB = true
+		self:ResponseDetachNormalGear(job, gearCategory, userId)
+		return true
+	end
+
+	method boolean CanDetachNormalGear()
+		-- 2026-09-15 수정: 해제는 항상 허용한다. 원래는 패키지의 옛 정원(InventoryCapacity=100, 무기+방어구 합계)에서
+		-- "착용 안 한 장비 수"를 빼서 빈 칸이 없으면 막았는데, 이 게임의 정원은 탭별(무기/방어구 각 100+확장)이고
+		-- 인벤 "N / M"도 착용 중인 장비를 이미 포함해서 센다 — 벗어도 칸 수가 안 변하므로 막을 이유가 없다.
+		-- (예전엔 무기 60 + 방어구 50처럼 탭은 여유 있어도 합이 100을 넘으면 어떤 장비도 못 벗었다)
+		return true
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean Inner_DetachNormalGear(integer job, integer gearCategory)
+		if self:GetNormalGearItemGUID(job, gearCategory) == nil then
+			return false
+		end
+		
+		local itemStruct = self:GetNormalGearItemStruct(job, gearCategory)
+		if itemStruct ~= nil then
+			local gearStruct = itemStruct:GetGearStruct()
+			if gearStruct ~= nil then
+				gearStruct.IsAttached = false
+			end
+		end
+		
+		self.AttachedNormalGearItems[job][gearCategory] = nil
+		return true
+	end
+
+	@ExecSpace("Client")
+	method void ResponseDetachNormalGear(integer job, integer gearCategory)
+		self:DetachNormalGearInClient(job, gearCategory)
+		
+		local evt = InvenDetachNormalGearEvent()
+		evt:Init(job, gearCategory)
+		self.Entity:SendEvent(evt)
+		
+		local invalidateEvt = InvenInvalidateEvent()
+		invalidateEvt.Job = job
+		self.Entity:SendEvent(invalidateEvt)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void DetachNormalGearInClient(integer job, integer gearCategory)
+		local guid = self:GetNormalGearItemGUID(job, gearCategory)
+		if self.AttachedNormalGearItems[job] then
+			self.AttachedNormalGearItems[job][gearCategory] = nil
+		end
+		
+		if _Util:IsNilorEmptyString(guid) then return end
+		
+		---@type ItemStruct
+		local itemStruct = self.Items[guid]
+		if itemStruct == nil then return end
+		
+		local gearStruct = itemStruct:GetGearStruct()
+		if gearStruct == nil then return end
+		
+		gearStruct.IsAttached = false
+	end
+
+	@ExecSpace("ServerOnly")
+	method void CreateAndAttachDefaultGear(integer job)
+		local jobData = _JobDataLogic:GetData(job)
+		if jobData == nil then
+			return
+		end
+		
+		-- 2026-09-17 출시 준비로 JobDataSet.DefaultGearItemIds 를 비웠다(신규 유저는 맨몸 시작).
+		-- 목록이 비면 아래 TryAddMultipleItems 를 빈 배열로 부르게 되므로 여기서 미리 빠진다 —
+		-- 기본 장비를 다시 주고 싶으면 CSV 의 DefaultGearItemIds 에 ItemId 를 '|' 로 넣으면 된다.
+		if next(jobData.DefaultGearItemIds) == nil then
+			return
+		end
+
+		local items = {}
+		for _, id in pairs(jobData.DefaultGearItemIds) do
+			local gearData = _ItemGearDataLogic:GetData(id)
+			
+			local createItem = ItemCreateParamStruct()
+			createItem:Set(id, 1, nil)
+			createItem.IsIgnoreInvenCapacity = true
+			createItem.Grade = gearData.DefaultGrade
+			table.insert(items, createItem)
+		end
+		
+		local resultStruct = ItemCreateResultStruct()
+		local result = _ItemFactoryLogic:TryAddMultipleItems(self.Entity.PlayerComponent.UserId, items, resultStruct)
+		if result ~= _ErrorCodeEnum.Success then
+			log(resultStruct.FailInfo.Message)
+			return
+		end
+		
+		local defaultItems = resultStruct.NewItemGUIDs
+		for guid, _ in pairs(defaultItems) do
+			---@type ItemStruct
+			local item = self.Items[guid]	
+			self:AttachNormalGear(job, guid)
+		end
+	end
+
+	@ExecSpace("Server")
+	method void RequestAttachNormalGear(integer job, string guid)
+		self:AttachNormalGear(job, guid)
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean AttachNormalGear(integer job, string guid)
+		local userId = self.Entity.PlayerComponent.UserId
+		
+		local errorCode = self:CanAttachNormalGear(job, guid)
+		if errorCode ~= _ErrorCodeEnum.Success then
+			self:SendErrorCodeToClient(errorCode, nil, userId)
+			return false
+		end
+		
+		---@type ItemStruct
+		local itemStruct = self.Items[guid]
+		if itemStruct == nil then return false end
+		
+		local itemData = _ItemDataLogic:GetData(itemStruct.ItemId)
+		if itemData == nil then return false end
+		
+		local gearData = itemData:GetGearData()
+		if gearData == nil then return false end
+		
+		local detachedGearCategories = {}
+		local gearCategory = gearData.GearCategory
+		if self:Inner_DetachNormalGear(job, gearCategory) then
+			table.insert(detachedGearCategories, gearCategory)	
+		end
+		
+		if gearCategory == _GearCategoryEnum.TwoHandedWeapon then
+			if self:Inner_DetachNormalGear(job, _GearCategoryEnum.OneHandedWeapon) then
+				table.insert(detachedGearCategories, _GearCategoryEnum.OneHandedWeapon)	
+			end
+		end
+		
+		if gearCategory == _GearCategoryEnum.OneHandedWeapon then
+			if self:Inner_DetachNormalGear(job, _GearCategoryEnum.TwoHandedWeapon) then
+				table.insert(detachedGearCategories, _GearCategoryEnum.TwoHandedWeapon)	
+			end
+		end
+		self.IsSaveDB = true
+		
+		local attachedGuid = nil
+		errorCode = self:Inner_AttachNormalGear(job, guid)
+		if errorCode == _ErrorCodeEnum.Success then
+			attachedGuid = guid
+		else
+			self:SendErrorCodeToClient(errorCode, nil, userId)
+		end
+		
+		self:ResponseAttachNormalGear(job, attachedGuid, detachedGearCategories, userId)
+		
+		return true
+	end
+
+	method integer CanAttachNormalGear(integer job, string guid)
+		---@type ItemStruct
+		local itemStruct = self.Items[guid]
+		if itemStruct == nil then
+			return _ErrorCodeEnum.Item_CannotFind
+		end
+		if itemStruct:IsExpired() then
+			return _ErrorCodeEnum.Item_Expired
+		end
+		
+		local itemData = _ItemDataLogic:GetData(itemStruct.ItemId)
+		if itemData == nil then
+			return _ErrorCodeEnum.Item_InvalidData
+		end
+		if itemData.Category ~= _ItemCategoryEnum.Gear then
+			return _ErrorCodeEnum.Item_InvalidCategory
+		end
+		
+		if self.Entity.PlayerJob:IsJobLocked(job) then
+			return _ErrorCodeEnum.Job_Locked
+		end
+		
+		local gearData = itemData:GetGearData()
+		if gearData == nil then
+			return _ErrorCodeEnum.Item_InvalidData
+		end
+		
+		local jobLevel = self.Entity.PlayerJob:GetJobLevel(job)
+		local errorCode = gearData:CanEquip(job, jobLevel)
+		if errorCode ~= _ErrorCodeEnum.Success then
+			return errorCode
+		end
+		
+		local gearStruct = itemStruct:GetGearStruct()
+		if gearStruct == nil then
+			return _ErrorCodeEnum.Item_InvalidGearStruct
+		end
+		if gearStruct.IsAttached then
+			return _ErrorCodeEnum.Item_AlreadyAttached
+		end
+		
+		return _ErrorCodeEnum.Success
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer Inner_AttachNormalGear(integer job, string guid)
+		---@type ItemStruct
+		local itemStruct = self.Items[guid]
+		if itemStruct == nil then
+			return _ErrorCodeEnum.Item_CannotFind
+		end
+		
+		local itemData = _ItemDataLogic:GetData(itemStruct.ItemId)
+		if itemData == nil then
+			return _ErrorCodeEnum.Item_InvalidData
+		end
+		
+		local gearData = itemData:GetGearData()
+		if gearData == nil then
+			return _ErrorCodeEnum.Item_InvalidData
+		end
+		
+		local itemGearStruct = itemStruct:GetGearStruct()
+		if itemGearStruct == nil then
+			return _ErrorCodeEnum.Item_InvalidGearStruct
+		end
+		
+		if self.AttachedNormalGearItems[job] == nil then
+			self.AttachedNormalGearItems[job] = {}
+		end
+		
+		local gearCategory = gearData.GearCategory
+		if self.AttachedNormalGearItems[job][gearCategory] ~= nil then
+			return _ErrorCodeEnum.Item_NoEmptyEquipSlot
+		end
+		
+		self.AttachedNormalGearItems[job][gearCategory] = guid
+		itemGearStruct.IsAttached = true
+		
+		return _ErrorCodeEnum.Success
+	end
+
+	@ExecSpace("Client")
+	method void ResponseAttachNormalGear(integer job, string guid, table detachedGearCategories)
+		for i, category in ipairs(detachedGearCategories) do
+			self:DetachNormalGearInClient(job, category)
+			local evt = InvenDetachNormalGearEvent()
+			evt:Init(job, category)
+			self.Entity:SendEvent(evt)
+		end
+		
+		if self:AttachNormalGearInClient(job, guid) then
+			local evt = InvenAttachNormalGearEvent()
+			evt:Init(job, guid)
+			self.Entity:SendEvent(evt)
+		end
+		
+		self:RemoveNewItemFromList(guid)
+		
+		local invalidateEvt = InvenInvalidateEvent()
+		invalidateEvt.Job = job
+		self.Entity:SendEvent(invalidateEvt)
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean AttachNormalGearInClient(integer job, string guid)
+		---@type ItemStruct
+		local itemStruct = self.Items[guid]
+		if itemStruct == nil then return false end
+		
+		local itemData = _ItemDataLogic:GetData(itemStruct.ItemId)
+		if itemData == nil then return false end
+		
+		local gearData = itemData:GetGearData()
+		if gearData == nil then return false end
+		
+		local gearStruct = itemStruct:GetGearStruct()
+		if gearStruct ~= nil then
+			gearStruct.IsAttached = true
+		end
+		
+		if self.AttachedNormalGearItems[job] == nil then
+			self.AttachedNormalGearItems[job] = {}
+		end
+		
+		local gearCategory = gearData.GearCategory
+		self.AttachedNormalGearItems[job][gearCategory] = guid
+		return true
+	end
+
+	method string GetNormalGearItemGUID(integer job, integer gearCategory)
+		if self.AttachedNormalGearItems[job] == nil then 
+			return nil 
+		end
+		return self.AttachedNormalGearItems[job][gearCategory]
+	end
+
+	method ItemStruct GetNormalGearItemStruct(integer job, integer gearCategory)
+		if self.AttachedNormalGearItems[job] == nil then 
+			return nil 
+		end
+		
+		local guid = self.AttachedNormalGearItems[job][gearCategory]
+		if _Util:IsNilorEmptyString(guid) then 
+			return nil 
+		end
+		
+		return self.Items[guid]
+	end
+
+	@ExecSpace("Client")
+	method void SyncAddItemsToClient(table dbItems, table resultItemCountTable)
+		local evt = InvenItemAddedEvent()
+		for _, dbItem in ipairs(dbItems) do
+			local itemStruct = ItemStruct()
+			if itemStruct:Deserialize(dbItem) == false then
+				log_error('PkgPlayerInventory SyncAddItemsToClient Error. Deserialize itemStruct Failed.')
+				continue
+			end
+			
+			local guid = itemStruct.GUID
+			local prevItemStruct = self.Items[guid]
+			if prevItemStruct ~= nil then
+				log_error(string.format("PkgPlayerInventory SyncAddItemsToClient Error. ItemGUID already exist. ItemId : %s, ItemGUID : %s",
+					tostring(itemStruct.ItemId), guid))
+			end
+			
+			self.Items[guid] = itemStruct
+			table.insert(evt.GUIDs, guid)
+		end
+		
+		if #evt.GUIDs ~= 0 then
+			self:AddItemsToNewItemSet(evt.GUIDs)
+			self.Entity:SendEvent(evt)
+		end
+		
+		self:SyncItemCountsToClient(resultItemCountTable)
+	end
+
+	@ExecSpace("Client")
+	method void SyncItemCountsToClient(table resultItemCountTable)
+		local evt = InvenItemModifiedEvent()
+		local addCountTable = {}
+		for GUID, count in pairs(resultItemCountTable) do
+			---@type ItemStruct
+			local itemStruct = self.Items[GUID]
+			if itemStruct == nil then
+		
+				log_error(string.format('PkgPlayerInventory SyncItemCountsToClient Error. Cannot find exist item. GUID : %s', GUID))
+				continue
+			end
+			if count > itemStruct.Count then
+				table.insert(addCountTable,GUID)
+			end
+			itemStruct.Count = count
+			
+			table.insert(evt.GUIDs, GUID)
+		end
+		
+		if #evt.GUIDs ~= 0 then
+			self:AddItemsToNewItemSet(addCountTable)
+			self.Entity:SendEvent(evt)
+		end
+	end
+
+	@ExecSpace("Client")
+	method void SyncRemovedItemsToClient(table guidList)
+		local evt = InvenItemRemovedEvent()
+		for _, guid in ipairs(guidList) do
+			---@type ItemStruct
+			local prevItemStruct = self.Items[guid]
+			if prevItemStruct == nil then
+				log_warning(string.format("PkgPlayerInventory SyncRemovedItemToClient Error. Cannot find Item. ItemGUID : %s", guid))
+				return
+			end
+			
+			self.Items[guid] = nil
+			
+			table.insert(evt.GUIDs, guid)
+			table.insert(evt.ItemIds, prevItemStruct.ItemId)
+			if prevItemStruct:IsAttached() then
+				evt.IsAttached = true
+			end
+		end
+		
+		self.Entity:SendEvent(evt)
+	end
+
+	@ExecSpace("Server")
+	method void RequestDiscardItem(string guid, integer count)
+		self:DiscardItem(guid, count, true)
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer DiscardItem(string guid, integer count, boolean isSendErrorCode)
+		local userId = self.Entity.PlayerComponent.UserId
+		
+		local errorCode = self:CanDiscardItem(guid, count)
+		if errorCode == _ErrorCodeEnum.Success then
+			errorCode = self:Inner_DiscardItem(guid, count)
+		end
+		
+		if isSendErrorCode and errorCode ~= _ErrorCodeEnum.Success then
+			self:SendErrorCodeToClient(errorCode, '', userId)
+		end
+		
+		return errorCode
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer Inner_DiscardItem(string guid, integer count)
+		---@type ItemStruct
+		local itemStruct = self.Items[guid]
+		if itemStruct == nil then
+			return _ErrorCodeEnum.Item_CannotFind
+		end
+		
+		local deleteParam = ItemDeleteParamStruct()
+		deleteParam.ItemGUID = guid
+		deleteParam.ItemCount = count
+		
+		local userId = self.Entity.PlayerComponent.UserId
+		
+		local resultStruct = ItemDeleteResultStruct()
+		return _ItemFactoryLogic:TryDeleteItem(userId, deleteParam, resultStruct)
+	end
+
+	method integer CanDiscardItem(string guid, integer count)
+		---@type ItemStruct
+		local itemStruct = self.Items[guid]
+		if itemStruct == nil then
+			return _ErrorCodeEnum.Item_CannotFind
+		end
+		
+		count = math.floor(count)
+		if count <= 0 then
+			return _ErrorCodeEnum.Item_CountIsZero
+		end
+		
+		if itemStruct.Count < count then
+			return _ErrorCodeEnum.Item_LackCount
+		end
+		
+		return itemStruct:CanDiscardItem()
+	end
+
+	method integer GetRemainSlotCount(integer itemCategory)
+		local usedSlotCount = self:GetUsedSlotCount(itemCategory)
+		return math.max(self.InventoryCapacity - usedSlotCount, 0)
+	end
+
+	method boolean HasRemainSlotCount(integer itemCategory)
+		return self:GetRemainSlotCount(itemCategory) > 0
+	end
+
+	method boolean HasRemainSlotCountAll(integer checkSlotCount)
+		local enums = _ItemCategoryEnum:ToTable()
+		for i = 1, #enums do
+			local enum = enums[i]
+			if self:GetRemainSlotCount(enum) < checkSlotCount then
+				return false
+			end
+		end
+		
+		return true
+	end
+
+	method string SerializeAttachedNormalGearItems()
+		local dbEquipItems = {}
+		
+		for jobCode, v in pairs(self.AttachedNormalGearItems) do
+			local jobCodeStr = tostring(jobCode)
+			for category, guid in pairs(v) do
+				if dbEquipItems[jobCodeStr] == nil then
+					dbEquipItems[jobCodeStr] = {}
+				end
+				
+				local categoryStr = tostring(category)
+				dbEquipItems[jobCodeStr][categoryStr] = guid
+			end
+		end
+		
+		if _Util:IsNilorEmptyTable(dbEquipItems) then
+			return nil
+		end
+		
+		return _HttpService:JSONEncode(dbEquipItems)
+	end
+
+	method table DeserializeAttachedNormalGearItems(string gearItemsStr)
+		local equipItems = {}
+		if _Util:IsNilorEmptyString(gearItemsStr) then
+			return equipItems
+		end
+		
+		local dbEquipItems = _HttpService:JSONDecode(gearItemsStr)
+		for jobCodeStr, categoryGUIDPairs in pairs(dbEquipItems) do
+			local jobCode = math.tointeger(tonumber(jobCodeStr))
+			for categoryStr, guid in pairs(categoryGUIDPairs) do
+				local category = math.tointeger(tonumber(categoryStr))
+				if equipItems[jobCode] == nil then
+					equipItems[jobCode] = {}
+				end
+				
+				equipItems[jobCode][category] = guid
+			end
+		end
+		
+		return equipItems
+	end
+
+	method integer GetUsedSlotCount(integer itemCategory)
+		local accSlotCount = 0
+		for guid, v in pairs(self.Items) do
+			---@type ItemStruct
+			local itemStruct = v
+			if itemStruct:IsAttached() then
+				continue
+			end
+			
+			local itemData = _ItemDataLogic:GetData(itemStruct.ItemId)
+			if itemData == nil then
+				continue
+			end
+			
+			if itemData.Category ~= itemCategory then
+				continue
+			end
+			
+			accSlotCount += 1
+		end
+		
+		return accSlotCount
+	end
+
+	method integer CanUseItem(string guid, integer count)
+		---@type ItemStruct
+		local itemStruct = self.Items[guid]
+		if itemStruct == nil then
+			return _ErrorCodeEnum.Item_CannotFind
+		end
+		
+		count = math.floor(count)
+		if count <= 0 then
+			return _ErrorCodeEnum.Item_CountIsZero
+		end
+		
+		if itemStruct:IsExpired() then
+			return _ErrorCodeEnum.Item_Expired	
+		end
+		
+		local itemData = _ItemDataLogic:GetData(itemStruct.ItemId)
+		if itemData == nil then
+			return _ErrorCodeEnum.Item_InvalidData
+		end
+		
+		if itemData.Category ~= _ItemCategoryEnum.Usable then
+			return _ErrorCodeEnum.Item_InvalidCategory
+		end
+		
+		if itemStruct.Count < count then
+			return _ErrorCodeEnum.Item_LackCount
+		end
+		
+		return _ErrorCodeEnum.Success
+	end
+
+	@ExecSpace("Server")
+	method void RequestUseItem(string guid, integer count)
+		self:UseItem(guid, count, true)
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean UseItem(string guid, integer count, boolean isSendErrorCode)
+		local userId = self.Entity.PlayerComponent.UserId
+		
+		local errorCode = self:CanUseItem(guid, count)
+		if errorCode ~= _ErrorCodeEnum.Success then
+			if isSendErrorCode then
+				self:SendErrorCodeToClient(errorCode, nil, userId)
+			end
+			return false
+		end
+		
+		---@type ItemStruct
+		local itemStruct = self.Items[guid]
+		local itemData = _ItemDataLogic:GetData(itemStruct.ItemId)
+		
+		local useFunction = _ItemCategoryEnum:GetUsableFunction(itemData.UsableFunction)
+		if useFunction == nil then
+			if isSendErrorCode then
+				self:SendErrorCodeToClient(_ErrorCodeEnum.Item_NoUseFunction, nil, userId)
+			end
+			return false
+		end
+		
+		errorCode = self:Inner_DiscardItem(guid, count)
+		if errorCode ~= _ErrorCodeEnum.Success then
+			if isSendErrorCode then
+				self:SendErrorCodeToClient(errorCode, nil, userId)
+			end
+			return false
+		end
+		
+		useFunction(itemData.UsableFunctionParams)
+		
+		self.IsSaveDB = true
+		return true
+	end
+
+	@ExecSpace("Server")
+	method void RequestLockItem(string guid, boolean lock)
+		self:LockItem(guid, lock)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void LockItem(string guid, boolean lock)
+		local userId = self.Entity.PlayerComponent.UserId
+		---@type ItemStruct
+		local itemStruct = self.Items[guid]
+		if itemStruct == nil then
+			self:SendErrorCodeToClient(_ErrorCodeEnum.Item_CannotFind, nil, userId)
+			return
+		end
+		
+		local itemData = _ItemDataLogic:GetData(itemStruct.ItemId)
+		if itemData == nil then
+			self:SendErrorCodeToClient(_ErrorCodeEnum.InvalidData, nil, userId)
+			return
+		end
+		
+		if not itemData:IsLockable() then
+			self:SendErrorCodeToClient(_ErrorCodeEnum.Item_NotLockable, nil, userId)
+			return
+		end
+		
+		self.IsSaveDB = true
+		itemStruct.Lock = lock
+		self:SyncItemLockToClient(itemStruct.GUID, lock, true, userId)
+	end
+
+	-- 장비 합성(등급업 + 품질 보정이 매번 동시에 적용됨, 유저 강한 정정: 별개 모드가 아니라 한 번의
+	-- 합성에서 둘 다 처리). 등급 축:
+	-- 1) 노말→레어(IsInstantComposeTier): baseGUID와 완전히 동일한 ItemId 아이템 2개를 재료로 소모, 즉시 1단계 승급
+	-- 2) 레어→에픽 이상: baseGUID와 같은 등급+같은 부위(GearCategory) 아이템 1개를 재료로 소모, ComposeCount만 누적
+	--    (아이템 종류는 달라도 됨). ComposeCount가 3에 도달하는 순간 1단계 승급하고 0으로 리셋.
+	-- 품질 축(매번 함께 처리): 베이스/재료(들) 중 가장 높은 품질을 목표로 잡아 그 등급 성공률로 굴린다
+	-- (성공: 그 품질 그대로 / 실패: 1단계 낮게). 재료 품질이 전부 베이스와 같으면 목표 품질=현재 품질이라
+	-- 굴릴 필요 자체가 없다(품질 변화 없음).
+	@ExecSpace("Server")
+	method void RequestComposeItem(string baseGUID, table materialGUIDs)
+		self:ComposeItem(baseGUID, materialGUIDs, true)
+	end
+
+	@ExecSpace("Server")
+	method void RequestLevelUpGear(string gearGUID, boolean isBatch)
+		self:LevelUpGear(gearGUID, isBatch)
+	end
+
+	-- 장비 레벨 강화(부위별 강화 주문서 + 골드). isBatch면 재료/골드/상한이 허용하는 만큼 연속으로 올린다.
+	--  · 상한은 현재 등급이 정한다(EnhanceScrollLogic.GetMaxLevel) — 등급업해도 레벨은 유지되므로
+	--    합성으로 상한만 열리고 이어서 올릴 수 있다(유저 지정)
+	--  · 골드는 런 전용 Gold가 아니라 영구 누적 TotalCoins에서 뺀다(GameManager.SpendCoins)
+	-- 이미 갖고 있는 장비의 빠진 기본 스탯을 채운다(2026-09-02 신설).
+	-- 투구/장갑/망토는 예전엔 StatField 가 없어서 Atk/Hp 가 0으로 저장돼 있다. 스탯이 생긴 지금
+	-- 그대로 두면 "강화 수치만 오르고 기본 능력치가 0"인 상태가 된다.
+	-- 이미 값이 있는 장비는 건드리지 않으므로 여러 번 호출해도 안전하다.
+	@ExecSpace("ServerOnly")
+	method void BackfillMissingGearStats()
+		local filled = 0
+		for guid, itemStruct in pairs(self.Items) do
+			local gearStruct = itemStruct:GetGearStruct()
+			if gearStruct ~= nil and _WeaponTierDataLogic:IsRing(itemStruct.ItemId) then
+				-- 반지는 2026-09-21에 규칙이 두 번 바뀌어서 옛 아이템 보정이 두 갈래다.
+				-- 둘 다 한 번만 돌고(값이 채워지면 조건이 거짓이 된다) 서로 독립이다.
+				local ringFixed = false
+
+				-- ① 메인 옵션 단일화 — 옛 반지는 ATK와 HP를 동시에 갖고 있다.
+				--    한쪽을 굴려 확정하고 반대쪽 수치/표를 0으로 눌러 정리한다.
+				if gearStruct.MainStatType == 0 then
+					gearStruct.MainStatType = _WeaponTierDataLogic:RollRingMainStatType()
+					if gearStruct.MainStatType == _WeaponTierDataLogic.RingMainStatHp then
+						gearStruct.Atk = 0
+						gearStruct.AtkByGrade = _WeaponTierDataLogic:ZeroByGradeTable()
+					else
+						gearStruct.Hp = 0
+						gearStruct.HpByGrade = _WeaponTierDataLogic:ZeroByGradeTable()
+					end
+					ringFixed = true
+				end
+
+				-- ② 등급 스킬 등급별화 — 옛 반지는 아이템당 1종이라 등급 표 5줄이 전부 같았다.
+				--    전 등급을 새로 굴리고 지금 등급의 것을 SkillVariant에 반영한다.
+				if not _WeaponTierDataLogic:HasSkillVariantByGrade(gearStruct) then
+					gearStruct.SkillVariantByGrade = _WeaponTierDataLogic:RollRingStatTypeByGrade()
+					gearStruct.SkillVariant = _WeaponTierDataLogic:GetSkillVariantForGrade(gearStruct, gearStruct.Grade)
+					ringFixed = true
+				end
+
+				if ringFixed then
+					filled = filled + 1
+				end
+			elseif gearStruct ~= nil and _WeaponTierDataLogic:IsWeaponItem(itemStruct.ItemId)
+				and not _WeaponTierDataLogic:IsRing(itemStruct.ItemId) then
+				-- ⚠ 반지는 여기서 제외해야 한다 — StatFieldTable엔 "Atk"로 등록돼 있어서, 체력형 반지
+				--   (Atk가 의도적으로 0)가 들어오면 "스탯이 빠졌다"고 보고 ATK를 다시 굴려버린다
+				local statField = _WeaponTierDataLogic:GetStatField(itemStruct.ItemId)
+				if statField == "Atk" and gearStruct.Atk <= 0 then
+					gearStruct.Atk = _WeaponTierDataLogic:RollAtk(itemStruct.ItemId, gearStruct.Grade, gearStruct.Quality)
+					-- 등급업 미리보기가 쓰는 등급별 표도 같이 채워둔다(비어 있으면 폴백 재굴림이 돌아
+					-- "미리 본 값 ≠ 실제 받는 값"이 될 수 있다)
+					gearStruct.AtkByGrade = _WeaponTierDataLogic:RollAtkByGrade(itemStruct.ItemId, gearStruct.Quality)
+					filled = filled + 1
+				elseif statField == "Hp" and gearStruct.Hp <= 0 then
+					gearStruct.Hp = _WeaponTierDataLogic:RollHp(itemStruct.ItemId, gearStruct.Grade, gearStruct.Quality)
+					gearStruct.HpByGrade = _WeaponTierDataLogic:RollHpByGrade(itemStruct.ItemId, gearStruct.Quality)
+					filled = filled + 1
+				end
+			end
+		end
+
+		if filled > 0 then
+			self.IsSaveDB = true
+			log("PkgPlayerInventory: backfilled base stats on " .. tostring(filled) .. " gear item(s)")
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer LevelUpGear(string gearGUID, boolean isBatch)
+		local userId = self.Entity.PlayerComponent.UserId
+
+		---@type ItemStruct
+		local itemStruct = self.Items[gearGUID]
+		if itemStruct == nil then
+			self:SendErrorCodeToClient(_ErrorCodeEnum.Item_CannotFind, '', userId)
+			return _ErrorCodeEnum.Item_CannotFind
+		end
+
+		---@type ItemGearStruct
+		local gearStruct = itemStruct:GetGearStruct()
+		if gearStruct == nil then
+			self:SendErrorCodeToClient(_ErrorCodeEnum.Item_InvalidGearStruct, '', userId)
+			return _ErrorCodeEnum.Item_InvalidGearStruct
+		end
+
+		local itemData = itemStruct:GetItemData()
+		if itemData == nil then
+			self:SendErrorCodeToClient(_ErrorCodeEnum.Item_InvalidData, '', userId)
+			return _ErrorCodeEnum.Item_InvalidData
+		end
+
+		local gearData = itemData:GetGearData()
+		if gearData == nil then
+			self:SendErrorCodeToClient(_ErrorCodeEnum.Item_InvalidData, '', userId)
+			return _ErrorCodeEnum.Item_InvalidData
+		end
+
+		local scrollItemId = _EnhanceScrollLogic:GetScrollItemId(gearData.GearCategory)
+		if scrollItemId == 0 then
+			-- 강화 대상이 아닌 부위(신발/악세 등)
+			self:SendErrorCodeToClient(_ErrorCodeEnum.Item_InvalidCategory, '', userId)
+			return _ErrorCodeEnum.Item_InvalidCategory
+		end
+
+		local maxLevel = _EnhanceScrollLogic:GetMaxLevel(gearStruct.Grade)
+		local leveledCount = 0
+		local lastError = _ErrorCodeEnum.Success
+
+		repeat
+			local curLevel = gearStruct.Level
+			if curLevel >= maxLevel then
+				lastError = _ErrorCodeEnum.Item_LevelUpMaxLevel
+				break
+			end
+
+			local scrollCost = _EnhanceScrollLogic:GetScrollCost(curLevel)
+			local goldCost = _EnhanceScrollLogic:GetGoldCost(curLevel)
+			if scrollCost <= 0 then
+				lastError = _ErrorCodeEnum.Item_LevelUpMaxLevel
+				break
+			end
+
+			if self:GetItemCount(scrollItemId, nil) < scrollCost then
+				lastError = _ErrorCodeEnum.Item_LackCount
+				break
+			end
+
+			if _GameManager.TotalCoins < goldCost then
+				lastError = _ErrorCodeEnum.Item_LevelUpLackGold
+				break
+			end
+
+			if not self:ConsumeScrolls(userId, scrollItemId, scrollCost) then
+				lastError = _ErrorCodeEnum.ItemDelete_Exception
+				break
+			end
+
+			-- 바로 위에서 잔액을 확인했고 서버는 단일 스레드라 실패할 수 없는 경로다. 그래도 만약
+			-- 실패하면 이미 주문서를 소모한 뒤이므로, 재료만 날리지 않도록 레벨은 그대로 올려준다
+			if not _GameManager:SpendCoins(goldCost) then
+				log_error("LevelUpGear: SpendCoins failed after validation. gold=" .. tostring(goldCost))
+			end
+
+			gearStruct.Level = curLevel + 1
+			leveledCount = leveledCount + 1
+		until not isBatch
+
+		if leveledCount == 0 then
+			-- 한 레벨도 못 올렸을 때만 알린다(일괄 강화는 올릴 수 있는 만큼 올리고 멈추는 게 정상이라
+			-- leveledCount > 0이면 실패로 취급하지 않는다). SendErrorCodeToClient는 로컬라이즈 키가
+			-- 없어 "Item_LackCount" 같은 원문 enum 이름이 그대로 뜨므로 한글 문구로 대체한다
+			self:ShowLevelUpFailToClient(self:GetLevelUpFailMessage(lastError), userId)
+			return lastError
+		end
+
+		self.IsSaveDB = true
+		-- 업적: 장비 강화 성공 횟수(일괄 강화는 올린 레벨 수만큼)
+		_AchievementLogic:OnGearLeveled(leveledCount)
+		self:SyncGearLevelToClient(gearGUID, gearStruct.Level, userId)
+
+		return _ErrorCodeEnum.Success
+	end
+
+	-- 강화 실패 문구를 장비 정보 팝업 안(재료 칸 위)에 띄운다. 공용 토스트(_UIToast)를 쓰지 않는 이유는
+	-- UIEquipPopup.LevelUpWarnText 주석 참고 — ToastGroup이 이 팝업보다 아래 그룹이고, GroupOrder를
+	-- 올리면 Maker가 전체 UI 그룹 순서를 재정렬해버린다.
+	-- UIEquipPopup은 UI 엔티티에 붙은 @Component라 서버에서 직접 RPC를 받을 수 없어서(UI는 client-only),
+	-- 플레이어 엔티티에 붙은 이 컴포넌트가 클라에서 대신 받아 팝업을 찾아 호출한다
+	@ExecSpace("Client")
+	method void ShowLevelUpFailToClient(string message)
+		local popup = _EntityService:GetEntityByPath("/ui/EquipmentGroup/Inventory/EquipPopup")
+		if not isvalid(popup) then
+			return
+		end
+
+		local ui = popup.UIEquipPopup
+		if not isvalid(ui) then
+			return
+		end
+
+		ui:ShowLevelUpWarning(_LocText:Resolve(message))
+	end
+
+	-- 레벨 강화 실패 사유를 로컬라이제이션 키로 바꾼다. 서버에서 호출되므로
+	-- _LocalizationService(ClientOnly)는 쓸 수 없어 키만 돌려주고, ShowLevelUpFailToClient(클라)가 푼다
+	method string GetLevelUpFailMessage(integer errorCode)
+		if errorCode == _ErrorCodeEnum.Item_LackCount then
+			return "MLUA_PKGPLAYERINVENTORY_001"
+		end
+
+		if errorCode == _ErrorCodeEnum.Item_LevelUpLackGold then
+			return "MLUA_PKGPLAYERINVENTORY_002"
+		end
+
+		if errorCode == _ErrorCodeEnum.Item_LevelUpMaxLevel then
+			return "MLUA_PKGPLAYERINVENTORY_003"
+		end
+
+		if errorCode == _ErrorCodeEnum.Item_InvalidCategory then
+			return "MLUA_PKGPLAYERINVENTORY_004"
+		end
+
+		return "MLUA_PKGPLAYERINVENTORY_005"
+	end
+
+	-- 주문서 N장 소모. 스택이 여러 슬롯에 나뉘어 있을 수 있어 슬롯 단위로 순차 삭제한다 —
+	-- TryDeleteMultipleItems는 같은 ItemId가 목록에 두 번 이상 나오면 InvalidParam으로 거부하고,
+	-- resultStruct를 재사용하면 두 번째 삭제의 제거 이벤트가 클라에 안 가기 때문에 매번 새로 만든다
+	-- (ComposeItem의 재료 삭제와 동일한 이유 — 그쪽 주석 참고)
+	@ExecSpace("ServerOnly")
+	method boolean ConsumeScrolls(string userId, integer scrollItemId, integer count)
+		local deleteParamList = self:GetDeleteParamListByItemId(scrollItemId, count, nil)
+		if deleteParamList == nil then
+			return false
+		end
+
+		for _, deleteParam in ipairs(deleteParamList) do
+			local resultStruct = ItemDeleteResultStruct()
+			local errorCode = _ItemFactoryLogic:TryDeleteItem(userId, deleteParam, resultStruct)
+			if errorCode ~= _ErrorCodeEnum.Success then
+				log_error("ConsumeScrolls: TryDeleteItem failed. Error : " .. tostring(errorCode))
+				return false
+			end
+		end
+
+		return true
+	end
+
+	@ExecSpace("Client")
+	method void SyncGearLevelToClient(string gearGUID, integer newLevel)
+		-- 서버가 올린 레벨을 클라 사본에 반영하고, 열려 있는 장비 정보 팝업을 그 값으로 다시 그린다
+		---@type ItemStruct
+		local itemStruct = self.Items[gearGUID]
+		if itemStruct == nil then
+			return
+		end
+
+		---@type ItemGearStruct
+		local gearStruct = itemStruct:GetGearStruct()
+		if gearStruct == nil then
+			return
+		end
+
+		gearStruct.Level = newLevel
+
+		-- 합성 결과 동기화와 동일한 통지 경로 — 인벤토리/팝업이 이 이벤트를 받아 그 GUID를 다시 그린다
+		local evt = InvenItemModifiedEvent()
+		evt.GUIDs = {gearGUID}
+		self.Entity:SendEvent(evt)
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer ComposeItem(string baseGUID, table materialGUIDs, boolean isSendErrorCode)
+		local userId = self.Entity.PlayerComponent.UserId
+
+		local errorCode = self:CanComposeItem(baseGUID, materialGUIDs)
+		if errorCode ~= _ErrorCodeEnum.Success then
+			if isSendErrorCode then
+				self:SendErrorCodeToClient(errorCode, '', userId)
+			end
+			return errorCode
+		end
+
+		---@type ItemStruct
+		local baseItem = self.Items[baseGUID]
+		---@type ItemGearStruct
+		local gearStruct = baseItem:GetGearStruct()
+		local grade = gearStruct.Grade
+		local isInstant = _GearGradeEnum:IsInstantComposeTier(grade)
+
+		-- 품질 축 계산에 쓸 값들(베이스 원래 품질 + 재료들의 품질) — 재료를 지우기 전에 미리 모아둔다.
+		-- 유저 확정 규칙(2026-08-08 전면 교체): 셋 이상(노말→매직, 재료 2개) 입력이면 가장 높은 값은
+		-- 계산에서 완전히 제외되고, 남은 값들 중 "가장 낮은 값(low)"과 "두 번째로 낮은 값(higher)"의
+		-- 등급 차이(gap)로 승급 확률이 정해진다. 결과는 higher(유지) 또는 higher+1(승급, S 클램프) 둘 중
+		-- 하나뿐 — 재료가 전부 베이스와 같은 품질이어도 매번 승급 기회가 있다(예전처럼 스킵하지 않음).
+		-- ⚠ 베이스가 셋 중 유일하게 제일 좋은 품질이면 그 값이 통째로 버려질 수 있음(유저 확인/의도된 리스크,
+		-- UIComposePopup에서 이 조합이면 합성 전 경고창을 띄운다)
+		local qualities = { gearStruct.Quality }
+		for i, guid in ipairs(materialGUIDs) do
+			---@type ItemStruct
+			local matItem = self.Items[guid]
+			local matGearStruct = matItem:GetGearStruct()
+			if matGearStruct ~= nil then
+				table.insert(qualities, matGearStruct.Quality)
+			end
+		end
+
+		-- 재료를 한 번에 하나씩 순차 삭제한다. TryDeleteMultipleItems는 같은 ItemId가 파라미터 목록에
+		-- 두 번 이상 나오면 IsValidDeleteParamList에서 무조건 InvalidParam으로 거부하는데, 노말→레어
+		-- 모드는 재료 2개가 항상 "베이스와 완전히 같은 아이템"이라 이 제약에 정면으로 걸린다.
+		-- 하나라도 실패하면 그때까지 지운 것들을 롤백하고 등급은 건드리지 않는다.
+		-- ⚠ resultStruct는 호출마다 반드시 새로 만들어야 한다 — Inner_DeleteItems가 SyncRemovedItemsToClient에
+		-- resultStruct.DeletedItems를 통째로 넘기는데, 같은 resultStruct를 재사용하면 두 번째 삭제 때 이미
+		-- 클라이언트에서 지워진 첫 번째 재료 GUID까지 다시 동기화하려다 "Cannot find Item" 경고가 뜨고,
+		-- SyncRemovedItemsToClient가 그 GUID에서 조기 return 해버려서 정작 두 번째 재료의 제거 이벤트가
+		-- 클라이언트에 전달되지 않는다(서버 데이터는 정상인데 클라 그리드만 유령 아이템으로 남는 버그).
+		local deletedResults = {}
+		for i, guid in ipairs(materialGUIDs) do
+			local deleteParam = ItemDeleteParamStruct()
+			deleteParam.ItemGUID = guid
+			deleteParam.ItemCount = 1
+
+			local resultStruct = ItemDeleteResultStruct()
+			local deleteErrorCode = _ItemFactoryLogic:TryDeleteItem(userId, deleteParam, resultStruct)
+			if deleteErrorCode ~= _ErrorCodeEnum.Success then
+				for j = 1, #deletedResults do
+					_ItemFactoryLogic:TryRollbackDeleteItems(userId, deletedResults[j])
+				end
+				if isSendErrorCode then
+					self:SendErrorCodeToClient(deleteErrorCode, '', userId)
+				end
+				return deleteErrorCode
+			end
+
+			table.insert(deletedResults, resultStruct)
+		end
+
+		-- 등급 축
+		if isInstant then
+			gearStruct.Grade = _GearGradeEnum:GetNextGrade(grade)
+			gearStruct.ComposeCount = 0
+		else
+			gearStruct.ComposeCount += 1
+			if gearStruct.ComposeCount >= 3 then
+				gearStruct.Grade = _GearGradeEnum:GetNextGrade(grade)
+				gearStruct.ComposeCount = 0
+			end
+		end
+
+		-- 품질 축 — 매번 무조건 굴린다(전부 같은 품질이어도 승급 기회가 있음, 유저 확정)
+		local higherQuality = _QualityEnum:GetPromoteHigherQuality(qualities)
+		local gap = _QualityEnum:GetPromoteGap(qualities)
+		local promoteRate = _QualityEnum:GetGapPromoteRate(higherQuality, gap)
+		local isPromote = _UtilLogic:RandomDouble() * 100 < promoteRate
+		local newQuality = higherQuality
+		if isPromote then
+			newQuality = higherQuality + 1
+			if newQuality > _QualityEnum.S then
+				newQuality = _QualityEnum.S
+			end
+		end
+		local qualityChanged = newQuality ~= gearStruct.Quality
+		gearStruct.Quality = newQuality
+
+		-- 품질이 바뀌면 드롭 시 굴려둔 등급별 표(AtkByGrade/BonusPercentPerMilleByGrade)가 옛 품질
+		-- 기준이라 더 이상 정확하지 않다 — 새 품질로 전 등급 표를 다시 굴려서 갱신한다(유저 강한 정정:
+		-- "미리 본 값 = 실제 받는 값"을 이 경우에도 유지하려면 품질이 바뀌는 순간 표 자체를 다시 만드는
+		-- 수밖에 없음. 등급업 미리보기는 이 새 표를 기준으로 다시 계산됨)
+		if qualityChanged and _WeaponTierDataLogic:IsWeaponItem(baseItem.ItemId) then
+			gearStruct.AtkByGrade = _WeaponTierDataLogic:RollAtkByGrade(baseItem.ItemId, gearStruct.Quality)
+			gearStruct.HpByGrade = _WeaponTierDataLogic:RollHpByGrade(baseItem.ItemId, gearStruct.Quality)
+			gearStruct.BonusPercentPerMilleByGrade = _WeaponTierDataLogic:RollBonusPercentPerMilleByGrade(baseItem.ItemId, gearStruct.Quality)
+
+			-- 반지는 표를 새로 굴리면 눌러뒀던 반대쪽 축이 같이 살아난다 — 베이스의 메인 옵션
+			-- (MainStatType)은 합성으로 바뀌지 않으므로 여기서 다시 눌러준다(재료가 반대 종류여도
+			-- 베이스 종류가 그대로 유지된다)
+			if _WeaponTierDataLogic:IsRing(baseItem.ItemId) then
+				if gearStruct.MainStatType == _WeaponTierDataLogic.RingMainStatHp then
+					gearStruct.AtkByGrade = _WeaponTierDataLogic:ZeroByGradeTable()
+				else
+					gearStruct.HpByGrade = _WeaponTierDataLogic:ZeroByGradeTable()
+				end
+			end
+		end
+
+		-- 등급이 실제로 올랐으면(또는 품질이 바뀌어 표가 새로 갱신됐으면) ATK/BonusPercentPerMille을
+		-- 새 등급+새 품질 기준 표에서 꺼내 갱신한다(재굴림 아님 — AtkByGrade/BonusPercentPerMilleByGrade
+		-- 조회만). 레거시 아이템(표 필드 추가 전 드롭)은 표가 비어있을 수 있어 기존 재굴림으로 폴백한다
+		if (gearStruct.Grade ~= grade or qualityChanged) and _WeaponTierDataLogic:IsWeaponItem(baseItem.ItemId) then
+			local newAtk = gearStruct.AtkByGrade[gearStruct.Grade]
+			if newAtk == nil then
+				newAtk = _WeaponTierDataLogic:RollAtk(baseItem.ItemId, gearStruct.Grade, gearStruct.Quality)
+			end
+			gearStruct.Atk = newAtk
+
+			-- HP 계열(슈트류) 라인도 ATK와 동일하게 표에서 꺼내 갱신한다
+			local newHp = gearStruct.HpByGrade[gearStruct.Grade]
+			if newHp == nil then
+				newHp = _WeaponTierDataLogic:RollHp(baseItem.ItemId, gearStruct.Grade, gearStruct.Quality)
+			end
+			gearStruct.Hp = newHp
+
+			local newBonusPercentPerMille = gearStruct.BonusPercentPerMilleByGrade[gearStruct.Grade]
+			if newBonusPercentPerMille == nil then
+				newBonusPercentPerMille = _WeaponTierDataLogic:RollBonusPercentPerMille(baseItem.ItemId, gearStruct.Grade, gearStruct.Quality)
+			end
+			gearStruct.BonusPercentPerMille = newBonusPercentPerMille
+
+			-- 등급 스킬 변형도 등급마다 다르므로(반지) 새 등급의 것으로 갱신한다. 재굴림이 아니라
+			-- 드롭 때 굴려둔 SkillVariantByGrade 조회일 뿐이라 미리 본 값 그대로 온다.
+			-- ⚠ 클라는 이 값을 따로 받지 않지만, 표가 아이템에 이미 있고 Grade는 동기화되므로
+			--   GetSkillVariantForGrade로 같은 값을 스스로 뽑아낸다(RPC 추가 불필요)
+			gearStruct.SkillVariant = _WeaponTierDataLogic:GetSkillVariantForGrade(gearStruct, gearStruct.Grade)
+		end
+
+		self.IsSaveDB = true
+		-- 업적: 장비 합성 성공
+		_AchievementLogic:OnGearComposed()
+		self:SyncComposeResultToClient(baseGUID, gearStruct.Grade, gearStruct.ComposeCount, gearStruct.Atk, gearStruct.BonusPercentPerMille, gearStruct.Quality, gearStruct.AtkByGrade, gearStruct.BonusPercentPerMilleByGrade, gearStruct.Hp, gearStruct.HpByGrade, userId)
+
+		return _ErrorCodeEnum.Success
+	end
+
+	method integer CanComposeItem(string baseGUID, table materialGUIDs)
+		---@type ItemStruct
+		local baseItem = self.Items[baseGUID]
+		if baseItem == nil then
+			return _ErrorCodeEnum.Item_CannotFind
+		end
+
+		---@type ItemGearStruct
+		local gearStruct = baseItem:GetGearStruct()
+		if gearStruct == nil then
+			return _ErrorCodeEnum.Item_InvalidGearStruct
+		end
+
+		local grade = gearStruct.Grade
+		if _GearGradeEnum:GetNextGrade(grade) == -1 then
+			return _ErrorCodeEnum.Item_ComposeMaxGrade
+		end
+
+		if materialGUIDs == nil then
+			return _ErrorCodeEnum.Item_ComposeWrongMaterialCount
+		end
+
+		local isInstant = _GearGradeEnum:IsInstantComposeTier(grade)
+		local requiredCount = isInstant and 2 or 1
+		if #materialGUIDs ~= requiredCount then
+			return _ErrorCodeEnum.Item_ComposeWrongMaterialCount
+		end
+
+		local baseGearData = baseItem:GetGearData()
+		if baseGearData == nil then
+			return _ErrorCodeEnum.Item_InvalidGearStruct
+		end
+
+		local seenGUIDs = {}
+		seenGUIDs[baseGUID] = true
+		for i, guid in ipairs(materialGUIDs) do
+			if seenGUIDs[guid] then
+				return _ErrorCodeEnum.Item_ComposeInvalidMaterial
+			end
+			seenGUIDs[guid] = true
+
+			---@type ItemStruct
+			local materialItem = self.Items[guid]
+			if materialItem == nil then
+				return _ErrorCodeEnum.Item_CannotFind
+			end
+
+			if materialItem:IsAttached() then
+				return _ErrorCodeEnum.Item_ComposeMaterialAttached
+			end
+
+			---@type ItemGearStruct
+			local materialGearStruct = materialItem:GetGearStruct()
+			if materialGearStruct == nil or materialGearStruct.Grade ~= grade then
+				return _ErrorCodeEnum.Item_ComposeInvalidMaterial
+			end
+
+			-- 재료 자체가 이미 다른 합성 진행도(ComposeCount>0)를 갖고 있으면 안 된다(유저 지정) —
+			-- 진행 중인 아이템을 다른 아이템의 재료로 갈아넣는 걸 막는다. 항상 ComposeCount=0인 아이템만 재료 가능
+			if materialGearStruct.ComposeCount ~= 0 then
+				return _ErrorCodeEnum.Item_ComposeInvalidMaterial
+			end
+
+			if isInstant then
+				if materialItem.ItemId ~= baseItem.ItemId then
+					return _ErrorCodeEnum.Item_ComposeInvalidMaterial
+				end
+			else
+				local materialGearData = materialItem:GetGearData()
+				if materialGearData == nil or materialGearData.GearCategory ~= baseGearData.GearCategory then
+					return _ErrorCodeEnum.Item_ComposeInvalidMaterial
+				end
+			end
+		end
+
+		return _ErrorCodeEnum.Success
+	end
+
+	@ExecSpace("Client")
+	method void SyncComposeResultToClient(string baseGUID, integer grade, integer composeCount, integer atk, integer bonusPercentPerMille, integer quality, table atkByGrade, table bonusPercentPerMilleByGrade, integer hp, table hpByGrade)
+		---@type ItemStruct
+		local itemStruct = self.Items[baseGUID]
+		if itemStruct == nil then
+			self:SendErrorCodeToClient(_ErrorCodeEnum.Item_CannotFind, nil)
+			return
+		end
+
+		---@type ItemGearStruct
+		local gearStruct = itemStruct:GetGearStruct()
+		if gearStruct == nil then
+			return
+		end
+
+		gearStruct.Grade = grade
+		gearStruct.ComposeCount = composeCount
+		gearStruct.Atk = atk
+		gearStruct.BonusPercentPerMille = bonusPercentPerMille
+		gearStruct.Quality = quality
+		gearStruct.AtkByGrade = atkByGrade
+		gearStruct.BonusPercentPerMilleByGrade = bonusPercentPerMilleByGrade
+		gearStruct.Hp = hp
+		gearStruct.HpByGrade = hpByGrade
+
+		local evt = InvenItemModifiedEvent()
+		evt.GUIDs = {baseGUID}
+		self.Entity:SendEvent(evt)
+	end
+
+	-- 버그 수정(2026-08-22, 유저 리포트: "장비 장착중인데 효과 적용이 안되는거같다") — CurrentJob은
+	-- UIInventory.Open()이 @ExecSpace("ClientOnly")에서만 세팅하는 값이라 서버에서는 항상 nil이었다
+	-- (실측 확인: 장비를 눈으로 보이게 장착해도 서버 쪽 GearEffectLogic.InitForRun/CardManager.
+	-- InitWeaponSkillForRun이 읽는 inventory.CurrentJob은 계속 nil → 모든 장비 등급 효과가 항상
+	-- 미장착 취급됐음). 서버 전용 읽기 경로는 이 메서드로 job을 구해야 한다 — CurrentJob이 세팅돼
+	-- 있으면 그대로 쓰고, 아니면 UIInventory와 동일한 규칙(정렬순 첫 번째 해금 job)으로 직접 계산한다.
+	method integer ResolveCurrentJob()
+		if self.CurrentJob ~= nil then return self.CurrentJob end
+		local playerJob = self.Entity.PlayerJob
+		if playerJob == nil then return nil end
+		local jobDataList = _JobDataLogic:GetSortJobDataList()
+		for i, jobData in ipairs(jobDataList) do
+			---@type JobData
+			local jd = jobData
+			if not playerJob:IsJobLocked(jd.Id) then
+				return jd.Id
+			end
+		end
+		return nil
+	end
+
+	method ItemStruct GetAttachedGearItemStruct(integer job, integer gearCategory)
+		local categoryRuidTable = self.AttachedNormalGearItems[job]
+		if categoryRuidTable == nil then
+			return nil
+		end
+		
+		local ruid = categoryRuidTable[gearCategory]
+		if _Util:IsNilorEmptyString(ruid) then
+			return nil
+		end
+		
+		return self.Items[ruid]
+	end
+
+	method table GetAttachedGearItemStructList(integer job)
+		local categoryRuidTable = self.AttachedNormalGearItems[job]
+		if categoryRuidTable == nil then
+			return nil
+		end
+		
+		local itemStructList = {}
+		
+		for gearCategory, ruid in pairs(categoryRuidTable) do
+			if _Util:IsNilorEmptyString(ruid) then
+				continue
+			end
+			
+			local itemStruct = self.Items[ruid]
+			if itemStruct == nil then
+				continue
+			end
+			table.insert(itemStructList, itemStruct)
+		end
+		
+		return itemStructList
+	end
+
+	method integer GetItemCount(integer itemId, integer curElapsed)
+		if curElapsed == nil then
+			curElapsed = _DateTimeLogic:GetTimeElapsed()
+		end
+		
+		local accCount = 0
+		for guid, v in pairs(self.Items) do
+			---@type ItemStruct	
+			local itemStruct = v
+			if itemStruct.ItemId ~= itemId then 
+				continue
+			elseif itemStruct.Lock then 
+				continue 
+			elseif itemStruct:IsExpiredWithElapsed(curElapsed) then
+				continue
+			end
+			
+			accCount += itemStruct.Count
+		end
+		
+		return accCount
+	end
+
+	method table GetDeleteParamListByItemId(integer itemId, integer delCount, integer curElapsed)
+		if curElapsed == nil then
+			curElapsed = _DateTimeLogic:GetTimeElapsed()
+		end
+		
+		---@type table<ItemStruct>
+		local sortList = {}
+		
+		for guid, v in pairs(self.Items) do
+			---@type ItemStruct	
+			local itemStruct = v
+			if itemStruct.ItemId ~= itemId then continue end
+			if itemStruct.Lock then continue end
+			if itemStruct:IsExpiredWithElapsed(curElapsed) then
+				continue
+			end
+		
+			table.insert(sortList, itemStruct)
+		end
+		
+		if #sortList == 0 then
+			return nil
+		end
+		
+		local comp = _InventorySortEnum:GetSortFunc(_InventorySortEnum.EndDateMinute)
+		table.sort(sortList, comp)
+		
+		local remainCount = delCount
+		local guidCountTable = {}
+		
+		for i = 1, #sortList do
+			local itemStruct = sortList[i]
+			local itemCount = itemStruct.Count
+			
+			if remainCount <= itemCount then
+				guidCountTable[itemStruct.GUID] = remainCount
+				remainCount = 0
+				break
+			end
+			
+			guidCountTable[itemStruct.GUID] = itemCount
+			remainCount -= itemCount
+		end
+		
+		if remainCount ~= 0 then
+			return nil
+		end
+		
+		local delParamList = {}
+		for GUID, count in pairs(guidCountTable) do
+			local delParam = ItemDeleteParamStruct()
+			delParam.ItemGUID = GUID
+			delParam.ItemCount = count
+			table.insert(delParamList, delParam)
+		end
+		
+		return delParamList
+	end
+
+	@ExecSpace("ServerOnly")
+	method void CleanupExpiredItems(boolean isSendSync)
+		local userId = self.Entity.PlayerComponent.UserId
+		local curElapsed = _DateTimeLogic:GetTimeElapsed()
+		
+		local guidList = {}
+		
+		for guid, v in pairs (self.Items) do
+			---@type ItemStruct
+			local itemStruct = v
+			if not itemStruct:IsExpiredWithElapsed(curElapsed) then
+				continue
+			end
+			
+			self:Inner_DetachGearForCleanup(itemStruct)
+			
+			self.Items[guid] = nil
+			self.IsSaveDB = true
+			table.insert(guidList, guid)
+			
+			local delCount = itemStruct.Count
+			itemStruct.Count = 0
+			
+			local itemData = itemStruct:GetItemData()
+			local category = 0
+			if itemData ~= nil then
+				category = itemData.Category
+			end
+		end
+		
+		if isSendSync and #guidList ~= 0 then
+			self:SyncRemovedItemsToClient(guidList, self.Entity.PlayerComponent.UserId)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void Inner_DetachGearForCleanup(ItemStruct itemStruct)
+		if not itemStruct:IsAttached() then
+			return
+		end
+		
+		local itemData = itemStruct:GetItemData()
+		if itemData == nil then
+			return
+		end
+		
+		if itemData.Category == _ItemCategoryEnum.Gear then
+			local gearData = itemStruct:GetGearData()
+			if gearData == nil then
+				return
+			end
+			
+			local gearCategory = gearData.GearCategory
+			for job, categoryGuidPairs in pairs(self.AttachedNormalGearItems) do
+				if categoryGuidPairs[gearCategory] == itemStruct.GUID then
+					categoryGuidPairs[gearCategory] = nil
+					return
+				end
+			end
+		end
+	end
+
+	@ExecSpace("Client")
+	method void SyncItemCountToClient(string guid, integer count)
+		---@type ItemStruct
+		local itemStruct = self.Items[guid]
+		if itemStruct == nil then
+			self:SendErrorCodeToClient(_ErrorCodeEnum.Item_CannotFind, nil)
+			return
+		end
+		itemStruct.Count = count
+		
+		local evt = InvenItemModifiedEvent()
+		evt.GUIDs = {guid}
+		self.Entity:SendEvent(evt)
+	end
+
+	@ExecSpace("Client")
+	method void SyncItemLockToClient(string guid, boolean lock, boolean invalidateInven)
+		---@type ItemStruct
+		local itemStruct = self.Items[guid]
+		if itemStruct == nil then
+			self:SendErrorCodeToClient(_ErrorCodeEnum.Item_CannotFind, nil)
+			return
+		end
+		itemStruct.Lock = lock
+		
+		if invalidateInven then
+			local evt = InvenItemModifiedEvent()
+			evt.GUIDs = {guid}
+			self.Entity:SendEvent(evt)
+		end
+	end
+
+	method table GetAttachedGearItemIds(integer job, integer utcElapsed)
+		if self.AttachedNormalGearItems[job] == nil then
+			return nil
+		end
+		
+		if utcElapsed == nil then
+			utcElapsed = _DateTimeLogic:GetTimeElapsed()
+		end
+		
+		local itemIds = {}
+		for gearCategory, guid in pairs(self.AttachedNormalGearItems[job]) do
+			---@type ItemStruct
+			local itemStruct = self.Items[guid]
+			if itemStruct == nil then
+				continue
+			end
+			
+			if itemStruct:IsExpiredWithElapsed(utcElapsed) then
+				continue
+			end
+			
+			table.insert(itemIds, itemStruct.ItemId)
+		end
+		
+		if #itemIds == 0 then
+			return nil
+		end
+		
+		return itemIds
+	end
+
+	@ExecSpace("Client")
+	method void SendErrorCodeToClient(integer errorCode, string message)
+		_ErrorCodeEnum:ShowErrorMsg(errorCode)
+	end
+
+	method table GetExpiredItemGUIDs()
+		local curElapsed = _DateTimeLogic:GetTimeElapsed()
+		local guidList = {}
+		for guid, v in pairs (self.Items) do
+			
+			---@type ItemStruct
+			local itemStruct = v
+			if itemStruct.EndDateSeconds == 0 then
+				continue
+			end
+			
+			if not itemStruct:IsExpiredWithElapsed(curElapsed) then
+				continue
+			end
+			
+			table.insert(guidList, itemStruct.GUID)
+		end
+		
+		return guidList
+	end
+
+	@ExecSpace("Server")
+	method void RequestRemoveExpiredItems(table guids)
+		local userId = self.Entity.PlayerComponent.UserId
+		
+		for _, guid in ipairs(guids) do
+			---@type ItemStruct
+			local itemStruct = self.Items[guid]
+			if itemStruct == nil then
+				continue
+			end
+			
+			if not itemStruct:IsExpired() then
+				continue
+			end
+			
+			local param = ItemDeleteParamStruct()
+			param.ItemGUID = guid
+			param.ItemCount = itemStruct.Count
+			
+			local deleteResultStruct = ItemDeleteResultStruct()
+			if _ItemFactoryLogic:TryDeleteItem(userId, param, deleteResultStruct) ~= _ErrorCodeEnum.Success then
+				continue
+			end
+		end
+		
+		self.IsSaveDB = true
+	end
+
+	@ExecSpace("ServerOnly")
+	method table AttachNormalGears(table itemGUIDs, table errorLists, integer jobCode)
+		local successLists = {}
+		for _, guid in pairs(itemGUIDs) do
+			---@type ItemStruct
+			local itemStruct = self.Items[guid]
+			if itemStruct == nil then
+				errorLists[guid] = _ErrorCodeEnum.Item_CannotFind
+				continue
+			end
+			
+			local itemData = _ItemDataLogic:GetData(itemStruct.ItemId)
+			if itemData == nil then
+				errorLists[guid] = _ErrorCodeEnum.Item_InvalidData
+				continue
+			end
+			
+			local gearData = itemData:GetGearData()
+			if gearData == nil then
+				errorLists[guid] = _ErrorCodeEnum.Item_InvalidData
+				continue
+			end
+		
+			local itemGearStruct = itemStruct:GetGearStruct()
+			if itemGearStruct == nil then
+				errorLists[guid] = _ErrorCodeEnum.Item_InvalidGearStruct
+				continue
+			end
+			
+			if self.AttachedNormalGearItems[jobCode] == nil then
+				self.AttachedNormalGearItems[jobCode] = {}
+			end
+			
+			local gearCategory = gearData.GearCategory
+			if self.AttachedNormalGearItems[jobCode][gearCategory] ~= nil then
+				errorLists[guid] = _ErrorCodeEnum.Item_NoEmptyEquipSlot
+				continue
+			end
+			
+			self.AttachedNormalGearItems[jobCode][gearCategory] = guid
+			itemGearStruct.IsAttached = true
+			
+			table.insert(successLists, guid)
+		end
+		
+		return successLists
+	end
+
+	method boolean IsMainWeaponAttached(integer job)
+		local oneHandedWeaponGUID = self:GetNormalGearItemGUID(job, _GearCategoryEnum.OneHandedWeapon)
+		local twoHandedWeaponGUID = self:GetNormalGearItemGUID(job, _GearCategoryEnum.TwoHandedWeapon)
+		if _Util:IsNilorEmptyString(oneHandedWeaponGUID) and _Util:IsNilorEmptyString(twoHandedWeaponGUID) then
+			return false
+		end
+		
+		return true
+	end
+
+	method boolean IsSubWeaponAttached(integer job)
+		local subWeaponGUID = self:GetNormalGearItemGUID(job, _GearCategoryEnum.SubWeapon)
+		if _Util:IsNilorEmptyString(subWeaponGUID) then
+			return false
+		end
+		
+		return true
+	end
+
+	@ExecSpace("ClientOnly")
+	method void AddItemsToNewItemSet(table guidList)
+		for i, guid in pairs(guidList) do
+			self.NewItemsSet[guid] = true
+		end
+		
+		_UserService.LocalPlayer:SendEvent(NewItemEvent())
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RemoveNewItemFromList(string guid)
+		self.NewItemsSet[guid] = nil
+		_UserService.LocalPlayer:SendEvent(NewItemEvent())
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RemoveAllNewItemsFromList()
+		table.clear(self.NewItemsSet)
+		_UserService.LocalPlayer:SendEvent(NewItemEvent())
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean IsNewItem(string guid)
+		if self.NewItemsSet[guid] then
+			return true
+		else
+			return false
+		end
+	end
+
+	-- 유저 요청: 가방 아이콘(로비 btnEquip)에 표시할 레드닷 — 확인 안 한 새 아이템이 하나라도 있으면 true
+	@ExecSpace("ClientOnly")
+	method boolean HasAnyNewItem()
+		return next(self.NewItemsSet) ~= nil
+	end
+
+end

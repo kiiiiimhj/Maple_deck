@@ -1,0 +1,486 @@
+@Logic
+script SkillInventory extends Logic
+
+	@Sync
+	property SyncTable<string, integer> Counts
+
+	@Sync
+	property SyncTable<string, integer> Levels
+
+	-- 유저 요청: 처음 뽑힌 스킬(0개→1개 이상 전환)에 레드닷 표시 — 스킬 탭에서 슬롯을 한 번 눌러
+	-- 확인하면(OnSkillSlotClicked) 꺼진다. key는 Counts/Levels와 동일한 스킬 인덱스 문자열
+	@Sync
+	property SyncTable<string, boolean> NewSet
+
+	-- 스킬별 획득 조각 개수 / 현재 레벨 — key = 스킬 인덱스 "0".."17" 문자열, value = 개수/레벨.
+	-- RelicInventory와 완전히 동일한 구조. SyncTable은 next/pairs를 못 쓰므로 항상 0~skillCount-1 범위를 직접 순회한다
+	property integer skillCount = 113
+
+	-- 강화 안 한 기본 상태가 Lv.1이고, 9번 강화하면 Lv.10이 최대(9줄짜리 비용표와 1:1 대응).
+	-- 보너스는 Lv3/6/9에서만 상승(Lv1,2,4,5,7,8,10은 효과 없이 조각/골드만 소모)
+	property integer maxLevel = 10
+
+	-- 레벨업 비용 — 등급(1=일반/2=매직/3=레어)별로 다른 표를 쓴다. 인덱스 1~9 = "현재 레벨이 N일 때
+	-- N+1로 올리는 비용"(예: 일반 등급 Lv1 -> Lv2는 인덱스1 = 조각1개/1000골드). 사용자 확정표.
+	property any _levelFragmentCostByGrade = {
+		[1] = { 1, 10, 20, 40, 60, 80, 100, 130, 170 },
+		[2] = { 1, 5, 10, 15, 20, 40, 60, 80, 100 },
+		[3] = { 1, 5, 10, 15, 20, 30, 40, 50, 70 },
+	}
+
+	property any _levelGoldCostByGrade = {
+		[1] = { 1000, 2000, 3000, 4000, 6000, 8000, 10000, 12000, 15000 },
+		[2] = { 2000, 3000, 4000, 5000, 8000, 11000, 14000, 17000, 20000 },
+		[3] = { 3000, 4000, 5000, 6000, 9000, 13000, 17000, 21000, 25000 },
+	}
+
+	-- 스킬탭 슬롯 인덱스(0~19) ↔ 실제 스킬 정보. grade는 1=일반/2=매직/3=레어이며, 등급 오름차순으로
+	-- 이미 정렬해뒀다 — SkillUI가 슬롯 순서 그대로(SkillSlot_0..19) 그리기만 하면 "낮은 등급부터" 노출된다.
+	-- ⚠ 스킬 추가는 반드시 **배열 끝에 이어 붙인다**(2026-10-01). 유저 저장 데이터(Skill.Counts/Levels)가 인덱스 문자열을
+	-- 키로 쓰므로 중간에 끼워 넣으면 뒤 번호가 밀려 남의 스킬 레벨/조각이 된다. 끝에 붙인 스킬은 GetSkillCharacter의
+	-- _extraSkillCharacter 표에 캐릭터를 적고, 스킬탭(TitleGroup.ui SkillSlot_N)·확률공시(GachaGroup.ui Row_N) 칸도 늘릴 것.
+	property any _skillDefs = {
+		{ name = "MLUA_CARDMANAGER_006", icon = "5ef24c581426423f9919bef97ab23f56", grade = 1 },
+		{ name = "MLUA_SKILLINVENTORY_001", icon = "234aca1a4ce946119b68e3717991e775", grade = 1 },
+		{ name = "MLUA_CARDMANAGER_010", icon = "cb8ff28174224d93991f6a4e936d8de9", grade = 1 },
+		{ name = "MLUA_CARDMANAGER_004", icon = "aaf8b238c8b14370b008eed503bec731", grade = 1 },
+		{ name = "MLUA_CARDMANAGER_003", icon = "31c30270de024b4687f79842a2344fc4", grade = 1 },
+		{ name = "MLUA_CARDMANAGER_013", icon = "8eda518d79264701b88aecb228328f9d", grade = 1 },
+		{ name = "MLUA_CARDMANAGER_008", icon = "656fc88da4a74534b75ca624fa143b6b", grade = 1 },
+		{ name = "MLUA_CARDMANAGER_015", icon = "4fdc26aaf3144929a1f0d643da97e40a", grade = 1 },
+		{ name = "MLUA_CARDMANAGER_007", icon = "1b1eea5b619a4a57ba3f20649feda62c", grade = 2 },
+		{ name = "MLUA_CARDMANAGER_009", icon = "719213847fdf4b50a109a263e784f0c0", grade = 2 },
+		{ name = "MLUA_CARDMANAGER_011", icon = "62bfbcf2b16442ce826c0fbc9f16fbb4", grade = 2 },
+		{ name = "MLUA_CARDMANAGER_014", icon = "6c4a2b6ea3904907bdfead6276ef1cff", grade = 2 },
+		{ name = "MLUA_CARDMANAGER_060", icon = "846868d95f1c445ea5d0df5b84cb00a9", grade = 2 },
+		{ name = "MLUA_CARDMANAGER_018", icon = "77909f8233254133bb6919c386a2d77d", grade = 2 },
+		{ name = "MLUA_CARDMANAGER_061", icon = "8b109fcf51d64bc49a2dcc0e221beee1", grade = 3 },
+		{ name = "MLUA_CARDMANAGER_062", icon = "dbee0d9812a04400837ba38e89cbffbc", grade = 3 },
+		{ name = "MLUA_CARDMANAGER_063", icon = "f84bad609f3a47c29ed662abea683f2e", grade = 3 },
+		{ name = "MLUA_CARDMANAGER_016", icon = "d6d3e9ffbb6d4d43a96f6c63876d0c2e", grade = 3 },
+		{ name = "MLUA_CARDMANAGER_017", icon = "d56f3132d8b74e08b3861902228717df", grade = 3 },
+		{ name = "MLUA_CARDMANAGER_012", icon = "412638a16dc643f595b035ba776ef425", grade = 3 },
+
+		-- 인덱스 20~39: 실피드 전용 20종(액티브 15 + 패시브 5, 포션은 공용이라 제외 — 유저 지정).
+		-- 아이콘/등급은 실제 스킬 카드(101~120)와 완전히 동일한 값을 그대로 재사용한다.
+		{ name = "MLUA_CARDMANAGER_039", icon = "f822a40d24004883980d8ef88d9b0f7a", grade = 1 },
+		{ name = "MLUA_CARDMANAGER_041", icon = "f62b353e3f704eb097e427b7fc97980e", grade = 1 },
+		{ name = "MLUA_CARDMANAGER_043", icon = "5380e2771f104da4a1a8d4287cc0faa1", grade = 1 },
+		{ name = "MLUA_CARDMANAGER_044", icon = "852bcdd0e80c4014addb76d72969f7bc", grade = 1 },
+		{ name = "MLUA_CARDMANAGER_046", icon = "fd051469cf104e0bb1597e6930619354", grade = 2 },
+		{ name = "MLUA_CARDMANAGER_048", icon = "1a05fec36730489dba992b06d9e89176", grade = 2 },
+		{ name = "MLUA_CARDMANAGER_050", icon = "244c81f1750747549a5fdaa87f4e3d04", grade = 2 },
+		{ name = "MLUA_CARDMANAGER_052", icon = "764f0902e51048549dcbaf59b782639a", grade = 1 },
+		{ name = "MLUA_SKILLINVENTORY_002", icon = "333f9c5876124f14aa9a1ad80265a3f3", grade = 3 },
+		{ name = "MLUA_CARDMANAGER_047", icon = "088e8e269661493f8794073429bae296", grade = 3 },
+		{ name = "MLUA_CARDMANAGER_040", icon = "d476a239a9b146598670c692e27c2717", grade = 3 },
+		{ name = "MLUA_CARDMANAGER_042", icon = "48eed9553f37476aa234798e5fecc709", grade = 3 },
+		{ name = "MLUA_CARDMANAGER_049", icon = "028b253be9894fd28e2b9f8a3af0ff28", grade = 3 },
+		{ name = "MLUA_CARDMANAGER_051", icon = "158c055faa384b36b5e4e273bf7da441", grade = 3 },
+		{ name = "MLUA_CARDMANAGER_053", icon = "431246ee45104325abb416f08db32924", grade = 3 },
+		{ name = "MLUA_CARDMANAGER_054", icon = "fb0c2c8bda7142b3955f1ca0bd4e6513", grade = 1 },
+		{ name = "MLUA_CARDMANAGER_055", icon = "5a78b6fc281449d08794e132030e258d", grade = 1 },
+		{ name = "MLUA_CARDMANAGER_056", icon = "872fb05eb1244d7f84c590e9dbcaf9d5", grade = 2 },
+		{ name = "MLUA_CARDMANAGER_057", icon = "39d6e65ad9cb45e5b068946eaae56192", grade = 1 },
+		{ name = "MLUA_CARDMANAGER_058", icon = "883decec81c74de3ae0b4301fd6b8add", grade = 2 },
+
+		-- 인덱스 40~59: 레이온 전용 20종(액티브 15 + 패시브 5). 아이콘/등급도 실제 스킬 카드
+		-- (151~170, CardRegistry)와 동일한 값을 그대로 재사용한다.
+		{ name = "MLUA_CARDREGISTRY_003", icon = "3c9bcefb5e6941adb3e3dfd342639164", grade = 1 },
+		{ name = "MLUA_CARDREGISTRY_005", icon = "f01f2a399af5468cabccba2eb25ed523", grade = 1 },
+		{ name = "MLUA_CARDREGISTRY_006", icon = "cd91e94eee914c7d94908c5d4994efe1", grade = 1 },
+		{ name = "MLUA_CARDREGISTRY_008", icon = "5250cebd192a41fab47ffde667facda7", grade = 2 },
+		{ name = "MLUA_CARDREGISTRY_010", icon = "483690e55c974444aef84df3a6331d93", grade = 1 },
+		{ name = "MLUA_CARDREGISTRY_011", icon = "acedd37044c746c5b932cc61c4359de4", grade = 2 },
+		{ name = "MLUA_CARDREGISTRY_013", icon = "96cba170e5684708a5e5263a4f9c1666", grade = 1 },
+		{ name = "MLUA_CARDMANAGER_038", icon = "f97f557e480f482db24679f0d53e6e30", grade = 2 },
+		{ name = "MLUA_CARDREGISTRY_016", icon = "880efe8e26bd41c18e08e8813463977c", grade = 3 },
+		{ name = "MLUA_CARDREGISTRY_024", icon = "e9e9dea63a5545a692459fa1cd4a11e4", grade = 3 },
+		{ name = "MLUA_CARDREGISTRY_025", icon = "89e5b77cdcb1434ea65748251c921825", grade = 3 },
+		{ name = "MLUA_CARDREGISTRY_027", icon = "a1f571fb695a46baabe8d64aef29a410", grade = 3 },
+		{ name = "MLUA_CARDREGISTRY_028", icon = "70afb0ab485a44638c446ba65e7e0cd5", grade = 3 },
+		{ name = "MLUA_CARDREGISTRY_029", icon = "1613665fd8154996b48c69f1fcf7cf93", grade = 3 },
+		{ name = "MLUA_CARDREGISTRY_030", icon = "5bd391d75bbe4d97a25d6ac506b82d7d", grade = 3 },
+		{ name = "MLUA_CARDREGISTRY_001", icon = "d714c4d5a90a43a7b5a7bfb3b49c4628", grade = 1 },
+		{ name = "MLUA_CARDREGISTRY_018", icon = "50a17d6899e04e2eab21fe0f2d315519", grade = 1 },
+		{ name = "MLUA_CARDREGISTRY_019", icon = "6a4b4c93ebf14ea1ad480a836c741205", grade = 2 },
+		{ name = "MLUA_CARDREGISTRY_021", icon = "7bd3582353ea4c5981c26190fe43d360", grade = 1 },
+		{ name = "MLUA_CARDREGISTRY_023", icon = "77895755199f4f9eb8dc7073acd05756", grade = 2 },
+
+		-- 인덱스 60~79: 쉐이드 전용 20종(액티브 15 + 패시브 5). 기본공격(172)은 공용 취급이라 제외
+		-- (실피드에서 포션을 뺀 것과 같은 관례). 아이콘/등급은 실제 스킬 카드(171~191)와 동일.
+		{ name = "MLUA_CARDREGISTRY_032", icon = "92a5020c978c46bdabab910598118b86", grade = 1 },
+		{ name = "MLUA_CARDREGISTRY_033", icon = "5146d54c65864a63b2d86e524e3a0c14", grade = 1 },
+		{ name = "MLUA_CARDREGISTRY_034", icon = "b944ae2274a04a1b96df2875368a8105", grade = 2 },
+		{ name = "MLUA_CARDMANAGER_037", icon = "19361e72087946b1888684185b40d935", grade = 2 },
+		{ name = "MLUA_CARDREGISTRY_036", icon = "0cdc58f4336044e58e07afcd112727d0", grade = 1 },
+		{ name = "MLUA_CARDREGISTRY_038", icon = "0784bfbeea6545e3a1dbbbe2aebfa2b2", grade = 2 },
+		{ name = "MLUA_CARDREGISTRY_040", icon = "5d79c29ae4e44194a4deda2458adcf08", grade = 2 },
+		{ name = "MLUA_CARDREGISTRY_042", icon = "f158aaaf0aad40b68580518e2e4de17f", grade = 1 },
+		{ name = "MLUA_CARDREGISTRY_051", icon = "dbaa15855ce9477faaf83b7ffa0f6ee2", grade = 3 },
+		{ name = "MLUA_CARDREGISTRY_053", icon = "ffecbd57b88f44d3991cb6738f739e09", grade = 3 },
+		{ name = "MLUA_CARDREGISTRY_054", icon = "0a72fb25ab844cee8126b64b202cd7b9", grade = 3 },
+		{ name = "MLUA_CARDREGISTRY_055", icon = "3beb3be542084574b48da2da0e7fde46", grade = 3 },
+		{ name = "MLUA_CARDREGISTRY_057", icon = "def5b9aea9dc4bd5b93940df791f0cec", grade = 3 },
+		{ name = "MLUA_CARDREGISTRY_059", icon = "a1a46c991c5f464b862225b85c011aac", grade = 3 },
+		{ name = "MLUA_CARDREGISTRY_061", icon = "b210de14b51f41608a208b1a0764697f", grade = 3 },
+		{ name = "MLUA_CARDREGISTRY_044", icon = "2dd04134bf4448b4ad073868dd34b0cb", grade = 1 },
+		{ name = "MLUA_CARDREGISTRY_046", icon = "128361e7c7f54ec49a7f18c8708ddaf3", grade = 2 },
+		{ name = "MLUA_CARDREGISTRY_047", icon = "4ad16b9e770c4c998367ea03028dc40c", grade = 2 },
+		{ name = "MLUA_CARDREGISTRY_049", icon = "ae6ed4be8e0e4c5c9eb19326bb0f8fce", grade = 2 },
+		{ name = "MLUA_CARDREGISTRY_048", icon = "e444f0d4a4bc414cb213be4027749187", grade = 1 },
+
+		-- 인덱스 80~101: 린 전용 22종(액티브 16 + 패시브 6). ⚠ 다른 캐릭터는 20종씩인데 린만 22종이다
+		-- — 슬롯형 액티브 8개가 전부 조합 업글을 하나씩 갖고(8+8=16), 패시브도 6종이라 그렇다.
+		-- 그래서 캐릭터 구간을 20개 고정으로 가정하면 안 된다(GetSkillCharacter 참고).
+		{ name = "MLUA_CARDMANAGER_035", icon = "1b1ac0cdfa4042679aa4caa6fcd0fc0b", grade = 1 },
+		{ name = "MLUA_CARDMANAGER_019", icon = "826e34ac444542ed81138d8f3c600eb4", grade = 1 },
+		{ name = "MLUA_CARDMANAGER_033", icon = "4ff247d41f3a437d950265851dbb4956", grade = 1 },
+		{ name = "MLUA_CARDMANAGER_021", icon = "2dbfbe5629b54d4bb23709ff0f996976", grade = 2 },
+		{ name = "MLUA_CARDMANAGER_023", icon = "8c55ca7af6994b0cabce15f01641c91b", grade = 1 },
+		{ name = "MLUA_CARDMANAGER_025", icon = "15995c8c9dc44d3ca9bfc76ce0f605b9", grade = 2 },
+		{ name = "MLUA_CARDMANAGER_027", icon = "bdce6c0ec4af442691d92ba3c3b7cd81", grade = 1 },
+		{ name = "MLUA_CARDMANAGER_031", icon = "ea15a1b333cf46719984b09c3d55c3ea", grade = 2 },
+		{ name = "MLUA_CARDMANAGER_036", icon = "098792a5debc40d9be80dbfb29051bfa", grade = 3 },
+		{ name = "MLUA_CARDMANAGER_020", icon = "997b1b9b580b4495a34c185b998bc2ed", grade = 3 },
+		{ name = "MLUA_CARDMANAGER_034", icon = "0d2a1d366e1041009c0a45527a91273c", grade = 3 },
+		{ name = "MLUA_CARDMANAGER_024", icon = "0807bdcf057f40b5acd8b4491e86fa84", grade = 3 },
+		{ name = "MLUA_CARDMANAGER_026", icon = "624b9b3862554c2aa56f88fbee0aa7b2", grade = 3 },
+		{ name = "MLUA_CARDMANAGER_032", icon = "4d254b1d906243fea57f6305ff461b2b", grade = 3 },
+		{ name = "MLUA_CARDMANAGER_029", icon = "956727b76287433c80ddfd9c0dd9dd2f", grade = 3 },
+		{ name = "MLUA_CARDMANAGER_022", icon = "03efd1261b234191a0cfd01e39e35c4b", grade = 3 },
+		{ name = "MLUA_CARDREGISTRY_072", icon = "e29914f0244449a6a20561bb9c243585", grade = 1 },
+		{ name = "MLUA_CARDREGISTRY_073", icon = "38044ea122f7440f8cadeea6c9c27f8c", grade = 2 },
+		{ name = "MLUA_CARDREGISTRY_074", icon = "cf1603a5de0540bead022e62527add99", grade = 2 },
+		{ name = "MLUA_CARDREGISTRY_077", icon = "d0156a43b7f649dbb88ef13e324436db", grade = 1 },
+		{ name = "MLUA_CARDREGISTRY_076", icon = "1f3c103ca9b2406194deafd0989bc790", grade = 1 },
+		{ name = "MLUA_CARDREGISTRY_075", icon = "cc6f04c6134241369d67edb9ad6bff8c", grade = 2 },
+
+		-- 인덱스 102~112: 2026-10-01 신규 11종(끝에 이어 붙임 — 캐릭터는 _extraSkillCharacter). 기본기 매직 / 조합 레어 / 패시브 매직.
+		{ name = "MLUA_CARDMANAGER_546", icon = "fce4228656b546ac98793726418ffc86", grade = 2 },  -- 102 프리징 브레스(26)
+		{ name = "MLUA_CARDMANAGER_547", icon = "412638a16dc643f595b035ba776ef425", grade = 3 },  -- 103 프로즌 오브(27)
+		{ name = "MLUA_CARDMANAGER_548", icon = "48d122c4eb43493bb1ad12758bc32418", grade = 3 },  -- 104 라이트닝 오브(28)
+		{ name = "MLUA_CARDMANAGER_555", icon = "0c7429594f59465da53d31def2b1c566", grade = 2 },  -- 105 윈드 오브 프레이(121)
+		{ name = "MLUA_CARDMANAGER_556", icon = "1145fd299098487cbbb083e611a3669e", grade = 3 },  -- 106 게일 오브 프레이(122)
+		{ name = "MLUA_CARDMANAGER_557", icon = "a848ac6a11194dc6a5c25bfa5cd5331b", grade = 3 },  -- 107 스네어 오브 프레이(123)
+		{ name = "MLUA_CARDMANAGER_569", icon = "69acc0a1482143d5a25f80da945e0f22", grade = 2 },  -- 108 인사이징(192)
+		{ name = "MLUA_CARDMANAGER_570", icon = "b507f575ffb9478d9d98a6ff3c727954", grade = 3 },  -- 109 인사이징:관(193)
+		{ name = "MLUA_CARDMANAGER_571", icon = "662464c2c40d4600a75e3e70cd576346", grade = 3 },  -- 110 인사이징:폭(194, 아이콘 -90도 회전)
+		{ name = "MLUA_CARDMANAGER_558", icon = "f0007cc9b4324713b0ad8ee938f40325", grade = 2 },  -- 111 컨센트레이션(124, 패시브)
+		{ name = "MLUA_CARDMANAGER_572", icon = "52162587bc534b9385af8c77513d93d4", grade = 2 },  -- 112 아이언 바디(195, 패시브)
+	}
+
+	property any _storage = nil
+
+	property boolean _dirty = false
+
+	property any _flushTimerId = nil
+
+	method integer GetMaxLevelForSkill(integer skillIndex)
+		return self.maxLevel
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		-- 저장 주기 타이머만 건다. 데이터는 유저가 들어올 때(HandleUserEnterEvent) 그 유저 저장소에서 읽는다
+		self._flushTimerId = _TimerService:SetTimerRepeat(function() self:FlushIfDirty() end, 3.0)
+	end
+
+	@ExecSpace("ServerOnly")
+	@EventSender("Service", "UserService")
+	handler HandleUserEnterEvent(UserEnterEvent event)
+		-- 입장한 유저의 저장된 스킬 조각/레벨을 **유저별 저장소**에서 불러온다
+		-- 출시 전 수정(2026-09-20): 예전엔 월드 시작 때 전역 저장소("SkillInventory")라 전 유저가 스킬을 공유했다
+		local user = _UserService:GetUserEntityByUserId(event.UserId)
+		if user == nil then return end
+		self._storage = _DataStorageService:GetUserDataStorage(user.PlayerComponent.ProfileCode)
+		local errorCode, raw = self._storage:GetAndWait("Skill.Counts")
+		if errorCode == 0 and raw ~= nil and raw ~= "" then
+			local loaded = _UtilLogic:StringToTable(raw)
+			if loaded ~= nil then
+				for i = 0, self.skillCount - 1 do
+					local key = tostring(i)
+					if loaded[key] ~= nil then
+						self.Counts[key] = loaded[key]
+					end
+				end
+			end
+		end
+		local levelErrorCode, levelRaw = self._storage:GetAndWait("Skill.Levels")
+		if levelErrorCode == 0 and levelRaw ~= nil and levelRaw ~= "" then
+			local loadedLevels = _UtilLogic:StringToTable(levelRaw)
+			if loadedLevels ~= nil then
+				for i = 0, self.skillCount - 1 do
+					local key = tostring(i)
+					if loadedLevels[key] ~= nil then
+						self.Levels[key] = loadedLevels[key]
+					end
+				end
+			end
+		end
+		-- 레드닷 상태도 재시작 사이에 유지한다(확인 안 한 새 스킬은 다음 접속에도 계속 표시)
+		local newErrorCode, newRaw = self._storage:GetAndWait("Skill.NewSet")
+		if newErrorCode == 0 and newRaw ~= nil and newRaw ~= "" then
+			local loadedNew = _UtilLogic:StringToTable(newRaw)
+			if loadedNew ~= nil then
+				for i = 0, self.skillCount - 1 do
+					local key = tostring(i)
+					if loadedNew[key] ~= nil then
+						self.NewSet[key] = loadedNew[key]
+					end
+				end
+			end
+		end
+		-- 저장은 OnBeginPlay의 3초 타이머가 변경이 있을 때만 한다(RelicInventory와 동일한 dirty-flag 패턴)
+		log("SkillInventory started")
+	end
+
+	@ExecSpace("Server")
+	method void RequestAddSkill(integer skillIndex)
+		-- 스킬 조각을 획득했을 때 호출 — GachaUI(스킬 뽑기)가 호출한다.
+		if skillIndex < 0 or skillIndex >= self.skillCount then return end
+		local key = tostring(skillIndex)
+		-- 유저 요청: 처음 뽑히는 순간(조각 0개→1개 이상)에만 레드닷을 켠다. 스킬은 레벨 개념상
+		-- 조각이 0개여도 이미 Lv.1 취급이라(RequestLevelUpSkill 참고) 레벨이 아니라 "조각을 이번에
+		-- 처음 받았는가"로 새 스킬 여부를 판정한다.
+		local wasOwned = self.Counts[key] ~= nil and self.Counts[key] > 0
+		local current = 0
+		if self.Counts[key] ~= nil then current = self.Counts[key] end
+		self.Counts[key] = current + 1
+		if not wasOwned then
+			self.NewSet[key] = true
+		end
+		self._dirty = true
+	end
+
+	-- 스킬 탭에서 슬롯을 눌러 확인했을 때 호출 — 레드닷을 끈다
+	@ExecSpace("Server")
+	method void MarkSkillSeen(integer skillIndex)
+		if skillIndex < 0 or skillIndex >= self.skillCount then return end
+		local key = tostring(skillIndex)
+		if self.NewSet[key] then
+			self.NewSet[key] = nil
+			self._dirty = true
+		end
+	end
+
+	-- 뽑기 해금 스킬(2026-10-01 신규 102~112, 유저 지정 "자물쇠 걸자"): 조각을 한 번도 못 받았고 강화 기록도 없으면 잠김.
+	-- 잠긴 스킬은 스킬탭에 자물쇠가 덮이고, 인게임 레벨업 선택지에 "새로 배우기(unlock)"로 나오지 않는다(CardManager.IsGachaLockedCard).
+	-- 강화하면 조각이 0이 될 수 있어서 Levels(강화한 적 있으면 2 이상 저장)도 같이 본다
+	method boolean IsSkillLocked(integer skillIndex)
+		if skillIndex < 102 then return false end
+		local key = tostring(skillIndex)
+		local count = self.Counts[key]
+		if count ~= nil and count > 0 then return false end
+		local level = self.Levels[key]
+		if level ~= nil and level > 0 then return false end
+		return true
+	end
+
+	method boolean IsSkillNew(integer skillIndex)
+		local key = tostring(skillIndex)
+		return self.NewSet[key] == true
+	end
+
+	-- 스킬 탭 아이콘(로비 상단 btnSkill)에 표시할 레드닷 — 하나라도 미확인 스킬이 있으면 true
+	method boolean HasAnyNewSkill()
+		for i = 0, self.skillCount - 1 do
+			if self.NewSet[tostring(i)] == true then return true end
+		end
+		return false
+	end
+
+	@ExecSpace("Server")
+	method void RequestLevelUpSkill(integer skillIndex)
+		-- 스킬 탭에서 슬롯을 눌러 업그레이드 팝업에서 강화 버튼을 눌렀을 때 호출된다
+		if skillIndex < 0 or skillIndex >= self.skillCount then return end
+		local key = tostring(skillIndex)
+		-- 강화 안 한 기본 상태는 Lv.1(0이 아니다) — 처음 누르는 강화도 currentLevel=1 기준 비용을 쓴다.
+		-- ⚠ nil이 아니라 "0보다 큰가"로 본다. 저장소에 0이 한 번 기록되면 nil 체크로는 못 걸러서
+		-- currentLevel이 0으로 깨지고, GetFragmentCostForLevel(0, grade)가 nil을 돌려준다(1-based 표).
+		-- 유물에서 실제로 이 방식으로 터졌다 — RelicInventory.GetEffectiveLevel 주석 참고
+		local currentLevel = 1
+		local storedLevel = self.Levels[key]
+		if storedLevel ~= nil and storedLevel > 0 then currentLevel = storedLevel end
+		if currentLevel >= self:GetMaxLevelForSkill(skillIndex) then
+			log("SkillInventory: skill " .. key .. " already at max level")
+			return
+		end
+		
+		local nextLevel = currentLevel + 1
+		local grade = self:GetSkillGrade(skillIndex)
+		local fragmentCost = self:GetFragmentCostForLevel(currentLevel, grade)
+		local goldCost = self:GetGoldCostForLevel(currentLevel, grade)
+		
+		local haveFragments = 0
+		if self.Counts[key] ~= nil then haveFragments = self.Counts[key] end
+		if haveFragments < fragmentCost then
+			log("SkillInventory: not enough fragments for skill " .. key)
+			return
+		end
+		-- 유물 강화와 동일하게 런과 무관한 메인화면 누적 코인(TotalCoins)으로 결제한다
+		if not _GameManager:SpendCoins(goldCost) then
+			log("SkillInventory: not enough coins for skill " .. key)
+			return
+		end
+		
+		self.Counts[key] = haveFragments - fragmentCost
+		self.Levels[key] = nextLevel
+		self._dirty = true
+		log("SkillInventory: skill " .. key .. " leveled up to " .. tostring(nextLevel))
+	end
+
+	-- currentLevel(1~9)이 현재 레벨일 때 다음 레벨로 올리는 데 필요한 조각 개수(등급별)
+	method integer GetFragmentCostForLevel(integer currentLevel, integer grade)
+		return self._levelFragmentCostByGrade[grade][currentLevel]
+	end
+
+	method string GetSkillName(integer skillIndex)
+		-- _skillDefs에는 로컬라이제이션 키만 들어 있다 — 이 표는 서버에서도 읽히는데
+		-- _LocalizationService는 ClientOnly라 표 안에서 풀 수 없기 때문. 여기서 한 번에 푼다.
+		-- 표시용 호출은 전부 클라다(SkillUI 이름 / GachaUI 확률공개).
+		local def = self._skillDefs[skillIndex + 1]
+		local key = "MLUA_GACHAUI_003"   -- 폴백 "스킬"
+		if def ~= nil then key = def.name end
+		if self:IsClient() then return _LocalizationService:GetText(key) end
+		return key
+	end
+
+	method string GetSkillIconRuid(integer skillIndex)
+		local def = self._skillDefs[skillIndex + 1]
+		if def == nil then return "" end
+		return def.icon
+	end
+
+	method number GetSkillIconRotation(integer skillIndex)
+		-- 스킬탭/강화 팝업 아이콘 회전(도). 인게임 카드(CardManager.GetCardIconRotation)와 같은 그림을 같은 방향으로 보이게 한다
+		if skillIndex == 53 then return -90 end  -- 스카링 블레이드(카드 169)
+		if skillIndex == 110 then return -90 end  -- 인사이징:폭(카드 194)
+		return 0
+	end
+
+	method integer GetSkillCount()
+		-- 다른 Logic(GachaUI 등)이 스킬 전체를 순회할 때 쓴다 — skillCount 필드를 로직 밖에서
+		-- 직접 읽으면 런타임에 nil이 잡힐 수 있어서 접근자로 노출한다
+		return self.skillCount
+	end
+
+	-- 뽑기 등급 가중치(1=일반 / 2=매직 / 3=레어). 확률 공개 팝업(GachaUI)과 실제 추첨이 같은 값을
+	-- 보도록 여기 한 곳에만 둔다 — 예전엔 GachaUI가 자기 사본을 들고 굴려서 어긋날 여지가 있었다
+	property any GachaGradeWeights = { 55, 30, 15 }
+
+	method integer GetGachaGradeWeight(integer grade)
+		-- GachaUI 확률 공개 팝업이 읽는다(표시와 실제 추첨이 같은 표를 쓰게)
+		local w = self.GachaGradeWeights[grade]
+		if w == nil then return 0 end
+		return w
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer RollGachaSkillIndex()
+		-- 등급을 가중 추첨한 뒤 그 등급 안에서는 균등하게 하나 고른다(해당 등급이 비면 일반=1로 내린다).
+		-- ⚠ 2026-09-16: 예전엔 GachaUI(클라)가 굴린 뒤 연출이 끝나고 RequestAddSkill을 따로 불렀다.
+		-- 연출 중 끊기면 다이아만 빠지는 문제가 있어서, 결제와 같은 흐름에서 서버가 굴리도록 옮겼다
+		local buckets = { {}, {}, {} }
+		for i = 0, self.skillCount - 1 do
+			local g = self:GetSkillGrade(i)
+			if g >= 1 and g <= 3 then table.insert(buckets[g], i) end
+		end
+		local total = 0
+		for i = 1, 3 do total = total + self:GetGachaGradeWeight(i) end
+		local roll = _UtilLogic:RandomDouble() * total
+		local grade = 1
+		local acc = 0
+		for i = 1, 3 do
+			acc = acc + self:GetGachaGradeWeight(i)
+			if roll < acc then
+				grade = i
+				break
+			end
+		end
+		local bucket = buckets[grade]
+		if bucket == nil or #bucket == 0 then bucket = buckets[1] end
+		if bucket == nil or #bucket == 0 then return 0 end
+		return bucket[_UtilLogic:RandomIntegerRange(1, #bucket)]
+	end
+
+	-- 1=일반 / 2=매직 / 3=레어
+	method integer GetSkillGrade(integer skillIndex)
+		local def = self._skillDefs[skillIndex + 1]
+		if def == nil then return 1 end
+		return def.grade
+	end
+
+	-- currentLevel(1~9)이 현재 레벨일 때 다음 레벨로 올리는 데 필요한 골드(등급별)
+	method integer GetGoldCostForLevel(integer currentLevel, integer grade)
+		return self._levelGoldCostByGrade[grade][currentLevel]
+	end
+
+	-- 캐릭터 필터용 — 인덱스 구간으로 캐릭터를 판별한다.
+	-- 0~19=아르카나(20) / 20~39=실피드(20) / 40~59=레이온(20) / 60~79=쉐이드(20) / 80~101=린(22).
+	-- ⚠ 린만 22종이라 "캐릭터당 20개"로 계산하면 안 된다(_skillDefs 주석 참고).
+	-- SkillUI의 _characterFilter(0/1/2/3/4)와 동일한 번호 체계.
+	-- 102 이후(끝에 이어 붙인 스킬)는 구간이 아니라 이 표로 캐릭터를 정한다(없으면 아르카나 취급하지 않게 로그를 남긴다).
+	property any _extraSkillCharacter = {
+		[102] = 0, [103] = 0, [104] = 0,
+		[105] = 1, [106] = 1, [107] = 1, [111] = 1,
+		[108] = 2, [109] = 2, [110] = 2, [112] = 2,
+	}
+
+	method integer GetSkillCharacter(integer skillIndex)
+		-- 스킬 인덱스 → 캐릭터 번호(0=아르카나/1=실피드/2=레이온/3=쉐이드/4=린)
+		if skillIndex >= 102 then
+			local c = self._extraSkillCharacter[skillIndex]
+			if c ~= nil then return c end
+			log_warning("SkillInventory: no character for skill " .. tostring(skillIndex))
+			return 0
+		end
+		if skillIndex >= 80 then return 4
+		elseif skillIndex >= 60 then return 3
+		elseif skillIndex >= 40 then return 2
+		elseif skillIndex >= 20 then return 1
+		end
+		return 0
+	end
+
+	@ExecSpace("ServerOnly")
+	method void FlushIfDirty()
+		-- 유저 입장(로드) 전이면 저장하지 않는다 — 빈 값으로 유저 데이터를 덮으면 안 된다
+		if not self._dirty or self._storage == nil then return end
+		self._dirty = false
+		local plainCounts = {}
+		local plainLevels = {}
+		local plainNew = {}
+		for i = 0, self.skillCount - 1 do
+			local key = tostring(i)
+			-- 0은 저장하지 않는다 — 의미 없는 0이 쌓이면 다음 로드에서 "값이 있다"로 오인돼
+			-- 기본 레벨(1)을 0으로 덮어버린다(유물에서 실제로 터진 버그, RelicInventory 주석 참고)
+			if self.Counts[key] ~= nil and self.Counts[key] > 0 then plainCounts[key] = self.Counts[key] end
+			if self.Levels[key] ~= nil and self.Levels[key] > 0 then plainLevels[key] = self.Levels[key] end
+			if self.NewSet[key] == true then plainNew[key] = true end
+		end
+		self._storage:SetAndWait("Skill.Counts", _UtilLogic:TableToString(plainCounts))
+		self._storage:SetAndWait("Skill.Levels", _UtilLogic:TableToString(plainLevels))
+		self._storage:SetAndWait("Skill.NewSet", _UtilLogic:TableToString(plainNew))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnSyncProperty(string name, any value)
+		-- 획득 개수나 레벨이 갱신될 때마다 스킬 탭 UI를 새로고침한다
+		if name == "Counts" or name == "Levels" or name == "NewSet" then
+			_SkillUI:RefreshAllSkillSlots()
+			_SkillUpgradeUI:RefreshPanel()
+		end
+		if name == "NewSet" then
+			_TitleUI:RefreshSkillNavDot()
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnEndPlay()
+		if self._flushTimerId then _TimerService:ClearTimer(self._flushTimerId) end
+		self:FlushIfDirty()
+	end
+
+end
+

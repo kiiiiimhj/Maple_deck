@@ -1,0 +1,544 @@
+@Logic
+script WorldCharacterSelectUI extends Logic
+
+	property Entity popupGroup = "ae6db2b2-e539-46c5-93fd-1a5595f685ed"
+	property ButtonComponent btnClose = "28981970-caed-44f0-bbfd-bfe77126c36a"
+	-- 프레임(왼쪽/가운데/오른쪽)은 .ui에 저장된 위치에 항상 고정 — </>를 눌러도 움직이지 않고,
+	-- 그 뒤에 깔린 Photo의 스샷만 바뀐다
+	property SpriteGUIRendererComponent worldImageLeft = "b5ff8b54-cc74-4ef2-8f2b-1a78b6bb6063"
+	property SpriteGUIRendererComponent worldImageCenter = "5f262546-66d3-4c41-aa4c-d8e66978835f"
+	property SpriteGUIRendererComponent worldImageRight = "e7cc45d2-6cdf-4c64-bee6-992ca5260d38"
+	-- 프레임(worldImageLeft/Center/Right)은 액자 그래픽이고, 실제 월드 스샷은 그 뒤에 깔린
+	-- 이 Photo 엔티티들이 보여준다
+	property SpriteGUIRendererComponent worldImageLeftPhoto = "8e4282d7-626d-4029-b302-48c10623d01e"
+	property SpriteGUIRendererComponent worldImageCenterPhoto = "11fbfd06-51c9-43e6-9568-0548b7a6bc22"
+	property SpriteGUIRendererComponent worldImageRightPhoto = "20b657ba-3745-44fe-9f7d-efeea0d7fb3e"
+	property ButtonComponent btnWorldPrev = "eae7a802-52e5-4b95-9494-8547b695febf"
+	property ButtonComponent btnWorldNext = "a37c4cb1-3e23-4a89-a230-38a538517378"
+	-- 가운데 프레임 아래에 표시되는 맵 이름
+	property TextComponent worldNameText = "e42ea462-d466-4a65-91fb-7dcec94effe2"
+	-- 잠긴 월드 표시(유저 지정 2026-09-20: 이전 에피소드 10분 생존 시 열림) — 가운데 사진 위 어두운 판 + 자물쇠 + 안내 문구
+	property Entity lockOverlay = "65701534-7a57-459b-a4e2-cb2c900b44d6"
+	property TextGUIRendererComponent lockHintText = "af36acce-bbe3-473e-b03d-03d00ad5cf58"
+	property Entity charList = "e268de69-d6c8-43ae-8eeb-20758c36bfc5"
+	property TextComponent charDescNameText = "39cc8743-5098-45f8-91e1-00177775d7c4"
+	property TextComponent charDescText = "3b71b228-4884-40e8-80ba-3d89f487661d"
+	property ButtonComponent btnConfirm = "c2e1c1e2-d89c-48ff-a7ac-745e9f6ecc2f"
+	-- 무제한 모드 체크박스 — 체크(기본값) = 무제한 모드(기존과 동일), 해제 = 20분 타임어택 모드
+	property ButtonComponent unlimitedModeCheckbox = "e1dd0b9a-b7f1-458a-a121-0ae3e1c21103"
+	property Entity unlimitedModeCheckMark = "a23b7b51-ac37-43fd-a16e-584d92317301"
+	property boolean _unlimitedModeChecked = true
+	property any _unlimitedModeToggleHandler = nil
+
+	-- 월드 목록 — 지금은 실제 입장 가능한 월드가 1개뿐이라, </> 이동 기능이 실제로 동작하는 걸 보여주기
+	-- 위해 "준비중" 더미 월드를 하나 더 둔다. enterable=false인 월드는 확인을 눌러도 입장하지 않는다.
+	property any _worlds = nil
+	property integer _worldIndex = 1
+
+	-- 캐릭터 목록 — 0번(아르카나)/2번(레이온)/3번(쉐이드)은 항상 해금, 1번(실피드)은 맵21 이스터에그로
+	-- 영구 해금되는 슬롯, 나머지는 향후 캐릭터 추가를 위한 잠금 슬롯
+	property any _characters = nil
+	property integer _selectedCharIndex = -1
+	-- 쉐이드/린 해금 진행도. 서버가 팝업을 열 때 OnProgressSynced로 내려준다(CharacterUnlockLogic 참고)
+	property integer _gearCollected = 0
+	property integer _monsterKilled = 0
+
+	property any _closeHandler = nil
+	property any _confirmHandler = nil
+	property any _prevHandler = nil
+	property any _nextHandler = nil
+	property any _dragHandler = nil
+	property any _scrollBarHandler = nil
+	property boolean _syncingScrollBar = false
+	property number scrollableRangePx = 200
+	property SliderComponent charScrollBar = "89d7fa0f-8bb6-4bac-b6e8-f903fd2b5e50"
+	property Entity charScrollTouchArea = "a03e29e8-5f03-4a07-ae1d-88ee7ad7642f"
+	property any _slotHandlers = nil
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		-- 월드 시작 시점엔 무조건 숨겨둔다 — CharacterUnlockUI/GachaUI 등과 동일한 이유로, 이걸
+		-- 빠뜨리면 .ui에 저장된 기본값(Enable=true)이 그대로 남아 로비 화면 위에 팝업이 떠 있는 채로
+		-- 시작해버린다(유저 지적: "팝업같은 UI가 떴다 로비화면으로 변경되는 경우가있어" —
+		-- WorldCharacterSelectGroup의 displayOrder(12)가 TitleGroup(5)보다 높아서 실제로 덮어 그려짐).
+		self.popupGroup.Enable = false
+		-- 2026-08-10: 에피소드2(구름정원) 추가로 두 번째 슬롯이 "준비중" 더미에서 실제 입장 가능한
+		-- 월드로 바뀐다. 2026-08-11: Ep2_map1(존1) 에디터 씬을 스샷+크롭해서 계정 리소스로 등록하고
+		-- (Deck_Map_EP2_CloudGarden) 여기 RUID를 교체 — 기존엔 존재하지 않는(리소스 조회 404) 깨진
+		-- 플레이스홀더 RUID라 팝업에서 흰 빈 칸으로 보였다.
+		-- 2026-08-25: 에피소드3(ep3_map1, 유저 지정 맵이름 "엘라스 산맥") 추가 — 존1(mapIndex89) 실제
+		-- 플레이 화면을 스샷(maker_screenshot, play 모드)+HUD/카드열 크롭(jimp) 후 계정 리소스로 업로드해
+		-- 세 번째 슬롯을 채운다. 위 두 월드와 동일한 패턴(실제 게임 화면 스샷, 에디터 목업 아님).
+		-- partIcons: 그 맵에서만 드롭되는 장비 부위 심볼(장착 슬롯의 하얀 벡터와 동일 리소스).
+		-- 사진 우측 하단 배지로 표시된다. 실제 드롭 분배는 WeaponTierDataLogic.GearItemIdsByEpisode가
+		-- 들고 있고 여기 목록과 반드시 같아야 한다 — 한쪽만 고치면 표시와 실제가 어긋난다.
+		-- 인덱스(_worldIndex)가 그대로 에피소드 번호로 넘어간다(OnConfirmClicked → OnStartClicked).
+		self._worlds = {
+			{ name = _LocalizationService:GetText("MLUA_IDLEREWARDLOGIC_003"), imageRuid = "95ce798ac8fd4b1ab8177405c18c9949", enterable = true,
+				partIcons = { "3ceaa3af732e4956b623b5f470f628c5" } },
+			{ name = _LocalizationService:GetText("MLUA_IDLEREWARDLOGIC_001"), imageRuid = "d83a7e649d724c009faf12e4a3dfda4d", enterable = true,
+				partIcons = { "b41b2a76b9cf4074baa4c727ca5e1ac9", "42e5e834544e4b05b11160213f712635" } },
+			{ name = _LocalizationService:GetText("MLUA_IDLEREWARDLOGIC_002"), imageRuid = "3ad5d3ae556b42fe94401c63d788bf7a", enterable = true,
+				partIcons = { "1c9eba05b6c142e789f5a197c472c066", "1d74d38d49ac41c5a14009e6f6414772" } },
+			-- 2026-09-28: 에피소드4(루디브리엄) — ep4_map1 존1 플레이 화면(HUD 숨김) 스샷을 계정 리소스로 업로드.
+			-- 배지 = 무기(에피1과 같은 심볼) + 갑옷(에피2 첫 배지와 같은 심볼) — WeaponTierDataLogic byEpisode[4]와 짝
+			{ name = _LocalizationService:GetText("MLUA_IDLEREWARDLOGIC_004"), imageRuid = "2fda6679e68c44729890ceb154fdc7f8", enterable = true,
+				partIcons = { "3ceaa3af732e4956b623b5f470f628c5", "b41b2a76b9cf4074baa4c727ca5e1ac9" } },
+		}
+		-- 2026-09-16 유저 지정: 해금된 캐릭터는 컨셉 소개, 해금 전에는 "무엇을 해야 풀리는지"를 같은 자리에
+		-- 보여준다(unlockHint). 누적 카운터로 풀리는 쉐이드/린은 진행도(progressKind)까지 한 줄 더 붙는다.
+		-- 아르카나는 기본 캐릭터라 해금 조건이 없다.
+		self._characters = {
+			{ name = _LocalizationService:GetText("MLUA_WORLDCHARACTERSELECTUI_001"), desc = _LocalizationService:GetText("MLUA_WORLDCHARACTERSELECTUI_002"), iconRuid = "f13366e4ab0c4523b3f96f131aafbe85", locked = false, unlockHint = "", progressKind = "" },
+			{ name = "", desc = "", iconRuid = "", locked = true, unlockHint = "", progressKind = "" },
+			-- 레이온(3번 슬롯) — 전사 컨셉, 콤보어택 패시브. 몬스터 갤러리 전투 미니게임(1등 픽)으로
+			-- 해금된다(RefreshLeionSlot이 매번 최신 상태로 덮어쓴다). 여기 placeholder는 최초 1프레임
+			-- 동안만 보일 수 있는 값이라 Sylph 슬롯(69번 줄)과 동일하게 잠금으로 시작한다.
+			{ name = "", desc = "", iconRuid = "", locked = true, unlockHint = "", progressKind = "" },
+			-- 쉐이드(4번 슬롯) — 아직 전용 카드/스킬 없음(유저 지정: 레이온과 동일하게 먼저 선택 슬롯만
+			-- 추가하고 실제 전용 카드는 나중에 따로 작업). CardManager.OnUpdate/BuildActiveUpgradePool 둘 다
+			-- SelectedCharacter가 1(실피드)/2(레이온)이 아니면 기본값(아르카나 파이어샷+카드1~24 풀)으로
+			-- 폴백하므로, 지금 당장은 쉐이드 선택 시 아르카나와 동일하게 동작한다.
+			{ name = _LocalizationService:GetText("MLUA_CHARACTERUNLOCKLOGIC_001"), desc = _LocalizationService:GetText("MLUA_CHARACTERUNLOCKLOGIC_002"), iconRuid = "a8348a83ab4343409cd461ddd83c6730", locked = true, unlockHint = _LocalizationService:GetText("MLUA_WORLDCHARACTERSELECTUI_003"), progressKind = "gear" },
+			-- 린(5번 슬롯, SelectedCharacter == 4) — 쉐이드를 처음 넣었을 때와 동일하게 선택 슬롯만 먼저
+			-- 만든다. 전용 카드가 아직 없어서 CardManager 쪽 폴백(아르카나 파이어샷 + 카드1~24 풀)으로
+			-- 동작한다. 설명 문구는 임시 — 컨셉 확정되면 교체할 것.
+			{ name = _LocalizationService:GetText("MLUA_CHARACTERUNLOCKLOGIC_003"), desc = _LocalizationService:GetText("MLUA_CHARACTERUNLOCKLOGIC_004"), iconRuid = "e64d2ef49017475b925f18c98510ee7f", locked = true, unlockHint = _LocalizationService:GetText("MLUA_WORLDCHARACTERSELECTUI_004"), progressKind = "kill" },
+			{ name = "", desc = "", iconRuid = "", locked = true, unlockHint = "", progressKind = "" },
+			{ name = "", desc = "", iconRuid = "", locked = true, unlockHint = "", progressKind = "" },
+			{ name = "", desc = "", iconRuid = "", locked = true, unlockHint = "", progressKind = "" },
+		}
+		self._slotHandlers = {}
+
+		self._closeHandler = self.btnClose.Entity:ConnectEvent(ButtonClickEvent, self.Close)
+		self._confirmHandler = self.btnConfirm.Entity:ConnectEvent(ButtonClickEvent, self.OnConfirmClicked)
+		self._unlimitedModeToggleHandler = self.unlimitedModeCheckbox.Entity:ConnectEvent(ButtonClickEvent, self.OnUnlimitedModeToggleClicked)
+		self.unlimitedModeCheckMark.Enable = self._unlimitedModeChecked
+		self._prevHandler = self.btnWorldPrev.Entity:ConnectEvent(ButtonClickEvent, function() self:ChangeWorld(-1) end)
+		self._nextHandler = self.btnWorldNext.Entity:ConnectEvent(ButtonClickEvent, function() self:ChangeWorld(1) end)
+		self._dragHandler = self.charScrollTouchArea:ConnectEvent(UITouchDragEvent, self.OnScrollDrag)
+		self._scrollBarHandler = self.charScrollBar.Entity:ConnectEvent(SliderValueChangedEvent, self.OnScrollBarChanged)
+
+		self:ConnectCharSlots()
+		log("WorldCharacterSelectUI started")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ConnectCharSlots()
+		for i = 0, #self._characters - 1 do
+			local slot = self.charList:GetChildByName("CharSlot_" .. tostring(i))
+			if isvalid(slot) then
+				local capturedIndex = i
+				local h = slot:ConnectEvent(UITouchUpEvent, function(event) self:OnCharSlotClicked(capturedIndex) end)
+				local dragH = slot:ConnectEvent(UITouchDragEvent, self.OnScrollDrag)
+				table.insert(self._slotHandlers, { entity = slot, upHandler = h, dragHandler = dragH })
+			end
+		end
+	end
+
+	-- TitleUI가 "게임 시작" 버튼을 눌렀을 때 호출 — 바로 입장하지 않고 이 팝업을 연다
+	@ExecSpace("ClientOnly")
+	method void Open()
+		self.popupGroup.Enable = true
+		self._worldIndex = 1
+		-- 열 때마다 기본값(체크=무제한 모드)으로 초기화 — 지난번에 타임어택을 골랐어도 매번
+		-- 다시 명시적으로 선택하게 해서 실수로 타임어택이 시작되는 일을 막는다
+		self._unlimitedModeChecked = true
+		self.unlimitedModeCheckMark.Enable = true
+		self:RefreshSylphSlot()
+		self:RefreshLeionSlot()
+		self:RefreshShadeSlot()
+		self:RefreshRinSlot()
+		-- 진행도(장비/처치 누적)는 @Sync가 아니라 요청-응답이라 여기서 한 번 물어본다. 응답은
+		-- OnProgressSynced로 늦게 도착할 수 있어서, 그때 설명란만 다시 그린다
+		_CharacterUnlockLogic:RequestProgress()
+		self:RefreshWorld()
+		self:RefreshCharList()
+		-- 0번(썬콜법사)을 기본 선택 상태로 열어준다 — 지금은 캐릭터가 얘 하나뿐이라 매번 직접
+		-- 클릭하지 않아도 되게. OnCharSlotClicked가 선택 테두리/설명/확인 버튼 상태까지 다 처리한다
+		self:OnCharSlotClicked(0)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Close()
+		self.popupGroup.Enable = false
+	end
+
+	@ExecSpace("ClientOnly")
+	method integer WrapWorldIndex(integer idx)
+		local n = #self._worlds
+		while idx < 1 do idx = idx + n end
+		while idx > n do idx = idx - n end
+		return idx
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetWorldSlotImage(SpriteGUIRendererComponent img, integer worldIdx)
+		local w = self._worlds[worldIdx]
+		img.ImageRUID = DataRef(w.imageRuid)
+		-- 양옆 미리보기도 잠긴 월드는 어둡게(가운데는 RefreshWorld가 다시 칠한다)
+		img.Color = w.enterable and Color(1, 1, 1, 1) or Color(0.5, 0.5, 0.5, 1)
+		self:SetWorldSlotPartBadges(img.Entity, w)
+		self:SetWorldSlotStatText(img.Entity, worldIdx)
+	end
+
+	-- 사진 우상단에 그 월드의 몬스터 능력치 배율을 2줄로 표시한다(2026-09-02 유저 지정).
+	-- 부위 배지와 같은 이유로 캐러셀 이동 때마다 다시 채워야 한다.
+	-- 배율은 GameManager 가 실제 전투에 쓰는 값을 그대로 읽으므로 표시와 실제가 어긋나지 않는다
+	-- (_worldIndex 가 곧 에피소드 번호다).
+	@ExecSpace("ClientOnly")
+	method void SetWorldSlotStatText(Entity photoEntity, integer worldIdx)
+		local statText = photoEntity:GetChildByName("StatText")
+		if not isvalid(statText) then return end
+
+		-- 배경 사진이 밝으면 글씨가 묻혀서, 글씨 뒤에 검은 반투명 판을 깔아 뒀다(StatBg).
+		-- 판이 글씨와 형제라 Enable 을 따로 꺼줘야 한다(자식 Mid/Core 는 부모 따라 같이 꺼진다).
+		local statBg = photoEntity:GetChildByName("StatBg")
+
+		-- 좌/우 슬롯은 액자 밖으로 잘려 나가는 미리보기라 글자가 "공격력 12" 처럼 토막나 보인다.
+		-- 지금 고른 가운데 슬롯에서만 표시한다.
+		if photoEntity ~= self.worldImageCenterPhoto.Entity then
+			statText.Enable = false
+			if isvalid(statBg) then statBg.Enable = false end
+			return
+		end
+
+		statText.Enable = true
+		if isvalid(statBg) then statBg.Enable = true end
+		local percent = math.floor(_GameManager:GetEpisodeStatMultiplierFor(worldIdx) * 100 + 0.5)
+		statText.TextGUIRendererComponent.Text =
+			_LocalizationService:GetTextFormat("FMT_WORLDCHARACTERSELECTUI_001", tostring(percent), tostring(percent))
+	end
+
+	-- 사진 우측 하단의 부위 배지(PartBadge0=가장 오른쪽, PartBadge1=그 왼쪽)를 그 월드의 partIcons로
+	-- 갱신한다. 캐러셀이라 같은 배지 엔티티가 </> 이동 때마다 다른 월드를 가리키게 되므로,
+	-- 슬롯 사진을 바꿀 때 배지도 같이 갈아끼워야 한다. 부위가 1개뿐인 월드는 남는 배지를 끈다
+	@ExecSpace("ClientOnly")
+	method void SetWorldSlotPartBadges(Entity photoEntity, any world)
+		local icons = world.partIcons
+		for i = 0, 1 do
+			local badge = photoEntity:GetChildByName("PartBadge" .. tostring(i))
+			if isvalid(badge) then
+				local ruid = nil
+				if icons ~= nil then
+					ruid = icons[i + 1]
+				end
+
+				if ruid == nil then
+					badge.Enable = false
+				else
+					badge.Enable = true
+					local icon = badge:GetChildByName("Icon")
+					if isvalid(icon) then
+						icon.SpriteGUIRendererComponent.ImageRUID = DataRef(ruid)
+					end
+				end
+			end
+		end
+	end
+
+	-- 프레임(Left/Center/Right)은 .ui에 저장된 위치에 항상 고정 — 여기서는 Photo(스샷)와
+	-- 색상만 현재 _worldIndex 기준으로 갱신한다. 슬라이드/스케일 애니메이션은 없다
+	@ExecSpace("ClientOnly")
+	method void RefreshWorld()
+		-- 에피소드 해금(유저 지정 2026-09-20): 이전 에피소드에서 10분 버텨야 열린다. 기록은 서버 @Sync라
+		-- 팝업을 열거나 넘길 때마다 최신 값으로 다시 판정한다(EpisodeRewardLogic.IsEpisodeUnlocked)
+		for i, w in ipairs(self._worlds) do
+			w.enterable = _EpisodeRewardLogic:IsEpisodeUnlocked(i)
+		end
+		self:SetWorldSlotImage(self.worldImageLeftPhoto, self:WrapWorldIndex(self._worldIndex - 1))
+		self:SetWorldSlotImage(self.worldImageCenterPhoto, self._worldIndex)
+		self:SetWorldSlotImage(self.worldImageRightPhoto, self:WrapWorldIndex(self._worldIndex + 1))
+
+		local w = self._worlds[self._worldIndex]
+		log("WorldCharacterSelectUI: world " .. tostring(self._worldIndex) .. " (" .. w.name .. ") enterable=" .. tostring(w.enterable))
+		local centerColor = w.enterable and Color(1, 1, 1, 1) or Color(0.5, 0.5, 0.5, 1)
+		self.worldImageCenter.Color = centerColor
+		self.worldImageCenterPhoto.Color = centerColor
+		self.worldNameText.Text = w.name
+
+		-- 잠긴 월드면 사진 위에 자물쇠 + "이전 맵 10분 생존 시 열림"
+		if isvalid(self.lockOverlay) then
+			self.lockOverlay.Enable = not w.enterable
+			if not w.enterable and isvalid(self.lockHintText) then
+				local prev = self._worlds[self._worldIndex - 1]
+				local prevName = prev ~= nil and prev.name or ""
+				self.lockHintText.Text = _EpisodeRewardLogic:GetUnlockHint(prevName)
+			end
+		end
+	end
+
+	-- </> 클릭 — 프레임은 그대로 두고, 가운데(그리고 양옆 미리보기)의 스샷만 다음/이전 월드로 갱신한다
+	@ExecSpace("ClientOnly")
+	method void ChangeWorld(integer delta)
+		if #self._worlds <= 1 then return end
+		self._worldIndex = self:WrapWorldIndex(self._worldIndex + delta)
+		self:RefreshWorld()
+		self:RefreshConfirmState()
+	end
+
+	-- 1번 슬롯(실피드)은 CharacterUnlockLogic.SylphUnlocked(계정 영구 저장, @Sync)에 따라 잠금/해금이
+	-- 갈린다. OnBeginPlay 시점엔 서버→클라 동기화가 아직 안 왔을 수 있어 여기(팝업이 열리는 Open())에서
+	-- 매번 최신 값으로 다시 읽는다 — 게임 시작 버튼을 눌러야 여는 팝업이라 그 사이 동기화될 시간은 충분하다.
+	@ExecSpace("ClientOnly")
+	method void RefreshSylphSlot()
+		local unlocked = _CharacterUnlockLogic.SylphUnlocked
+		self._characters[2] = {
+			name = _LocalizationService:GetText("MLUA_MAP21RELICEASTEREGG_001"),
+			desc = _LocalizationService:GetText("MLUA_WORLDCHARACTERSELECTUI_006"),
+			iconRuid = "c8d5851228a844da80c8c94586b06aa7",
+			locked = not unlocked,
+			-- 맵21(태초의 마을) 비밀구역의 봉인 — Map21RelicEasterEgg / Map21TreePuzzleLogic
+			unlockHint = _LocalizationService:GetText("MLUA_WORLDCHARACTERSELECTUI_007"),
+			progressKind = "",
+		}
+	end
+
+	-- 3번 슬롯(레이온)은 CharacterUnlockLogic.LeionUnlocked(몬스터 갤러리 전투 미니게임 1등 픽으로
+	-- 해금, 계정 영구 저장, @Sync)에 따라 잠금/해금이 갈린다. RefreshSylphSlot과 동일 패턴.
+	@ExecSpace("ClientOnly")
+	method void RefreshLeionSlot()
+		local unlocked = _CharacterUnlockLogic.LeionUnlocked
+		self._characters[3] = {
+			name = _LocalizationService:GetText("MLUA_EP2MAP2ARENALOGIC_006"),
+			desc = _LocalizationService:GetText("MLUA_WORLDCHARACTERSELECTUI_008"),
+			iconRuid = "c26beb96e46e41289ecd838a62c60da1",
+			locked = not unlocked,
+			-- 구름정원 몬스터 갤러리(ep2_map2_estermap_1) 전투 미니게임 1등 픽 — Ep2Map2ArenaLogic
+			unlockHint = _LocalizationService:GetText("MLUA_WORLDCHARACTERSELECTUI_009"),
+			progressKind = "",
+		}
+	end
+
+	-- 4번 슬롯(쉐이드)은 누적 장비 획득 100개로 풀린다(CharacterUnlockLogic.ShadeUnlocked, @Sync).
+	-- 실피드/레이온과 같은 패턴이되, 진행도(n/100)를 설명란에 한 줄 더 보여준다.
+	@ExecSpace("ClientOnly")
+	method void RefreshShadeSlot()
+		local unlocked = _CharacterUnlockLogic.ShadeUnlocked
+		self._characters[4] = {
+			name = _LocalizationService:GetText("MLUA_CHARACTERUNLOCKLOGIC_001"),
+			desc = _LocalizationService:GetText("MLUA_CHARACTERUNLOCKLOGIC_002"),
+			iconRuid = "a8348a83ab4343409cd461ddd83c6730",
+			locked = not unlocked,
+			unlockHint = _LocalizationService:GetText("MLUA_WORLDCHARACTERSELECTUI_003"),
+			progressKind = "gear",
+		}
+	end
+
+	-- 5번 슬롯(린)은 누적 몬스터 처치 20,000마리로 풀린다. RefreshShadeSlot과 동일 패턴.
+	@ExecSpace("ClientOnly")
+	method void RefreshRinSlot()
+		local unlocked = _CharacterUnlockLogic.RinUnlocked
+		self._characters[5] = {
+			name = _LocalizationService:GetText("MLUA_CHARACTERUNLOCKLOGIC_003"),
+			desc = _LocalizationService:GetText("MLUA_CHARACTERUNLOCKLOGIC_004"),
+			iconRuid = "e64d2ef49017475b925f18c98510ee7f",
+			locked = not unlocked,
+			unlockHint = _LocalizationService:GetText("MLUA_WORLDCHARACTERSELECTUI_004"),
+			progressKind = "kill",
+		}
+	end
+
+	-- 서버(CharacterUnlockLogic.RequestProgress)가 팝업을 열 때 한 번 내려준다. 카운터는 킬마다 오르는
+	-- 값이라 @Sync를 걸지 않고, 필요한 순간에만 받아서 설명란을 다시 그린다.
+	@ExecSpace("Client")
+	method void OnProgressSynced(integer gearCollected, integer monsterKilled)
+		self._gearCollected = gearCollected
+		self._monsterKilled = monsterKilled
+		-- 응답이 팝업을 연 뒤에 도착하므로, 지금 보고 있는 칸이 진행도 캐릭터면 문구를 다시 채운다
+		self:RefreshCharDesc()
+	end
+
+	-- 1234 → "1,234". 진행도 숫자를 조건 문구(20,000마리)와 같은 표기로 맞춘다
+	@ExecSpace("ClientOnly")
+	method string FormatCount(integer n)
+		local s = tostring(n)
+		local out = ""
+		local count = 0
+		for i = #s, 1, -1 do
+			out = string.sub(s, i, i) .. out
+			count = count + 1
+			if count % 3 == 0 and i > 1 then out = "," .. out end
+		end
+		return out
+	end
+
+	-- 오른쪽 설명 패널 갱신 — 해금됐으면 컨셉 소개, 잠겨 있으면 해금 조건(+진행도)을 같은 자리에 쓴다
+	@ExecSpace("ClientOnly")
+	method void RefreshCharDesc()
+		if self._selectedCharIndex < 0 then return end
+		local charData = self._characters[self._selectedCharIndex + 1]
+		if charData == nil then return end
+
+		if not charData.locked then
+			self.charDescNameText.Text = charData.name
+			self.charDescText.Text = charData.desc
+			return
+		end
+
+		-- 잠긴 칸은 슬롯 목록과 동일하게 이름을 가린다(기존 "???" 규칙)
+		self.charDescNameText.Text = "???"
+		local body = charData.unlockHint
+		if body == "" then body = _LocalizationService:GetText("MLUA_WORLDCHARACTERSELECTUI_010") end
+		-- 라벨과 숫자를 일부러 줄을 갈라 쓴다 — 한 줄로 붙이면 글상자 폭(208)을 넘겨서
+		-- "몬스터 처치 (8,462 /" / "20,000)" 처럼 괄호 한가운데서 잘린다(2026-09-16 실측)
+		if charData.progressKind == "gear" then
+			body = _LocalizationService:GetTextFormat("FMT_WORLDCHARACTERSELECTUI_002", body, self:FormatCount(self._gearCollected), self:FormatCount(_CharacterUnlockLogic:GetShadeGearGoal()))
+		elseif charData.progressKind == "kill" then
+			body = _LocalizationService:GetTextFormat("FMT_WORLDCHARACTERSELECTUI_003", body, self:FormatCount(self._monsterKilled), self:FormatCount(_CharacterUnlockLogic:GetRinKillGoal()))
+		end
+		self.charDescText.Text = body
+	end
+
+	-- 슬롯 이름(Name)이 게임 시작 시 갱신되지 않던 버그 수정 — 기존엔 아이콘만 갱신하고 슬롯 자체의
+	-- Name 텍스트는 한 번도 안 건드려서 .ui에 저장된 예전 값이 그대로 남아있었다. 잠긴 캐릭터(실피드
+	-- 미해금 등)는 이미지가 있으면 검은색으로 틴트해서 실루엣처럼 보이게 한다(유저 요청: "캐릭터 이미지
+	-- 넣을걸 검은색으로... 보여줘야해").
+	@ExecSpace("ClientOnly")
+	method void RefreshCharList()
+		for i = 0, #self._characters - 1 do
+			local charData = self._characters[i + 1]
+			local slot = self.charList:GetChildByName("CharSlot_" .. tostring(i))
+			if isvalid(slot) then
+				local nameLabel = slot:GetChildByName("Name")
+				if isvalid(nameLabel) then
+					-- 잠긴 캐릭터는 이름 대신 "???"로 가려서 보여준다(유저 요청). 해금된 캐릭터는
+					-- 아르카나와 동일하게 흰색으로 표시한다.
+					if charData.locked then
+						nameLabel.TextComponent.Text = "???"
+						nameLabel.TextComponent.FontColor = Color(0.6, 0.6, 0.6, 1)
+					else
+						nameLabel.TextComponent.Text = charData.name
+						nameLabel.TextComponent.FontColor = Color(1, 1, 1, 1)
+					end
+				end
+				local icon = slot:GetChildByName("Icon")
+				if isvalid(icon) and charData.iconRuid ~= "" then
+					icon.SpriteGUIRendererComponent.ImageRUID = DataRef(charData.iconRuid)
+					if charData.locked then
+						icon.SpriteGUIRendererComponent.Color = Color(0, 0, 0, 1)
+					else
+						icon.SpriteGUIRendererComponent.Color = Color(1, 1, 1, 1)
+					end
+				end
+			end
+		end
+		self:RefreshCharSelection()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnCharSlotClicked(integer index)
+		-- 2026-09-16 유저 지정: 잠긴 칸도 눌러서 "해금 조건"을 읽을 수 있어야 한다. 그래서 여기서
+		-- 막지 않고 선택까지 허용하고, 실제 입장은 RefreshConfirmState가 확인 버튼을 꺼서 막는다.
+		local charData = self._characters[index + 1]
+		if charData == nil then return end
+		self._selectedCharIndex = index
+		self:RefreshCharSelection()
+		self:RefreshCharDesc()
+		self:RefreshConfirmState()
+	end
+
+	-- 출석 보상 테마와 맞춘 금색 테두리로 선택된 슬롯을 표시한다
+	@ExecSpace("ClientOnly")
+	method void RefreshCharSelection()
+		for i = 0, #self._characters - 1 do
+			local slot = self.charList:GetChildByName("CharSlot_" .. tostring(i))
+			if isvalid(slot) then
+				local sp = slot.SpriteGUIRendererComponent
+				if i == self._selectedCharIndex then
+					sp.Outline = true
+					sp.OutlineColor = Color(1.0, 0.78, 0.18, 1.0)
+					sp.OutlineWidth = 4
+				else
+					sp.Outline = false
+				end
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshConfirmState()
+		local world = self._worlds[self._worldIndex]
+		-- 잠긴 캐릭터를 고른 상태(조건만 읽는 중)에서는 입장할 수 없다
+		local selected = nil
+		if self._selectedCharIndex >= 0 then selected = self._characters[self._selectedCharIndex + 1] end
+		local charOk = selected ~= nil and not selected.locked
+		local canConfirm = charOk and world.enterable
+		self.btnConfirm.Enable = canConfirm
+		local sprite = self.btnConfirm.Entity.SpriteGUIRendererComponent
+		-- 새 초록색 버튼의 원색을 유지하고 입장 불가 상태만 어둡게 표시한다.
+		if canConfirm then
+			sprite.Color = Color(1.0, 1.0, 1.0, 1.0)
+		else
+			sprite.Color = Color(0.4, 0.4, 0.4, 1.0)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnConfirmClicked()
+		local world = self._worlds[self._worldIndex]
+		if self._selectedCharIndex < 0 or not world.enterable then return end
+		-- 잠긴 캐릭터로는 입장 금지(확인 버튼도 꺼져 있지만 이중 방어)
+		local selected = self._characters[self._selectedCharIndex + 1]
+		if selected == nil or selected.locked then return end
+		-- 유저 지정(2026-09-15): 이번 판 드롭이 들어갈 인벤 탭이 가득 찼으면 입장 전에 확인 팝업을 띄운다.
+		-- [취소]를 누르면 이 선택 팝업에 그대로 남는다(값은 누른 순간 기준으로 캡처)
+		local unlimited = self._unlimitedModeChecked
+		local charIndex = self._selectedCharIndex
+		local episode = self._worldIndex
+		_RunStartConfirmUI:CheckThen(episode, function()
+			if not isvalid(self) then return end
+			self:Close()
+			_TitleUI:OnStartClicked(unlimited, charIndex, episode)
+		end)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUnlimitedModeToggleClicked()
+		-- 체크박스 토글 — 안쪽 체크마크(Mark)의 Enable로 상태를 표시한다
+		self._unlimitedModeChecked = not self._unlimitedModeChecked
+		self.unlimitedModeCheckMark.Enable = self._unlimitedModeChecked
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnScrollDrag(UITouchDragEvent event)
+		local current = self.charList.ScrollLayoutGroupComponent:GetScrollNormalizedPosition(UITransformAxis.Vertical)
+		local delta = event.TouchDelta.y / self.scrollableRangePx
+		local newValue = math.max(0, math.min(1, current + delta))
+		self.charList.ScrollLayoutGroupComponent:SetScrollNormalizedPosition(UITransformAxis.Vertical, newValue)
+		self:SyncScrollBar(newValue)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SyncScrollBar(number normalizedValue)
+		self._syncingScrollBar = true
+		self.charScrollBar.Value = normalizedValue
+		self._syncingScrollBar = false
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnScrollBarChanged(SliderValueChangedEvent event)
+		if self._syncingScrollBar then return end
+		self.charList.ScrollLayoutGroupComponent:SetScrollNormalizedPosition(UITransformAxis.Vertical, event.Value)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		if self._closeHandler then self.btnClose.Entity:DisconnectEvent(ButtonClickEvent, self._closeHandler) end
+		if self._confirmHandler then self.btnConfirm.Entity:DisconnectEvent(ButtonClickEvent, self._confirmHandler) end
+		if self._unlimitedModeToggleHandler then self.unlimitedModeCheckbox.Entity:DisconnectEvent(ButtonClickEvent, self._unlimitedModeToggleHandler) end
+		if self._prevHandler then self.btnWorldPrev.Entity:DisconnectEvent(ButtonClickEvent, self._prevHandler) end
+		if self._nextHandler then self.btnWorldNext.Entity:DisconnectEvent(ButtonClickEvent, self._nextHandler) end
+		if self._dragHandler then self.charScrollTouchArea:DisconnectEvent(UITouchDragEvent, self._dragHandler) end
+		if self._scrollBarHandler then self.charScrollBar.Entity:DisconnectEvent(SliderValueChangedEvent, self._scrollBarHandler) end
+		if self._slotHandlers then
+			for _, rec in ipairs(self._slotHandlers) do
+				if isvalid(rec.entity) then
+					rec.entity:DisconnectEvent(UITouchUpEvent, rec.upHandler)
+					rec.entity:DisconnectEvent(UITouchDragEvent, rec.dragHandler)
+				end
+			end
+		end
+	end
+
+end

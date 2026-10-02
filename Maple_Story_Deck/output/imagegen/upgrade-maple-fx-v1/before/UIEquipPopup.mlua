@@ -1,0 +1,816 @@
+@Component
+script UIEquipPopup extends Component
+
+	property TextComponent TitleText = nil
+
+	property SpriteGUIRendererComponent ItemIcon = "3e2662ab-05a0-4e7c-9e77-d5a8b1053fa9"
+
+	-- 등급색 테두리 대상(유저 지정: 아이템 아이콘 자체가 아니라 슬롯 배경(IconFrame/Bg)에 테두리를 씌워야 함)
+	property SpriteGUIRendererComponent ItemIconFrameBg = "29b265c5-8292-4865-bdab-6fbaff83a371"
+
+	property SpriteGUIRendererComponent PartBadge = "8d70b8b7-ad61-442b-95f9-15ea60e9ba50"
+
+	property TextGUIRendererComponent QualityText = "5eb9d87e-2365-4def-abf4-332b25b22459"
+
+	property SpriteGUIRendererComponent ComposeCountBadge = "3b119caf-0cd3-4777-8c38-f478068e0cd7"
+
+	property TextGUIRendererComponent ComposeCountText = "edcf299d-52a4-45cd-a625-fbde0b426535"
+
+	property UIComposePopup ComposePopup = nil
+
+	property UIInventory Inventory = nil
+
+	property any ItemStruct = nil
+
+	property boolean IsOpenedFromInventory = false
+
+	property ButtonComponent BtnClose = "6eef8a6f-3f56-4e86-90bd-a70221fbdf17"
+
+	property TextGUIRendererComponent LevelBadgeText = "3eb01c9f-6c4e-45e7-9716-446508801d42"
+
+	property TextGUIRendererComponent StatValueText = "4a556226-b3fc-40e1-a724-ecd88adc4b2d"
+
+	-- 스탯 줄 왼쪽 아이콘(StatRow/Icon) — 공격력/체력에 따라 바꾼다(유저 지정 2026-09-16).
+	-- 예전엔 .ui에 하트 한 장이 박혀 있어서 공격력 장비에도 하트가 떴다
+	property SpriteGUIRendererComponent StatIcon = "d4f189b6-9baf-4712-93db-f93ff9e9ec33"
+
+	property string AtkStatIconRUID = "e8ed10a8b44d47d5a0d42f7f32656a58"
+
+	property string HpStatIconRUID = "7ecb5769578f4b05808afaad17ee83ac"
+
+	-- 스탯 줄 라벨(StatRow/Label) — 공격력이면 ATK, 체력이면 HP(유저 시안 2026-09-16)
+	property TextGUIRendererComponent StatLabelText = "8bb20d54-44af-4f97-9681-7b4fa185d197"
+
+	-- 강화로 붙은 수치(+N)만 초록 계열로(유저 시안 "150 (+30)")
+	property string StatBonusColorHex = "#5DC25D"
+
+	-- 메이플 원본 아이콘은 스프라이트 기준점이 그림 왼쪽 아래라, 기준점이 칸 가운데에 찍혀서 그림이
+	-- 칸 크기 절반만큼 밀려 그려진다(하트는 오른쪽 위, 좌우 반전한 칼은 왼쪽 위 — 스샷 실측).
+	-- 그림 가운데가 라벨 왼쪽(StatRow 로컬 x≈50, 가운데 줄)에 오도록 칸 위치를 반대로 보정한다
+	-- 칸 64x64 기준(유저 지정 2026-09-16: 아이콘 조금 키우고 라벨과 함께 경계 쪽으로) — 그림 가운데 x≈89
+	property Vector2 AtkStatIconPos = Vector2(89, -29)
+
+	property Vector2 HpStatIconPos = Vector2(25, -33)
+
+	property TextGUIRendererComponent DescText = "daa61354-9d65-4169-83be-c60f64aeb55b"
+
+	property TextGUIRendererComponent GoldText = "5009a399-2408-45a3-8922-cebb3a880852"
+
+	-- 강화 재료 표시(골드 칸 옆) — 그 장비 부위에 맞는 강화 주문서 아이콘과 "보유 / 필요" 수량.
+	-- 만렙이거나 강화 대상이 아닌 부위면 둘 다 꺼진다
+	property SpriteGUIRendererComponent ScrollIcon = "b84fa1ef-8f2b-428e-a7f8-80eeb024bb36"
+
+	property TextGUIRendererComponent ScrollCostText = "10846e28-e92c-432b-9926-9daf0948fd71"
+
+	-- 강화 실패 사유(주문서/골드 부족 등)를 화면 중앙에 띄웠다가 위로 살짝 떠오르며 사라진다.
+	-- EquipPopup(이 스크립트가 붙은 엔티티)이 1920x1080 전체화면이라 그 직속 자식으로 두고 pos=[0,0]이면
+	-- 정확히 화면 중앙이고, Panel보다 뒤에 추가돼 있어 팝업 위에 그려진다.
+	-- 공용 토스트(_UIToast)를 쓰지 않는 이유: ToastGroup은 별도 UIGroup이라 이 팝업(EquipmentGroup)보다
+	-- 아래에 그려지는데, GroupOrder를 올렸더니 Maker가 전체 UI 그룹 순서를 재정렬해서 다른 .ui 파일들에
+	-- 써버렸다(GachaGroup이 로비 아래로 내려가 뽑기 팝업이 안 보이는 사고). GroupOrder는 다시 건드리지 않는다.
+	property TextGUIRendererComponent LevelUpWarnText = "627e47fd-93f4-44c2-9727-b4c4817eb777"
+
+	-- 강화 성공 연출(유저 지정 2026-09-20): 아이템 아이콘 칸(IconFrame) 위에 겹친 스프라이트에서 스킬 이펙트
+	-- (animationclip 14bf6b37…)를 한 번 재생한다. 평소엔 꺼져 있다.
+	-- ⚠ UI 스프라이트에 animationclip RUID를 그대로 넣으면 Maker에서 아무것도 안 그려졌다(같은 칸에 프레임 스프라이트는
+	-- 잘 보임 — 실측). 그래서 프로젝트 스킬 연출과 같은 "원본 프레임 수동 재생" 방식으로 프레임을 갈아 끼운다.
+	-- 합성 팝업(UIComposePopup)도 PlayFrameFx를 같이 쓴다
+	property SpriteGUIRendererComponent UpgradeFx = "262f0eb4-8ce1-46cf-890a-5f87a73ecd8c"
+
+	-- 프레임 목록 { 스프라이트 RUID, 원본 가로, 원본 세로 } — 리소스 API로 뽑은 원본 순서 그대로(8프레임)
+	property table FxFrames = {
+		{ "5a46c03678094e0b979b81a19dd4e7fd", 220, 200 },
+		{ "642575e52fd64597b0a247f6c59b59af", 180, 180 },
+		{ "d1a76cc8aae24b628f313b8dc2d5ed85", 224, 224 },
+		{ "ab5ec9506d204353922f9f2ac8efdd13", 240, 240 },
+		{ "c0fdde523c084f628c06e5ae4151f716", 244, 244 },
+		{ "6a45720c6468486ea8c44ccf55812640", 252, 248 },
+		{ "de1acda3764e40249b1cc5b8b8a56a9a", 264, 252 },
+		{ "5a77881cea2147c1ada68391abcff129", 76, 164 },
+	}
+
+	property number FxFrameSeconds = 0.07
+
+	-- 강화 칸 연출 크기 배율(원본 최대 264px → 약 340px, 아이콘 220 칸보다 살짝 크게 터진다)
+	property number UpgradeFxScale = 1.3
+
+	-- 재생 중인 연출 타이머(연출 칸 엔티티 Id → 타이머 Id)
+	property table _fxTimers = {}
+
+	-- 강화 성공 판정용 — 지금 화면에 그려진 장비의 GUID/레벨(같은 장비의 레벨이 올랐을 때만 연출)
+	property string _shownGUID = ""
+
+	property integer _shownLevel = 0
+
+	property number WarnHoldSeconds = 1.6
+
+	property number WarnFadeInSeconds = 0.12
+
+	property number WarnFadeOutSeconds = 0.45
+
+	-- 사라지면서 위로 떠오르는 거리(px)
+	property number WarnRiseDistance = 22
+
+	property any _warnTimerId = nil
+
+	property Vector2 _warnBasePos = Vector2(0, 0)
+
+	-- 강화 칸에 마지막으로 그린 보유 골드. 팝업은 InvenItemModifiedEvent로 다시 그려지는데, 그 이벤트가
+	-- 골드 차감(TotalCoins @Sync / NotifyCoinsChanged)보다 먼저 도착하면 옛 골드가 그대로 남는다
+	-- (유저 리포트 2026-09-20 "강화하고 골드가 즉시 갱신 안 됨"). OnUpdate에서 값이 바뀌면 다시 그린다
+	property integer _shownCoins = -1
+
+	-- 유물 업그레이드와 동일한 골드 코스트 자리 — 실제 레벨업 수치 체계가 정해지기 전까지는 임시값
+	property integer PlaceholderUpgradeCost = 1000
+
+	property ButtonComponent ButtonEquip = "92346884-1f4e-4b95-b71a-524130b189f6"
+
+	property TextGUIRendererComponent ButtonEquipLabel = "2e2531ba-a99f-43dd-9f4a-99523b2b8c49"
+
+	property ButtonComponent ButtonLevelUp = "2542e63e-ec24-4a5b-8544-0f7ee8290b8a"
+
+	property ButtonComponent ButtonBatchLevelUp = "657b5177-d87b-42bf-a191-e760311979e4"
+
+	property ButtonComponent ComposeButton = "4adeaac0-8c50-4897-b301-d0671ac948a9"
+
+	-- 원래 "등급 상향" 자리표시 버튼이었는데 판매 버튼으로 용도를 바꿨다(유저 지정 2026-09-10).
+	-- 엔티티 이름/라벨도 SellButton / "판매"로 같이 바꿔뒀다(UUID는 그대로라 바인딩은 유지)
+	property ButtonComponent SellButton = "5480e133-4451-41c6-b4a8-599c9cffa272"
+
+	property ButtonComponent ButtonDelete = "c9ff01cc-a0db-48d7-b75d-2adf8b7428de"
+
+	property ButtonComponent ButtonLock = "21883e82-2424-4bd7-b0a3-355b3c751216"
+
+	-- 등급 스킬 5행(Row0~4, ui/EquipmentGroup.ui RightColumn/GradeSkillBox) — 유저 정정: 4칸이 "현재
+	-- 등급의 스킬 변형 4종"이 아니라 "매직/레어/에픽/유니크/레전더리 5단계 등급 진행"에 각각 매핑된다
+	-- (Row0=매직/Row1=레어/Row2=에픽/Row3=유니크/Row4=레전더리, 원래 템플릿엔 4행뿐이라 Row4를 새로
+	-- 복제해 추가했다). 각 행은 "이 아이템이 그 등급에 도달하면 실제로 받을 텍스트"를 항상 보여주고
+	-- (SkillVariant로 4종 중 1개 선택 — 매직/에픽/유니크처럼 4종이 동일한 등급은 어차피 결과가 같음),
+	-- 지금 등급이 그 행의 등급에 도달했으면(같거나 높으면) 잠금 해제, 아직이면 잠금 아이콘으로 덮는다.
+	-- 노말은 어떤 행의 기준 등급도 만족 못 해서 5행 전부 잠긴 채로 유지된다.
+	-- 행 왼쪽 배지(Row{i}/LockIcon)는 "그 줄이 해금되는 등급 색"의 네모로 항상 떠 있고, 잠긴 줄만
+	-- 그 위에 자물쇠(Row{i}/LockIcon/Lock — 인게임 맵이동 버튼과 같은 아이콘)를 덮는다. 아래 프로퍼티는
+	-- 그 자물쇠 오버레이를 가리킨다(배지 자체는 등급이 행마다 고정이라 .ui에 색을 박아두고 안 건드린다).
+	property SpriteGUIRendererComponent GradeSkillLock0 = "cea25ed1-ddae-43df-876c-ae90bff735d4"
+
+	property TextGUIRendererComponent GradeSkillText0 = "4a2ebbfc-1de2-464a-aa0b-a02beec7f368"
+
+	property SpriteGUIRendererComponent GradeSkillLock1 = "30370415-6f37-4e3a-a06f-aa06f61f7ebc"
+
+	property TextGUIRendererComponent GradeSkillText1 = "2c8a00bb-663f-4d60-b5b3-67a6a1cfd0b9"
+
+	property SpriteGUIRendererComponent GradeSkillLock2 = "d2225f24-e7c2-4a58-88e5-5ee82d0978c0"
+
+	property TextGUIRendererComponent GradeSkillText2 = "c70db38d-506c-4e42-b80b-e7fed382ff7d"
+
+	property SpriteGUIRendererComponent GradeSkillLock3 = "7572c0c5-bc43-4246-9bc3-b2044f953375"
+
+	property TextGUIRendererComponent GradeSkillText3 = "c836d03a-efa9-4e78-a3f2-8bbf22bc69db"
+
+	property SpriteGUIRendererComponent GradeSkillLock4 = "7800a9af-34cd-477d-b238-880501cd39b3"
+
+	property TextGUIRendererComponent GradeSkillText4 = "6fc8b940-64a8-4590-85a7-29660f2b61e6"
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		local panel = self.Entity:GetChildByName("Panel")
+		self.TitleText = panel:GetChildByName("Title").TextComponent
+
+		self.BtnClose.Entity:ConnectEvent(ButtonClickEvent, function() self:Close() end)
+		-- ComposePopup과 동일한 잠재 버그(Panel의 다른 자식들이 형제 순서상 BtnClose보다 뒤라 클릭이
+		-- 새는 문제) 예방 차원에서 여기도 확정적으로 맨 앞으로 올린다
+		_UILogic:SetSiblingIndex(self.BtnClose.Entity.UITransformComponent, 1000000)
+
+		-- 합성 팝업 X 버튼이 "완전히 꺼짐"이 아니라 이 장비 정보 팝업으로 되돌아가야 함(유저 지적) —
+		-- ComposePopup.Close()가 self.EquipPopup:Open(...)을 호출하는데, 이 역참조를 아무도 연결해준 적이
+		-- 없어서 항상 nil이었다(= 합성 팝업 X를 누르면 nil 인덱싱 에러 후 그냥 꺼지기만 함)
+		self.ComposePopup.EquipPopup = self
+
+		self.ButtonEquip.Entity:ConnectEvent(ButtonClickEvent, function() self:OnEquipButtonClicked() end)
+		self.ButtonDelete.Entity:ConnectEvent(ButtonClickEvent, function() self:OnDeleteButtonClicked() end)
+		self.ButtonLock.Entity:ConnectEvent(ButtonClickEvent, function() self:OnLockButtonClicked() end)
+
+		-- 레벨업/일괄 레벨업/합성/등급 상향 — 디자인 확정 전 자리만(유저 지정: "일단 플레이스홀더 수치로 뼈대만").
+		-- 실제 레벨/스탯 성장 데이터 모델이 아직 없어서 클릭하면 준비중 로그만 남긴다.
+		self.ButtonLevelUp.Entity:ConnectEvent(ButtonClickEvent, function() self:OnLevelUpButtonClicked(false) end)
+		self.ButtonBatchLevelUp.Entity:ConnectEvent(ButtonClickEvent, function() self:OnLevelUpButtonClicked(true) end)
+		self.ComposeButton.Entity:ConnectEvent(ButtonClickEvent, function() self:OnComposeButtonClicked() end)
+		self.SellButton.Entity:ConnectEvent(ButtonClickEvent, function() self:OnSellButtonClicked() end)
+
+		-- 강화/합성 연출 프레임 예열 — 처음 쓰는 스프라이트는 로딩이 끝날 때까지 안 그려져서, 예열 없이
+		-- 0.07초씩 넘기면 첫 연출이 통째로 빈 화면으로 지나갔다(실측). CardManager.PreloadEffectFrames와 같은 방식
+		local ruids = {}
+		for _, f in ipairs(self.FxFrames) do table.insert(ruids, f[1]) end
+		_ResourceService:PreloadAsync(ruids, function()
+			log("UIEquipPopup: fx frames preloaded (" .. tostring(#ruids) .. ")")
+		end)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Open(boolean isOpenedFromInventory, ItemStruct itemStruct)
+		self.IsOpenedFromInventory = isOpenedFromInventory
+		self.ItemStruct = itemStruct
+
+		local itemData = itemStruct:GetItemData()
+		self.ItemIcon.ImageRUID = itemStruct:GetDisplayRUID()
+		self.TitleText.Text = itemStruct:GetDisplayName()
+
+		-- 슬롯 배경 등급색 테두리 — 인벤토리 슬롯(IconBackground)/합성 팝업 슬롯과 동일 규칙: 아이템
+		-- 아이콘 자체가 아니라 IconFrame/Bg(슬롯 배경)에 테두리를 씌운다(등급 없는 잡템은 테두리 없음)
+		local iconGearStruct = itemStruct:GetGearStruct()
+		if iconGearStruct ~= nil then
+			self.ItemIconFrameBg.Outline = true
+			self.ItemIconFrameBg.OutlineWidth = 4
+			self.ItemIconFrameBg.OutlineColor = _GearGradeEnum:GetEnumColor(iconGearStruct.Grade)
+		else
+			self.ItemIconFrameBg.Outline = false
+		end
+
+		-- 부위 배지: 장비 아이템만 있는 GearData의 GearCategory로 판별. 인벤토리/장비판(EquipInfoGrid)에서
+		-- 이미 쓰고 있는 부위별 픽토그램과 동일한 걸 재사용해서 "슬롯에서 쓰는 아이콘"과 통일한다.
+		local gearData = itemStruct:GetGearData()
+		if gearData ~= nil then
+			self.PartBadge.Enable = true
+			self.PartBadge.ImageRUID = self:GetPartBadgeRUID(gearData.GearCategory)
+		else
+			self.PartBadge.Enable = false
+		end
+
+		local gearStruct = itemStruct:GetGearStruct()
+
+		-- 무기 아이템은 드롭 시 1회 고정된 ATK/등급별 보너스/등급 스킬을 실제 데이터로 표시.
+		-- 그 외(방어구 등)는 스탯 카탈로그가 아직 없어서(유저 지정: 뼈대만 먼저) 등급 기반 임시 수치 유지
+		if _WeaponTierDataLogic:IsWeaponItem(itemStruct.ItemId) and gearStruct ~= nil then
+			-- 스탯 축은 아이템 라인마다 다르다(ATK 계열 / HP 계열 / 스탯 없이 등급 스킬만).
+			-- 반지만 라인이 아니라 **그 아이템 인스턴스**가 축을 정하므로(MainStatType) 인스턴스 기준으로 묻는다
+			local statField = _WeaponTierDataLogic:GetInstanceStatField(itemStruct.ItemId, gearStruct.MainStatType)
+			-- 강화 레벨 보너스를 합쳐서 보여준다(2026-09-02). 기본값만 띄우면 강화해도 숫자가
+			-- 안 변해서 "강화가 안 먹는다"고 보인다. 괄호로 강화분을 따로 표기한다.
+			local levelBonus = _EnhanceScrollLogic:GetStatBonusForLevel(gearStruct.Level)
+			-- 스탯 이름은 왼쪽 라벨(ATK/HP)이 맡으니 수치 칸엔 숫자만, 강화분은 같은 줄에 초록으로 붙인다
+			local bonusText = ""
+			if levelBonus > 0 then
+				bonusText = " (<color=" .. self.StatBonusColorHex .. ">+" .. tostring(levelBonus) .. "</color>)"
+			end
+			if statField == "Hp" then
+				self.StatValueText.Text = tostring(gearStruct.Hp + levelBonus) .. bonusText
+				self:SetStatIcon(false)
+			elseif statField == "Atk" then
+				self.StatValueText.Text = tostring(gearStruct.Atk + levelBonus) .. bonusText
+				self:SetStatIcon(true)
+			else
+				self.StatValueText.Text = "-"
+				self:SetStatIcon(false)
+			end
+
+			-- 설명란은 아이템 플레이버 문구를 보여준다. 예전엔 현재 등급의 효과 텍스트를 넣었는데,
+			-- 바로 아래 등급 스킬 표에 같은 줄이 또 나와서 중복이었다
+			local descText = _WeaponTierDataLogic:GetDescription(itemStruct.ItemId, gearStruct.Grade)
+			if descText == "" then
+				descText = _LocalizationService:GetText("MLUA_UIEQUIPPOPUP_001")
+			end
+			self.DescText.Text = descText
+			self.QualityText.Text = _QualityEnum:GetKoreanName(gearStruct.Quality)
+			self:UpdateGradeSkillBox(itemStruct.ItemId, gearStruct)
+		else
+			local placeholderHp = 10 + (gearStruct ~= nil and gearStruct.Grade or 0) * 10
+			self.StatValueText.Text = tostring(placeholderHp)
+			self:SetStatIcon(false)
+			self.DescText.Text = _LocalizationService:GetText("MLUA_UIEQUIPPOPUP_001")
+
+			-- 아이템 품질(D~SS, 기존 Rare/Epic 같은 Grade와는 별개 축) — 무기 외에는 실제 산출 로직/데이터가
+			-- 아직 없어서 유저 지정대로 우선 전부 "A" 고정 표시
+			self.QualityText.Text = "A"
+		end
+
+		-- 합성 진행도(ComposeCount) 원형 뱃지 — ComposePopup의 CountBadge와 동일 이미지/스타일 재사용.
+		-- 다음 등급이 있고 진행중일 때만 표시(합성팝업/인벤토리 그리드와 동일 규칙)
+		if gearStruct ~= nil and _GearGradeEnum:GetNextGrade(gearStruct.Grade) ~= -1 and gearStruct.ComposeCount > 0 then
+			self.ComposeCountText.Text = tostring(gearStruct.ComposeCount)
+			self.ComposeCountBadge.Entity.Enable = true
+		else
+			self.ComposeCountBadge.Entity.Enable = false
+		end
+
+		-- 최고 등급(레전더리)은 더 올릴 곳이 없으니 합성 버튼 자체를 잠근다(유저 지정 2026-09-22).
+		-- 회색 처리는 ButtonComponent의 DisabledColor가 자동으로 입혀준다 — 판매 버튼과 같은 방식.
+		-- 판정은 GetNextGrade(-1) 단일 기준으로, 합성팝업/진행도 뱃지와 같은 규칙을 쓴다
+		local canCompose = gearStruct ~= nil and _GearGradeEnum:GetNextGrade(gearStruct.Grade) ~= -1
+		self.ComposeButton.Enable = canCompose
+		log("UIEquipPopup: composeButton enable=" .. tostring(canCompose)
+			.. " grade=" .. tostring(gearStruct ~= nil and gearStruct.Grade or -1))
+
+		self:UpdateLevelUpBox(itemStruct, gearStruct)
+
+		-- 같은 장비가 다시 그려졌는데 레벨이 올랐으면 = 강화 성공 → 아이콘 칸에 연출(유저 지정 2026-09-20)
+		local newLevel = 0
+		if gearStruct ~= nil then newLevel = gearStruct.Level end
+		if itemStruct.GUID == self._shownGUID and newLevel > self._shownLevel then
+			self:PlayUpgradeFx()
+			log("UIEquipPopup: level up " .. tostring(self._shownLevel) .. " -> " .. tostring(newLevel) .. ", fx played")
+		end
+		self._shownGUID = itemStruct.GUID
+		self._shownLevel = newLevel
+
+		local mainKeyword = itemStruct:IsAttached() and _LocalizationService:GetText("MLUA_UIEQUIPPOPUP_002") or _LocalizationService:GetText("MLUA_UIEQUIPPOPUP_003")
+		self.ButtonEquipLabel.Text = mainKeyword
+
+		-- 장착 중이거나 잠긴 장비는 팔 수 없다 — 인벤토리 그리드와 같은 규칙(GearSellLogic.CanSell).
+		-- 회색 처리는 ButtonComponent의 DisabledColor가 자동으로 입혀준다
+		self.SellButton.Enable = _GearSellLogic:CanSell(itemStruct)
+
+		self.Entity.Enable = true
+		-- EquipPopup은 인벤토리 메인 패널(Inventory/Panel)과 형제 관계라 형제 순서상 뒤에 그려지는
+		-- 패널에 가려질 수 있다 — InventoryUI가 자기 그룹을 맨 앞으로 올릴 때 쓰는 것과 동일한 방식으로
+		-- 열릴 때마다 확정적으로 맨 앞으로 올린다.
+		_UILogic:SetSiblingIndex(self.Entity.UITransformComponent, 1000000)
+
+		-- 인벤토리 전체닫기 버튼과 이 팝업의 X 버튼 클릭 영역이 겹쳐서(유저 리포트), 이 팝업이
+		-- 열려있는 동안은 전체닫기 버튼 자체를 꺼둔다. Close()에서 다시 켠다
+		if self.Inventory ~= nil then
+			self.Inventory:SetCloseButtonEnabled(false)
+		end
+	end
+
+	-- 등급 스킬 5행(유저 정정): Row0~4가 매직/레어/에픽/유니크/레전더리 5단계 등급에 각각 매핑된다.
+	-- 잠금 해제 여부는 현재 등급이 그 행의 기준 등급 이상인지로 판정한다. 노말은 매직조차 미달이라
+	-- 5행 전부 잠긴 채로 유지된다.
+	-- 각 행 텍스트는 절대 "N%~N%" 범위 문구를 쓰지 않는다(유저가 강하게 정정: 범위는 그 구간 안에서
+	-- 아이템이 실제로 하나의 확정값을 굴려서 갖는 것이라, 화면엔 항상 확정된 숫자 하나만 보여야 함).
+	-- 또한 그 값은 드롭 시 한 번에 굴려서 gearStruct.BonusPercentPerMilleByGrade에 영구 저장돼 있으므로
+	-- (WeaponTierDataLogic.RollBonusPercentPerMilleByGrade 참고) 여기서 매번 새로 굴리지 않는다 —
+	-- 아직 도달하지 못한 등급(행)이라도 "미리 정해진" 값을 그대로 보여주며, 실제로 그 등급에
+	-- 도달했을 때(PkgPlayerInventory.ComposeItem) 받는 값과 항상 정확히 일치한다.
+	@ExecSpace("ClientOnly")
+	method void UpdateGradeSkillBox(integer itemId, any gearStruct)
+		local rowGrades = { _GearGradeEnum.Magic, _GearGradeEnum.Rare, _GearGradeEnum.Epic, _GearGradeEnum.Unique, _GearGradeEnum.Legendary }
+		local locks = { self.GradeSkillLock0, self.GradeSkillLock1, self.GradeSkillLock2, self.GradeSkillLock3, self.GradeSkillLock4 }
+		local labels = { self.GradeSkillText0, self.GradeSkillText1, self.GradeSkillText2, self.GradeSkillText3, self.GradeSkillText4 }
+
+		for i = 1, 5 do
+			local rowGrade = rowGrades[i]
+			local isLocked = gearStruct.Grade < rowGrade
+			-- 잠긴 줄: 등급 색 배지 위에 자물쇠를 덮고 글씨는 회색 / 해금된 줄: 자물쇠 제거 + 흰 글씨
+			locks[i].Entity.Enable = isLocked
+			if isLocked then
+				labels[i].FontColor = Color(0.60, 0.60, 0.64, 1.0)
+			else
+				labels[i].FontColor = Color(1.0, 1.0, 1.0, 1.0)
+			end
+
+			-- 전투(GearEffectLogic)가 실제로 쓰는 값과 같은 헬퍼로 읽는다 — 표가 없는 옛 아이템도 볼 때마다
+			-- 숫자가 바뀌지 않고, 해금된 줄에 적힌 숫자가 곧 적용 수치가 된다(2026-09-26 "해금된 줄 전부 적용")
+			local bonusPercentPerMille = _WeaponTierDataLogic:GetGradeBonusPerMille(itemId, gearStruct, rowGrade)
+
+			-- 등급 스킬 변형도 등급마다 다르다(반지) — 아이템 하나의 SkillVariant를 5줄에 돌려쓰면
+			-- 표가 통째로 같은 문구로 나온다(2026-09-21 유저 지적). 줄마다 그 등급 값을 꺼낸다
+			local rowVariant = _WeaponTierDataLogic:GetSkillVariantForGrade(gearStruct, rowGrade)
+
+			labels[i].Text = _WeaponTierDataLogic:GetActualBonusText(itemId, rowGrade, rowVariant, bonusPercentPerMille, gearStruct.ProcChancePerMille)
+		end
+	end
+
+	-- 레벨 뱃지 / 강화 재료(부위별 주문서 아이콘 + 보유·필요 수) / 골드 비용을 한 번에 갱신한다.
+	-- 큰 수를 짧게 줄인다(1000→k / 100만→M). 강화 재료 칸의 "보유 / 필요" 골드가 9184688처럼 길어지면
+	-- 칸을 넘어 두 줄로 깨져서 도입했다. 보유량은 어차피 대략만 보면 되는 값이라 축약해도 정보 손실이 없다.
+	-- 정확한 숫자가 필요한 다른 화면(상점 가격 등)에는 일부러 적용하지 않았다.
+	@ExecSpace("ClientOnly")
+	method string FormatCount(integer value)
+		if value >= 1000000 then
+			return self:TrimDecimal(value / 1000000) .. "M"
+		end
+
+		if value >= 1000 then
+			return self:TrimDecimal(value / 1000) .. "k"
+		end
+
+		return tostring(value)
+	end
+
+	-- 소수 첫째자리까지 반올림하되 .0이면 떼고 정수로 보여준다("2.0k"가 아니라 "2k")
+	@ExecSpace("ClientOnly")
+	method string TrimDecimal(number value)
+		local rounded = math.floor(value * 10 + 0.5) / 10
+		if rounded == math.floor(rounded) then
+			return tostring(math.floor(rounded))
+		end
+
+		return string.format("%.1f", rounded)
+	end
+
+	-- 상한은 현재 등급이 정하고(노말5~레전더리50), 등급업해도 레벨은 유지되므로 "Lv. 현재 / 상한"으로 보여준다
+	@ExecSpace("ClientOnly")
+	method void UpdateLevelUpBox(any itemStruct, any gearStruct)
+		if gearStruct == nil then
+			self.LevelBadgeText.Text = "Lv. -"
+			self.GoldText.Text = "-"
+			self.ScrollIcon.Entity.Enable = false
+			self.ScrollCostText.Entity.Enable = false
+			return
+		end
+
+		local maxLevel = _EnhanceScrollLogic:GetMaxLevel(gearStruct.Grade)
+		self.LevelBadgeText.Text = string.format("Lv. %d / %d", gearStruct.Level, maxLevel)
+
+		local isMax = gearStruct.Level >= maxLevel
+		local goldCost = _EnhanceScrollLogic:GetGoldCost(gearStruct.Level)
+		local scrollCost = _EnhanceScrollLogic:GetScrollCost(gearStruct.Level)
+
+		-- 골드는 런 전용 Gold가 아니라 로비에서 쓰는 영구 누적 코인(TotalCoins) 기준으로 보여준다
+		-- 우상단 코인 배지와 같은 값(TitleUI가 서버 확정값을 파라미터로 받아 둔 것)을 쓴다 — @Sync는 늦게 올 수 있다
+		local coins = self:GetCurrentCoins()
+		self._shownCoins = coins
+		if isMax then
+			self.GoldText.Text = "MAX"
+		else
+			self.GoldText.Text = string.format("%s / %s", self:FormatCount(coins), self:FormatCount(goldCost))
+		end
+
+		-- 강화에 들어가는 재료를 그 장비 부위에 맞는 주문서 아이콘으로 보여준다
+		local itemData = itemStruct:GetItemData()
+		local gearData = nil
+		if itemData ~= nil then gearData = itemData:GetGearData() end
+
+		local scrollItemId = 0
+		if gearData ~= nil then
+			scrollItemId = _EnhanceScrollLogic:GetScrollItemId(gearData.GearCategory)
+		end
+
+		if scrollItemId == 0 or isMax then
+			self.ScrollIcon.Entity.Enable = false
+			self.ScrollCostText.Entity.Enable = false
+			return
+		end
+
+		local scrollData = _ItemDataLogic:GetData(scrollItemId)
+		if scrollData ~= nil then
+			self.ScrollIcon.ImageRUID = scrollData.RUID
+		end
+		self.ScrollIcon.Entity.Enable = true
+
+		local owned = _UserService.LocalPlayer.PkgPlayerInventory:GetItemCount(scrollItemId, nil)
+		self.ScrollCostText.Text = string.format("%d / %d", owned, scrollCost)
+		-- 부족하면 회색으로 — 뽑기 버튼과 같은 규칙(알파 말고 색으로 부족을 알린다)
+		if owned >= scrollCost then
+			self.ScrollCostText.FontColor = Color(1, 1, 1, 1)
+		else
+			self.ScrollCostText.FontColor = Color(0.85, 0.45, 0.45, 1)
+		end
+		self.ScrollCostText.Entity.Enable = true
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayUpgradeFx()
+		-- 아이콘 칸 위 연출 칸에서 강화 성공 이펙트를 한 번 재생
+		self:PlayFrameFx(self.UpgradeFx, self.UpgradeFxScale)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void HideUpgradeFx()
+		-- 강화 연출 중단 + 끄기
+		self:StopFrameFx(self.UpgradeFx)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayFrameFx(SpriteGUIRendererComponent fx, number scale)
+		-- 연출 칸에 FxFrames를 처음부터 순서대로 한 번 갈아 끼우고 끝나면 끈다. 프레임마다 원본 크기 × scale로
+		-- 칸 크기를 맞춰서 이펙트가 원본처럼 커지며 터진다(가운데 기준 칸이라 위치는 그대로)
+		if not isvalid(fx) then return end
+		self:StopFrameFx(fx)
+		local key = fx.Entity.Id
+		local frames = self.FxFrames
+		local t = fx.Entity.UITransformComponent
+		fx.PreserveSprite = PreserveSpriteType.None
+		fx.RaycastTarget = false
+		fx.Color = Color(1, 1, 1, 1)
+		local idx = 0
+		local step = function()
+			idx = idx + 1
+			if idx > #frames then
+				self:StopFrameFx(fx)
+				return
+			end
+			local f = frames[idx]
+			fx.ImageRUID = DataRef(f[1])
+			t.RectSize = Vector2(f[2] * scale, f[3] * scale)
+		end
+		step()
+		fx.Entity.Enable = true
+		self._fxTimers[key] = _TimerService:SetTimerRepeat(step, self.FxFrameSeconds)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void StopFrameFx(SpriteGUIRendererComponent fx)
+		-- 재생 타이머 정리 + 연출 칸 끄기
+		if not isvalid(fx) then return end
+		local key = fx.Entity.Id
+		local timerId = self._fxTimers[key]
+		if timerId ~= nil then
+			_TimerService:ClearTimer(timerId)
+			self._fxTimers[key] = nil
+		end
+		fx.Entity.Enable = false
+	end
+
+	@ExecSpace("ClientOnly")
+	method integer GetCurrentCoins()
+		-- 우상단 배지와 같은 값을 우선 쓰고, 아직 한 번도 안 받았으면(-1 등) @Sync 값으로 대체한다
+		local coins = _TitleUI:GetLastCurrency("gold")
+		if coins == nil or coins < 0 then
+			coins = _GameManager.TotalCoins
+		end
+		return coins
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUpdate(number delta)
+		-- 팝업이 열려 있는 동안 보유 골드가 바뀌면 강화 칸만 다시 그린다(값 비교라 매 프레임 비용은 거의 없다)
+		if self.ItemStruct == nil then
+			return
+		end
+		local coins = self:GetCurrentCoins()
+		if coins == self._shownCoins then
+			return
+		end
+		---@type ItemStruct
+		local itemStruct = self.ItemStruct
+		self:UpdateLevelUpBox(itemStruct, itemStruct:GetGearStruct())
+		log("UIEquipPopup: coins changed -> " .. tostring(coins) .. ", level-up box refreshed")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetStatIcon(boolean isAtk)
+		-- 공격력 = 검 아이콘 좌우 반전(유저 지정 "y축 플립"), 체력 = 하트. 검 아이콘이 36x32라
+		-- 48x48 칸에 늘리면 눌려 보이므로 비율 유지
+		if isvalid(self.StatLabelText) then
+			if isAtk then
+				self.StatLabelText.Text = "ATK"
+			else
+				self.StatLabelText.Text = "HP"
+			end
+		end
+		if not isvalid(self.StatIcon) then return end
+		-- .ui에 빨간 틴트(Color 1,0,0)가 남아 있어서 원본 색이 안 나왔다 — 원본 그대로
+		self.StatIcon.Color = Color(1, 1, 1, 1)
+		self.StatIcon.PreserveSprite = PreserveSpriteType.AspectOnly
+		local iconTransform = self.StatIcon.Entity.UITransformComponent
+		if isAtk then
+			self.StatIcon.ImageRUID = self.AtkStatIconRUID
+			self.StatIcon.FlipX = true
+			iconTransform.anchoredPosition = self.AtkStatIconPos
+		else
+			self.StatIcon.ImageRUID = self.HpStatIconRUID
+			self.StatIcon.FlipX = false
+			iconTransform.anchoredPosition = self.HpStatIconPos
+		end
+	end
+
+	-- EquipInfoGrid(장비판) 슬롯이 쓰는 부위별 픽토그램 RUID를 그대로 재사용한다. 장비판에 전용 슬롯이
+	-- 없는 부위(신발/어깨/귀/펜던트/보조무기 등)는 GearCategoryEnum의 범용 아이콘으로 대체한다.
+	@ExecSpace("ClientOnly")
+	method string GetPartBadgeRUID(integer gearCategory)
+		if gearCategory == _GearCategoryEnum.Cap then
+			return "42e5e834544e4b05b11160213f712635"
+		elseif gearCategory == _GearCategoryEnum.Cape then
+			return "1d74d38d49ac41c5a14009e6f6414772"
+		elseif gearCategory == _GearCategoryEnum.Longcoat or gearCategory == _GearCategoryEnum.Pants then
+			return "b41b2a76b9cf4074baa4c727ca5e1ac9"
+		elseif gearCategory == _GearCategoryEnum.Glove then
+			return "1c9eba05b6c142e789f5a197c472c066"
+		elseif gearCategory == _GearCategoryEnum.OneHandedWeapon or gearCategory == _GearCategoryEnum.TwoHandedWeapon or gearCategory == _GearCategoryEnum.SubWeapon then
+			return "3ceaa3af732e4956b623b5f470f628c5"
+		end
+
+		return _GearCategoryEnum:ToIconRUID(gearCategory)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEquipButtonClicked()
+		if self.Entity.Enable == false or self.ItemStruct == nil then
+			return
+		end
+
+		---@type ItemStruct
+		local itemStruct = self.ItemStruct
+		local playerInventory = _UserService.LocalPlayer.PkgPlayerInventory
+
+		if itemStruct:IsAttached() then
+			playerInventory:RequestDetachNormalGear(playerInventory.CurrentJob, itemStruct:GetGearData().GearCategory)
+		else
+			playerInventory:RequestAttachNormalGear(playerInventory.CurrentJob, itemStruct.GUID)
+		end
+
+		self:Close()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnComposeButtonClicked()
+		if self.Entity.Enable == false or self.ItemStruct == nil then
+			return
+		end
+
+		-- 버튼이 꺼져 있으면 클릭 자체가 안 오지만, 등급이 최고치인 장비로 합성 팝업이 열리는 경로를
+		-- 코드 쪽에서도 한 번 더 막는다(Open() 갱신 전에 눌리는 타이밍 방어)
+		local gearStruct = self.ItemStruct:GetGearStruct()
+		if gearStruct == nil or _GearGradeEnum:GetNextGrade(gearStruct.Grade) == -1 then
+			log("UIEquipPopup: compose blocked — max grade")
+			return
+		end
+
+		self.ComposePopup:Open(self.ItemStruct)
+		self.Entity.Enable = false
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnPlaceholderButtonClicked(string label)
+		log("UIEquipPopup: " .. label .. " 버튼 클릭 — 준비중(디자인 확정 전)")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnSellButtonClicked()
+		-- 이 장비 한 개를 판다. 확인창은 인벤토리가 들고 있는 것(판매 모드와 같은 창)을 그대로 쓰고,
+		-- "예"를 누르면 UIInventory가 이 팝업을 닫아 그리드로 돌려보낸다(유저 지정)
+		if self.Entity.Enable == false or self.ItemStruct == nil then
+			return
+		end
+
+		if self.Inventory == nil then
+			return
+		end
+
+		self.Inventory:OpenSellConfirmForItem(self.ItemStruct)
+	end
+
+	-- 레벨업 / 일괄 레벨업. 실제 재료·골드 검증과 차감은 전부 서버(PkgPlayerInventory.LevelUpGear)가 하고,
+	-- 결과는 InvenItemModifiedEvent로 되돌아와 이 팝업이 자동으로 다시 그려진다
+	@ExecSpace("ClientOnly")
+	method void OnLevelUpButtonClicked(boolean isBatch)
+		if self.Entity.Enable == false or self.ItemStruct == nil then
+			return
+		end
+
+		---@type ItemStruct
+		local itemStruct = self.ItemStruct
+		_UserService.LocalPlayer.PkgPlayerInventory:RequestLevelUpGear(itemStruct.GUID, isBatch)
+	end
+
+	-- 서버가 강화 실패 사유를 보내오면(PkgPlayerInventory.ShowLevelUpFailToClient) 재료 칸 위에 띄운다.
+	-- 재호출되면 진행 중이던 연출을 끊고 처음부터 다시 시작한다(연타 시 마지막 메시지가 온전히 보이게)
+	@ExecSpace("ClientOnly")
+	method void ShowLevelUpWarning(string message)
+		if not isvalid(self.LevelUpWarnText) then
+			return
+		end
+
+		local warn = self.LevelUpWarnText
+		local transform = warn.Entity.UITransformComponent
+
+		if self._warnTimerId ~= nil then
+			_TimerService:ClearTimer(self._warnTimerId)
+			self._warnTimerId = nil
+		else
+			-- 연출이 돌고 있지 않을 때의 위치가 원래 자리다. 떠오른 중간 위치를 기준으로 잡으면
+			-- 반복될수록 문구가 위로 계속 밀려 올라간다
+			self._warnBasePos = transform.anchoredPosition
+		end
+
+		warn.Text = message
+		warn.Entity.Enable = true
+		transform.anchoredPosition = self._warnBasePos
+		self:SetWarnAlpha(0)
+
+		local basePos = self._warnBasePos
+		local fadeIn = self.WarnFadeInSeconds
+		local hold = self.WarnHoldSeconds
+		local fadeOut = self.WarnFadeOutSeconds
+		local rise = self.WarnRiseDistance
+		local time = 0
+		local preTime = _UtilLogic.ElapsedSeconds
+
+		local tween = function()
+			local delta = _UtilLogic.ElapsedSeconds - preTime
+			time = time + delta
+			preTime = _UtilLogic.ElapsedSeconds
+
+			if time >= fadeIn + hold + fadeOut then
+				self:SetWarnAlpha(0)
+				transform.anchoredPosition = basePos
+				warn.Entity.Enable = false
+				_TimerService:ClearTimer(self._warnTimerId)
+				self._warnTimerId = nil
+				return
+			end
+
+			if time < fadeIn then
+				self:SetWarnAlpha(time / fadeIn)
+			elseif time < fadeIn + hold then
+				self:SetWarnAlpha(1)
+			else
+				-- 사라지는 구간에서만 위로 떠오른다
+				local t = (time - fadeIn - hold) / fadeOut
+				self:SetWarnAlpha(1 - t)
+				transform.anchoredPosition = Vector2(basePos.x, basePos.y + rise * t)
+			end
+		end
+
+		self._warnTimerId = _TimerService:SetTimerRepeat(tween, 1/60)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void StopLevelUpWarning()
+		-- 연출 중단 + 원위치 복구. 타이머가 안 돌고 있으면 아무것도 하지 않는다
+		if self._warnTimerId == nil then
+			return
+		end
+
+		_TimerService:ClearTimer(self._warnTimerId)
+		self._warnTimerId = nil
+
+		if isvalid(self.LevelUpWarnText) then
+			self.LevelUpWarnText.Entity.UITransformComponent.anchoredPosition = self._warnBasePos
+			self.LevelUpWarnText.Entity.Enable = false
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetWarnAlpha(number alpha)
+		-- TextGUIRendererComponent에는 그룹 알파가 없어서 FontColor의 a를 직접 건드린다
+		if not isvalid(self.LevelUpWarnText) then
+			return
+		end
+
+		local c = self.LevelUpWarnText.FontColor
+		self.LevelUpWarnText.FontColor = Color(c.r, c.g, c.b, math.min(1, math.max(0, alpha)))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnDeleteButtonClicked()
+		if self.Entity.Enable == false or self.ItemStruct == nil then
+			return
+		end
+
+		---@type ItemStruct
+		local itemStruct = self.ItemStruct
+		_UserService.LocalPlayer.PkgPlayerInventory:RequestDiscardItem(itemStruct.GUID, 1)
+
+		self:Close()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnLockButtonClicked()
+		if self.Entity.Enable == false or self.ItemStruct == nil then
+			return
+		end
+
+		---@type ItemStruct
+		local itemStruct = self.ItemStruct
+		_UserService.LocalPlayer.PkgPlayerInventory:RequestLockItem(itemStruct.GUID, not itemStruct.Lock)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Close()
+		self.ItemStruct = nil
+
+		-- 경고 문구 연출이 돌던 중이면 정리한다 — 안 그러면 팝업이 닫힌 뒤에도 타이머가 계속 돌고,
+		-- 다음에 열었을 때 알파/위치가 중간값인 채로 남는다
+		self:StopLevelUpWarning()
+		self:HideUpgradeFx()
+		-- 다음에 열 때 "레벨이 올랐다"로 잘못 판정하지 않게 비운다
+		self._shownGUID = ""
+
+		self.Entity.Enable = false
+
+		-- EquipPopup이 진짜로 닫힐 때(그리드로 복귀)만 전체닫기 버튼을 되살린다. ComposePopup으로
+		-- 넘어가는 경로(OnComposeButtonClicked)는 이 Close()를 타지 않으므로 꺼진 채로 유지된다
+		if self.Inventory ~= nil then
+			self.Inventory:SetCloseButtonEnabled(true)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	@EventSender("LocalPlayer")
+	handler HandleInvenItemModifiedEvent(InvenItemModifiedEvent event)
+		-- Parameters
+		local GUIDs = event.GUIDs
+		---------------------------------------------------------
+
+		if self.Entity.Enable == false then
+			return
+		end
+
+		---@type ItemStruct
+		local itemStruct = self.ItemStruct
+		if itemStruct == nil then
+			return
+		end
+		local itemGUID = itemStruct.GUID
+
+		for i, modifiedItemGUID in ipairs(GUIDs) do
+			if itemGUID == modifiedItemGUID then
+				self:Open(self.IsOpenedFromInventory, itemStruct)
+				return
+			end
+		end
+	end
+
+end

@@ -1,0 +1,154 @@
+@Logic
+script RelicUpgradeUI extends Logic
+
+	property Entity popupGroup = "a04efdfb-176b-4515-b656-76e9c37c195d"
+	property ButtonComponent btnClose = "f40ad922-4fa4-4d1f-9837-7f312e24e20c"
+	property ButtonComponent btnUpgrade = "c3f520cc-b529-4bf5-b91b-159a8789aedc"
+	property TextComponent levelText = "13c84be0-0170-45f2-b940-0ab9b07d20d9"
+	property SpriteGUIRendererComponent iconSprite = "e0a7eef4-a364-49a4-8c63-507d1cc7fcd7"
+	property TextComponent nameText = "dafd698b-6dc4-4dfa-96fc-b2a893c07b12"
+	property TextComponent optionText = "0f7b01bf-01ce-4532-b5e6-5782e785aaab"
+	property TextComponent costText = "0e60ade8-ea21-4153-9c49-4aa6e81bfce1"
+	property TextComponent upgradeTitleText = "b3e970ef-68a6-4a5b-bf68-8ee388144750"
+	-- 유물명 아래 조각 진행바 — 버튼의 코인 비용과 분리해서 여기서 "N/다음레벨요구치"를 보여준다
+	property SpriteGUIRendererComponent fragmentBarFill = "e40c4cd0-1e56-4752-a83d-2ae5e25bb77f"
+	property TextComponent fragmentBarText = "526e26a5-3dde-4633-afbf-8fd346b6d3ad"
+
+	property integer _currentRelicIndex = -1
+	property any _closeHandler = nil
+	property any _upgradeHandler = nil
+	property any _closeStateHandler = nil
+	property any _upgradeStateHandler = nil
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		-- 월드 시작 시점엔 무조건 숨겨둔다 — CharacterUnlockUI/GachaUI 등과 동일한 이유(유저 지적:
+		-- "팝업같은 UI가 떴다 로비화면으로 변경되는 경우가있어" — RelicUpgradeGroup의 displayOrder가
+		-- TitleGroup보다 높아서 .ui 저장 기본값(Enable=true)이 그대로면 로비 위에 덮여 그려진다).
+		self.popupGroup.Enable = false
+		self._closeHandler = self.btnClose.Entity:ConnectEvent(ButtonClickEvent, self.Close)
+		self._upgradeHandler = self.btnUpgrade.Entity:ConnectEvent(ButtonClickEvent, self.OnUpgradeClicked)
+		-- 패딩(눌림) 연출 — 누르는 순간 작아지고 떼는 순간 원래 크기로 돌아온다 (클릭 시점이 아니라 프레스/릴리즈 상태 자체에 붙인다)
+		self._closeStateHandler = self.btnClose.Entity:ConnectEvent(ButtonStateChangeEvent, function(event) self:OnButtonStateChanged(event, self.btnClose.Entity) end)
+		self._upgradeStateHandler = self.btnUpgrade.Entity:ConnectEvent(ButtonStateChangeEvent, function(event) self:OnButtonStateChanged(event, self.btnUpgrade.Entity) end)
+		log("RelicUpgradeUI started")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OpenForRelic(integer relicIndex)
+		-- 유물 탭에서 아이콘을 눌렀을 때 RelicUI가 호출 — 상세/업그레이드 팝업을 연다
+		self._currentRelicIndex = relicIndex
+		self.popupGroup.Enable = true
+		self:RefreshPanel()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Close()
+		self._currentRelicIndex = -1
+		self.popupGroup.Enable = false
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnButtonStateChanged(ButtonStateChangeEvent event, Entity buttonEntity)
+		-- Pressed 상태가 되는 순간 작아지고, 그 외(뗐을 때 등) 상태로 돌아오면 원래 크기로 복귀한다
+		if not isvalid(buttonEntity) then return end
+		-- 눌림 연출은 이제 공용 ButtonPressFxLogic이 모든 버튼에 건다(2026-09-26) — 여기서 또 크기를 바꾸면
+		-- 같은 버튼을 두 곳이 다퉈 중심 보정이 틀어진다. 연결은 남겨두되 아무것도 하지 않는다
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshPanel()
+		-- 현재 선택된 유물의 레벨/조각/골드 상태를 다시 그린다. 업그레이드 성공 후에도 이 메서드로 갱신한다
+		if self._currentRelicIndex < 0 then return end
+		local key = tostring(self._currentRelicIndex)
+
+		-- 최소 1개를 뽑아 소유하는 순간부터 Lv1(강화 전), 한 번도 못 뽑았으면 0
+		local level = _RelicInventory:GetEffectiveLevel(self._currentRelicIndex)
+		local fragments = 0
+		if _RelicInventory.Counts[key] ~= nil then fragments = _RelicInventory.Counts[key] end
+
+		self.levelText.Text = "Lv." .. tostring(level)
+		self.nameText.Text = _RelicUI:GetRelicBaseName(self._currentRelicIndex)
+		self.iconSprite.ImageRUID = DataRef(_RelicUI:GetRelicIconRuid(self._currentRelicIndex))
+
+		-- 유물마다 고유 효과 하나를 단독으로 가진다(예전처럼 같은 종류끼리 합산하지 않는다)
+		local effectKey = _RelicInventory:GetRelicEffectType(self._currentRelicIndex)
+		-- 효과 이름/단위는 로컬라이제이션 키로 온다(RelicInventory는 서버에서도 쓰여서 키만 들고 있음) — 여기(클라)서 푼다
+		local effectLabel = _LocText:Resolve(_RelicInventory:GetEffectLabel(effectKey))
+		local unit = _LocText:Resolve(_RelicInventory:GetEffectUnit(effectKey))
+		local currentValue = _RelicInventory:GetRelicValue(self._currentRelicIndex)
+
+		if level <= 0 then
+			-- 한 번도 뽑은 적 없는 유물 — 강화 자체가 불가능하다(비용표에 Lv0 행이 없음)
+			local firstValue = _RelicInventory:GetRelicValueAtLevel(self._currentRelicIndex, 1)
+			self.optionText.Text = _LocalizationService:GetTextFormat("FMT_RELICUPGRADEUI_001", effectLabel, tostring(firstValue), unit)
+			self.costText.Text = "-"
+			self.fragmentBarText.Text = tostring(fragments) .. "/-"
+			self.fragmentBarFill.FillAmount = 0
+			self:SetUpgradeEnabled(false)
+			return
+		end
+
+		local maxLevel = _RelicInventory.maxLevel
+		if level >= maxLevel then
+			self.optionText.Text = _LocalizationService:GetTextFormat("FMT_RELICUPGRADEUI_002", effectLabel, tostring(currentValue), unit)
+			self.costText.Text = "MAX"
+			self.fragmentBarText.Text = "MAX"
+			self.fragmentBarFill.FillAmount = 1
+			self:SetUpgradeEnabled(false)
+			return
+		end
+
+		local nextLevel = level + 1
+		local fragmentCost = _RelicInventory:GetFragmentCostForLevel(level)
+		local coinCost = _RelicInventory:GetGoldCostForLevel(level)
+		local nextValue = _RelicInventory:GetRelicValueAtLevel(self._currentRelicIndex, nextLevel)
+		self.optionText.Text = _LocalizationService:GetTextFormat("FMT_RELICUPGRADEUI_004", effectLabel, tostring(currentValue), unit, tostring(nextValue))
+		self.costText.Text = _LocalizationService:GetTextFormat("FMT_RELICUPGRADEUI_003", tostring(coinCost))
+
+		-- 유물명 아래 조각 진행바 — 그리드 슬롯과 동일하게 "다음 레벨 요구치"를 분모로 쓴다
+		self.fragmentBarText.Text = tostring(fragments) .. "/" .. tostring(fragmentCost)
+		local fragmentRatio = fragments / fragmentCost
+		if fragmentRatio > 1 then fragmentRatio = 1 end
+		self.fragmentBarFill.FillAmount = fragmentRatio
+
+		-- 유물 강화는 런 골드가 아니라 메인화면 누적 코인(TotalCoins)으로 결제한다
+		local canAfford = fragments >= fragmentCost and _TitleUI:GetLastCurrency("gold") >= coinCost
+		self:SetUpgradeEnabled(canAfford)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetUpgradeEnabled(boolean enabled)
+		-- 공통 프레임과 실제 강화 가능 상태를 유지하며 버튼 그림만 초록/회색으로 구분한다.
+		self.btnUpgrade.Enable = enabled
+		local sprite = self.btnUpgrade.Entity.SpriteGUIRendererComponent
+		-- 버튼 글씨 공통 규칙: 크림색 글씨 + 버튼 색의 진한 외곽선(초록 1F4208 / 회색 3C3C3C)
+		local textColor = Color(1, 0.953, 0.82, 1)
+		local outlineColor = Color(0.122, 0.259, 0.031, 1)
+		if enabled then
+			sprite.ImageRUID = DataRef("73a50596371b43bea72b8222a7b8881d")
+		else
+			sprite.ImageRUID = DataRef("6a34f87232c649cfaa6d770aae45e293")
+			outlineColor = Color(0.235, 0.235, 0.235, 1)
+		end
+		self.upgradeTitleText.FontColor = textColor
+		self.upgradeTitleText.OutlineColor = outlineColor
+		self.costText.FontColor = textColor
+		self.costText.OutlineColor = outlineColor
+		sprite.Color = Color(1, 1, 1, 1)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUpgradeClicked()
+		_RelicInventory:RequestLevelUpRelic(self._currentRelicIndex)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		if self._closeHandler then self.btnClose.Entity:DisconnectEvent(ButtonClickEvent, self._closeHandler) end
+		if self._upgradeHandler then self.btnUpgrade.Entity:DisconnectEvent(ButtonClickEvent, self._upgradeHandler) end
+		if self._closeStateHandler then self.btnClose.Entity:DisconnectEvent(ButtonStateChangeEvent, self._closeStateHandler) end
+		if self._upgradeStateHandler then self.btnUpgrade.Entity:DisconnectEvent(ButtonStateChangeEvent, self._upgradeStateHandler) end
+	end
+
+end
