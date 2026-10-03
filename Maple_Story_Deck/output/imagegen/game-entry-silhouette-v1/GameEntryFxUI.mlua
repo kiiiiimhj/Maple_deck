@@ -1,0 +1,125 @@
+@Logic
+script GameEntryFxUI extends Logic
+
+	-- 선택 캐릭터의 기존 정면 이미지로 만드는 1인칭 입장 연출. 끄려면 PresentationEnabled=false.
+	property boolean PresentationEnabled = true
+	property Entity effectRoot = "8782e100-799f-4606-8b6f-9900f7b7cbe7"
+	property Entity silhouette = "bdd58432-cfee-444c-850d-dc850d757514"
+	property Entity echo = "aa706048-1e0b-4612-82f4-54354c9a7881"
+	property Entity burst = "b0c3ae2f-49d5-4233-94fd-b211840367e6"
+	property number Duration = 0.64
+	property number ImpactSeconds = 0.38
+	property boolean _running = false
+	property number _elapsed = 0
+	property number _aspect = 0.8
+	property integer _characterIndex = -1
+	property integer _playCount = 0
+	property boolean _impactLogged = false
+	property table _leaves = {}
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		self._leaves = {}
+		if isvalid(self.burst) then
+			for i = 0, 11 do
+				local leaf = self.burst:GetChildByName("Leaf_" .. tostring(i))
+				if isvalid(leaf) then table.insert(self._leaves, leaf) end
+			end
+		end
+		self:Stop()
+		log("GameEntryFxUI started (enabled=" .. tostring(self.PresentationEnabled) .. ")")
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean Play(integer characterIndex)
+		self:Stop()
+		if not self.PresentationEnabled or not isvalid(self.effectRoot) or not isvalid(self.silhouette) or not isvalid(self.echo) or not isvalid(self.burst) then return false end
+		local characters = _WorldCharacterSelectUI._characters
+		local data = nil
+		if characters ~= nil then data = characters[characterIndex + 1] end
+		if data == nil or data.iconRuid == "" then return false end
+		local sprite = _ResourceService:LoadSpriteAndWait(data.iconRuid)
+		if sprite == nil or sprite.Height <= 0 then return false end
+		self._aspect = math.max(0.35, math.min(1.7, sprite.Width / sprite.Height))
+		self.silhouette.SpriteGUIRendererComponent.ImageRUID = DataRef(data.iconRuid)
+		self.echo.SpriteGUIRendererComponent.ImageRUID = DataRef(data.iconRuid)
+		self._characterIndex = characterIndex
+		self._elapsed = 0
+		self._running = true
+		self._impactLogged = false
+		self._playCount = self._playCount + 1
+		self.effectRoot.Enable = true
+		self:RenderFrame(0)
+		log("GameEntryFxUI create char=" .. tostring(characterIndex) .. " ruid=" .. data.iconRuid)
+		return true
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RenderFrame(number elapsed)
+		if not isvalid(self.effectRoot) or not isvalid(self.silhouette) or not isvalid(self.echo) or not isvalid(self.burst) then return end
+		local t = math.max(0, elapsed)
+		local view = self.effectRoot.UITransformComponent.RectSize
+		local h = math.max(360, view.y)
+		local u = math.max(0, math.min(1, (t - 0.09) / math.max(0.05, self.ImpactSeconds - 0.09)))
+		local zoom = u * u * u
+		local height = h * (0.22 + 2.18 * zoom)
+		local pos = Vector2(0, -22 + height * 0.20)
+		local appear = math.min(1, t / 0.07)
+		local impact = math.max(0, math.min(1, (t - self.ImpactSeconds) / math.max(0.05, self.Duration - self.ImpactSeconds)))
+		local fade = 1 - math.min(1, impact / 0.54)
+		-- 얕은 금빛 윤곽 + 어두운 본체. 투명 배경을 유지하여 원본 정면/얼굴 디테일은 드러나지 않는다.
+		self.silhouette.Enable = fade > 0
+		self.silhouette.UITransformComponent.RectSize = Vector2(height * self._aspect, height)
+		self.silhouette.UITransformComponent.anchoredPosition = pos
+		self.silhouette.CanvasGroupComponent.GroupAlpha = appear * fade
+		self.echo.Enable = fade > 0
+		self.echo.UITransformComponent.RectSize = Vector2(height * self._aspect * 1.035, height * 1.035)
+		self.echo.UITransformComponent.anchoredPosition = pos + Vector2(0, -8 - 12 * u)
+		self.echo.CanvasGroupComponent.GroupAlpha = appear * fade * (0.12 + 0.16 * u)
+		local flash = self.effectRoot:GetChildByName("Flash")
+		local shade = self.effectRoot:GetChildByName("Shade")
+		local flashAlpha = 0
+		if t >= self.ImpactSeconds then flashAlpha = 0.13 * math.max(0, 1 - (t - self.ImpactSeconds) / 0.11) end
+		flash.CanvasGroupComponent.GroupAlpha = flashAlpha
+		shade.CanvasGroupComponent.GroupAlpha = 0.14 * appear * fade
+		self.burst.Enable = t >= self.ImpactSeconds and impact < 1
+		self.burst.CanvasGroupComponent.GroupAlpha = (1 - impact) * (1 - impact)
+		for i, leaf in ipairs(self._leaves) do
+			local angle = (i - 1) * math.pi / 6 + 0.14
+			local distance = h * (0.09 + impact * (0.32 + (i % 3) * 0.075))
+			local size = h * (0.032 + (i % 3) * 0.006) * (1 - 0.30 * impact)
+			leaf.UITransformComponent.RectSize = Vector2(size, size)
+			leaf.UITransformComponent.anchoredPosition = Vector2(math.cos(angle) * distance, math.sin(angle) * distance + h * 0.04)
+			leaf.UITransformComponent.UIRotation = Vector3(0, 0, (i - 1) * 37 + impact * 95)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUpdate(number delta)
+		if not self._running then return end
+		if not self.PresentationEnabled or not isvalid(self.effectRoot) then self:Stop(); return end
+		self._elapsed = self._elapsed + delta
+		if self._elapsed >= self.Duration then
+			self:Stop()
+			log("GameEntryFxUI finish char=" .. tostring(self._characterIndex))
+			return
+		end
+		self:RenderFrame(self._elapsed)
+		if self._elapsed >= self.ImpactSeconds and not self._impactLogged then
+			self._impactLogged = true
+			log("GameEntryFxUI impact char=" .. tostring(self._characterIndex))
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Stop()
+		self._running = false
+		self._elapsed = 0
+		if isvalid(self.effectRoot) then self.effectRoot.Enable = false end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		self:Stop()
+	end
+end

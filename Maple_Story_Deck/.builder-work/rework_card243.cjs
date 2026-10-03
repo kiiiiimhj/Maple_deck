@@ -1,0 +1,13 @@
+const fs = require('fs');
+const p = 'RootDesk/MyDesk/Card/CardManager.mlua';
+let s = fs.readFileSync(p, 'utf8');
+const start = s.indexOf('\t-- ── 베노아 조합: 톡식 봄버(카드243)');
+const end = s.indexOf('\t-- ── 레이온: 인사이징 (Card 192) / 인사이징:관');
+if (start < 0 || end < start) throw new Error('markers');
+const block = fs.readFileSync('.builder-work/card243_block.txt', 'utf8');
+s = s.slice(0, start) + block + s.slice(end);
+const a = '\t\t\textraStr = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_124", math.floor(self.Card243FieldDuration + 0.5), math.floor(self:GetToxicBomberTickRatio(math.max(1, self.ToxicBomberLevel)) * 100 + 0.5))';
+if (s.split(a).length !== 2) throw new Error('tooltip');
+s = s.replace(a, '\t\t\textraStr = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_124", self.Card243PoisonSeconds, math.floor(self:GetToxicBomberTickRatio(math.max(1, self.ToxicBomberLevel)) * 100 + 0.5))');
+fs.writeFileSync(p, s, 'utf8');
+console.log('rework OK');

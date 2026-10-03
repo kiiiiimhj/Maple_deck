@@ -177,6 +177,43 @@ script MonsterAI extends Component
 	-- 클라이언트 로컬 — 부착 이펙트 시리얼
 	property integer _headMarkSerial = 0
 
+	-- ── 포이즌 미스트 표식(베노아 카드226, 유저 지정 2026-10-03) ─────────────────
+	-- "몹 머리 위에 표식이 있다가 죽으면 독무 발동". 서버가 표식 대미지/타이머를 들고, 클라 표시는 머리 위 표식과 같은
+	-- 방식(종류 문자열 @Sync → 클라가 stand 원본 크기로 머리 꼭대기를 계산해 부착)이다. 문자열 끝의 일련번호는
+	-- 같은 값 재적용(표식 갱신) 때도 OnSyncProperty가 다시 오게 하려는 것.
+	@Sync
+	property string _poisonMistMark = ""
+	property number _poisonMistDamage = 0
+	property integer _poisonMistTimerId = 0
+	property integer _poisonMistSeq = 0
+	property string PoisonMistMarkRUID = "e42be518ee2f4b838e52deba8bf1316b"  -- 팩 "포이즌 미스트" mob, 8프레임 0.96초(루프)
+	property number PoisonMistMarkScale = 1.0  -- 다 다가왔을 때 월드 배율(원본 약 0.8유닛)
+	property number PoisonMistMarkGap = 0.05
+	-- 클라이언트 로컬 — 부착 이펙트 시리얼
+	property integer _poisonMistMarkSerial = 0
+
+	-- ── 중독 상태 + 포이즌 트랩 넝쿨(베노아 카드227, 유저 지정 2026-10-03) ─────────────────
+	-- 포이즌 트랩은 "독 걸린 애들"만 노린다. 도트 칸(ApplyDot)은 화상/출혈과 공유라 그걸로는 중독인지 알 수 없어서
+	-- 중독이 끝나는 시각을 따로 들고 있는다(서버, 세션 경과시간 기준). 포이즌 브레스 중독·독무 틱이 갱신한다.
+	property number _poisonedUntil = 0
+	-- 솔라 플레어(239)는 "화상 걸린 애들"만 노린다 — 같은 이유로 화상이 끝나는 시각을 따로 든다(베노아 화상 스킬들이 갱신)
+	property number _burnedUntil = 0
+	-- 지금 붙은 독무 표식이 베놈 버스트(240) 것인지 — 죽을 때 베놈 독무(독 구슬 폭발 포함)로 갈지, 포이즌 미스트 독무로 갈지
+	property boolean _poisonMistVenom = false
+	-- 넝쿨(팩 "넝쿨 타래" mob/0)은 머리 위 표식과 같은 방식으로 클라가 몸통 가운데에 부착한다
+	@Sync
+	property string _poisonTrapVine = ""
+	property integer _poisonTrapVineSeq = 0
+	property integer _poisonTrapVineTimerId = 0
+	property string PoisonTrapVineRUID = "545e6d887fcb44c4850c39f8d30de1d0"  -- 27프레임 2.43초, 원본 약 1.0유닛, 가운데 피벗
+	property number PoisonTrapVineSrcSize = 1.0  -- 원본 그림 크기(유닛, 1배)
+	-- 다 다가왔을 때 넝쿨 월드 크기 = 몸 높이 × BodyRatio, 단 Min~Max로 자른다(큰 몬스터는 너무 커지지 않게 몸통에만 — 유저 지정)
+	property number PoisonTrapVineBodyRatio = 0.9
+	property number PoisonTrapVineMinSize = 0.7
+	property number PoisonTrapVineMaxSize = 1.5
+	-- 클라이언트 로컬 — 부착 이펙트 시리얼
+	property integer _poisonTrapVineSerial = 0
+
 	-- 웨이브10 리본돼지 보스인지 여부 — Die()에서 GameManager에 보스 처치를 알리는 데 사용.
 	-- @Sync인 이유: CardManager.ScanMonsterBoxAt(맵 오브젝트 터치 가드)이 **클라에서** 보스 여부를
 	-- 알아야 터치 판정 상자에 보스 배율(FocusBoxBossScale)을 적용할 수 있다. 쓰기는 전부 서버 쪽
@@ -2908,6 +2945,183 @@ script MonsterAI extends Component
 		self._headMarkSerial = 0
 	end
 
+	-- 서버 — 포이즌 미스트(카드226) 표식을 붙인다(이미 있으면 대미지·남은 시간 갱신). duration 동안 안 죽으면 저절로 사라진다
+	@ExecSpace("ServerOnly")
+	method void ApplyPoisonMistMark(number damage, number duration)
+		if self._dead then return end
+		self._poisonMistDamage = damage
+		self._poisonMistVenom = false
+		if self._poisonMistTimerId ~= 0 then
+			_TimerService:ClearTimer(self._poisonMistTimerId)
+			self._poisonMistTimerId = 0
+		end
+		self._poisonMistTimerId = _TimerService:SetTimerOnce(function()
+			if not isvalid(self) then return end
+			self._poisonMistTimerId = 0
+			self:ClearPoisonMistMark()
+		end, duration)
+		local reach = self._reachedScaleThreshold
+		if self._isFlying then reach = 1.0 end
+		local ref = self._scaleMultiplier * reach
+		if ref <= 0 then ref = 1.0 end
+		self._poisonMistSeq = self._poisonMistSeq + 1
+		self._poisonMistMark = string.format("%.4f", ref) .. "|" .. self._standRUID .. "|" .. tostring(self._poisonMistSeq)
+	end
+
+	-- 서버 — 베놈 버스트(240) 표식. 포이즌 미스트 표식과 같은 머리 표식·지속, 죽을 때만 베놈 독무로 간다
+	@ExecSpace("ServerOnly")
+	method void ApplyVenomMark(number damage, number duration)
+		if self._dead then return end
+		self:ApplyPoisonMistMark(damage, duration)
+		self._poisonMistVenom = true
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ClearPoisonMistMark()
+		-- 표식 제거(만료/사망 공통)
+		self._poisonMistDamage = 0
+		self._poisonMistVenom = false
+		if self._poisonMistTimerId ~= 0 then
+			_TimerService:ClearTimer(self._poisonMistTimerId)
+			self._poisonMistTimerId = 0
+		end
+		self._poisonMistMark = ""
+	end
+
+	-- 서버 — 중독 상태 갱신(포이즌 브레스 중독 / 독무 틱). 더 늦게 끝나는 쪽으로만 늘린다
+	@ExecSpace("ServerOnly")
+	method void MarkPoisoned(number seconds)
+		if self._dead then return end
+		local untilT = _UtilLogic.ElapsedSeconds + seconds
+		if untilT > self._poisonedUntil then self._poisonedUntil = untilT end
+	end
+
+	-- 서버 — 화상 상태 갱신(베노아 화상 스킬들). 더 늦게 끝나는 쪽으로만 늘린다
+	@ExecSpace("ServerOnly")
+	method void MarkBurned(number seconds)
+		if self._dead then return end
+		local untilT = _UtilLogic.ElapsedSeconds + seconds
+		if untilT > self._burnedUntil then self._burnedUntil = untilT end
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean IsBurned()
+		-- 지금 화상 상태인지(솔라 플레어 타겟 조건)
+		if self._dead then return false end
+		return _UtilLogic.ElapsedSeconds < self._burnedUntil
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean IsPoisoned()
+		-- 지금 중독 상태인지(포이즌 트랩 타겟 조건)
+		if self._dead then return false end
+		return _UtilLogic.ElapsedSeconds < self._poisonedUntil
+	end
+
+	-- 서버 — 포이즌 트랩 넝쿨을 duration 동안 감는다(같은 대상에 다시 걸리면 처음부터)
+	@ExecSpace("ServerOnly")
+	method void ApplyPoisonTrapVine(number duration)
+		if self._dead then return end
+		if self._poisonTrapVineTimerId ~= 0 then
+			_TimerService:ClearTimer(self._poisonTrapVineTimerId)
+			self._poisonTrapVineTimerId = 0
+		end
+		self._poisonTrapVineTimerId = _TimerService:SetTimerOnce(function()
+			if not isvalid(self) then return end
+			self._poisonTrapVineTimerId = 0
+			self._poisonTrapVine = ""
+		end, duration)
+		local reach = self._reachedScaleThreshold
+		if self._isFlying then reach = 1.0 end
+		local ref = self._scaleMultiplier * reach
+		if ref <= 0 then ref = 1.0 end
+		self._poisonTrapVineSeq = self._poisonTrapVineSeq + 1
+		self._poisonTrapVine = string.format("%.4f", ref) .. "|" .. self._standRUID .. "|" .. tostring(self._poisonTrapVineSeq)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ClearPoisonTrapVine()
+		-- 넝쿨 제거(사망 시)
+		if self._poisonTrapVineTimerId ~= 0 then
+			_TimerService:ClearTimer(self._poisonTrapVineTimerId)
+			self._poisonTrapVineTimerId = 0
+		end
+		self._poisonTrapVine = ""
+	end
+
+	-- 클라 — _poisonTrapVine을 읽어 넝쿨을 몸통 가운데에 부착한다. 크기는 몸 높이에 비례하되 Min~Max로 자른다
+	@ExecSpace("ClientOnly")
+	method void ApplyPoisonTrapVineVisual()
+		if self._poisonTrapVineSerial ~= 0 then
+			_EffectService:RemoveEffect(self._poisonTrapVineSerial)
+			self._poisonTrapVineSerial = 0
+		end
+		if self._poisonTrapVine == "" then return end
+		if not isvalid(self.Entity) then return end
+		local parts = {}
+		for part in string.gmatch(self._poisonTrapVine, "[^|]+") do table.insert(parts, part) end
+		if #parts < 2 then return end
+		local ref = tonumber(parts[1])
+		if ref == nil or ref <= 0 then ref = 1.0 end
+		local body = _CardManager:GetSpriteMetrics(parts[2])
+		-- 엔티티 로컬 좌표(= 원본 스프라이트 유닛). 몸통 가운데 = 가로 중앙, 세로 절반 높이
+		local offX = 0
+		local midY = 0.5
+		local bodyH = 1.0
+		if body.w > 0 then
+			offX = (0.5 - body.px) * body.w
+			midY = (0.5 - body.py) * body.h
+			bodyH = body.h
+		end
+		local worldSize = math.max(self.PoisonTrapVineMinSize, math.min(self.PoisonTrapVineMaxSize, bodyH * ref * self.PoisonTrapVineBodyRatio))
+		local s = worldSize / (self.PoisonTrapVineSrcSize * ref)
+		local options = {}
+		local renderer = self.Entity.SpriteRendererComponent
+		if renderer ~= nil then
+			options["SortingLayer"] = renderer.SortingLayer
+			options["OrderInLayer"] = renderer.OrderInLayer + 4
+		end
+		self._poisonTrapVineSerial = _EffectService:PlayEffectAttached(self.PoisonTrapVineRUID, self.Entity, Vector3(offX, midY, 0), 0, Vector3(s, s, 1), true, options)
+	end
+
+	-- 클라 — _poisonMistMark를 읽어 표식을 머리 위에 부착한다. 엘리트/보스 표식이 있으면 그 위로 한 칸 올린다
+	@ExecSpace("ClientOnly")
+	method void ApplyPoisonMistMarkVisual()
+		if self._poisonMistMarkSerial ~= 0 then
+			_EffectService:RemoveEffect(self._poisonMistMarkSerial)
+			self._poisonMistMarkSerial = 0
+		end
+		if self._poisonMistMark == "" then return end
+		if not isvalid(self.Entity) then return end
+		local parts = {}
+		for part in string.gmatch(self._poisonMistMark, "[^|]+") do table.insert(parts, part) end
+		if #parts < 2 then return end
+		local ref = tonumber(parts[1])
+		if ref == nil or ref <= 0 then ref = 1.0 end
+		local body = _CardManager:GetSpriteMetrics(parts[2])
+		-- 엔티티 로컬 좌표(= 원본 스프라이트 유닛). 부착이라 몬스터 스케일이 그대로 곱해진다
+		local offX = 0
+		local top = 1.2
+		if body.w > 0 then
+			offX = (0.5 - body.px) * body.w
+			top = (1.0 - body.py) * body.h
+		end
+		local y = top + self.PoisonMistMarkGap / ref
+		if self._headMark ~= "" then
+			local size = self.EliteHeadMarkSize
+			if string.sub(self._headMark, 1, 4) == "boss" then size = self.BossHeadMarkSize end
+			y = y + (size + self.HeadMarkGap) / ref
+		end
+		local s = self.PoisonMistMarkScale / ref
+		local options = {}
+		local renderer = self.Entity.SpriteRendererComponent
+		if renderer ~= nil then
+			options["SortingLayer"] = renderer.SortingLayer
+			options["OrderInLayer"] = renderer.OrderInLayer + 6
+		end
+		self._poisonMistMarkSerial = _EffectService:PlayEffectAttached(self.PoisonMistMarkRUID, self.Entity, Vector3(offX, y, 0), 0, Vector3(s, s, 1), true, options)
+	end
+
 	@ExecSpace("ClientOnly")
 	method void OnSyncProperty(string name, any value)
 		-- 엘리트 표식(발밑 오라) — 서버가 MarkElite로 _isElite를 켜면 여기로 도착한다.
@@ -2920,6 +3134,16 @@ script MonsterAI extends Component
 		-- 머리 위 표식(엘리트/보스) — 문자열 하나에 필요한 정보가 다 들어 있어 도착 순서 경합이 없다
 		if name == "_headMark" then
 			self:ApplyHeadMark()
+			return
+		end
+		-- 포이즌 미스트 표식 — 사망 순간에 비워지므로 아래 _dead 가드보다 위에서 받아야 표식이 같이 사라진다
+		if name == "_poisonMistMark" then
+			self:ApplyPoisonMistMarkVisual()
+			return
+		end
+		-- 포이즌 트랩 넝쿨 — 표식과 같은 이유로 _dead 가드보다 위
+		if name == "_poisonTrapVine" then
+			self:ApplyPoisonTrapVineVisual()
 			return
 		end
 		-- MonsterSprite가 동기화되면 SpriteRendererComponent의 RUID를 교체한다.
@@ -4242,7 +4466,7 @@ script MonsterAI extends Component
 		-- 방패 구슬(에피4 게이트키퍼)이 남아 있으면 이 타격은 통째로 무효 — 구슬 1개만 사라진다
 		if self:ConsumeBossShield() then return end
 		self._lastHitWasCrit = true
-		damage = damage * (1.0 + _CardManager:GetCriticalShotBonus() + _CardManager:GetKarmaBonus() + _CardManager:GetSpiritJavelinBonus() + _RelicInventory:GetCritDamageBonus())
+		damage = damage * (1.0 + _CardManager:GetCriticalShotBonus() + _CardManager:GetKarmaBonus() + _CardManager:GetSpiritJavelinBonus() + _CardManager:GetElementalAdeptBonus() + _RelicInventory:GetCritDamageBonus())
 		-- 장비 치명타 피해 보너스(자마다르 에픽 상시 / 레전더리 확률 버프) — 모든 크리티컬이
 		-- 이 두 진입점(TakeDamageCrit / TakeDamageCritWithOffset)만 거치므로 개별 스킬의
 		-- `damage * 2` 호출부를 전부 건드릴 필요가 없다
@@ -4297,7 +4521,7 @@ script MonsterAI extends Component
 		self._lastHitWasCrit = true
 		-- 크리티컬 샷(카드111, 실피드 전용 패시브) + 카르마(카드182, 쉐이드 전용 패시브) 보너스 —
 		-- 모든 크리티컬 대미지에 추가 배율 적용(같은 런에서 둘 다 활성일 수 없어 가산해도 안전)
-		damage = damage * (1.0 + _CardManager:GetCriticalShotBonus() + _CardManager:GetKarmaBonus() + _CardManager:GetSpiritJavelinBonus() + _RelicInventory:GetCritDamageBonus())
+		damage = damage * (1.0 + _CardManager:GetCriticalShotBonus() + _CardManager:GetKarmaBonus() + _CardManager:GetSpiritJavelinBonus() + _CardManager:GetElementalAdeptBonus() + _RelicInventory:GetCritDamageBonus())
 		-- 장비 치명타 피해 보너스(자마다르 에픽 상시 / 레전더리 확률 버프) — 모든 크리티컬이
 		-- 이 두 진입점(TakeDamageCrit / TakeDamageCritWithOffset)만 거치므로 개별 스킬의
 		-- `damage * 2` 호출부를 전부 건드릴 필요가 없다
@@ -4355,7 +4579,7 @@ script MonsterAI extends Component
 		-- 방패 구슬(에피4 게이트키퍼)이 남아 있으면 이 타격은 통째로 무효 — 구슬 1개만 사라진다
 		if self:ConsumeBossShield() then return end
 		-- 크리티컬 샷(카드111)/카르마(카드182) 보너스 — 크리티컬 경로에서만 추가 배율 적용
-		if isCrit then damage = damage * (1.0 + _CardManager:GetCriticalShotBonus() + _CardManager:GetKarmaBonus() + _CardManager:GetSpiritJavelinBonus() + _RelicInventory:GetCritDamageBonus()) end
+		if isCrit then damage = damage * (1.0 + _CardManager:GetCriticalShotBonus() + _CardManager:GetKarmaBonus() + _CardManager:GetSpiritJavelinBonus() + _CardManager:GetElementalAdeptBonus() + _RelicInventory:GetCritDamageBonus()) end
 		-- DPS 미터 집계(미니 무어는 전투 대상이 아니라 제외)
 		if not self._isMiniMoore then
 			_DpsMeterLogic:RecordDamage(dpsSource, damage)
@@ -4767,6 +4991,8 @@ script MonsterAI extends Component
 	@ExecSpace("ServerOnly")
 	method void ApplyDot(number damagePerTick, integer ticks, number tickInterval)
 		-- 도트 데미지 적용. 중복 시 이전 도트를 취소하고 새 도트로 덮어씀
+		-- 베노아 엘리멘탈 드레인(카드233) — 틱 대미지 +3~15%(다른 캐릭터는 레벨 0이라 배율 1.0)
+		damagePerTick = damagePerTick * _CardManager:GetElementalDrainMult()
 		if self._dotTimerId ~= 0 then
 			_TimerService:ClearTimer(self._dotTimerId)
 			self._dotTimerId = 0
@@ -5071,6 +5297,20 @@ script MonsterAI extends Component
 		end
 		self.ComboStack = 0
 		self:ClearAllComboOrbs()
+		-- 포이즌 미스트(카드226) 표식이 붙은 채로 죽으면 그 자리에 독무가 생긴다(위치·크기·깊이는 지금 값으로 캡처)
+		if self._poisonMistDamage > 0 then
+			local mistPos = _CardManager:WorldToCurrentMapLocal(self.Entity.TransformComponent.WorldPosition)
+			if self._poisonMistVenom then
+				-- 베놈 버스트(240) 표식 — 독무 + 독무 안 몬스터마다 독 구슬 폭발
+				_CardManager:SpawnVenomMist(mistPos, self._poisonMistDamage, _CardManager:GetEffectScaleRatio(self), _CardManager:GetDepthBand(self), self._spawnZoneIndex)
+			else
+				_CardManager:SpawnPoisonMist(mistPos, self._poisonMistDamage, _CardManager:GetEffectScaleRatio(self), _CardManager:GetDepthBand(self), self._spawnZoneIndex)
+			end
+		end
+		self:ClearPoisonMistMark()
+		self:ClearPoisonTrapVine()
+		self._poisonedUntil = 0
+		self._burnedUntil = 0
 		log("Monster died")
 		-- 인게임 HUD 처치 수 — 보상 경로(일반/루돌프/보스)와 무관하게 사망 1회당 1
 		_GameManager:AddKillCount()

@@ -93,7 +93,8 @@ script GameManager extends Logic
 	property number BossHpMultiplier = 14.0
 	-- ⚠ 테스트 전용(유저 지정 2026-09-30 "테스트하게 임시로 체력 2천") — 0보다 크면 일반 몬스터의 기본 체력을 이 값으로 고정한다
 	-- (MonsterAI.InitializeStats). 보스는 그대로. 출시 전 반드시 0으로 되돌릴 것.
-	property number TestMonsterHp = 0
+	-- 2026-10-03 베노아 스킬 테스트용(10000 → 1000) — ⚠ 출시 전 0
+	property number TestMonsterHp = 1000
 
 	-- 2026-09-12 유저 지정 2.0 → 1.5
 	property number BossAttackMultiplier = 1.5
@@ -157,6 +158,14 @@ script GameManager extends Logic
 	-- 순간에 맞춰 전투가 시작되도록 맞춰둔 값이다. 한쪽만 고치면 어긋난다(검은 화면에서 이미
 	-- 맞고 있거나, 밝아진 뒤 한참 아무것도 안 나오거나).
 	property number EntryDelaySeconds = 1.55
+	-- 로비 입장 연출이 끝날 때까지 전투/시계/자동공격을 함께 정지한다.
+	@Sync
+	property boolean EntryPresentationPending = false
+	property integer _entrySequence = 0
+	property string _entryOwnerId = ""
+	property boolean _entryClientReady = false
+	property boolean _entryGameplayReady = false
+	property integer _entryResumeKind = 0
 
 	@Sync
 	property number TimeAttackRemaining = 0
@@ -191,7 +200,7 @@ script GameManager extends Logic
 	-- (다른 Logic에서는 콜론 호출로만 접근 — feedback_cross_logic_field_access_nil).
 	method boolean IsGamePaused()
 		-- 몬스터 이동/공격·스폰·플레이어 자동공격·타이머를 통째로 멈춰야 하는 상태인지
-		return self.TutorialPaused or self.OptionPaused or self.ShopPaused
+		return self.TutorialPaused or self.OptionPaused or self.ShopPaused or self.EntryPresentationPending
 	end
 
 	-- 안전지대 정지(유저 지정 2026-09-17 — "그림자 상점에 가만히 서 있어도 시간이 흐른다 / 콜로세움도 / 포션 같은 것도").
@@ -6631,6 +6640,8 @@ script GameManager extends Logic
 		-- 안정적으로 참조할 수 있도록 이 시점에 캡처해 둔다 — GameOverUI가 이 값으로 "이어하기+다시하기"
 		-- 대신 "다시하기만" 노출할지 결정한다.
 		self._timeAttackOvertimeDeath = self._timeAttackOvertimeActive
+		-- 마지막 타격까지 결과창 DPS 순위에 반영한다(정지 뒤에는 주기 스냅샷이 더 이상 갱신되지 않음).
+		_DpsMeterLogic:PublishSnapshot()
 		self.GameOver = true
 		_MonsterSpawner:StopSpawning()
 		-- 유물 골드 보너스는 킬마다 곱하지 않고, 게임오버 시점에 이번 구간(직전 정산 이후) 동안
@@ -6740,6 +6751,62 @@ script GameManager extends Logic
 
 	-- 클라이언트의 "게임 시작" 버튼 요청 (타이틀 화면) — 캐릭터 선택 팝업의 "무제한 모드" 체크박스
 	-- 값과 선택된 캐릭터 인덱스(0=아르카나, 1=실피드)를 그대로 넘겨받는다
+	-- 연출 전용 입장 요청. 기존 에피소드 해금 검증과 새 판 초기화는 그대로 사용한다.
+	@ExecSpace("Server")
+	method void RequestPresentedStart(boolean timeAttack, integer characterIndex, integer episode, integer sequence)
+		if self.EntryPresentationPending or not _EpisodeRewardLogic:IsEpisodeUnlocked(episode) then return end
+		self.EntryPresentationPending = true
+		self._entrySequence = sequence
+		self._entryOwnerId = senderUserId
+		self._entryClientReady = false
+		self._entryGameplayReady = false
+		self._entryResumeKind = 0
+		-- 클라이언트가 종료되거나 연출에 실패해도 영구 정지되지 않는다.
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) or not self.EntryPresentationPending or self._entrySequence ~= sequence then return end
+			self._entryClientReady = true
+			self:TryFinishEntryPresentation()
+		end, 8)
+		local resuming = self.GameStarted and not self.GameOver
+		log("GameManager: entry presentation waiting seq=" .. tostring(sequence))
+		if self.GameOver then
+			self:RestartGame(timeAttack, characterIndex, senderUserId, episode)
+		else
+			self:StartGame(timeAttack, characterIndex, senderUserId, episode)
+		end
+		if resuming then self:ResumeGameplayAfterEntry(3) end
+	end
+
+	@ExecSpace("Server")
+	method void RequestEntryPresentationFinished(integer sequence)
+		if not self.EntryPresentationPending or self._entrySequence ~= sequence or self._entryOwnerId ~= senderUserId then return end
+		self._entryClientReady = true
+		log("GameManager: entry presentation client finished seq=" .. tostring(sequence))
+		self:TryFinishEntryPresentation()
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResumeGameplayAfterEntry(integer kind)
+		if self.EntryPresentationPending then
+			self._entryResumeKind = kind
+			self._entryGameplayReady = true
+			self:TryFinishEntryPresentation()
+			return
+		end
+		if kind == 1 then _MapManager:BeginGameplay() end
+		if kind == 2 then _MonsterSpawner:RestartSpawning() end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void TryFinishEntryPresentation()
+		if not self.EntryPresentationPending or not self._entryClientReady or not self._entryGameplayReady then return end
+		local kind = self._entryResumeKind
+		self.EntryPresentationPending = false
+		self._entryOwnerId = ""
+		self:ResumeGameplayAfterEntry(kind)
+		log("GameManager: gameplay released after silhouette seq=" .. tostring(self._entrySequence))
+	end
+
 	@ExecSpace("Server")
 	method void RequestStartGame(boolean timeAttack, integer characterIndex, integer episode)
 		-- 잠긴 에피소드로는 시작하지 않는다(선택 팝업이 확인 버튼을 끄지만 서버에서도 한 번 더 막는다 — 2026-09-20)
@@ -6810,8 +6877,8 @@ script GameManager extends Logic
 		-- 화면이 밝아지는 순간(EntryDelaySeconds 경과)에 맞춰 전투를 시작한다.
 		_TimerService:SetTimerOnce(function()
 			if not isvalid(self) then return end
-			_MapManager:BeginGameplay()
-			log("GameManager: gameplay begun after entry loading")
+			self:ResumeGameplayAfterEntry(1)
+			log("GameManager: entry loading ready for gameplay")
 		end, self.EntryDelaySeconds)
 		_CardManager:InitWeaponSkillForRun(userId)
 		-- 모험 지원 패스 판 혜택(최초 시작은 ResetAllCards를 안 타므로 여기서 직접 — 다시하기는 ResetAllCards 끝에서 적용)
@@ -7074,8 +7141,8 @@ script GameManager extends Logic
 		-- 로딩 화면을 띄운다) — 검은 화면 뒤에서 몹이 이미 달려오고 있으면 안 된다
 		_TimerService:SetTimerOnce(function()
 			if not isvalid(self) then return end
-			_MonsterSpawner:RestartSpawning()
-			log("GameManager: spawning restarted after entry loading")
+			self:ResumeGameplayAfterEntry(2)
+			log("GameManager: restart loading ready for gameplay")
 		end, self.EntryDelaySeconds)
 		self:NotifyExpChanged(self.Exp, self.ExpNeeded, self.Level, true)
 		log("Game restarted (full reset)")

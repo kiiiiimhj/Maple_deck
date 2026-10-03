@@ -1,0 +1,422 @@
+@Logic
+script TitleUI extends Logic
+	property boolean _entryStarting = false
+	property integer _entrySequence = 0
+
+	-- 루트 그룹 자체 — "게임 시작" 클릭 시 이 전체(하단 탭바 포함)를 한 번에 끈다. 이 스크립트는
+	-- @Logic이라 UI 엔티티 트리 밖에서 독립 실행되므로, 루트를 꺼도 스크립트 생명주기엔 영향 없다.
+	property Entity titleGroup = "4109795c-8f3d-41f1-9403-fefcec8fbb3e"
+	property ButtonComponent btnStart = "7324df2c-c085-43e9-9b23-93c36b4e7121"
+
+	-- 로비/레이드 화면 뒤 인게임 HUD 클릭 차단(2026-09-26 유저 리포트 "스킬탭에서 안 보이는 인게임 인벤토리 버튼이 눌린다").
+	-- 인게임 HUD(DefaultGroup, GroupOrder 0)와 콜로세움 UI는 로비 동안에도 꺼지지 않고 뒤에 깔려 있고, 로비 탭 배경은
+	-- 클릭을 막지 않아 그 자리를 누르면 HUD 버튼(인벤토리·맵 이동·스킬 슬롯·6번 슬롯 다이아 해금·리롤 등)이 눌렸다.
+	-- 로비나 레이드 화면이 떠 있는 동안 두 그룹의 CanvasGroup.Interactable을 끈다(보이는 모습은 그대로)
+	property CanvasGroupComponent hudCanvas = "3833f71e-06ae-4874-97ae-8d983afa9a9e"
+	property CanvasGroupComponent arenaCanvas = "135eaa2f-fb1a-4194-8f71-6f22dfc69090"
+	property integer _hudInteractState = -1
+
+	-- 로비 전용 BGM(2026-08-21, 유저 지정) — map01.map 루트 SoundComponent와 동일한 RUID. map01의
+	-- SoundComponent는 PlayOnEnable이라 월드 부팅 시 딱 한 번만 자동 재생되고, 로비↔게임 왕복 중엔 다시
+	-- 안 켜지므로(엔티티 자체가 계속 Enable 상태라 재트리거 안 됨), 로비로 돌아올 때(ShowLobby)는 이
+	-- RUID로 명시적으로 다시 재생해야 한다.
+	property string LobbyBgmRUID = "387dee48e8064f9091b090f45a8d94cf"
+
+	-- 하단 탭 5개(상점/스킬/전투/유물/랭킹) — 클릭 시 해당 패널만 보이고 나머지는 숨는다
+	property ButtonComponent btnShop = "f6e66e4a-08d4-48cc-a0a6-25305634678e"
+	property ButtonComponent btnSkill = "3d0c5a53-a76d-4349-bc82-d27bf7af450b"
+	property ButtonComponent btnBattle = "578ab65e-c34b-4341-83e4-9d59b323d1fc"
+	property ButtonComponent btnRelic = "cebc9839-c154-4b66-9e1e-ed6c5225de19"
+	property ButtonComponent btnRank = "23708561-776c-4235-b4a0-34df325b210a"
+	-- 좌상단 장비 버튼(가방 아이콘) — 눌리면 인벤토리 패키지 UI(_InventoryBootstrap)를 연다
+	property ButtonComponent btnEquip = "f827c060-0eaf-4825-8e7f-24208c9fa5dd"
+
+	property Entity battlePanel = "f75fae1e-c8fb-4554-9017-79134b71633c"
+	property Entity shopPanel = "d67d85f8-44fe-41bb-912e-18387d1029fc"
+	property Entity skillPanel = "d6c39a06-7db3-42e2-8d21-635fc028b775"
+	property Entity relicPanel = "eba587f7-623c-4c03-ac11-af666a917cbf"
+	property Entity rankPanel = "06fe7223-8b8e-403a-a901-295fcdda2a77"
+
+	-- 우측 상단 상시 코인 배지 — 어떤 탭을 보고 있어도 항상 표시된다 (GameManager.TotalCoins, 런과 무관하게 누적)
+	property TextComponent coinText = "7953a102-4e89-451e-907d-ad8215d50f79"
+	-- 코인 배지 바로 아래 다이아 배지 — 뽑기 전용 재화(GameManager.Diamond). 코인과 완전히 같은 갱신 경로
+	-- (시작 시 RequestDiamondSync로 당겨오고, 이후엔 NotifyDiamondChanged Multicast로 갱신)
+	property TextGUIRendererComponent diamondText = "0f487edf-528b-45f5-a027-eee635795401"
+	-- 다이아 배지 오른쪽 끝의 (+) 버튼 — 누르면 상점 탭으로 이동한다(유저 지정 2026-09-16).
+	-- 탭 버튼을 직접 누른 것과 똑같이 OnShopClicked를 태워서 아이콘 인사 연출까지 같이 재생한다
+	property ButtonComponent btnDiaShop = "245ff091-384a-42d5-bbbd-f5ee1da04bf9"
+
+	-- 상점 탭 아이콘 — 평소엔 라이딩 가게 NPC의 stand 클립으로 가만히 서 있다가, 탭 클릭 시 say 클립으로 짧게 인사하는 연출을 재생한다
+	property SpriteGUIRendererComponent shopIcon = "cdcc6063-2fd8-45c5-81b9-851158d06ce8"
+
+	-- 탭 아이콘 5개의 UITransform — 선택된 탭의 아이콘만 위로 올라오고 커지는 연출, 나머지는 평소 크기/위치로 되돌린다
+	property UITransformComponent battleIconTransform = "05e4d9f8-ea68-4dad-80b1-60fd5aea1dbf"
+	property UITransformComponent shopIconTransform = "cdcc6063-2fd8-45c5-81b9-851158d06ce8"
+	property UITransformComponent skillIconTransform = "846f8a92-91da-481c-b5ee-6f333a0e6241"
+	property UITransformComponent relicIconTransform = "bc8c5931-252c-4178-a10f-4478f6f91281"
+	property UITransformComponent rankIconTransform = "a5885431-8221-4fa0-a0c1-1994fe28cfeb"
+
+	-- 탭 아이콘 5개의 SpriteGUIRenderer — 선택되지 않은 동안은 PlayRate=0으로 멈춰있고, 선택된 탭만 애니메이션이 재생된다
+	property SpriteGUIRendererComponent battleIcon = "05e4d9f8-ea68-4dad-80b1-60fd5aea1dbf"
+	property SpriteGUIRendererComponent skillIcon = "846f8a92-91da-481c-b5ee-6f333a0e6241"
+	property SpriteGUIRendererComponent relicIcon = "bc8c5931-252c-4178-a10f-4478f6f91281"
+	property SpriteGUIRendererComponent rankIcon = "a5885431-8221-4fa0-a0c1-1994fe28cfeb"
+
+	-- 5개 탭 아이콘이 공통으로 사용하는 평소 y 좌표 (탭바 기준)
+	property number tabIconBaseY = 28
+
+	-- 스킬/유물 탭 레드닷의 평소 위치(탭 버튼 기준, TitleGroup.ui BtnSkill/RedDot·BtnRelic/RedDot와 같은 값).
+	-- 탭이 선택돼 아이콘이 위로 뜨고 커지면 SyncTabRedDot이 이 값을 기준으로 레드닷을 같이 옮긴다
+	property Vector2 tabRedDotRestPos = Vector2(60, 48)
+
+	-- 서버가 마지막으로 알려준 실제 잔액. 화면엔 여기서 "날아오는 중인 보상"(_RewardFlyUI.GetHeld)을 뺀 값을 보여주고,
+	-- 아이콘이 배지에 도착할 때마다 그만큼씩 올라간다(로얄매치식 보상 비행 — 2026-09-15)
+	property integer _lastCoins = 0
+	property integer _lastDiamonds = 0
+
+	property any _startHandler = nil
+	property any _startStateHandler = nil
+	property any _shopHandler = nil
+	property any _diaShopHandler = nil
+	property any _skillHandler = nil
+	property any _battleHandler = nil
+	property any _relicHandler = nil
+	property any _rankHandler = nil
+	property any _shopIconAnimEndHandler = nil
+	property any _equipHandler = nil
+	property any _newItemHandler = nil
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		-- 타이틀 화면이 보이기도 전에 카메라 줌부터 맞춘다 — BeginGameplay(게임 시작 클릭 후)까지
+		-- 기다리면 그 사이 네이티브 기본 줌(100)으로 렌더링되다가 튀어서 "줌인으로 시작했다가
+		-- 줌아웃되는" 것처럼 보인다.
+		_MapManager:ApplyDefaultZoomImmediate()
+		-- 메인 화면 버튼들을 연결한다. 기본 탭은 전투(게임 시작 화면)
+		self._startHandler = self.btnStart.Entity:ConnectEvent(ButtonClickEvent, self.OnStartButtonPressed)
+		-- 패딩(눌림) 연출 — 누르는 순간 작아지고 떼는 순간 원래 크기로 돌아온다
+		self._startStateHandler = self.btnStart.Entity:ConnectEvent(ButtonStateChangeEvent, function(event) self:OnButtonStateChanged(event, self.btnStart.Entity) end)
+		self._shopHandler = self.btnShop.Entity:ConnectEvent(ButtonClickEvent, self.OnShopClicked)
+		self._diaShopHandler = self.btnDiaShop.Entity:ConnectEvent(ButtonClickEvent, self.OnShopClicked)
+		self._skillHandler = self.btnSkill.Entity:ConnectEvent(ButtonClickEvent, function() self:ShowTab("skill") end)
+		self._battleHandler = self.btnBattle.Entity:ConnectEvent(ButtonClickEvent, function() self:ShowTab("battle") end)
+		self._relicHandler = self.btnRelic.Entity:ConnectEvent(ButtonClickEvent, function() self:ShowTab("relic") end)
+		-- 랭킹 탭은 패널을 보여주는 것만으로는 부족하다 — 열 때마다 서버에 최신 목록을 다시 요청한다
+		self._rankHandler = self.btnRank.Entity:ConnectEvent(ButtonClickEvent, function()
+			self:ShowTab("rank")
+			_RankUI:Open()
+		end)
+		self._equipHandler = self.btnEquip.Entity:ConnectEvent(ButtonClickEvent, function() _InventoryBootstrap:OpenInventory() end)
+		-- 유저 요청: 가방/스킬탭/유물탭 아이콘에 "안에 새 게 있음" 레드닷 표시 — 장비는 NewItemEvent로
+		-- 변경을 통지받고, 스킬/유물은 각자의 OnSyncProperty(NewSet)가 이 스크립트를 직접 부른다
+		self._newItemHandler = _UserService.LocalPlayer:ConnectEvent(NewItemEvent, function() self:RefreshEquipNavDot() end)
+		self:RefreshEquipNavDot()
+		self:RefreshSkillNavDot()
+		self:RefreshRelicNavDot()
+		self._shopIconAnimEndHandler = self.shopIcon.Entity:ConnectEvent(SpriteGUIAnimPlayerEndEvent, self.OnShopIconAnimEnd)
+		-- 시작 시 기본 탭인 전투가 눌린 상태로 보이도록 연출까지 함께 적용한다
+		self:ShowTab("battle")
+		-- 코인 배지 초기값 — TotalCoins의 @Sync 전파 타이밍을 신뢰하지 않고, 서버에 현재 값을 직접
+		-- 요청한다(RequestCoinSync → NotifyCoinsChanged 응답). 이 시점의 로컬 캐시 값은 서버가 스토리지
+		-- 로드를 끝내기 전의 기본값(0)일 수 있어서 그냥 읽으면 "코인이 초기화된 것처럼" 보일 수 있다
+		self._lastCoins = _GameManager.TotalCoins
+		self._lastDiamonds = _GameManager.Diamond
+		self:RefreshCurrencyText()
+		_GameManager:RequestCoinSync()
+		_GameManager:RequestDiamondSync()
+		_GameManager:InitPlayerNameUI()
+		-- 타이틀(로비) 화면 BGM.
+		-- 버그 수정(2026-09-13, 유저 리포트 "지금 배경 bgm 없는데 어디지?") — 예전엔 여기서 `PauseBGM()`만
+		-- 불러서 "뒤에 깔린 맵 곡"을 멈추기만 했다. 그런데 로비 곡을 실제로 트는 곳은 ShowLobby() 하나뿐이고
+		-- 그건 **게임오버 팝업의 X**에서만 호출된다 — 결과적으로 **월드를 처음 켜면 로비가 완전 무음**이었고,
+		-- 한 판 죽고 로비로 돌아오기 전까지는 BGM이 아예 안 나왔다.
+		-- (실측: 부팅 후 타이틀 화면에서 `IsPlayBGM()=false`, 음소거는 false)
+		-- ShowLobby와 **완전히 같은 방식**으로 맞춘다 — 채널을 끊고 로비 곡을 명시적으로 재생.
+		-- map01의 SoundComponent(PlayOnEnable)가 부팅 때 자동재생하는 곡과 RUID가 같아서, 둘 중 어느 쪽이
+		-- 먼저 도착하든 들리는 곡은 동일하다(경합이 있어도 안전).
+		_SoundService:StopBGM(true)
+		_SoundOptionLogic:PlayBgm(self.LobbyBgmRUID, 1.0)
+		log("TitleUI started")
+	end
+
+	@ExecSpace("Multicast")
+	method void NotifyCoinsChanged(integer newTotal)
+		-- GameManager.AddGold()가 호출 — TotalCoins의 @Sync 전파와 이 Multicast 호출은 서로 다른 채널이라
+		-- 순서 보장이 없어서, 여기서 다시 _GameManager.TotalCoins를 읽지 않고 파라미터로 직접 받는다
+		if not self:IsClient() then return end
+		self._lastCoins = newTotal
+		self:RefreshCurrencyText()
+		-- 유물/스킬 강화 팝업의 "강화 가능" 버튼도 이 값으로 다시 판정한다 — 강화 성공(Levels @Sync)이 코인 알림보다
+		-- 먼저 오면 차감 전 코인으로 버튼이 켜진 채 남았다(2026-09-20 갱신 감사). 선택된 항목이 없으면 둘 다 바로 빠진다
+		_RelicUpgradeUI:RefreshPanel()
+		_SkillUpgradeUI:RefreshPanel()
+	end
+
+	@ExecSpace("Multicast")
+	method void NotifyDiamondChanged(integer newTotal)
+		-- GameManager.AddDiamond / SpendDiamond / RequestDiamondSync가 호출. NotifyCoinsChanged와
+		-- 같은 이유로 @Sync 전파를 믿지 않고 서버가 확정한 값을 파라미터로 직접 받는다
+		if not self:IsClient() then return end
+		self._lastDiamonds = newTotal
+		self:RefreshCurrencyText()
+		-- 뽑기 팝업이 열려 있으면 그쪽 잔액 표시도 같은 값으로 함께 갱신한다
+		_GachaUI:NotifyDiamondChanged(newTotal)
+	end
+
+	method integer GetLastCurrency(string kind)
+		-- RewardFlyUI가 보류를 시작할 때 "지금 보이던 숫자"를 바닥으로 기억하려고 읽는다.
+		-- 보류가 0일 때만 부르므로 이 값이 곧 화면에 보이던 숫자다
+		if kind == "gold" then return self._lastCoins end
+		return self._lastDiamonds
+	end
+
+	@ExecSpace("ClientOnly")
+	method integer ComputeShownCurrency(string kind, integer total)
+		-- 보류분(아직 날아오는 중)을 뺀 값을 보여주되, 보류를 시작한 순간의 숫자 밑으로는 안 내려간다.
+		-- ⚠ 받기를 누른 직후엔 보류만 먼저 걸리고 서버 지급은 아직 안 와서 (옛 잔액 - 보류분)이 되는데,
+		-- 그대로 두면 숫자가 잠깐 내려갔다가 지급이 도착하면 원래대로 돌아온다
+		-- (유저 리포트 2026-09-16 "숫자가 변했다 다시 원상태가 된다"). 바닥으로 그 구간을 없앤다
+		local shown = total - _RewardFlyUI:GetHeld(kind)
+		local floorValue = _RewardFlyUI:GetHoldFloor(kind)
+		if floorValue >= 0 and shown < floorValue then shown = floorValue end
+		return shown
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshCurrencyText()
+		-- 우상단 코인/다이아 배지 — 날아오는 중인 보상은 도착하기 전까지 빼고 보여준다
+		self.coinText.Text = tostring(self:ComputeShownCurrency("gold", self._lastCoins))
+		self.diamondText.Text = tostring(self:ComputeShownCurrency("diamond", self._lastDiamonds))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void UpdateNavSelection(string tabName)
+		-- Keep the reflection separate from the original animated icons.
+		local glow = _EntityService:GetEntityByPath("/ui/TitleGroup/TabBar/SelectedGlow")
+		if not isvalid(glow) then return end
+		local positions = {shop = -768, skill = -384, battle = 0, relic = 384, rank = 768}
+		local x = positions[tabName]
+		glow.Enable = (x ~= nil)
+		if x ~= nil then
+			glow.UITransformComponent.anchoredPosition = Vector2(x, 20)
+		end
+		log("TitleUI: nav skin selected " .. tabName)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ShowPanelOnly(string tabName)
+		self:UpdateNavSelection(tabName)
+		-- 5개 패널 중 선택된 탭 하나만 보여주고 나머지는 숨긴다 (아이콘 연출은 건드리지 않는다)
+		self.battlePanel.Enable = (tabName == "battle")
+		self.shopPanel.Enable = (tabName == "shop")
+		self.skillPanel.Enable = (tabName == "skill")
+		self.relicPanel.Enable = (tabName == "relic")
+		self.rankPanel.Enable = (tabName == "rank")
+		-- 가방(인벤토리) 버튼은 로비(배틀 탭)에서만 쓴다. 다른 탭에서는 화면 우상단을 가리기만 해서
+		-- 숨긴다 — 랭킹 탭은 이 자리를 실제 콘텐츠로 쓴다(유저 지정 2026-09-01).
+		self.btnEquip.Entity.Enable = (tabName == "battle")
+		-- 출석 버튼도 같은 규칙(전투 탭에서만). 7일을 다 받았으면 AttendanceUI가 알아서 계속 숨긴다
+		_AttendanceUI:SetLobbyTabVisible(tabName == "battle")
+		-- 업적 버튼(인벤토리 버튼 아래)도 전투 탭에서만
+		_AchievementUI:SetLobbyTabVisible(tabName == "battle")
+		-- 레이드 아이콘(화면 우측)도 같은 규칙 — 다른 탭 위에 떠 있으면 그 탭의 아이콘처럼 보인다
+		-- (유저 리포트 2026-09-22). 해금 전/수령 완료 시즌에는 RaidUI가 알아서 계속 숨긴다
+		_RaidUI:SetLobbyTabVisible(tabName == "battle")
+		-- 몬스터 도감 버튼(오른쪽 줄 맨 아래)도 전투 탭에서만
+		_MonsterBookUI:SetLobbyTabVisible(tabName == "battle")
+		-- 모험 지원 패스 버튼(왼쪽 줄)도 전투 탭에서만
+		_AdventurePassUI:SetLobbyTabVisible(tabName == "battle")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ShowTab(string tabName)
+		-- 탭 버튼을 실제로 눌렀을 때만 호출 — 패널 전환과 함께 선택된 탭 아이콘이 위로 뜨는 연출을 재생한다
+		self:ShowPanelOnly(tabName)
+
+		-- 선택된 탭의 아이콘만 위로 올라오고 커진 상태로 애니메이션이 재생되고, 나머지는 평소 상태(정지)로 되돌린다
+		self:SetTabIconSelected(self.battleIconTransform, self.battleIcon, tabName == "battle")
+		self:SetTabIconSelected(self.shopIconTransform, self.shopIcon, tabName == "shop")
+		self:SetTabIconSelected(self.skillIconTransform, self.skillIcon, tabName == "skill")
+		self:SetTabIconSelected(self.relicIconTransform, self.relicIcon, tabName == "relic")
+		self:SetTabIconSelected(self.rankIconTransform, self.rankIcon, tabName == "rank")
+		-- 레드닷도 아이콘을 따라 올라가게(유저 지정 2026-09-13) — 레드닷은 탭 버튼의 자식이라 아이콘과 따로 논다
+		self:SyncTabRedDot(self.btnSkill, self.skillIconTransform)
+		self:SyncTabRedDot(self.btnRelic, self.relicIconTransform)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SyncTabRedDot(ButtonComponent tabButton, UITransformComponent iconTransform)
+		-- 탭 레드닷을 아이콘 오른쪽 위 모서리에 붙여 둔다. 아이콘이 뜨는 높이만큼 올리고, 아이콘 배율(선택 시 1.5)만큼
+		-- 아이콘 중심에서 떨어진 거리도 벌린다. 탭 버튼과 아이콘은 x가 같아서(-384/384) 버튼 기준 x = 오프셋만 쓰면 된다
+		local redDot = tabButton.Entity:GetChildByName("RedDot")
+		if not isvalid(redDot) then return end
+		local s = iconTransform.Scale.x
+		local offX = self.tabRedDotRestPos.x
+		local offY = self.tabRedDotRestPos.y - self.tabIconBaseY
+		redDot.UITransformComponent.anchoredPosition = Vector2(offX * s, iconTransform.anchoredPosition.y + offY * s)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetTabIconSelected(UITransformComponent iconTransform, SpriteGUIRendererComponent iconSprite, boolean selected)
+		-- selected면 아이콘 높이의 절반만큼 위로 띄우고 1.5배로 키우고 애니메이션을 재생하며, 아니면 평소 위치/크기로 되돌리고 애니메이션을 멈춘다
+		local x = iconTransform.anchoredPosition.x
+		if selected then
+			local halfHeight = iconTransform.RectSize.y * 0.5
+			iconTransform.anchoredPosition = Vector2(x, self.tabIconBaseY + halfHeight)
+			iconTransform.Scale = Vector3(1.5, 1.5, 1.5)
+			iconSprite.PlayRate = 1
+		else
+			iconTransform.anchoredPosition = Vector2(x, self.tabIconBaseY)
+			iconTransform.Scale = Vector3(1, 1, 1)
+			iconSprite.PlayRate = 0
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnShopClicked()
+		-- 상점 탭 진입 연출 — 아이콘이 say 클립을 한 번 재생해 인사하고, 끝나면 OnShopIconAnimEnd에서 stand로 복귀한다
+		self.shopIcon.AnimClipPlayType = SpriteAnimClipPlayType.Onetime
+		self.shopIcon.ImageRUID = DataRef("9a8dd4b49d2d4e2b9941c4cd46a17423")
+		self:ShowTab("shop")
+		log("TitleUI: Shop clicked, playing greet animation")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnShopIconAnimEnd(SpriteGUIAnimPlayerEndEvent event)
+		-- say 연출이 끝나면 평소 상태(stand 루프)로 되돌린다
+		self.shopIcon.AnimClipPlayType = SpriteAnimClipPlayType.Loop
+		self.shopIcon.ImageRUID = DataRef("e4c8f831403d4c09bb4464a20dc72f98")
+		log("TitleUI: Shop icon back to stand")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnStartButtonPressed()
+		-- "게임 시작"을 눌러도 바로 입장하지 않고, 월드/캐릭터 선택 팝업을 먼저 연다.
+		-- 팝업에서 확인을 누르면 OnStartClicked()가 호출되어 실제로 맵에 입장한다
+		_WorldCharacterSelectUI:Open()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnStartClicked(boolean unlimitedMode, integer characterIndex, integer episode)
+		if self._entryStarting then return end
+		self._entryStarting = true
+		self._entrySequence = self._entrySequence + 1
+		local entrySequence = self._entrySequence
+		-- 같은 클라이언트가 방금 누른 버튼이므로 서버 응답(동기화)을 기다리지 않고 바로 메인 화면을 닫는다
+		-- unlimitedMode: 캐릭터 선택 팝업 체크박스 값. true=무제한 모드(기존과 동일), false=20분 타임어택
+		-- characterIndex: 캐릭터 선택 팝업에서 고른 캐릭터(0=아르카나, 1=실피드)
+		-- episode: 월드 선택(</> 캐러셀)에서 고른 월드 번호(1=에피소드1, 2=에피소드2)
+		log("TitleUI: Start clicked (unlimitedMode=" .. tostring(unlimitedMode) .. ", characterIndex=" .. characterIndex .. ", episode=" .. episode .. ")")
+		-- 버그 수정(2026-08-21, 유저 리포트 "게임 시작하면 즉시 꺼주고 인게임 배경음악으로 나오게... 지금은
+		-- 서서히 작아지는듯?") — ResumeBGM()은 "멈춰뒀던 로비 BGM을 그대로 이어서 재생"하는 것이라, 실제
+		-- 게임 맵(ep2_map1~4/map11/12 등)이 자기 SoundComponent(PlayOnEnable=true)로 이미 자동 재생하려는
+		-- BGM과 같은 채널을 두고 충돌해서 흐릿하게 겹치거나 서서히 잦아드는 것처럼 들렸다. StopBGM(true)로
+		-- 로비 BGM을 즉시(페이드 없이) 완전히 끊어서, 곧바로 입장할 맵의 네이티브 BGM이 깨끗하게 이어받게 한다.
+		_SoundService:StopBGM(true)
+		-- GameManager 쪽 API는 timeAttack(=무제한 모드의 반대)을 받는다 — 여기서 극성을 뒤집는다
+		local timeAttack = not unlimitedMode
+		-- 입장 로딩 화면을 먼저 띄운다. 화면이 완전히 검어진 뒤에 타이틀을 닫으므로, 로비가 사라지는
+		-- 순간과 에피2/3의 맵 점프가 전부 검은 화면 뒤에 감춰진다(예전엔 에피2/3만 0.35초 지연으로
+		-- 따로 가렸는데, 이제 모든 에피소드가 같은 경로를 탄다). 서버는 GameManager.EntryDelaySeconds
+		-- 만큼 몬스터 스폰 시작을 미뤄서, 화면이 밝아질 때 몹이 막 다가오기 시작하도록 맞춰져 있다
+		-- 보상 팝업을 닫지 않고 바로 게임을 시작하면 배지 보류분이 안 풀려서 로비로 돌아왔을 때
+		-- 코인/다이아가 실제보다 적게 보인다(재화 자체는 서버가 이미 지급 완료) — 여기서 정리한다
+		_RewardFlyUI:ReleaseAll()
+		_LoadingUI:PlayCharacterEntry(function()
+			if isvalid(self) then self.titleGroup.Enable = false end
+		end, characterIndex, function()
+			if not isvalid(self) then return end
+			self._entryStarting = false
+			_GameManager:RequestEntryPresentationFinished(entrySequence)
+			_TutorialGuideUI:TryStartFirstPlay()
+		end)
+
+		-- 맵/카드 초기화는 먼저 진행하되 전투는 연출 완료 신호까지 서버에서 정지한다.
+		_GameManager:RequestPresentedStart(timeAttack, characterIndex, episode, entrySequence)
+		-- 타이틀을 닫는 건 위 PlayEntry의 onCovered 콜백이 맡는다(화면이 검어진 뒤에 닫음).
+		-- 그래서 여기서 따로 닫지 않는다 — 에피소드별 분기도 더 이상 필요 없다.
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnButtonStateChanged(ButtonStateChangeEvent event, Entity buttonEntity)
+		-- Pressed 상태가 되는 순간 작아지고, 그 외(뗐을 때 등) 상태로 돌아오면 원래 크기로 복귀한다
+		if not isvalid(buttonEntity) then return end
+		-- 눌림 연출은 이제 공용 ButtonPressFxLogic이 모든 버튼에 건다(2026-09-26) — 여기서 또 크기를 바꾸면
+		-- 같은 버튼을 두 곳이 다퉈 중심 보정이 틀어진다. 연결은 남겨두되 아무것도 하지 않는다
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ShowLobby()
+		-- 게임오버 팝업의 X(로비로 가기)가 호출 — 런 상태는 건드리지 않고 타이틀 화면만 다시 보여준다
+		self.titleGroup.Enable = true
+		-- 버그 수정(2026-08-21) — 죽은 런의 맵 BGM이 아직 채널을 차지하고 있으므로 즉시 끊고(PauseBGM으로
+		-- "멈추기"만 하면 로비 곡이 자동으로 돌아오지 않는다 — map01의 SoundComponent는 PlayOnEnable이라
+		-- 월드 부팅 시 1회만 자동재생되고 이후엔 재트리거되지 않음), 로비 전용 BGM을 명시적으로 다시 재생한다.
+		_SoundService:StopBGM(true)
+		_SoundOptionLogic:PlayBgm(self.LobbyBgmRUID, 1.0)
+		log("TitleUI: ShowLobby")
+		-- 판 도중에 해금된 캐릭터(쉐이드/린) 축하 팝업은 로비로 돌아왔을 때 띄운다(유저 지정 2026-09-30)
+		_CharacterUnlockUI:TryShowPending()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		if self._startHandler then self.btnStart.Entity:DisconnectEvent(ButtonClickEvent, self._startHandler) end
+		if self._startStateHandler then self.btnStart.Entity:DisconnectEvent(ButtonStateChangeEvent, self._startStateHandler) end
+		if self._shopHandler then self.btnShop.Entity:DisconnectEvent(ButtonClickEvent, self._shopHandler) end
+		if self._diaShopHandler then self.btnDiaShop.Entity:DisconnectEvent(ButtonClickEvent, self._diaShopHandler) end
+		if self._skillHandler then self.btnSkill.Entity:DisconnectEvent(ButtonClickEvent, self._skillHandler) end
+		if self._battleHandler then self.btnBattle.Entity:DisconnectEvent(ButtonClickEvent, self._battleHandler) end
+		if self._relicHandler then self.btnRelic.Entity:DisconnectEvent(ButtonClickEvent, self._relicHandler) end
+		if self._rankHandler then self.btnRank.Entity:DisconnectEvent(ButtonClickEvent, self._rankHandler) end
+		if self._equipHandler then self.btnEquip.Entity:DisconnectEvent(ButtonClickEvent, self._equipHandler) end
+		if self._shopIconAnimEndHandler then self.shopIcon.Entity:DisconnectEvent(SpriteGUIAnimPlayerEndEvent, self._shopIconAnimEndHandler) end
+		if self._newItemHandler then _UserService.LocalPlayer:DisconnectEvent(NewItemEvent, self._newItemHandler) end
+	end
+
+	-- 가방 아이콘(btnEquip) 레드닷 — 확인 안 한 새 아이템이 있으면 표시. PkgPlayerInventory의
+	-- NewItemEvent(장비/아이템 획득·확인 시마다 발생)에 연결해서 갱신한다.
+	@ExecSpace("ClientOnly")
+	method void RefreshEquipNavDot()
+		-- 배지는 "베이스 원 + 하이라이트 + 느낌표" 자식 구조라 엔티티 단위로 토글한다
+		local redDot = self.btnEquip.Entity:GetChildByName("RedDot")
+		if not isvalid(redDot) then return end
+		local playerInventory = _UserService.LocalPlayer.PkgPlayerInventory
+		local hasNewItem = isvalid(playerInventory) and playerInventory:HasAnyNewItem()
+		-- 유저 지정(2026-09-18): 레벨업 보상(가방 → 프로필 판때기에서 열림)을 받을 게 있어도 느낌표를 띄운다
+		local canClaimLevelReward = _LevelRewardLogic:CanClaimNext()
+		redDot.Enable = hasNewItem or canClaimLevelReward
+	end
+
+	-- 스킬탭 아이콘(btnSkill) 레드닷 — SkillInventory.OnSyncProperty(NewSet)가 이 메서드를 직접 부른다
+	@ExecSpace("ClientOnly")
+	method void RefreshSkillNavDot()
+		local redDot = self.btnSkill.Entity:GetChildByName("RedDot")
+		if not isvalid(redDot) then return end
+		redDot.Enable = _SkillInventory:HasAnyNewSkill()
+	end
+
+	-- 유물탭 아이콘(btnRelic) 레드닷 — RelicInventory.OnSyncProperty(NewSet)가 이 메서드를 직접 부른다
+	@ExecSpace("ClientOnly")
+	method void RefreshRelicNavDot()
+		local redDot = self.btnRelic.Entity:GetChildByName("RedDot")
+		if not isvalid(redDot) then return end
+		redDot.Enable = _RelicInventory:HasAnyNewRelic()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUpdate(number delta)
+		-- 로비/레이드 화면이 떠 있으면 뒤에 깔린 인게임 HUD·콜로세움 UI 버튼이 안 눌리게 한다(값이 바뀔 때만 쓴다)
+		local covered = (isvalid(self.titleGroup) and self.titleGroup.Enable) or _RaidUI:IsOpen()
+		local state = 1
+		if covered then state = 0 end
+		if state == self._hudInteractState then return end
+		self._hudInteractState = state
+		local interactable = not covered
+		if isvalid(self.hudCanvas) then self.hudCanvas.Interactable = interactable end
+		if isvalid(self.arenaCanvas) then self.arenaCanvas.Interactable = interactable end
+		log("TitleUI: in-game HUD interactable=" .. tostring(interactable))
+	end
+
+end
+

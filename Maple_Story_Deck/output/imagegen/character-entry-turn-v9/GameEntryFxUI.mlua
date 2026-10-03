@@ -1,0 +1,300 @@
+@Logic
+script GameEntryFxUI extends Logic
+
+	-- 선택 캐릭터가 화면에 스며들고 시점이 안정된 뒤 전투가 시작된다.
+	property boolean PresentationEnabled = true
+	property Entity effectRoot = "8782e100-799f-4606-8b6f-9900f7b7cbe7"
+	property Entity silhouette = "bdd58432-cfee-444c-850d-dc850d757514"
+	property number Duration = 1.16
+	property number ImpactSeconds = 0.88
+	property number TurnDuration = 2.06
+	property number _activeDuration = 1.16
+	property boolean _turnEntry = false
+	property table _poses = {}
+	property table _turnSprites = {}
+	property table _mattes = {}
+	property boolean _turnAssetsReady = false
+	property number _width = 1920
+	property boolean _running = false
+	property number _elapsed = 0
+	property number _aspect = 0.8
+	property integer _characterIndex = -1
+	property integer _playCount = 0
+	property boolean _impactLogged = false
+	property boolean _bodyVisible = false
+	property table _render = {}
+	property number _height = 1080
+	property any _onFinished = nil
+	property any _entryCamera = nil
+	property number _cameraBaseZoom = 100
+	property boolean _cameraActive = false
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		self._render = {}
+		if isvalid(self.effectRoot) and isvalid(self.silhouette) then
+			local shade = self.effectRoot:GetChildByName("Shade")
+			if isvalid(shade) then
+				self._render = {
+					mainTransform = self.silhouette.UITransformComponent,
+					mainAlpha = self.silhouette.CanvasGroupComponent,
+					mainSprite = self.silhouette.SpriteGUIRendererComponent,
+					shadeAlpha = shade.CanvasGroupComponent
+				}
+			end
+		end
+
+		self._poses = {}
+		self._mattes = {}
+		self._turnAssetsReady = false
+		if self._render.mainAlpha ~= nil then
+			table.insert(self._poses, {entity=self.silhouette, transform=self._render.mainTransform, alpha=self._render.mainAlpha, sprite=self._render.mainSprite})
+			local pose1 = self.effectRoot:GetChildByName("TurnPose1")
+			if isvalid(pose1) then
+				table.insert(self._poses, {entity=pose1, transform=pose1.UITransformComponent, alpha=pose1.CanvasGroupComponent, sprite=pose1.SpriteGUIRendererComponent})
+			end
+			local pose2 = self.effectRoot:GetChildByName("TurnPose2")
+			if isvalid(pose2) then
+				table.insert(self._poses, {entity=pose2, transform=pose2.UITransformComponent, alpha=pose2.CanvasGroupComponent, sprite=pose2.SpriteGUIRendererComponent})
+			end
+			local pose3 = self.effectRoot:GetChildByName("TurnPose3")
+			if isvalid(pose3) then
+				table.insert(self._poses, {entity=pose3, transform=pose3.UITransformComponent, alpha=pose3.CanvasGroupComponent, sprite=pose3.SpriteGUIRendererComponent})
+			end
+			local pose4 = self.effectRoot:GetChildByName("TurnPose4")
+			if isvalid(pose4) then
+				table.insert(self._poses, {entity=pose4, transform=pose4.UITransformComponent, alpha=pose4.CanvasGroupComponent, sprite=pose4.SpriteGUIRendererComponent})
+			end
+			for _, name in ipairs({"VisionTop", "VisionBottom"}) do
+				local matte = self.effectRoot:GetChildByName(name)
+				if isvalid(matte) then table.insert(self._mattes, {entity=matte, transform=matte.UITransformComponent, alpha=matte.CanvasGroupComponent}) end
+			end
+			self._turnSprites = {
+				[0] = {frontRuid="f13366e4ab0c4523b3f96f131aafbe85", frames={"3becabeeb6834a28803afdc050164b76", "7df1221d606845a3a609405403a58240", "b6e8b1ce33a84187879c79a1cbc3ef77", "aba120c33408429f8579050db86d31a7"}, aspects={0.78378378, 0.78378378, 0.78378378, 0.78378378}, ready=false},
+				[1] = {frontRuid="c8d5851228a844da80c8c94586b06aa7", frames={"66d911a74cd845be888d6fdad82980cb", "9b317f5950b84b35ab65ab01dcf568b4", "54f45fe540a94af5aab20092c037c134", "9dd617d1316941aebda38a98893e39de"}, aspects={0.90540541, 0.90540541, 0.90540541, 0.90540541}, ready=false},
+				[2] = {frontRuid="c26beb96e46e41289ecd838a62c60da1", frames={"3ad7ae1bbbb54f25a2c620f97da16876", "3a84023a40514951890c1a544b84892a", "52ec5f05d7974672b8a545572fcad029", "7e6111eefbb74ff19ab323eae48f7a12"}, aspects={0.95348837, 0.95348837, 0.95348837, 0.95348837}, ready=false},
+				[3] = {frontRuid="a8348a83ab4343409cd461ddd83c6730", frames={"e7db945e01254a3e8c836e6af55f0858", "4f5e538d1271488b93d4485f3e631608", "1195c596813e4147acfd40af03166c11", "6e71acef54e84ebba88da118ce4455b6"}, aspects={0.82666667, 0.84, 0.85333333, 0.77333333}, ready=false},
+				[4] = {frontRuid="e64d2ef49017475b925f18c98510ee7f", frames={"01449a0172e0461c894438fd809efd49", "d1b4525e05f5472d870ef73ac0d87ed3", "f0a0577900b544cba796e4f44d76d974", "c46a3ebe550948daa1c573d82c12e257"}, aspects={0.82352941, 0.77941176, 0.79411765, 0.83823529}, ready=false},
+			}
+			-- 각 캐릭터의 텍스처를 미리 준비해 돌아가는 순간의 로딩을 없앤다.
+			for _, set in pairs(self._turnSprites) do
+				local ready = true
+				for _, ruid in ipairs(set.frames) do
+					local texture = _ResourceService:LoadSpriteAndWait(ruid)
+					if texture == nil or texture.Height <= 0 then ready = false end
+				end
+				set.ready = ready
+			end
+			self._turnAssetsReady = (#self._poses == 5 and #self._mattes == 2)
+		end
+		self:Stop()
+		log("GameEntryFxUI started (all characters turn and vision v9, enabled=" .. tostring(self.PresentationEnabled) .. ")")
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean Play(integer characterIndex)
+		return self:PlayWithCompletion(characterIndex, nil)
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean PlayWithCompletion(integer characterIndex, any onFinished)
+		self:Stop()
+		if not self.PresentationEnabled or not isvalid(self.effectRoot) or self._render.mainAlpha == nil then return false end
+		local characters = _WorldCharacterSelectUI._characters
+		local data = nil
+		if characters ~= nil then data = characters[characterIndex + 1] end
+		if data == nil or data.iconRuid == "" then return false end
+		local sprite = _ResourceService:LoadSpriteAndWait(data.iconRuid)
+		if sprite == nil or sprite.Height <= 0 then return false end
+		self._aspect = math.max(0.35, math.min(1.7, sprite.Width / sprite.Height))
+		self.silhouette.SpriteGUIRendererComponent.ImageRUID = DataRef(data.iconRuid)
+		self._onFinished = onFinished
+		self._characterIndex = characterIndex
+		local turnSet = self._turnSprites[characterIndex]
+		self._turnEntry = self._turnAssetsReady and turnSet ~= nil and turnSet.ready and turnSet.frontRuid == data.iconRuid
+		if self._turnEntry then
+			for i = 2, #self._poses do
+				self._poses[i].sprite.ImageRUID = DataRef(turnSet.frames[i - 1])
+			end
+		end
+		self._activeDuration = self.Duration
+		if self._turnEntry then self._activeDuration = self.TurnDuration end
+		self._elapsed = 0
+		self._impactLogged = false
+		self._playCount = self._playCount + 1
+		self._height = math.max(360, self.effectRoot.UITransformComponent.RectSize.y)
+		local h = self._height
+		self._width = math.max(360, self.effectRoot.UITransformComponent.RectSize.x)
+		for i, pose in ipairs(self._poses) do
+			local aspect = self._aspect
+			if self._turnEntry and i > 1 then aspect = turnSet.aspects[i - 1] end
+			pose.transform.RectSize = Vector2(h * aspect, h)
+			pose.transform.UIScale = Vector3(1, 1, 1)
+			pose.sprite.Color = Color(1, 1, 1, 1)
+			pose.alpha.GroupAlpha = 0
+			pose.entity.Enable = self._turnEntry or pose.entity == self.silhouette
+		end
+		for _, matte in ipairs(self._mattes) do
+			matte.transform.RectSize = Vector2(self._width + 4, h * 0.5 + 2)
+			matte.transform.UIScale = Vector3(1, 1, 1)
+			matte.alpha.GroupAlpha = 0
+			matte.entity.Enable = self._turnEntry
+		end
+		local r = self._render
+		-- 기본 크기는 준비할 때 한 번만 정한다. 재생 중 확대는 UIScale을 사용한다.
+		r.mainTransform.RectSize = Vector2(h * self._aspect, h)
+		self.silhouette.Enable = true
+		self._bodyVisible = true
+		-- 현재 PC/모바일 줌 비율을 보관하고 연출 종료·중단 때 같은 카메라를 복원한다.
+		self._entryCamera = _CameraService:GetCurrentCameraComponent()
+		self._cameraActive = isvalid(self._entryCamera)
+		if self._cameraActive then self._cameraBaseZoom = self._entryCamera.ZoomRatio end
+		self:RenderFrame(0)
+		self.effectRoot.Enable = true
+		log("GameEntryFxUI create char=" .. tostring(characterIndex) .. " turn=" .. tostring(self._turnEntry) .. " duration=" .. tostring(self._activeDuration) .. " ruid=" .. data.iconRuid)
+		-- UI 준비와 텍스처 로딩이 끝난 뒤 재생을 시작한다.
+		self._elapsed = 0
+		self._running = true
+		return true
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RenderFrame(number elapsed)
+		local r = self._render
+		if r.mainAlpha == nil then return end
+		if self._turnEntry then self:RenderTurnFrame(elapsed); return end
+		local t = math.max(0, elapsed)
+		local h = self._height
+		local u = math.max(0, math.min(1, (t - 0.16) / math.max(0.05, self.ImpactSeconds - 0.16)))
+		if u < 1 then
+			if not self._bodyVisible then
+				self.silhouette.Enable = true
+				self._bodyVisible = true
+			end
+			-- 처음 캐릭터를 알아볼 시간을 주고, 눈 높이의 중심으로 크게 들어온다.
+			local scale = 0.58 + 5.00 * u ^ 2.8
+			local height = h * scale
+			local appear = math.max(0, math.min(1, t / 0.10))
+			appear = appear * appear * (3 - 2 * appear)
+			local fadeTime = math.max(0, math.min(1, (u - 0.62) / 0.38))
+			local fade = (1 - 0.20 * u) * (1 - fadeTime * fadeTime * (3 - 2 * fadeTime))
+			local tintTime = math.max(0, math.min(1, (u - 0.22) / 0.46))
+			local tint = 1 - 0.94 * tintTime * tintTime * (3 - 2 * tintTime)
+			local pos = Vector2(0, -height * 0.18 - h * 0.04 * (1 - u))
+			r.mainSprite.Color = Color(tint, tint, math.min(1, tint * 1.07), 1)
+			r.mainTransform.UIScale = Vector3(scale, scale, 1)
+			r.mainTransform.anchoredPosition = pos
+			r.mainAlpha.GroupAlpha = 0.98 * appear * fade
+			r.shadeAlpha.GroupAlpha = 0.025 * appear * (1 - u)
+		elseif self._bodyVisible then
+			r.mainAlpha.GroupAlpha = 0
+			r.shadeAlpha.GroupAlpha = 0
+			self.silhouette.Enable = false
+			self._bodyVisible = false
+		end
+		-- 실루엣과 함께 시점을 살짝 당기고, 몸이 스며든 다음 원래 시야로 안정시킨다.
+		if self._cameraActive and isvalid(self._entryCamera) then
+			if _CameraService:GetCurrentCameraComponent() == self._entryCamera then
+				local approach = math.max(0, math.min(1, (t - 0.25) / math.max(0.05, self.ImpactSeconds - 0.25)))
+				approach = approach * approach * (3 - 2 * approach)
+				local settle = math.max(0, math.min(1, (t - self.ImpactSeconds) / 0.24))
+				settle = settle * settle * (3 - 2 * settle)
+				local zoom = self._cameraBaseZoom * (1 + 0.055 * approach * (1 - settle))
+				self._entryCamera.ZoomRatio = math.max(self._entryCamera.ZoomRatioMin, math.min(self._entryCamera.ZoomRatioMax, zoom))
+			else
+				-- 다른 시스템이 카메라를 바꾸면 그 시점은 건드리지 않는다.
+				self._cameraActive = false
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method number Ease(number value)
+		local u = math.max(0, math.min(1, value))
+		return u * u * (3 - 2 * u)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RenderTurnFrame(number elapsed)
+		local t = math.max(0, elapsed)
+		local h = self._height
+		-- 0.28초 정면 → 네 방향으로 돌아서기 → 뒤돌아선 채 눈높이로 접근.
+		local turn = math.max(0, math.min(4, (t - 0.28) / 0.14))
+		local index = math.floor(turn) + 1
+		local blend = self:Ease((turn - math.floor(turn) - 0.50) / 0.50)
+		local absorb = math.max(0, math.min(1, (t - 0.92) / 0.64))
+		local scale = 0.60 + 6.50 * absorb ^ 2.5
+		local fade = 1 - self:Ease((absorb - 0.38) / 0.62)
+		local appear = self:Ease(t / 0.12)
+		local y = -h * scale * (0.11 + 0.01 * absorb)
+		for i, pose in ipairs(self._poses) do
+			local weight = 0
+			if i == index then weight = 1 - blend end
+			if i == index + 1 then weight = blend end
+			pose.transform.UIScale = Vector3(scale, scale, 1)
+			pose.transform.anchoredPosition = Vector2(0, y)
+			pose.alpha.GroupAlpha = weight * appear * fade
+		end
+		-- 몸이 스며든 다음 눈을 뜨듯 위아래가 열리고 카메라 시야도 원래 폭으로 펼쳐진다.
+		local open = self:Ease((t - 1.40) / 0.62)
+		local eyelid = self:Ease((t - 1.12) / 0.20) * (1 - self:Ease((open - 0.75) / 0.25))
+		for _, matte in ipairs(self._mattes) do
+			matte.transform.UIScale = Vector3(1, math.max(0.001, 1 - open), 1)
+			matte.alpha.GroupAlpha = eyelid
+		end
+		self._render.shadeAlpha.GroupAlpha = 0.52 * appear * (1 - open)
+		if self._cameraActive and isvalid(self._entryCamera) then
+			if _CameraService:GetCurrentCameraComponent() == self._entryCamera then
+				local narrow = self:Ease((t - 0.84) / 0.52)
+				local zoom = self._cameraBaseZoom * (1 + 0.28 * narrow * (1 - open))
+				self._entryCamera.ZoomRatio = math.max(self._entryCamera.ZoomRatioMin, math.min(self._entryCamera.ZoomRatioMax, zoom))
+			else
+				self._entryCamera.ZoomRatio = self._cameraBaseZoom
+				self._cameraActive = false
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUpdate(number delta)
+		if not self._running then return end
+		if not self.PresentationEnabled or not isvalid(self.effectRoot) then self:Finish(); return end
+		self._elapsed = self._elapsed + delta
+		if self._elapsed >= self._activeDuration then
+			self:RenderFrame(self._activeDuration)
+			self:Finish()
+			return
+		end
+		self:RenderFrame(self._elapsed)
+		if self._elapsed >= self.ImpactSeconds and not self._impactLogged then
+			self._impactLogged = true
+			log("GameEntryFxUI impact char=" .. tostring(self._characterIndex))
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Finish()
+		local done = self._onFinished
+		self:Stop()
+		log("GameEntryFxUI finish char=" .. tostring(self._characterIndex))
+		if done ~= nil then done() end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Stop()
+		if self._cameraActive and isvalid(self._entryCamera) then
+			self._entryCamera.ZoomRatio = self._cameraBaseZoom
+		end
+		self._cameraActive = false
+		self._entryCamera = nil
+		self._onFinished = nil
+		self._running = false
+		self._elapsed = 0
+		if isvalid(self.effectRoot) then self.effectRoot.Enable = false end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		self:Stop()
+	end
+end

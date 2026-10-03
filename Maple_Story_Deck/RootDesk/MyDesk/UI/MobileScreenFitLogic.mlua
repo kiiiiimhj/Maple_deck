@@ -634,6 +634,24 @@ script MobileScreenFitLogic extends Logic
 			-- 세로로 넘치는 만큼은 아래쪽에서만 잘리게 위를 화면 위에 붙인다(로딩 화면 로고 보호)
 			if self:IsTopAligned(path) and H > (r.y1 - r.y0) then
 				cy = r.y1 - H / 2
+			elseif not self:IsTopAligned(path) then
+				-- PC에서 배경이 화면 가운데보다 올라가 있는 만큼(BattlePanel +58 등) 모바일에서도 올린다 —
+				-- 2026-10-02 유저 리포트 "모바일은 이미지가 좀 내려가 있다, PC처럼 올려줘".
+				-- 기준은 "실제 화면 중심 + PC 오프셋(이미지 배율만큼 비례)". 올린 뒤에도 화면을 다 덮도록 모자라면 키운다.
+				local m = self:MeasureScreenLocal(t, w, h)
+				if m ~= nil then
+					local sb = m.y0 + offset.y
+					local st = m.y1 + offset.y
+					local design = self:GetDesignCenterY(e, o.pos.y)
+					cy = (sb + st) / 2 + design * (H / h)
+					local need = math.max(st - cy, cy - sb) * 2
+					if need > H then
+						W = W * (need / H)
+						H = need
+					end
+					log(string.format("MobileScreenFitLogic: %s raised by design %.1f -> center %.0f (screen %.0f..%.0f)",
+						path, design, cy, sb, st))
+				end
 			end
 		end
 
@@ -651,6 +669,19 @@ script MobileScreenFitLogic extends Logic
 		log(string.format("MobileScreenFitLogic: fit %s stretch=%s measured=%s orig=%.0fx%.0f -> %.0fx%.0f center(%.0f,%.0f)",
 			path, tostring(o.stretch), tostring(r.measured), w, h, W, H, cx, cy))
 		return true
+	end
+
+	@ExecSpace("ClientOnly")
+	method number GetDesignCenterY(Entity e, number selfOrigY)
+		-- PC 기준으로 이 요소의 중심이 캔버스 가운데보다 얼마나 위에 있는지(자신 원본 + UI 그룹 루트 전까지의 부모들).
+		-- 가운데 pivot이라 stretch여도 anchoredPosition.y가 곧 중심 오프셋이다.
+		local y = selfOrigY
+		local p = e.Parent
+		while isvalid(p) and p.UIGroupComponent == nil and p.UITransformComponent ~= nil do
+			y = y + p.UITransformComponent.anchoredPosition.y
+			p = p.Parent
+		end
+		return y
 	end
 
 	-- MapTransitionLogic 와이프 패널용: 화면 전체를 덮는 크기와 중심(anchoredPosition 좌표)을 돌려준다.

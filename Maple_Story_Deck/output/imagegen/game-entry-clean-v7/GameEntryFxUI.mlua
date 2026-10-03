@@ -1,0 +1,175 @@
+@Logic
+script GameEntryFxUI extends Logic
+
+	-- 선택 캐릭터가 화면에 스며들고 시점이 안정된 뒤 전투가 시작된다.
+	property boolean PresentationEnabled = true
+	property Entity effectRoot = "8782e100-799f-4606-8b6f-9900f7b7cbe7"
+	property Entity silhouette = "bdd58432-cfee-444c-850d-dc850d757514"
+	property number Duration = 1.16
+	property number ImpactSeconds = 0.88
+	property boolean _running = false
+	property number _elapsed = 0
+	property number _aspect = 0.8
+	property integer _characterIndex = -1
+	property integer _playCount = 0
+	property boolean _impactLogged = false
+	property boolean _bodyVisible = false
+	property table _render = {}
+	property number _height = 1080
+	property any _onFinished = nil
+	property any _entryCamera = nil
+	property number _cameraBaseZoom = 100
+	property boolean _cameraActive = false
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		self._render = {}
+		if isvalid(self.effectRoot) and isvalid(self.silhouette) then
+			local shade = self.effectRoot:GetChildByName("Shade")
+			if isvalid(shade) then
+				self._render = {
+					mainTransform = self.silhouette.UITransformComponent,
+					mainAlpha = self.silhouette.CanvasGroupComponent,
+					mainSprite = self.silhouette.SpriteGUIRendererComponent,
+					shadeAlpha = shade.CanvasGroupComponent
+				}
+			end
+		end
+		self:Stop()
+		log("GameEntryFxUI started (character only v7, enabled=" .. tostring(self.PresentationEnabled) .. ")")
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean Play(integer characterIndex)
+		return self:PlayWithCompletion(characterIndex, nil)
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean PlayWithCompletion(integer characterIndex, any onFinished)
+		self:Stop()
+		if not self.PresentationEnabled or not isvalid(self.effectRoot) or self._render.mainAlpha == nil then return false end
+		local characters = _WorldCharacterSelectUI._characters
+		local data = nil
+		if characters ~= nil then data = characters[characterIndex + 1] end
+		if data == nil or data.iconRuid == "" then return false end
+		local sprite = _ResourceService:LoadSpriteAndWait(data.iconRuid)
+		if sprite == nil or sprite.Height <= 0 then return false end
+		self._aspect = math.max(0.35, math.min(1.7, sprite.Width / sprite.Height))
+		self.silhouette.SpriteGUIRendererComponent.ImageRUID = DataRef(data.iconRuid)
+		self._onFinished = onFinished
+		self._characterIndex = characterIndex
+		self._elapsed = 0
+		self._impactLogged = false
+		self._playCount = self._playCount + 1
+		self._height = math.max(360, self.effectRoot.UITransformComponent.RectSize.y)
+		local h = self._height
+		local r = self._render
+		-- 기본 크기는 준비할 때 한 번만 정한다. 재생 중 확대는 UIScale을 사용한다.
+		r.mainTransform.RectSize = Vector2(h * self._aspect, h)
+		self.silhouette.Enable = true
+		self._bodyVisible = true
+		-- 현재 PC/모바일 줌 비율을 보관하고 연출 종료·중단 때 같은 카메라를 복원한다.
+		self._entryCamera = _CameraService:GetCurrentCameraComponent()
+		self._cameraActive = isvalid(self._entryCamera)
+		if self._cameraActive then self._cameraBaseZoom = self._entryCamera.ZoomRatio end
+		self:RenderFrame(0)
+		self.effectRoot.Enable = true
+		log("GameEntryFxUI create char=" .. tostring(characterIndex) .. " ruid=" .. data.iconRuid)
+		-- UI 준비와 텍스처 로딩이 끝난 뒤 재생을 시작한다.
+		self._elapsed = 0
+		self._running = true
+		return true
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RenderFrame(number elapsed)
+		local r = self._render
+		if r.mainAlpha == nil then return end
+		local t = math.max(0, elapsed)
+		local h = self._height
+		local u = math.max(0, math.min(1, (t - 0.16) / math.max(0.05, self.ImpactSeconds - 0.16)))
+		if u < 1 then
+			if not self._bodyVisible then
+				self.silhouette.Enable = true
+				self._bodyVisible = true
+			end
+			-- 처음 캐릭터를 알아볼 시간을 주고, 눈 높이의 중심으로 크게 들어온다.
+			local scale = 0.58 + 5.00 * u ^ 2.8
+			local height = h * scale
+			local appear = math.max(0, math.min(1, t / 0.10))
+			appear = appear * appear * (3 - 2 * appear)
+			local fadeTime = math.max(0, math.min(1, (u - 0.62) / 0.38))
+			local fade = (1 - 0.20 * u) * (1 - fadeTime * fadeTime * (3 - 2 * fadeTime))
+			local tintTime = math.max(0, math.min(1, (u - 0.22) / 0.46))
+			local tint = 1 - 0.94 * tintTime * tintTime * (3 - 2 * tintTime)
+			local pos = Vector2(0, -height * 0.18 - h * 0.04 * (1 - u))
+			r.mainSprite.Color = Color(tint, tint, math.min(1, tint * 1.07), 1)
+			r.mainTransform.UIScale = Vector3(scale, scale, 1)
+			r.mainTransform.anchoredPosition = pos
+			r.mainAlpha.GroupAlpha = 0.98 * appear * fade
+			r.shadeAlpha.GroupAlpha = 0.025 * appear * (1 - u)
+		elseif self._bodyVisible then
+			r.mainAlpha.GroupAlpha = 0
+			r.shadeAlpha.GroupAlpha = 0
+			self.silhouette.Enable = false
+			self._bodyVisible = false
+		end
+		-- 실루엣과 함께 시점을 살짝 당기고, 몸이 스며든 다음 원래 시야로 안정시킨다.
+		if self._cameraActive and isvalid(self._entryCamera) then
+			if _CameraService:GetCurrentCameraComponent() == self._entryCamera then
+				local approach = math.max(0, math.min(1, (t - 0.25) / math.max(0.05, self.ImpactSeconds - 0.25)))
+				approach = approach * approach * (3 - 2 * approach)
+				local settle = math.max(0, math.min(1, (t - self.ImpactSeconds) / 0.24))
+				settle = settle * settle * (3 - 2 * settle)
+				local zoom = self._cameraBaseZoom * (1 + 0.055 * approach * (1 - settle))
+				self._entryCamera.ZoomRatio = math.max(self._entryCamera.ZoomRatioMin, math.min(self._entryCamera.ZoomRatioMax, zoom))
+			else
+				-- 다른 시스템이 카메라를 바꾸면 그 시점은 건드리지 않는다.
+				self._cameraActive = false
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUpdate(number delta)
+		if not self._running then return end
+		if not self.PresentationEnabled or not isvalid(self.effectRoot) then self:Finish(); return end
+		self._elapsed = self._elapsed + delta
+		if self._elapsed >= self.Duration then
+			self:RenderFrame(self.Duration)
+			self:Finish()
+			return
+		end
+		self:RenderFrame(self._elapsed)
+		if self._elapsed >= self.ImpactSeconds and not self._impactLogged then
+			self._impactLogged = true
+			log("GameEntryFxUI impact char=" .. tostring(self._characterIndex))
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Finish()
+		local done = self._onFinished
+		self:Stop()
+		log("GameEntryFxUI finish char=" .. tostring(self._characterIndex))
+		if done ~= nil then done() end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Stop()
+		if self._cameraActive and isvalid(self._entryCamera) then
+			self._entryCamera.ZoomRatio = self._cameraBaseZoom
+		end
+		self._cameraActive = false
+		self._entryCamera = nil
+		self._onFinished = nil
+		self._running = false
+		self._elapsed = 0
+		if isvalid(self.effectRoot) then self.effectRoot.Enable = false end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		self:Stop()
+	end
+end

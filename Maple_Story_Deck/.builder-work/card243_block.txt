@@ -1,0 +1,93 @@
+	-- ── 베노아 조합: 톡식 봄버(카드243) — 유저 지정 2026-10-04(정정: 장판 아님) ──
+	-- 포이즌 버스트(229) Lv5 + 마나 웨이브(232) + 매직 가드(234) 보유 시 선택지에 뜨고, 해금되면 포이즌 버스트 슬롯을 그대로 넘겨받는다. 3레벨까지.
+	-- 260/280/300, 쿨 6초, 타겟 1명. 포이즌 버스트와 같은 독 구체(d22e7d28)가 맺히고, 터지는 부분만 다르다(유저 지정):
+	-- 구체 위에 hit/0(c73783da)이 겹쳐 터지는 순간 그 영역 안 몬스터 전부 대미지 + 독 도트(1초마다 기준 대미지의 30/40/50%), 끝으로 hit/1(5ec3bc93)로 사라진다.
+	-- 독 지속은 유저 표에 없어 포이즌 버스트와 같은 2초로 정함. 포이즌 트랩 대상 표시(MarkPoisoned) 포함.
+	-- 클립 실측: hit/0 8프레임 0.72초 ~316px 가운데 기준점 / hit/1 9프레임 0.81초 ~520px 가운데 기준점
+	@Sync property integer ToxicBomberLevel = 0
+	property number Card243Cooldown = 6.0
+	property string Card243BurstRUID = "c73783da50b94704983adf3389bda8c2"  -- hit/0 — 구체 위에 겹쳐 터짐
+	property string Card243VanishRUID = "5ec3bc9335be40d3ae8bf778cd2d5a17"  -- hit/1 — 사라지는 연출
+	property string Card243UseSoundRUID = "1191639174ce47a09a52a075c6ed51c6"
+	property string Card243HitSoundRUID = "3fe422522f1841e68da7604640b87af4"
+	property number Card243BurstDelay = 0.14  -- 독 구체 3번째 프레임(포이즌 버스트 1타와 같은 시점) — 터짐 + 대미지
+	property number Card243BurstScale = 0.5
+	property number Card243BurstLifetime = 0.68  -- 클립 0.72초보다 살짝 짧게
+	property number Card243VanishScale = 0.4
+	property number Card243VanishLifetime = 0.76  -- 클립 0.81초보다 살짝 짧게
+	property number Card243HalfW = 0.9  -- 터지는 영역 타원(발밑 기준, 1배) — hit/0 그림 폭에 맞춤
+	property number Card243HalfH = 0.5
+	property integer Card243PoisonSeconds = 2
+
+	method number GetToxicBomberDamage(integer level)
+		-- 레벨별 기준 대미지(유저 표) — 260/280/300
+		if level >= 3 then return 300
+		elseif level >= 2 then return 280
+		end
+		return 260
+	end
+
+	method number GetToxicBomberTickRatio(integer level)
+		-- 독 도트 초당 비율 — 30/40/50%
+		if level >= 3 then return 0.5
+		elseif level >= 2 then return 0.4
+		end
+		return 0.3
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ToxicBomberAttack(number damage, boolean isCrit)
+		-- 톡식 봄버 시전 — 가장 가까운 1명 자리에 독 구체 → 터지는 순간 영역 대미지 + 독 도트 → 사라짐
+		local map = self:GetCurrentMap()
+		if map == nil then return end
+		local target = self:GetClosestTargets(1)[1]
+		if not isvalid(target) or not isvalid(target.Entity) then return end
+		self:PlayBreathSfx(self.Card243UseSoundRUID)
+		local ratio = self:GetEffectScaleRatio(target)
+		local tp = self:WorldToCurrentMapLocal(target.Entity.TransformComponent.WorldPosition)
+		local band = self:GetDepthBand(target)
+		local zoneIndex = target._spawnZoneIndex
+		local level = self.ToxicBomberLevel
+		local center = Vector3(tp.x, tp.y + self.Card229BodyYOffset * ratio, tp.z)
+		-- 포이즌 버스트와 같은 독 구체
+		local orb = self:SpawnEffect(self.Card229BurstRUID, Vector3(tp.x, tp.y + self.Card229BurstYOffset * ratio, tp.z), 0, 1.0, self.Card229BurstScale * ratio, 1)
+		if orb ~= nil then orb:Destroy(self.Card229BurstLifetime) end
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) then return end
+			if zoneIndex ~= _MapManager.CurrentMapIndex then return end
+			self:PlayBreathSfx(self.Card243HitSoundRUID)
+			local bfx = self:SpawnEffect(self.Card243BurstRUID, center, 0, 1.0, self.Card243BurstScale * ratio, 1)
+			if bfx ~= nil then bfx:Destroy(self.Card243BurstLifetime) end
+			local halfW = self.Card243HalfW * ratio
+			local halfH = self.Card243HalfH * ratio
+			local poisonPerTick = damage * self:GetToxicBomberTickRatio(level)
+			local hitCount = 0
+			for _, mob in ipairs(self:GetMonstersInCurrentZone(map)) do
+				---@type MonsterAI
+				local m = mob
+				if isvalid(m) and isvalid(m.Entity) and not m._dead then
+					local mp = m.Entity.TransformComponent.Position
+					if self:InEllipse(mp.x - tp.x, mp.y - tp.y, halfW, halfH) and self:IsInDepthBand(m, band) then
+						hitCount = hitCount + 1
+						if isCrit then _DpsMeterLogic:Tag(243, m):TakeDamageCrit(damage * 2)
+						else _DpsMeterLogic:Tag(243, m):TakeDamage(damage) end
+						if not m._dead then
+							-- 독 도트 100% — 1초마다 기준 대미지(치명타 전)의 30/40/50% + 포이즌 트랩 대상 표시
+							m:ApplyDot(poisonPerTick, self.Card243PoisonSeconds, 1.0)
+							m:MarkPoisoned(self.Card243PoisonSeconds)
+						end
+					end
+				end
+			end
+			log("ToxicBomberHit: hit=" .. hitCount .. " dmg=" .. math.floor(isCrit and damage * 2 or damage) .. " poison=" .. math.floor(poisonPerTick) .. "x" .. self.Card243PoisonSeconds)
+			-- 터짐이 끝나갈 때 사라지는 연출로 넘긴다
+			_TimerService:SetTimerOnce(function()
+				if not isvalid(self) then return end
+				if zoneIndex ~= _MapManager.CurrentMapIndex then return end
+				local vfx = self:SpawnEffect(self.Card243VanishRUID, center, 0, 1.0, self.Card243VanishScale * ratio, 1)
+				if vfx ~= nil then vfx:Destroy(self.Card243VanishLifetime) end
+			end, self.Card243BurstLifetime - 0.05)
+		end, self.Card243BurstDelay)
+		log("ToxicBomberAttack: lv=" .. level .. " dmg=" .. math.floor(isCrit and damage * 2 or damage))
+	end
+
