@@ -15164,29 +15164,42 @@ script CardManager extends Logic
 	@Sync property integer HighWisdomLevel = 0
 	@Sync property integer ElementalAdeptLevel = 0  -- 엘리멘탈 어뎁팅(236) 크리티컬 대미지 +5/8/11/14/17% — MonsterAI.TakeDamageCrit* 3곳에서 가산
 
+	-- 로비 스킬 강화(인덱스 129~134) Lv3/6/9 보너스는 카드 레벨 수치에 더한다. 카드를 안 가진 판(레벨 0)엔 강화분도 없다
+	-- (컨센트레이션/아이언 바디와 같은 규칙 — 다른 캐릭터로 플레이할 때 새지 않게)
 	method number GetMagicAccelReduction()
-		-- 매직 액셀레이션(231) 쿨타임 감소율 — 5/7/10/12/15%
-		return _CardRegistry:GetChance(231, self.MagicAccelLevel)
+		-- 매직 액셀레이션(231) 쿨타임 감소율 — 5/7/10/12/15% + 로비 강화 1/2/3%
+		if self.MagicAccelLevel <= 0 then return 0 end
+		return _CardRegistry:GetChance(231, self.MagicAccelLevel) + self:GetSkillInvTierPercent(129, 0.01, 0.02, 0.03)
+	end
+
+	method number GetManaWaveChance()
+		-- 마나 웨이브(232) 크리티컬 확률 — 10/12/15/17/20% + 로비 강화 1/2/3% (RollCrit에서 가산)
+		if self.ManaWaveLevel <= 0 then return 0 end
+		return _CardRegistry:GetChance(232, self.ManaWaveLevel) + self:GetSkillInvTierPercent(130, 0.01, 0.02, 0.03)
 	end
 
 	method number GetElementalDrainMult()
-		-- 엘리멘탈 드레인(233) 틱 대미지 배율 — +3/6/9/12/15%
-		return 1.0 + _CardRegistry:GetChance(233, self.ElementalDrainLevel)
+		-- 엘리멘탈 드레인(233) 틱 대미지 배율 — +3/6/9/12/15% + 로비 강화 2/4/6%
+		if self.ElementalDrainLevel <= 0 then return 1.0 end
+		return 1.0 + _CardRegistry:GetChance(233, self.ElementalDrainLevel) + self:GetSkillInvTierPercent(131, 0.02, 0.04, 0.06)
 	end
 
 	method number GetMagicGuardReduction()
-		-- 매직 가드(234) 받는 피해 감소율 — 5/7/10/12/15%
-		return _CardRegistry:GetChance(234, self.MagicGuardLevel)
+		-- 매직 가드(234) 받는 피해 감소율 — 5/7/10/12/15% + 로비 강화 1/2/3%
+		if self.MagicGuardLevel <= 0 then return 0 end
+		return _CardRegistry:GetChance(234, self.MagicGuardLevel) + self:GetSkillInvTierPercent(132, 0.01, 0.02, 0.03)
 	end
 
 	method number GetElementalAdeptBonus()
-		-- 엘리멘탈 어뎁팅(236) 크리티컬 대미지 보너스
-		return _CardRegistry:GetChance(236, self.ElementalAdeptLevel)
+		-- 엘리멘탈 어뎁팅(236) 크리티컬 대미지 보너스 — 5/8/11/14/17% + 로비 강화 2/4/6%
+		if self.ElementalAdeptLevel <= 0 then return 0 end
+		return _CardRegistry:GetChance(236, self.ElementalAdeptLevel) + self:GetSkillInvTierPercent(134, 0.02, 0.04, 0.06)
 	end
 
 	method number GetHighWisdomMult()
-		-- 하이 위즈덤(235) 피해량 배율 — +3/6/9/12/15%
-		return 1.0 + _CardRegistry:GetChance(235, self.HighWisdomLevel)
+		-- 하이 위즈덤(235) 피해량 배율 — +3/6/9/12/15% + 로비 강화 1/2/3%
+		if self.HighWisdomLevel <= 0 then return 1.0 end
+		return 1.0 + _CardRegistry:GetChance(235, self.HighWisdomLevel) + self:GetSkillInvTierPercent(133, 0.01, 0.02, 0.03)
 	end
 
 	-- 표창술(214) 추가 공격 발동 확률 — 기본 공격이 나갈 때마다 TickCard(slotIndex==0)에서 굴린다.
@@ -15584,9 +15597,92 @@ script CardManager extends Logic
 	end
 
 	method integer GetExplosionBurnSeconds(integer level)
-		-- 화상 지속(초) = 틱 수 — Lv1~2:1초 / Lv3~5:2초
-		if level >= 3 then return 2 end
-		return 1
+		-- 화상 지속(초) = 틱 수 — Lv1~2:1초 / Lv3~5:2초. 로비 스킬 강화 Lv9면 +1초
+		local sec = 1
+		if level >= 3 then sec = 2 end
+		if self:GetSkillInvLevel2(225) >= 9 then sec = sec + self.BenoaInvLv9ExtraSeconds end
+		return sec
+	end
+
+	-- ── 베노아 로비 스킬 강화 Lv9(2026-10-04, 유저 확정표) — 투사체/타겟 수는 안 건드리고 비율·시간·범위만 올린다.
+	-- 각 스킬이 쓰는 지점에서 아래 getter를 부른다(GetSkillInvLevel2(cardIdx) >= 9 = 로비 강화 Lv9 달성)
+	property integer BenoaInvLv9ExtraSeconds = 1  -- 익스플로젼 화상 / 포이즌 미스트 독무 / 이그나이트 월 화상 지속 +1초
+	property number BenoaInvLv9ExtraBindSeconds = 0.5  -- 포이즌 트랩 속박 / 솔라 플레어 스턴 +0.5초
+	property number Card223InvLv9BurnRatio = 0.4  -- 플레임 오브 화상 틱 30% → 40%
+	property number Card224InvLv9AreaMult = 1.15  -- 포이즌 브레스 독구름 범위(판정 + 그림) +15%
+	property number Card228InvLv9BurnRatio = 0.6  -- 이그나이트 화상 틱 50% → 60%
+	property number Card229InvLv9PoisonRatio = 0.4  -- 포이즌 버스트 중독 틱 30% → 40%
+	property number Card238InvLv9AreaMult = 1.15  -- 미스트 이럽션 폭발 범위(판정 + 그림) +15%
+	property number Card240InvLv9OrbRatio = 0.65  -- 베놈 버스트 독 구슬 50% → 65%
+	property number Card241InvLv9ExtraBonus = 0.15  -- 베놈 스피어 추가타 +15%p
+	property number Card243InvLv9PoisonRatio = 0.4  -- 톡식 봄버 중독 틱 30% → 40%
+	property number Card244InvLv9BlastMult = 1.2  -- 메테오 착탄 폭발 판정 +20%(그림은 이미 판정보다 커서 그대로)
+
+	method number GetFlameOrbBurnRatio()
+		if self:GetSkillInvLevel2(223) >= 9 then return self.Card223InvLv9BurnRatio end
+		return self.Card223BurnRatio
+	end
+
+	method number GetPoisonBreathAreaMult()
+		if self:GetSkillInvLevel2(224) >= 9 then return self.Card224InvLv9AreaMult end
+		return 1.0
+	end
+
+	method number GetPoisonMistDuration(integer cardTag)
+		-- 독무 지속 — 포이즌 미스트(226) 표식 독무만 Lv9에서 +1초(베놈 버스트(240) 독무는 그대로)
+		if cardTag == 226 and self:GetSkillInvLevel2(226) >= 9 then return self.Card226MistDuration + self.BenoaInvLv9ExtraSeconds end
+		return self.Card226MistDuration
+	end
+
+	method number GetPoisonTrapRootDuration()
+		if self:GetSkillInvLevel2(227) >= 9 then return self.Card227RootDuration + self.BenoaInvLv9ExtraBindSeconds end
+		return self.Card227RootDuration
+	end
+
+	method number GetIgniteBurnRatio()
+		if self:GetSkillInvLevel2(228) >= 9 then return self.Card228InvLv9BurnRatio end
+		return self.Card228BurnRatio
+	end
+
+	method number GetPoisonBurstPoisonRatio()
+		if self:GetSkillInvLevel2(229) >= 9 then return self.Card229InvLv9PoisonRatio end
+		return self.Card229PoisonRatio
+	end
+
+	method table GetBenoaFalloffPercents(integer cardIdx)
+		-- 블레이즈 샷(230) 관통 순서 / 플레임 스윕(237) 띠 3구간 비율 — 기본 100/50/25%, 로비 강화 Lv9면 100/65/40%
+		if self:GetSkillInvLevel2(cardIdx) >= 9 then return { 1.0, 0.65, 0.4 } end
+		return { 1.0, 0.5, 0.25 }
+	end
+
+	method number GetMistEruptionAreaMult()
+		if self:GetSkillInvLevel2(238) >= 9 then return self.Card238InvLv9AreaMult end
+		return 1.0
+	end
+
+	method number GetSolarFlareStunSeconds()
+		if self:GetSkillInvLevel2(239) >= 9 then return self.Card239StunSeconds + self.BenoaInvLv9ExtraBindSeconds end
+		return self.Card239StunSeconds
+	end
+
+	method number GetVenomBurstOrbRatio()
+		if self:GetSkillInvLevel2(240) >= 9 then return self.Card240InvLv9OrbRatio end
+		return self.Card240OrbRatio
+	end
+
+	method integer GetIgniteWallBurnSeconds()
+		if self:GetSkillInvLevel2(242) >= 9 then return self.Card242BurnSeconds + self.BenoaInvLv9ExtraSeconds end
+		return self.Card242BurnSeconds
+	end
+
+	method number GetToxicBomberPoisonRatio()
+		if self:GetSkillInvLevel2(243) >= 9 then return self.Card243InvLv9PoisonRatio end
+		return self.Card243PoisonRatio
+	end
+
+	method number GetMeteorBBlastMult()
+		if self:GetSkillInvLevel2(244) >= 9 then return self.Card244InvLv9BlastMult end
+		return 1.0
 	end
 
 	@ExecSpace("ServerOnly")
@@ -15716,9 +15812,9 @@ script CardManager extends Logic
 		end
 		if isCrit then _DpsMeterLogic:Tag(223, target):TakeDamageCrit(damage * 2)
 		else _DpsMeterLogic:Tag(223, target):TakeDamage(damage) end
-		local burnPerTick = damage * self.Card223BurnRatio
+		local burnPerTick = damage * self:GetFlameOrbBurnRatio()
 		if not target._dead then
-			-- 화상 100% — 1초마다 기준 대미지(치명타 전)의 30%
+			-- 화상 100% — 1초마다 기준 대미지(치명타 전)의 30%(로비 강화 Lv9 40%)
 			target:ApplyDot(burnPerTick, self.Card223BurnSeconds, 1.0)
 			target:MarkBurned(self.Card223BurnSeconds)
 		end
@@ -15761,11 +15857,13 @@ script CardManager extends Logic
 	@ExecSpace("ServerOnly")
 	method void ResolvePoisonBreathHit(Entity map, Vector3 hitPos, Vector3 footPos, number ratio, boolean band, number damage, boolean isCrit)
 		-- 브레스 착탄 — 독구름 연출 범위(타원) 안 같은 깊이 구간 몬스터 전부에게 대미지 + 중독, 맞은 몬스터 머리 위에 중독 표시
-		local fx = self:SpawnEffect(self.Card224HitRUID, hitPos, 0, 1.0, self.Card224HitScale * ratio, 1)
+		-- 로비 강화 Lv9면 독구름 그림과 판정을 같이 15% 키운다
+		local areaMult = self:GetPoisonBreathAreaMult()
+		local fx = self:SpawnEffect(self.Card224HitRUID, hitPos, 0, 1.0, self.Card224HitScale * ratio * areaMult, 1)
 		if fx ~= nil then fx:Destroy(self.Card224HitLifetime) end
 		self:PlayBreathSfx(self.Card224HitSoundRUID)
-		local halfW = self.Card224HalfW * ratio
-		local halfH = self.Card224HalfH * ratio
+		local halfW = self.Card224HalfW * ratio * areaMult
+		local halfH = self.Card224HalfH * ratio * areaMult
 		local poisonPerTick = damage * self.Card224PoisonRatio
 		local hitCount = 0
 		for _, mob in ipairs(self:GetMonstersInCurrentZone(map)) do
@@ -15950,7 +16048,7 @@ script CardManager extends Logic
 		if fx ~= nil then fx:Destroy(self.Card226CastLifetime) end
 		local halfW = self.Card226MistHalfW * ratio
 		local halfH = self.Card226MistHalfH * ratio
-		local duration = self.Card226MistDuration
+		local duration = self:GetPoisonMistDuration(cardTag)
 		local fade = self.Card226MistFade
 		-- 연출: 타일 클립을 타원 안에 흩뿌리고 알파로 페이드 인/아웃(클립은 루프라 지속 동안 계속 일렁인다)
 		local tiles = self:GetPoisonMistTileRUIDs()
@@ -15974,7 +16072,7 @@ script CardManager extends Logic
 				puff:Destroy(duration)
 			end
 		end
-		-- 판정: 첫 틱 Card226MistFirstTick, 이후 1초마다 — 지속 안에 들어가는 만큼(3초면 0.5/1.5/2.5초 3회)
+		-- 판정: 첫 틱 Card226MistFirstTick, 이후 1초마다 — 지속 안에 들어가는 만큼(3초면 0.5/1.5/2.5초 3회, 로비 강화 Lv9 4초면 4회)
 		local tick = self.Card226MistFirstTick
 		-- 엘리멘탈 드레인(233) — 독무 틱도 틱 대미지라 같이 오른다(ApplyDot 경로가 아니라 여기서 직접 곱한다)
 		local tickDamage = damage * mistRatio * self:GetElementalDrainMult()
@@ -16046,7 +16144,7 @@ script CardManager extends Logic
 		self:PlayBreathSfx(self.Card227UseSoundRUID)
 		self:PlayBreathSfx(self.Card227HitSoundRUID)
 		-- 넝쿨 표시 시간은 실제 속박 시간과 맞춘다(유물 시몬수의자가 ApplyStun/ApplyLevitate 안에서 늘리는 몫까지)
-		local dur = self.Card227RootDuration
+		local dur = self:GetPoisonTrapRootDuration()
 		local vineDur = dur * _RelicInventory:GetAilmentDurationMult()
 		for _, mob in ipairs(targets) do
 			---@type MonsterAI
@@ -16158,7 +16256,7 @@ script CardManager extends Logic
 		local hitCount = 0
 		local elapsed = 0
 		local tickId = 0
-		local burnPerTick = damage * self.Card228BurnRatio
+		local burnPerTick = damage * self:GetIgniteBurnRatio()
 		tickId = _TimerService:SetTimerRepeat(function()
 			if not isvalid(self) then _TimerService:ClearTimer(tickId) return end
 			elapsed = elapsed + self.Card228SweepTick
@@ -16284,7 +16382,7 @@ script CardManager extends Logic
 		local halfW = self.Card229HalfW * ratio
 		local halfH = self.Card229HalfH * ratio
 		local hitDamage = damage * self.Card229HitPercent
-		local poisonPerTick = damage * self.Card229PoisonRatio
+		local poisonPerTick = damage * self:GetPoisonBurstPoisonRatio()
 		local hitCount = 0
 		for _, mob in ipairs(self:GetMonstersInCurrentZone(map)) do
 			---@type MonsterAI
@@ -16344,8 +16442,8 @@ script CardManager extends Logic
 	property number Card230ShotInterval = 0.15
 
 	method table GetBlazeShotPiercePercents()
-		-- 관통 순서별 대미지 비율(유저 표) — 100% → 50% → 25%
-		return { 1.0, 0.5, 0.25 }
+		-- 관통 순서별 대미지 비율(유저 표) — 100% → 50% → 25%(로비 강화 Lv9 100/65/40%)
+		return self:GetBenoaFalloffPercents(230)
 	end
 
 	method number GetBlazeShotDamage(integer level)
@@ -16590,6 +16688,13 @@ script CardManager extends Logic
 						local zoneRatio = self.Card237Zone3Ratio
 						if along < len / 3 then zoneRatio = self.Card237Zone1Ratio
 						elseif along < len * 2 / 3 then zoneRatio = self.Card237Zone2Ratio end
+						-- 로비 강화 Lv9면 100/65/40%
+						if self:GetSkillInvLevel2(237) >= 9 then
+							local zp = self:GetBenoaFalloffPercents(237)
+							zoneRatio = zp[3]
+							if along < len / 3 then zoneRatio = zp[1]
+							elseif along < len * 2 / 3 then zoneRatio = zp[2] end
+						end
 						local hitDamage = damage * zoneRatio
 						log("FlameSweepZone: along=" .. string.format("%.2f", along) .. "/" .. string.format("%.2f", len) .. " ratio=" .. zoneRatio .. " dmg=" .. math.floor(hitDamage))
 						if isCrit then _DpsMeterLogic:Tag(237, m):TakeDamageCrit(hitDamage * 2)
@@ -16669,17 +16774,19 @@ script CardManager extends Logic
 	@ExecSpace("ServerOnly")
 	method void CastMistEruption(Entity map, Vector3 tp, number ratio, boolean band, number damage, boolean isCrit, integer castZoneIndex)
 		-- 폭발 1개 — 타겟 발밑에 effect + effect2를 겹쳐 띄우고, 큰 폭발로 바뀌는 순간 타원 안 전부 타격 + 중독
+		-- 로비 강화 Lv9면 폭발 그림과 판정을 같이 15% 키운다
+		local areaMult = self:GetMistEruptionAreaMult()
 		local pos = Vector3(tp.x, tp.y + self.Card238EffectYOffset * ratio, tp.z)
-		local fx = self:SpawnEffectWithModel(self.Card238EffectRUID, pos, 0, 1.0, self.Card238EffectScale * ratio, 1, "skilleffectlong")
+		local fx = self:SpawnEffectWithModel(self.Card238EffectRUID, pos, 0, 1.0, self.Card238EffectScale * ratio * areaMult, 1, "skilleffectlong")
 		if fx ~= nil then fx:Destroy(self.Card238EffectLifetime) end
-		local fx2 = self:SpawnEffectWithModel(self.Card238Effect2RUID, pos, 0, 1.0, self.Card238Effect2Scale * ratio, 1, "skilleffectlong")
+		local fx2 = self:SpawnEffectWithModel(self.Card238Effect2RUID, pos, 0, 1.0, self.Card238Effect2Scale * ratio * areaMult, 1, "skilleffectlong")
 		if fx2 ~= nil then fx2:Destroy(self.Card238Effect2Lifetime) end
 		_TimerService:SetTimerOnce(function()
 			if not isvalid(self) then return end
 			if castZoneIndex ~= _MapManager.CurrentMapIndex then return end
 			self:PlayBreathSfx(self.Card238HitSoundRUID)
-			local halfW = self.Card238HalfW * ratio
-			local halfH = self.Card238HalfH * ratio
+			local halfW = self.Card238HalfW * ratio * areaMult
+			local halfH = self.Card238HalfH * ratio * areaMult
 			local poisonPerTick = damage * self.Card238PoisonRatio
 			local hitCount = 0
 			for _, mob in ipairs(self:GetMonstersInCurrentZone(map)) do
@@ -16829,11 +16936,11 @@ script CardManager extends Logic
 						-- 화상 100%(1초마다 기준 대미지의 50%) + 스턴 100%
 						m:ApplyDot(burnPerTick, self.Card239BurnSeconds, 1.0)
 						m:MarkBurned(self.Card239BurnSeconds)
-						m:ApplyStun(self.Card239StunSeconds, true)
+						m:ApplyStun(self:GetSolarFlareStunSeconds(), true)
 					end
 				end
 			end
-			log("SolarFlareHit: hit=" .. hitCount .. " burn=" .. math.floor(burnPerTick) .. "x" .. self.Card239BurnSeconds .. " stun=" .. self.Card239StunSeconds)
+			log("SolarFlareHit: hit=" .. hitCount .. " burn=" .. math.floor(burnPerTick) .. "x" .. self.Card239BurnSeconds .. " stun=" .. self:GetSolarFlareStunSeconds())
 		end, self.Card239BurstStart + self.Card239ImpactDelay)
 		log("SolarFlareAttack: lv=" .. self.SolarFlareLevel .. " targets=" .. #targets .. " dmg=" .. math.floor(damage))
 	end
@@ -16914,7 +17021,7 @@ script CardManager extends Logic
 		self:SpawnPoisonMistEx(pos, damage, ratio, band, zoneIndex, 240, self.Card240MistRatio)
 		local halfW = self.Card226MistHalfW * ratio
 		local halfH = self.Card226MistHalfH * ratio
-		local orbDamage = damage * self.Card240OrbRatio
+		local orbDamage = damage * self:GetVenomBurstOrbRatio()
 		local victims = {}
 		for _, mob in ipairs(self:GetMonstersInCurrentZone(map)) do
 			---@type MonsterAI
@@ -16984,11 +17091,13 @@ script CardManager extends Logic
 	end
 
 	method number GetVenomSpearExtraRatio(integer level)
-		-- 추가타 비율 — 30/40/50%
-		if level >= 3 then return 0.5
-		elseif level >= 2 then return 0.4
+		-- 추가타 비율 — 30/40/50%. 로비 스킬 강화 Lv9면 +15%p
+		local r = 0.3
+		if level >= 3 then r = 0.5
+		elseif level >= 2 then r = 0.4
 		end
-		return 0.3
+		if self:GetSkillInvLevel2(241) >= 9 then r = r + self.Card241InvLv9ExtraBonus end
+		return r
 	end
 
 	@ExecSpace("ServerOnly")
@@ -17147,6 +17256,7 @@ script CardManager extends Logic
 			local halfW = self.Card242HalfW * ratio
 			local halfH = self.Card242HalfH * ratio
 			local burnPerTick = damage * self.Card242BurnRatio
+			local burnSeconds = self:GetIgniteWallBurnSeconds()
 			local hitCount = 0
 			for _, mob in ipairs(self:GetMonstersInCurrentZone(map)) do
 				---@type MonsterAI
@@ -17165,11 +17275,11 @@ script CardManager extends Logic
 						if isCrit then _DpsMeterLogic:Tag(242, m):TakeDamageCrit(damage * 2)
 						else _DpsMeterLogic:Tag(242, m):TakeDamage(damage) end
 						-- 화상 100% — 1초마다 기준 대미지(치명타 전)의 50% + 솔라 플레어 대상 표시
-						if not m._dead then m:ApplyDot(burnPerTick, self.Card242BurnSeconds, 1.0); m:MarkBurned(self.Card242BurnSeconds) end
+						if not m._dead then m:ApplyDot(burnPerTick, burnSeconds, 1.0); m:MarkBurned(burnSeconds) end
 					end
 				end
 			end
-			log("IgniteWallHit: hit=" .. hitCount .. " halfW=" .. string.format("%.2f", halfW) .. " burn=" .. math.floor(burnPerTick) .. "x" .. self.Card242BurnSeconds)
+			log("IgniteWallHit: hit=" .. hitCount .. " halfW=" .. string.format("%.2f", halfW) .. " burn=" .. math.floor(burnPerTick) .. "x" .. burnSeconds)
 		end, self.Card242ImpactDelay)
 	end
 
@@ -17272,7 +17382,7 @@ script CardManager extends Logic
 		local halfW = self.Card243HalfW * ratio
 		local halfH = self.Card243HalfH * ratio
 		local hitDamage = damage * self.Card243HitPercent
-		local poisonPerTick = damage * self.Card243PoisonRatio
+		local poisonPerTick = damage * self:GetToxicBomberPoisonRatio()
 		local hitCount = 0
 		for _, mob in ipairs(self:GetMonstersInCurrentZone(map)) do
 			---@type MonsterAI
@@ -17412,8 +17522,8 @@ script CardManager extends Logic
 			if not isvalid(self) then return end
 			if zoneIndex ~= _MapManager.CurrentMapIndex then return end
 			self:PlayBreathSfx(self.Card244HitSoundRUID)
-			local halfW = self.Card244BlastHalfW * ratio
-			local halfH = self.Card244BlastHalfH * ratio
+			local halfW = self.Card244BlastHalfW * ratio * self:GetMeteorBBlastMult()
+			local halfH = self.Card244BlastHalfH * ratio * self:GetMeteorBBlastMult()
 			for _, mob in ipairs(self:GetMonstersInCurrentZone(map)) do
 				---@type MonsterAI
 				local m = mob
@@ -18926,6 +19036,26 @@ script CardManager extends Logic
 		[192] = { idx = 108, grade = 2 },  -- 인사이징(Lv9 = 화상 틱 20% → 30%)
 		[193] = { idx = 109, grade = 3 },  -- 인사이징:관(Lv9 = 관통 추가타 +15%p)
 		[194] = { idx = 110, grade = 3 },  -- 인사이징:폭(Lv9 = 폭발 범위 +20%)
+
+		-- 2026-10-04 베노아 16종(인덱스 113~128) — 등급 규칙 그대로(일반·매직 10%/5%, 레어 15%/8%). 자물쇠 없음.
+		-- Lv9 고유효과는 GetExplosionBurnSeconds 아래 "베노아 로비 스킬 강화 Lv9" getter 묶음에서 GetSkillInvLevel2(cardIdx) >= 9로 따로 처리한다. 투사체/타겟 수는 안 늘린다.
+		-- 패시브 6종(129~134)은 카드 슬롯이 없어 인덱스로 직접 조회(GetMagicAccelReduction 등 베노아 패시브 getter).
+		[223] = { idx = 113, grade = 1 },  -- 플레임 오브(Lv9 = 화상 틱 30% → 40%)
+		[224] = { idx = 114, grade = 1 },  -- 포이즌 브레스(Lv9 = 독구름 범위 +15%)
+		[225] = { idx = 115, grade = 1 },  -- 익스플로젼(Lv9 = 화상 지속 +1초)
+		[226] = { idx = 116, grade = 2 },  -- 포이즌 미스트(Lv9 = 독무 지속 +1초)
+		[227] = { idx = 117, grade = 2 },  -- 포이즌 트랩(Lv9 = 속박 +0.5초)
+		[228] = { idx = 118, grade = 1 },  -- 이그나이트(Lv9 = 화상 틱 50% → 60%)
+		[229] = { idx = 119, grade = 1 },  -- 포이즌 버스트(Lv9 = 중독 틱 30% → 40%)
+		[230] = { idx = 120, grade = 2 },  -- 블레이즈 샷(Lv9 = 관통 100/50/25% → 100/65/40%)
+		[237] = { idx = 121, grade = 3 },  -- 플레임 스윕(Lv9 = 구간 100/50/25% → 100/65/40%)
+		[238] = { idx = 122, grade = 3 },  -- 미스트 이럽션(Lv9 = 폭발 범위 +15%)
+		[239] = { idx = 123, grade = 3 },  -- 솔라 플레어(Lv9 = 스턴 +0.5초)
+		[240] = { idx = 124, grade = 3 },  -- 베놈 버스트(Lv9 = 독 구슬 50% → 65%)
+		[241] = { idx = 125, grade = 3 },  -- 베놈 스피어(Lv9 = 추가타 +15%p)
+		[242] = { idx = 126, grade = 3 },  -- 이그나이트 월(Lv9 = 화상 지속 +1초)
+		[243] = { idx = 127, grade = 3 },  -- 톡식 봄버(Lv9 = 중독 틱 30% → 40%)
+		[244] = { idx = 128, grade = 3 },  -- 메테오(Lv9 = 착탄 폭발 범위 +20%)
 	}
 
 	-- 뽑기 해금 카드(유저 지정 2026-10-01 "자물쇠 걸자, 뽑기로 뽑아야 인게임에서 활성화") — cardIdx -> SkillInventory 인덱스.
@@ -21062,8 +21192,8 @@ script CardManager extends Logic
 			+ _CardRegistry:GetChance(161, self.ChanceAttackLevel) + _CardRegistry:GetChance(181, self.CriticalEdgeLevel)
 			-- 린 자벨린 마스터리(210) — 쉐이드 크리티컬 엣지(181)와 동일하게 가산
 			+ _CardRegistry:GetChance(210, self.JavelinMasteryLevel)
-			-- 베노아 마나 웨이브(232)
-			+ _CardRegistry:GetChance(232, self.ManaWaveLevel)
+			-- 베노아 마나 웨이브(232) — 로비 강화(인덱스130)분 포함
+			+ self:GetManaWaveChance()
 			-- SkillInventory 크리티컬 엣지(인덱스76)/자벨린 마스터리(인덱스97) Lv3/6/9: 크리 확률 +3%/6%/9%.
 			-- 이 둘은 전용 getter가 없어(카드 효과가 RollCrit에 인라인으로 가산됨) 여기서 같이 처리한다.
 			+ self:GetSkillInvTierPercent(76, 0.03, 0.06, 0.09)
@@ -22530,15 +22660,15 @@ script CardManager extends Logic
 		elseif cardIdx == 231 then
 			dmg = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_007", math.floor(self:GetMagicAccelReduction() * 100 + 0.5))
 		elseif cardIdx == 232 then
-			dmg = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_008", math.floor(_CardRegistry:GetChance(232, self.ManaWaveLevel) * 100 + 0.5))
+			dmg = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_008", math.floor(self:GetManaWaveChance() * 100 + 0.5))
 		elseif cardIdx == 233 then
-			dmg = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_120", math.floor(_CardRegistry:GetChance(233, self.ElementalDrainLevel) * 100 + 0.5))
+			dmg = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_120", math.floor((self:GetElementalDrainMult() - 1.0) * 100 + 0.5))
 		elseif cardIdx == 234 then
 			dmg = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_010", math.floor(self:GetMagicGuardReduction() * 100 + 0.5))
 		elseif cardIdx == 236 then
 			dmg = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_013", math.floor(self:GetElementalAdeptBonus() * 100 + 0.5))
 		elseif cardIdx == 235 then
-			dmg = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_018", math.floor(_CardRegistry:GetChance(235, self.HighWisdomLevel) * 100 + 0.5))
+			dmg = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_018", math.floor((self:GetHighWisdomMult() - 1.0) * 100 + 0.5))
 		elseif cardIdx == 214 then
 			dmg = _LocalizationService:GetTextFormat("FMT_CARDMANAGER_020", math.floor(self:GetShurikenMasteryChance() * 100), math.floor(self:GetShurikenMasteryDamageMult(self.ShurikenMasteryLevel) * 100))
 		elseif cardIdx == 165 then
