@@ -9643,8 +9643,13 @@ script GameManager extends Logic
 		-- 비행형 몬스터(fallHeight>0)는 먼저 바닥 높이까지 빙그르르 돌며 떨어진 뒤 이어서 홉 연출을 재생한다
 		-- (PlayLootDropVisual과 동일한 패턴 — PlayFallSpin은 공용 메서드).
 		if self:IsServer() then return end
-		-- 이전 드롭 연출이 아직 진행 중이면 스킵 (회복은 서버에서 별도로 처리됨)
-		if self._potionFlyActive then return end
+		-- 이전 드롭 연출이 아직 진행 중이면 복제 아이콘으로 따로 보여준다(회복은 서버에서 별도로 처리됨).
+		-- ⚠ 예전엔 여기서 그냥 건너뛰어서, 광역기로 여러 마리를 잡아 포션이 연달아 떨어지면 두 번째부터는 연출 없이
+		-- 체력만 차올랐다 — 유저 리포트(2026-10-06) "몬스터가 때려 체력이 닳다가 아무것도 없는데 갑자기 회복됨"의 원인
+		if self._potionFlyActive then
+			self:PlayExtraPotionDropVisual(worldPos, potionType, groundDelay, fallHeight, groundWorldY, dropScale)
+			return
+		end
 		
 		self._potionFlyActive = true
 		self._potionLanded = false
@@ -9776,6 +9781,63 @@ script GameManager extends Logic
 			self._potionFlyActive = false
 			self:PunchHpBar()
 		end, self.PotionFlyDuration)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayExtraPotionDropVisual(Vector2 worldPos, integer potionType, number groundDelay, number fallHeight, number groundWorldY, number dropScale)
+		-- 공용 potionFlyIcon이 이미 쓰이는 중일 때 들어온 포션 — 아이콘을 복제해 같은 순서(떨어짐 → 바닥 홉 → groundDelay 대기 →
+		-- HP바로 날아감)로 보여주고 끝나면 지운다. 서버 회복 시점(ApplyPotionDrop의 arrivalDelay)과 같은 groundDelay를 쓴다.
+		-- 존 이동 조기 수거(RequestPotionCollectNow)는 공용 아이콘만 대상이라 복제본은 원래 시간대로 날아간다
+		local src = self.potionFlyIcon
+		if not isvalid(src) then return end
+		local clone = src.Entity:Clone("PotionFlyExtra_" .. tostring(_UtilLogic.ElapsedSeconds))
+		if not isvalid(clone) then return end
+		local icon = clone.SpriteGUIRendererComponent
+		if potionType == 1 then
+			icon.ImageRUID = self.RedPotionRUID
+		elseif potionType == 2 then
+			icon.ImageRUID = self.WhitePotionRUID
+		else
+			icon.ImageRUID = self.PowerElixirRUID
+		end
+		icon.Color = Color(1, 1, 1, 1)
+		clone:SetEnable(true)
+		local rawUI = _UILogic:ScreenToUIPosition(_UILogic:WorldToScreenPosition(worldPos))
+		local startUI = Vector2(rawUI.x, rawUI.y + self.DropYOffset)
+		local tc = clone.UITransformComponent
+		tc.anchoredPosition = startUI
+		tc.Scale = Vector3(dropScale, dropScale, 1)
+		tc.ZRotation = 0
+		local flyToBar = function(landUI)
+			_TimerService:SetTimerOnce(function()
+				if not isvalid(clone) then return end
+				local endUI = self.HpBarFlyTargetUI
+				_TweenLogic:PlayTween(0.0, 1.0, self.PotionFlyDuration, EaseType.QuadEaseOut, function(t)
+					if not isvalid(clone) then return end
+					local x = landUI.x + (endUI.x - landUI.x) * t
+					local y = landUI.y + (endUI.y - landUI.y) * t + math.sin(t * math.pi) * 150
+					clone.UITransformComponent.anchoredPosition = Vector2(x, y)
+					local scale = (1.0 - 0.5 * t) * dropScale
+					clone.UITransformComponent.Scale = Vector3(scale, scale, 1)
+					icon.Color = Color(1, 1, 1, 1.0 - 0.6 * t)
+				end)
+				_TimerService:SetTimerOnce(function()
+					if isvalid(clone) then clone:Destroy() end
+					self:PunchHpBar()
+				end, self.PotionFlyDuration)
+			end, groundDelay)
+		end
+		local continueFromGround = function(groundUI)
+			self:PlayDropPop(icon, groundUI, flyToBar)
+		end
+		local landYCorrection = self:GetDropLandYCorrection(dropScale)
+		if fallHeight > 0 then
+			local groundUI = _UILogic:ScreenToUIPosition(_UILogic:WorldToScreenPosition(Vector2(worldPos.x, groundWorldY)))
+			self:PlayFallSpin(icon, startUI, Vector2(groundUI.x, groundUI.y + landYCorrection), fallHeight, continueFromGround)
+		else
+			continueFromGround(Vector2(rawUI.x, rawUI.y + landYCorrection))
+		end
+		log("Potion drop visual (extra, shared icon busy) type=" .. potionType)
 	end
 
 	@ExecSpace("ClientOnly")

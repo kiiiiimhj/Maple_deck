@@ -61,6 +61,9 @@ script ShopUI extends Logic
 	property any _scrollTween = nil
 	property any _dragHandler = nil
 	property any _scrollBarHandler = nil
+	-- 카드 위를 끌면 ScrollLayoutGroup이 스스로 스크롤한다(OnScrollDrag는 바탕 터치 영역만 받음) — 그때도 스크롤바가 따라오게
+	-- 목록의 스크롤 위치 변경 이벤트를 받는다(유저 지적 2026-10-06 "상품 옆으로 넘기면 스크롤은 안 움직이네")
+	property any _listScrollHandler = nil
 	-- 스크립트가 scrollBar.Value를 코드로 갱신할 때(카드 쪽에서 온 변화를 핸들에 반영) true로 세워서,
 	-- 그 갱신이 다시 SliderValueChangedEvent로 되돌아와 카드를 또 움직이는 무한 루프를 막는다
 	property boolean _syncingScrollBar = false
@@ -74,6 +77,7 @@ script ShopUI extends Logic
 		self._dragHandler = self.scrollTouchArea:ConnectEvent(UITouchDragEvent, self.OnScrollDrag)
 		-- 하단 스크롤바 핸들을 직접 끌면 카드 목록도 같이 움직이도록 연결한다
 		self._scrollBarHandler = self.scrollBar.Entity:ConnectEvent(SliderValueChangedEvent, self.OnScrollBarChanged)
+		self._listScrollHandler = self.productScroll.Entity:ConnectEvent(ScrollPositionChangedEvent, self.OnListScrolled)
 
 		self._tabDiamondHandler = self.tabDiamond.Entity:ConnectEvent(ButtonClickEvent, function() self:SelectTab("diamond") end)
 		self._tabSkinHandler = self.tabSkin.Entity:ConnectEvent(ButtonClickEvent, function() self:SelectTab("skin") end)
@@ -436,7 +440,7 @@ script ShopUI extends Logic
 
 		-- 장수가 줄면 기존 스크롤 위치가 새 한계를 넘을 수 있어 맨 앞으로 되돌린다
 		self.currentIndex = 0
-		self.productScroll:SetScrollNormalizedPosition(UITransformAxis.Horizontal, 0)
+		self:SetListScroll(0)
 		self:SyncScrollBar(0)
 	end
 
@@ -494,7 +498,7 @@ script ShopUI extends Logic
 		end
 		-- 핸들을 끝까지 끌어도 빈 슬롯이 안 보이도록 같은 한계를 적용한다
 		local v = math.max(0, math.min(self._maxScrollNorm, event.Value))
-		self.productScroll:SetScrollNormalizedPosition(UITransformAxis.Horizontal, v)
+		self:SetListScroll(v)
 		self.currentIndex = math.floor((v / self._maxScrollNorm) * (self.itemCount - 1) + 0.5)
 		if v ~= event.Value then self:SyncScrollBar(v) end
 	end
@@ -510,10 +514,45 @@ script ShopUI extends Logic
 		local delta = -event.TouchDelta.x / self.scrollableRangePx
 		-- 상한은 1이 아니라 _maxScrollNorm — 스타터 구매 후 꺼둔 뒤쪽 빈 슬롯이 안 보이게 막는다
 		local newValue = math.max(0, math.min(self._maxScrollNorm, current + delta))
-		self.productScroll:SetScrollNormalizedPosition(UITransformAxis.Horizontal, newValue)
+		self:SetListScroll(newValue)
 		-- 0~_maxScrollNorm 구간을 0~(itemCount-1)로 환산해야 현재 칸 번호가 맞는다
 		self.currentIndex = math.floor((newValue / self._maxScrollNorm) * (self.itemCount - 1) + 0.5)
 		self:SyncScrollBar(newValue)
+	end
+
+	-- 스크롤 위치 변경 이벤트는 한 박자 늦게(비동기로) 돌아온다(UIGridScrollBar 실측 주석 참고) — 스크립트가 직접 옮긴 뒤
+	-- 이 시간(ms) 안에 오는 이벤트는 그 echo로 보고 무시한다. 안 그러면 스크롤바를 끄는 중에 늦게 온 옛 값이 핸들을 되돌린다
+	property number _codeScrollAt = 0
+	property number CodeScrollEchoMs = 200
+
+	@ExecSpace("ClientOnly")
+	method void MarkCodeScroll()
+		self._codeScrollAt = DateTime.UtcNow.Elapsed
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetListScroll(number value)
+		-- 상품 목록 위치는 항상 이걸로 옮긴다(echo 구분용 시각 기록)
+		self:MarkCodeScroll()
+		self.productScroll:SetScrollNormalizedPosition(UITransformAxis.Horizontal, value)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnListScrolled(ScrollPositionChangedEvent event)
+		-- 카드를 직접 끌어 목록이 스스로 움직였을 때(관성 포함) 스크롤바와 현재 칸 번호를 목록 위치에 맞춘다
+		if DateTime.UtcNow.Elapsed - self._codeScrollAt < self.CodeScrollEchoMs then return end
+		local v = event.NormalizedPosition.x
+		if v > self._maxScrollNorm then
+			-- 스타터 구매 후 꺼 둔 뒤쪽 빈 슬롯은 안 보이게 막는다(OnScrollDrag와 같은 상한)
+			v = self._maxScrollNorm
+			self:SetListScroll(v)
+		elseif v < 0 then
+			v = 0
+		end
+		if self._maxScrollNorm > 0 then
+			self.currentIndex = math.floor((v / self._maxScrollNorm) * (self.itemCount - 1) + 0.5)
+		end
+		self:SyncScrollBar(v)
 	end
 
 	@ExecSpace("ClientOnly")
@@ -536,14 +575,15 @@ script ShopUI extends Logic
 		if newIndex == self.currentIndex then return end
 		local fromValue = self.productScroll:GetScrollNormalizedPosition(UITransformAxis.Horizontal)
 		self.currentIndex = newIndex
+		self:MarkCodeScroll()
 		self.productScroll:SetScrollPositionByItemIndex(self.currentIndex)
 		wait(1/60) -- 레이아웃이 한 프레임 뒤에 갱신되므로, 도착 위치를 읽기 전에 한 프레임 대기한다
 		local toValue = self.productScroll:GetScrollNormalizedPosition(UITransformAxis.Horizontal)
-		self.productScroll:SetScrollNormalizedPosition(UITransformAxis.Horizontal, fromValue)
+		self:SetListScroll(fromValue)
 
 		if self._scrollTween then self._scrollTween:Stop() end
 		self._scrollTween = _TweenLogic:PlayTween(fromValue, toValue, self.scrollTweenDuration, EaseType.QuartEaseOut, function(value)
-			self.productScroll:SetScrollNormalizedPosition(UITransformAxis.Horizontal, value)
+			self:SetListScroll(value)
 			self:SyncScrollBar(value)
 		end)
 	end
@@ -554,6 +594,7 @@ script ShopUI extends Logic
 		if self._nextHandler then self.btnNext.Entity:DisconnectEvent(ButtonClickEvent, self._nextHandler) end
 		if self._dragHandler then self.scrollTouchArea:DisconnectEvent(UITouchDragEvent, self._dragHandler) end
 		if self._scrollBarHandler then self.scrollBar.Entity:DisconnectEvent(SliderValueChangedEvent, self._scrollBarHandler) end
+		if self._listScrollHandler then self.productScroll.Entity:DisconnectEvent(ScrollPositionChangedEvent, self._listScrollHandler) end
 		if self._scrollTween then self._scrollTween:Stop() end
 		for _, rec in ipairs(self._cardHandlers) do
 			if isvalid(rec.entity) then rec.entity:DisconnectEvent(ButtonClickEvent, rec.eventHandler) end
