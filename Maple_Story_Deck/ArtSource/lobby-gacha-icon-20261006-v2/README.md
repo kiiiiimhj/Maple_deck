@@ -1,0 +1,9 @@
+# Red and purple two-card lobby icon
+
+Created with the built-in ImageGen tool, using the original `Downloads/card_1.png` (purple) and `Downloads/card_2.png` (red) artwork as references. Exactly two summon tickets, retaining the existing four-point star-in-a-ring emblem, notched ticket shape and gold border. The lobby button frame, icon geometry, click binding and reward-flight target coordinates are retained.
+
+Final game asset: `gacha-cards.png`, 512 × 512 RGBA. Source is retained under `generated-source/`. Prior image is preserved in the builder snapshot and previous versioned ArtSource folder.
+
+## Exact generation prompt
+
+Use case: compositing. Asset type: transparent square lobby gacha button icon for an existing MapleStory-style game. Input image 1 is the EXACT existing purple summon-ticket artwork. Input image 2 is the EXACT existing red summon-ticket artwork. Primary request: arrange exactly TWO of these existing tickets as a compact overlapping fan: purple ticket behind to the left, red ticket in front to the right, both recognizable and showing their golden four-point star-in-a-ring symbols. Treat this as faithful recomposition of the original artwork, not a redesign. Preserve exactly the ticket shape with semicircular notches at the top and bottom, thick shiny gold rim, dark brown edge, purple and red faces, and especially the original large golden FOUR-POINT star emblem and circular gold surround. Do not substitute a maple leaf, pentagram, five-point star, orb, animal, or any new symbol. Preserve the same painted glossy cartoon shading and proportions. Two cards only: one purple, one red. Fit the fan prominently in a square icon, balanced and centered, edges fully visible. Retain a restrained golden swoosh and a few existing four-point glints, no clutter that obscures the faces. Real transparent alpha background, no checkerboard drawn, no button frame, no text, no third card, no blue, green, or yellow-faced cards.

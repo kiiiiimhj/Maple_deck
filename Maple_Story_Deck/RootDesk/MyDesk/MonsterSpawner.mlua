@@ -412,7 +412,13 @@ script MonsterSpawner extends Logic
 		if frozen then return end
 
 		self._elapsedPlayTime = self._elapsedPlayTime + delta
+		if _MapManager.CurrentMapIndex==189 and not _Ep4PapulatusLogic:CanSpawnRegularMonsters() then return end
 		
+		if _MapManager.CurrentMapIndex==189 then
+			self._timer=self._timer-delta
+			if self._timer<=0 then self:SpawnWave() self._timer=self:GetEffectiveSpawnInterval(_GameManager.Wave) end
+			return
+		end
 		self._timer = self._timer - delta
 		if self._timer <= 0 then
 			self:SpawnWave()
@@ -1252,6 +1258,7 @@ script MonsterSpawner extends Logic
 	-- 다음 타이머를 다시 시작하므로, 자연히 "죽을 때까지 대기"가 된다).
 	@ExecSpace("ServerOnly")
 	method void TrySpawnPersistentBoss()
+		if _MapManager.CurrentMapIndex==189 then return end
 		if isvalid(self._currentBoss) then return end
 		local currentMap = self:GetCurrentMap()
 		if currentMap == nil then return end
@@ -1287,6 +1294,7 @@ script MonsterSpawner extends Logic
 	-- 접근하게 한다(유저 지정 — 순간이동처럼 바로 앞에 나타나면 안 됨).
 	@ExecSpace("ServerOnly")
 	method void RelocateBossToCurrentZone()
+		if _MapManager.CurrentMapIndex==189 then return end
 		local zoneIndex = _MapManager.CurrentMapIndex
 		local map = self:GetZoneEntity(zoneIndex)
 		if map == nil then return end
@@ -1371,6 +1379,10 @@ script MonsterSpawner extends Logic
 	-- 웨이브 스폰만 하고, 지금 도착한 맵이 "플레이어가 있는 맵"이므로 엘리트 후보 자격을 준다.
 	@ExecSpace("ServerOnly")
 	method void ActivateMap(integer mapIndex)
+		if mapIndex==189 then
+			if self._activeMaps==nil then self._activeMaps={} end
+			self._activeMaps[189]=true self._pendingRushPenalty=0 _Ep4PapulatusLogic:Activate() return
+		end
 		-- 다른 Logic의 OnBeginPlay가 이것보다 먼저 실행돼 _activeMaps가 아직 nil일 수 있으므로 지연 초기화
 		if self._activeMaps == nil then self._activeMaps = {} end
 		local wasActive = self._activeMaps[mapIndex]
@@ -1421,6 +1433,7 @@ script MonsterSpawner extends Logic
 	-- 안 그러면 화면 밖 맵에서 계속 새로 스폰되는 애들이 기본값(안 멈춤)으로 태어나서 몰래 공격한다.
 	@ExecSpace("ServerOnly")
 	method table SpawnBatchOnMap(Entity map, integer wave, boolean isBoss, boolean allowElite, integer mapIndex, boolean isSpike, integer minCountOverride)
+		if mapIndex==189 and (isBoss or not _Ep4PapulatusLogic:CanSpawnRegularMonsters()) then return {} end
 		-- 버그 수정(2026-08-20, 유저 리포트 "맵4에서 10존으로 들어왔는데 7존에 몬스터가 공격해") — 예전엔
 		-- "currentMap == nil 이거나 map == currentMap(엔티티 동일)"로 판정했는데, 맵3/4처럼 container=nil이라
 		-- 존 10개가 파일 하나(맵 루트)를 공유하면 GetCurrentMap()(=GetZoneEntity(플레이어의 현재 존))도
@@ -1447,11 +1460,14 @@ script MonsterSpawner extends Logic
 			-- 전체 몬스터 수)에서 O(그 존 몬스터 수)로 줄어든다.
 			local maxForThisMap = isCurrentMap and self.MaxMonstersPerMap or self.MaxMonstersPerMapBackground
 			local existingCount = #self:GetMonstersInZone(mapIndex)
+			local puzzleHalfSpawn = mapIndex==183 and not _Ep4Map5EasterEggLogic.PuzzleComplete
 		
 			if minCountOverride > 0 then
 				-- 2026-08-05: "적어도 N마리는 있게" 보장 모드(이동 도착 시 등) — 램프/스파이크/2배 배수를
 				-- 전부 건너뛰고 부족한 만큼만 정확히 채운다.
-				count = math.max(0, minCountOverride - existingCount)
+				-- 맵5 존10 퍼즐 전에는 도착/응급 보충의 목표 수도 절반으로 맞춘다.
+				local targetCount = puzzleHalfSpawn and math.ceil(minCountOverride*0.5) or minCountOverride
+				count = math.max(0, targetCount - existingCount)
 			else
 				local variance = math.floor(_UtilLogic:RandomDouble() * (self.SpawnCountVariance + 1))
 				-- 2026-08-03: 웨이브(킬레이트) 대신 순수 경과시간으로 스폰 수를 늘린다 — 0~SpawnCountRampSeconds
@@ -1477,7 +1493,10 @@ script MonsterSpawner extends Logic
 			-- — 지금 있는 맵은 MaxMonstersPerMap, 그 외(지나간/안 가본) 맵은 더 낮은 MaxMonstersPerMapBackground 적용
 			if existingCount >= maxForThisMap then return {} end
 			count = math.min(count, maxForThisMap - existingCount)
+			-- 에피소드4 맵5 존10(183)만: 퍼즐 완료 후 다음 배치부터 정상 수량으로 복귀한다.
+			if puzzleHalfSpawn and minCountOverride<=0 then count=math.ceil(count*0.5) end
 			if count <= 0 then return {} end
+			if puzzleHalfSpawn then log("MonsterSpawner: ep4_map5 zone10 puzzle pending, half spawn count=" .. count) end
 		end
 		
 		if isBoss then
@@ -2108,7 +2127,7 @@ script MonsterSpawner extends Logic
 		-- 카메라가 바닥 기준으로 고정돼 있어(MapManager.Ep4FixedCameraY) 그 높이에 서면 화면 밖이라 안 보인다 →
 		-- 바닥 + Ep4MaxAerialSpawnHeight 위의 발판은 스폰 후보에서 뺀다. 다른 에피소드는 기존 동작 그대로.
 		local maxRunY = 9999
-		if mapIndex >= 134 and mapIndex <= 183 then maxRunY = baselineY + self.Ep4MaxAerialSpawnHeight end
+		if mapIndex >= 134 and mapIndex <= 189 then maxRunY = baselineY + self.Ep4MaxAerialSpawnHeight end
 		
 		if isBoss then
 			-- 보스는 임팩트를 위해 존 중앙을 포함하는 바닥(baselineY) 구간에 고정 스폰
@@ -2613,7 +2632,7 @@ script MonsterSpawner extends Logic
 		-- 나머지는 단일 지면 — GetFlatRuns 기반 방식이라 이 역시 코드 수정 없이 실제 발판을 그대로 따라간다.
 		if (mapIndex >= 13 and mapIndex <= 15) or mapIndex == 8 or mapIndex == 27 or mapIndex == 28 or mapIndex == 29
 			or (mapIndex >= 61 and mapIndex <= 64) or (mapIndex >= 65 and mapIndex <= 84) or (mapIndex >= 85 and mapIndex <= 88)
-			or (mapIndex >= 89 and mapIndex <= 128) or (mapIndex >= 134 and mapIndex <= 183) then
+			or (mapIndex >= 89 and mapIndex <= 128) or (mapIndex >= 134 and mapIndex <= 189) then
 			-- 134~173(에피4 map1~4, 2026-09-28)도 같은 덤프 계열이라 공중 발판이 촘촘하다(getFootholds 실측
 			-- 맵당 320~400개) — 발판 데이터 기반 스폰으로 지상형이 허공에 뜨지 않게 한다.
 			return self:GetSpawnPositionFromFootholds(mapIndex, isBoss, map)

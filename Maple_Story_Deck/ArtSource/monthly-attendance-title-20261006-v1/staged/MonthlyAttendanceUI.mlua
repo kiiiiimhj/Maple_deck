@@ -1,0 +1,373 @@
+@Logic
+script MonthlyAttendanceUI extends Logic
+	-- 뉴비 출석 완료 후 이어지는 누적 30일 출석. 모바일 가독성을 위해 15칸씩 두 페이지를 쓴다.
+	property Entity popupGroup = "ca0401e4-0979-404b-92e3-f7045f3512b7"
+	property ButtonComponent btnClose = "2ce92d77-9990-4444-ae64-b9b8aa5a74ef"
+	property ButtonComponent btnPrev = "e10283fb-aed8-4eff-b0a5-8f1576b36af0"
+	property ButtonComponent btnNext = "6fb23437-eeef-4c3b-a186-8a360784b9c7"
+	property Entity slotsRoot = "37b86d6d-c41f-4298-a719-acdc7494759d"
+	property Entity lobbyButton = "b3516b28-fb89-43c0-adca-795b47b80883"
+	property number CheckStartScale = 1.65
+	property number CheckStartOffsetY = 30
+	property number CheckDropDuration = 0.3
+	property number PulseAmplitude = 0.035
+	property number PulseSpeed = 5.0
+	property string _displayLocaleId = ""
+	property any _localeTranslator = nil
+	property integer _page = 1
+	property boolean _isOpen = false
+	property integer _animatingDay = 0
+	property integer _pulseTimerId = 0
+	property number _pulseTime = 0
+	property table _handlers = {}
+	property boolean _claimPending = false
+	property integer _claimSeq = 0
+	property string _holdKind = ""
+	property integer _holdAmount = 0
+	property integer _requestTimerId = 0
+	property integer _clockTimerId = 0
+	property integer _animationSeq = 0
+	property table _pendingFly = {}
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		-- 새 팝업은 숨긴 상태에서 이벤트를 한 번만 연결한다.
+		if not isvalid(self.popupGroup) then return end
+		self.popupGroup.Enable = false
+		self:BindClick(self.btnClose.Entity, function() self:Close() end)
+		self:BindClick(self.btnPrev.Entity, function() self:SetPage(self._page - 1) end)
+		self:BindClick(self.btnNext.Entity, function() self:SetPage(self._page + 1) end)
+		for i=1,15 do
+			local capturedIndex = i
+			local slot = self.slotsRoot:GetChildByName("Slot" .. i)
+			self:BindClick(slot, function() self:OnSlotClicked((self._page - 1) * 15 + capturedIndex) end)
+		end
+		self:RefreshAll()
+		log("MonthlyAttendanceUI started: 30 days / 15 slots per page")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void BindClick(Entity entity, any action)
+		-- 화살표/카드를 정리 가능한 이벤트 목록에 묶고 같은 클릭음을 사용한다.
+		if not isvalid(entity) then return end
+		local h = entity:ConnectEvent(ButtonClickEvent, function()
+			_SoundService:PlaySound("972843e759204d3e9ad84e7d3fa94f83",0.4)
+			action()
+		end)
+		table.insert(self._handlers, {entity=entity,eventHandler=h})
+	end
+
+	@ExecSpace("ClientOnly")
+	method Entity GetSlot(integer day)
+		-- 페이지 밖의 날짜를 현재 보이는 칸으로 잘못 매핑하지 않는다.
+		local index = day - (self._page - 1) * 15
+		if index < 1 or index > 15 or not isvalid(self.slotsRoot) then return nil end
+		return self.slotsRoot:GetChildByName("Slot" .. index)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Open()
+		-- 뉴비 출석이 남아 있으면 뉴비 팝업으로 보내고, 완료 후에만 30일 출석을 연다.
+		if not _AttendanceLogic:IsMonthlyUnlocked() then _AttendanceUI:Open() return end
+		_AttendanceUI:Close()
+		if not isvalid(self.popupGroup) then return end
+		self._page = _AttendanceLogic:GetMonthlyClaimedCount() >= 15 and 2 or 1
+		_AttendanceLogic:RequestRefresh()
+		self._isOpen = true
+		self.popupGroup.Enable = true
+		self:RefreshAll()
+		self:StartPulse()
+		if self._clockTimerId ~= 0 then _TimerService:ClearTimer(self._clockTimerId) end
+		self._clockTimerId = _TimerService:SetTimerRepeat(function() _AttendanceLogic:RequestRefresh() end,60,60)
+		log("MonthlyAttendanceUI: opened page=" .. self._page)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Close()
+		-- 페이지 변경/닫기 전에 보류된 보상을 원래 좌표에서 날린다.
+		self:FlyPendingRewards()
+		self._animationSeq = self._animationSeq + 1
+		self._animatingDay = 0
+		self._isOpen = false
+		if isvalid(self.popupGroup) then self.popupGroup.Enable = false end
+		self:StopPulse()
+		if self._clockTimerId ~= 0 then _TimerService:ClearTimer(self._clockTimerId) self._clockTimerId = 0 end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetPage(integer page)
+		-- 애니메이션 중 카드 재사용으로 체크가 다른 날짜에 찍히는 것을 막는다.
+		if page < 1 or page > 2 or page == self._page then return end
+		self:FlyPendingRewards()
+		self._animationSeq = self._animationSeq + 1
+		self._animatingDay = 0
+		self._page = page
+		self:RefreshAll()
+		log("MonthlyAttendanceUI: page=" .. page)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ApplyLocaleLayout(string localeId)
+		-- 한국어 간판 제목만 이미지로 표시하고, 날짜와 다른 언어의 제목은 번역 텍스트를 쓴다.
+		local locale = string.lower(localeId or "en")
+		if string.sub(locale,1,2) == "ko" then locale="ko"
+		elseif string.sub(locale,1,2) == "ja" then locale="ja"
+		elseif string.sub(locale,1,2) == "zh" then locale="zh-tw"
+		else locale="en" end
+		self._displayLocaleId=locale
+		self._localeTranslator=_LocalizationService:GetTranslatorForLocale(locale)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshAll()
+		-- 아이콘/날짜/상태/보상 설명과 두 출석의 공통 로비 알림을 갱신한다.
+		if not isvalid(self.popupGroup) or not isvalid(self.slotsRoot) then return end
+		self:ApplyLocaleLayout(_LocalizationService.CurrentLocaleId)
+		self:RefreshTexts()
+		self.btnPrev.Entity.Enable=self._page > 1
+		self.btnNext.Entity.Enable=self._page < 2
+		for i=1,15 do
+			local day=(self._page-1)*15+i
+			if day ~= self._animatingDay then self:ApplySlotState(day,day <= _AttendanceLogic:GetMonthlyClaimedCount()) end
+		end
+		_AttendanceUI:RefreshLobbyButton()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshTexts()
+		-- 현재 번역기에 맞춰 제목과 탭/페이지/안내 문구를 한 번에 갱신한다.
+		local panel=self.popupGroup:GetChildByName("Panel")
+		-- 한국어는 간판 안의 출석 체크 이미지, 다른 언어는 기존 번역 텍스트를 표시한다.
+		local title=panel:GetChildByName("Board"):GetChildByName("LocaleTitle")
+		local korean=self._displayLocaleId == "ko"
+		title.SpriteGUIRendererComponent.Enable=korean
+		title.TextGUIRendererComponent.Enable=not korean
+		title.TextGUIRendererComponent.Text=korean and "출석 체크" or self:GetLocaleText("UI_MONTHLY_ATTENDANCE_TITLE","Daily Check-In")
+		panel:GetChildByName("PageText").TextGUIRendererComponent.Text=self._page .. " / 2"
+		-- "누적 N/30일" 문구는 안 쓴다(유저 지정 2026-10-06 "필요없음, 안 보이게")
+		panel:GetChildByName("ProgressText").Enable=false
+		panel:GetChildByName("RuleText").TextGUIRendererComponent.Text=self:GetLocaleText("UI_MONTHLY_ATTENDANCE_RULE","One reward per day")
+	end
+
+	@ExecSpace("ClientOnly")
+	method string GetRewardLabel(integer day)
+		-- 상자 등급과 주문서 부위를 축약 라벨로 명확히 보여준다.
+		local kind=_AttendanceLogic:GetMonthlyRewardKind(day)
+		local key="UI_MONTHLY_ATTENDANCE_GOLD"
+		if kind == "diamond" then key="UI_MONTHLY_ATTENDANCE_DIAMOND"
+		elseif kind == "relicPull" then key="UI_MONTHLY_ATTENDANCE_RELIC"
+		elseif kind == "skillPull" then key="UI_MONTHLY_ATTENDANCE_SKILL"
+		elseif kind == "gearWeapon" or kind == "gearArmor" then
+			local grade=_AttendanceLogic:GetMonthlyRewardGrade(day) == 1 and "MAGIC" or "RARE"
+			key="UI_MONTHLY_ATTENDANCE_" .. grade .. (kind == "gearWeapon" and "_WEAPON" or "_ARMOR")
+		elseif kind == "scroll" then
+			local keys={[3]="WEAPON",[10]="COAT",[17]="CAP",[24]="GLOVE",[29]="CAPE"}
+			key="UI_MONTHLY_ATTENDANCE_SCROLL_" .. keys[day]
+		elseif kind == "damageSkin" then
+			key=_AttendanceLogic:GetMonthlySkinKey() == "" and "UI_MONTHLY_ATTENDANCE_DIAMOND" or "UI_MONTHLY_ATTENDANCE_SKIN"
+		end
+		return self:GetLocaleText(key,kind)
+	end
+
+	@ExecSpace("ClientOnly")
+	method string GetAmountText(integer day)
+		-- 천 단위 수량은 쉼표로, 스킨 중복 보상은 실제 대체 다이아 수량으로 표시한다.
+		local amount=_AttendanceLogic:GetMonthlyRewardAmount(day)
+		if day == 30 and _AttendanceLogic:GetMonthlySkinKey() == "" then amount=_AttendanceLogic:GetMonthlySkinDuplicateDiamonds() end
+		if amount >= 1000 then return tostring(amount // 1000) .. "," .. string.format("%03d", amount % 1000) end
+		return "x" .. tostring(amount)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ApplySlotState(integer day, boolean claimed)
+		-- 수령 가능일만 밝게 강조한다. 미래 칸은 읽을 수 있게 두며 보상을 버리거나 건너뛰지 않는다.
+		local slot=self:GetSlot(day)
+		if not isvalid(slot) then return end
+		local special=day % 7 == 0 or day == 30
+		slot.SpriteGUIRendererComponent.ImageRUID=special and "8b66df2b272d4ebb83c4da455541050a" or "ceb8bce4384b441795afed987a68cafc"
+		local future=day > _AttendanceLogic:GetMonthlyClaimedCount()+1
+		slot.SpriteGUIRendererComponent.Color=future and Color(0.82,0.82,0.82,1) or Color.white
+		local dayLabel=slot:GetChildByName("DayLabel").TextGUIRendererComponent
+		dayLabel.MaxSize=self._displayLocaleId == "en" and 20 or 23
+		dayLabel.Text=self._localeTranslator:GetTextFormat("FMT_ATTENDANCEUI_DAY",day)
+		slot:GetChildByName("RewardLabel").TextGUIRendererComponent.Text=self:GetRewardLabel(day)
+		local icon=slot:GetChildByName("RewardIcon")
+		icon.SpriteGUIRendererComponent.ImageRUID=_AttendanceLogic:GetMonthlyRewardIconRUID(day)
+		icon.Enable=not claimed
+		local kind=_AttendanceLogic:GetMonthlyRewardKind(day)
+		icon.UITransformComponent.RectSize=kind == "gold" and Vector2(52,52) or kind == "diamond" and Vector2(55,45) or Vector2(62,62)
+		local part=slot:GetChildByName("ScrollPart")
+		part.Enable=not claimed and kind == "scroll"
+		if part.Enable then part.SpriteGUIRendererComponent.ImageRUID=_EnhanceScrollLogic:GetSymbolRUID(_AttendanceLogic:GetMonthlyScrollId(day)) end
+		slot:GetChildByName("AmountText").TextGUIRendererComponent.Text=claimed and self:GetLocaleText("MLUA_ATTENDANCEUI_001","Done") or self:GetAmountText(day)
+		local check=slot:GetChildByName("Check")
+		check.Enable=claimed
+		check.UITransformComponent.Scale=Vector3(1,1,1)
+		check.UITransformComponent.anchoredPosition=Vector2(0,-3)
+		check.SpriteGUIRendererComponent.Color=Color.white
+		slot.UITransformComponent.Scale=Vector3(1,1,1)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnSlotClicked(integer day)
+		-- 다음 수령일만 서버에 요청한다. 장비/주문서/스킨은 클릭 힌트로 종류를 확인할 수 있다.
+		if day <= _AttendanceLogic:GetMonthlyClaimedCount() then return end
+		if day ~= _AttendanceLogic:GetMonthlyClaimedCount()+1 then
+			_UIToast:ShowMessage(self:GetRewardLabel(day) .. " " .. self:GetAmountText(day))
+			return
+		end
+		if not _AttendanceLogic:CanClaimMonthly() then _UIToast:ShowMessage(self:GetLocaleText("MLUA_ATTENDANCEUI_002","Already claimed today")) return end
+		if self._claimPending then return end
+		self._holdKind=_AttendanceLogic:GetMonthlyRewardKind(day)
+		self._holdAmount=_AttendanceLogic:GetMonthlyRewardAmount(day)
+		if day == 30 and _AttendanceLogic:GetMonthlySkinKey() == "" then self._holdKind="diamond" self._holdAmount=_AttendanceLogic:GetMonthlySkinDuplicateDiamonds() end
+		if self._holdKind == "gold" or self._holdKind == "diamond" then _RewardFlyUI:Hold(self._holdKind,self._holdAmount) end
+		self._claimPending=true
+		self._claimSeq=self._claimSeq+1
+		local seq=self._claimSeq
+		self._requestTimerId=_TimerService:SetTimerOnce(function()
+			self._requestTimerId=0
+			if self._claimSeq == seq and self._claimPending then self:OnClaimFailed("UI_MONTHLY_ATTENDANCE_RETRY") end
+		end,10)
+		_AttendanceLogic:RequestClaimMonthly(day)
+	end
+
+	@ExecSpace("Client")
+	method void OnClaimFailed(string key)
+		-- 거절 시 배지 수량 보류와 클릭 잠금을 즉시 풀고 출석 보상은 그대로 둔다.
+		if self._claimPending and (self._holdKind == "gold" or self._holdKind == "diamond") then _RewardFlyUI:Release(self._holdKind,self._holdAmount) end
+		self._claimPending=false
+		self._claimSeq=self._claimSeq+1
+		if self._requestTimerId ~= 0 then _TimerService:ClearTimer(self._requestTimerId) self._requestTimerId=0 end
+		_UIToast:ShowMessage(self:GetLocaleText(key,"Please try again"))
+		self:RefreshAll()
+	end
+
+	@ExecSpace("Client")
+	method void OnClaimed(integer day)
+		-- 수령 성공 시 체크를 찍고 재화만 기존 로비 배지로 날린다. 장비/스킨은 즉시 반영된다.
+		self._claimPending=false
+		self._claimSeq=self._claimSeq+1
+		if self._requestTimerId ~= 0 then _TimerService:ClearTimer(self._requestTimerId) self._requestTimerId=0 end
+		local src=Vector2(0,0)
+		local slot=self:GetSlot(day)
+		if isvalid(slot) then src=_RewardFlyUI:GetLayerPosOf(slot,0,0) end
+		local kind=_AttendanceLogic:GetMonthlyRewardKind(day)
+		local amount=_AttendanceLogic:GetMonthlyRewardAmount(day)
+		if day == 30 then kind=self._holdKind amount=self._holdAmount end
+		if kind == "gold" or kind == "diamond" then
+			local rec={day=day,kind=kind,amount=amount,icon=_AttendanceLogic:GetMonthlyRewardIconRUID(day),src=src}
+			if self._isOpen and isvalid(slot) then table.insert(self._pendingFly,rec)
+			else _RewardFlyUI:Fly(rec.kind,rec.amount,rec.icon,rec.src,0) end
+		end
+		if self._isOpen and isvalid(slot) then self:PlayClaimAnimation(day) else self:RefreshAll() end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void FlyPendingRewards()
+		-- 저장된 화면 좌표를 사용해 페이지가 바뀌어도 받은 칸에서 보상이 출발한다.
+		local delay=0
+		for _, rec in ipairs(self._pendingFly) do
+			_RewardFlyUI:Fly(rec.kind,rec.amount,rec.icon,rec.src,delay)
+			delay=delay+0.3
+		end
+		self._pendingFly={}
+	end
+
+	@ExecSpace("ClientOnly")
+	method void StartPulse()
+		-- 매 프레임보다 낮은 30Hz로 오늘 받을 칸 하나만 부드럽게 강조한다.
+		self:StopPulse()
+		self._pulseTime=0
+		self._pulseTimerId=_TimerService:SetTimerRepeat(function()
+			self._pulseTime=self._pulseTime+1/30
+			local target=_AttendanceLogic:CanClaimMonthly() and _AttendanceLogic:GetMonthlyClaimedCount()+1 or 0
+			for i=1,15 do
+				local day=(self._page-1)*15+i
+				local slot=self:GetSlot(day)
+				if isvalid(slot) then
+					local scale=day == target and 1+self.PulseAmplitude*math.sin(self._pulseTime*self.PulseSpeed) or 1
+					slot.UITransformComponent.Scale=Vector3(scale,scale,1)
+				end
+			end
+		end,1/30)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		-- 이벤트와 반복 타이머를 정리하고 실패/종료 상황의 재화 보류를 남기지 않는다.
+		self:Close()
+		if self._requestTimerId ~= 0 then _TimerService:ClearTimer(self._requestTimerId) self._requestTimerId=0 end
+		if self._claimPending and (self._holdKind == "gold" or self._holdKind == "diamond") then _RewardFlyUI:Release(self._holdKind,self._holdAmount) end
+		for _, rec in ipairs(self._handlers) do
+			if isvalid(rec.entity) then rec.entity:DisconnectEvent(ButtonClickEvent,rec.eventHandler) end
+		end
+		self._handlers={}
+	end
+
+	@ExecSpace("ClientOnly")
+	method string GetLocaleText(string key, string fallback)
+		-- 현재 화면 상태에 맞게 처리한다.
+		local text = nil
+		if self._localeTranslator ~= nil then text = self._localeTranslator:GetText(key)
+		else text = _LocalizationService:GetText(key) end
+		if text == nil or text == "" or text == key then return fallback end
+		return text
+	end
+
+	@ExecSpace("ClientOnly")
+	method void StopPulse()
+		-- 현재 화면 상태에 맞게 처리한다.
+		if self._pulseTimerId ~= 0 then
+			_TimerService:ClearTimer(self._pulseTimerId)
+			self._pulseTimerId = 0
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayClaimAnimation(integer day)
+		-- 현재 화면 상태에 맞게 처리한다.
+		local slot = self:GetSlot(day)
+		if not isvalid(slot) then return end
+		local icon = slot:GetChildByName("RewardIcon")
+		local amountText = slot:GetChildByName("AmountText")
+		local check = slot:GetChildByName("Check")
+		if not isvalid(check) then return end
+		self._animationSeq = self._animationSeq + 1
+		local seq = self._animationSeq
+		self._animatingDay = day
+		slot.UITransformComponent.Scale = Vector3(1, 1, 1)
+		if isvalid(icon) then icon.Enable = false end
+		local part = slot:GetChildByName("ScrollPart")
+		if isvalid(part) then part.Enable = false end
+		if isvalid(amountText) then amountText.TextGUIRendererComponent.Text = self:GetLocaleText("MLUA_ATTENDANCEUI_001", "Done") end
+
+		local tr = check.UITransformComponent
+		local sprite = check.SpriteGUIRendererComponent
+		tr.Scale = Vector3(self.CheckStartScale, self.CheckStartScale, 1)
+		tr.anchoredPosition = Vector2(0, self.CheckStartOffsetY)
+		sprite.Color = Color(1, 1, 1, 0)
+		check.Enable = true
+		-- 가속하며 떨어지듯(QuadEaseIn) 크게 → 원래 크기, 위 → 제자리, 투명 → 불투명
+		_TweenLogic:PlayTween(0.0, 1.0, self.CheckDropDuration, EaseType.QuadEaseIn, function(t)
+			if not isvalid(check) or self._animationSeq ~= seq then return end
+			local s = self.CheckStartScale + (1.0 - self.CheckStartScale) * t
+			tr.Scale = Vector3(s, s, 1)
+			tr.anchoredPosition = Vector2(0, self.CheckStartOffsetY * (1.0 - t))
+			local a = t * 1.6
+			if a > 1 then a = 1 end
+			sprite.Color = Color(1, 1, 1, a)
+			if t >= 1.0 then
+				-- 착지 반동 — 살짝 눌렸다가 원래 크기로
+				_TweenLogic:ScaleTo(check, Vector2(0.9, 0.9), 0.06, EaseType.QuadEaseOut)
+				_TimerService:SetTimerOnce(function()
+					if not isvalid(check) or self._animationSeq ~= seq then return end
+					_TweenLogic:ScaleTo(check, Vector2(1, 1), 0.12, EaseType.BackEaseOut)
+					self._animatingDay = 0
+					self:RefreshAll()
+				end, 0.06)
+			end
+		end)
+		log("MonthlyAttendanceUI: claim animation day " .. day)
+	end
+end

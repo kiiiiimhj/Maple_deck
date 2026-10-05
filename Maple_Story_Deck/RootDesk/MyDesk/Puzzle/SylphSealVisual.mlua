@@ -1,0 +1,108 @@
+@Component
+script SylphSealVisual extends Component
+	property number _age = 0
+	property number _openAge = 0
+	property Vector3 _basePosition = Vector3(0,0,0)
+	property Vector3 _baseScale = Vector3(1,1,1)
+	property Entity _character = nil
+	property Entity _arrow = nil
+	property Entity _burst = nil
+	property table _metrics = {}
+	property table _burstMetrics = {}
+	property boolean _initialized = false
+	property boolean _openingLogged = false
+	property boolean _revealedLogged = false
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		self._basePosition=self.Entity.TransformComponent.Position
+		self._baseScale=self.Entity.TransformComponent.Scale
+		self._character=_EntityService:GetEntityByPath("/maps/map21/SealedSylph")
+		self._arrow=_EntityService:GetEntityByPath("/maps/map21/RelicArrowHint")
+		self._burst=_EntityService:GetEntityByPath("/maps/map21/SylphSealAura")
+		self._metrics=_CardManager:GetSpriteMetrics("c8d5851228a844da80c8c94586b06aa7")
+		if isvalid(self._burst) then self._burstMetrics=_CardManager:GetSpriteMetrics(self._burst.SpriteRendererComponent.SpriteRUID) end
+		self._initialized=true
+		self:ClearLocalReveal()
+		log("SylphSealVisual: drawn seal ready")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ClearLocalReveal()
+		if isvalid(self._character) then self._character.SpriteRendererComponent.Color=Color(1,1,1,0) end
+		if isvalid(self._burst) then self._burst.SpriteRendererComponent.Color=Color(1,1,1,0) end
+	end
+
+	@ExecSpace("Multicast")
+	method void ResetVisual()
+		if not self:IsClient() or not self._initialized then return end
+		self._age=0 self._openAge=0 self._openingLogged=false self._revealedLogged=false
+		self.Entity.TransformComponent.Position=self._basePosition
+		self.Entity.TransformComponent.Scale=self._baseScale
+		self.Entity.TransformComponent.ZRotation=0
+		self.Entity.SpriteRendererComponent.Color=Color(1,1,1,1)
+		self:ClearLocalReveal()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUpdate(number delta)
+		if not self._initialized or _MapManager.CurrentMapIndex~=35 then return end
+		if not isvalid(self._character) or not isvalid(self._arrow) then return end
+		self._age=self._age+delta
+		local p=self._basePosition local base=self._baseScale
+		local cx=p.x local cy=p.y local floating=math.sin(self._age*1.5)*0.018
+		local grow=1 local sealAlpha=0.98+math.sin(self._age*1.8)*0.02
+		local characterAlpha=0 local burstAlpha=0 local burstGrow=0.8 local rise=0
+		local shake=0 local rotation=0
+		if _Map21RelicEasterEgg.SealOpening then
+			self._openAge=self._openAge+delta
+			local age=self._openAge
+			if not self._openingLogged then
+				self._openingLogged=true
+				log("SylphSealVisual: flash and light shards started")
+			end
+			-- A short charge, the drawn seal breaks into light, then the native hero appears.
+			local charge=math.max(0,math.min(1,age/0.24))
+			shake=math.sin(age*52)*0.018*(1-charge)
+			local release=math.max(0,math.min(1,(age-0.22)/0.65))
+			local ease=1-(1-release)*(1-release)*(1-release)
+			grow=1+ease*0.10
+			sealAlpha=1-ease
+			local flash=math.max(0,math.min(1,(age-0.10)/0.12))
+			burstGrow=0.60+ease*1.40
+			burstAlpha=flash*(1-release)*(1-release)
+			rotation=ease*8
+			local reveal=math.max(0,math.min(1,(age-0.42)/0.46))
+			characterAlpha=reveal*reveal*(3-2*reveal)
+			local settle=math.max(0,math.min(1,(age-0.80)/0.55))
+			rise=math.sin(settle*math.pi)*0.08
+			if age>0.90 and not self._revealedLogged then
+				self._revealedLogged=true
+				log("SylphSealVisual: hero revealed, seal faded")
+			end
+			-- Leave a readable hero moment before smoothly handing off to the unlock popup.
+			characterAlpha=characterAlpha*(1-math.max(0,math.min(1,(age-1.65)/0.35)))
+		else
+			self._openAge=0 self._openingLogged=false self._revealedLogged=false
+		end
+		self.Entity.TransformComponent.Position=Vector3(cx+shake,cy+floating,p.z)
+		self.Entity.TransformComponent.Scale=Vector3(base.x*grow,base.y*grow,base.z)
+		self.Entity.TransformComponent.ZRotation=0
+		self.Entity.SpriteRendererComponent.Color=Color(1,1,1,sealAlpha)
+		local m=self._metrics local size=1.45/math.max(0.1,m.h)
+		self._character.TransformComponent.Scale=Vector3(size,size,1)
+		self._character.TransformComponent.Position=Vector3(cx+(m.px-0.5)*m.w*size,cy-0.12+(m.py-0.5)*m.h*size+floating+rise,p.z-0.05)
+		self._character.SpriteRendererComponent.Color=Color(1,1,1,characterAlpha)
+		if isvalid(self._burst) then
+			local bm=self._burstMetrics local bs=3.0/math.max(0.1,bm.h)
+			self._burst.TransformComponent.Position=Vector3(cx,cy,p.z-0.10)
+			self._burst.TransformComponent.Scale=Vector3(bs*burstGrow,bs*burstGrow,1)
+			self._burst.TransformComponent.ZRotation=rotation
+			self._burst.SpriteRendererComponent.Color=Color(1,1,1,burstAlpha)
+		end
+		self._arrow.TransformComponent.Scale=Vector3(2,2,1)
+		self._arrow.TransformComponent.Position=Vector3(cx-1.90+math.sin(self._age*3)*0.05,cy+0.10,p.z-0.15)
+		self._arrow.TransformComponent.ZRotation=90
+		self._arrow.SpriteRendererComponent.Color=Color(1,1,1,0.90+math.sin(self._age*3)*0.10)
+	end
+end

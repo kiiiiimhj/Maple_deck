@@ -1,0 +1,140 @@
+@Logic
+script Ep4Map2SummonLogic extends Logic
+	-- 에피2의 body 없는 소환수 모델을 재사용한다. 현재 존 변경을 즉시 감지해 남은 수명을 이어간다.
+	property number Duration = 60
+	property number AttackInterval = 3
+	-- 공격 범위 반지름(목표 위치 중심). 유저 지정 2026-10-06: 4.3 → 3
+	property number AoeRadius = 3
+	property number DamageRatio = 2.0/3.0
+	property Entity _summon = nil
+	property Entity _parent = nil
+	property integer _zone = -1
+	property number _remaining = 0
+	property number _attackWait = 0
+	property number _phaseTime = 0
+	property integer _phase = 0
+	property integer _attackZone = -1
+	property Vector3 _hitCenter = Vector3(0,0,0)
+	property table _pack = {}
+	property number _damage = 0
+	property table Packs = {
+		-- 배드 리본돼지 — 2.5배(유저 지정 2026-10-05)
+		{scale=2.5,stand="afb62ce2ca744cd2823393da64a4dda4",move="b58d17bf0df9434d949a117ae7c4a944",attack="4b00cc2e292447498e92c0644ed6371d",die="215d17e9725440009e8df91c044fc2be",hit={"31b05202833e4e7bb861bac5dd3d30ab"},sound="de4a890489cf4a119141ac1f0f413f31"},
+		{stand="783a8e08bf054b6aa7d8262ccf3b33ba",move="362fd8f92c0b459b93bc3fb5eb136797",attack="324ea4a0ea154a2ab4c4b8e751ce5c38",die="8e9bc1b686254436907b4166ed502dd1",hit={"1097b723d9914492b67af03fa7ba2463","f8f7f94db576439d92c3e115ed6e1d60","5634c1a2b2424b1e9fb9dbfe38c42f98","51b56adedab541e9a63081f45fb2732c","157c759046a949239f1f9d7f2bae1f1d","929b0551bab643489512a6df2cf8e5ee"},sound="eb593b66df294daa89456e910a5c51cf"}
+	}
+
+	@ExecSpace("ServerOnly")
+	method boolean SummonAlly()
+		-- 두 리소스팩 중 하나를 동일 확률로 선택하고 실제 생성 성공 후에만 수명을 시작한다.
+		self:EndSummon(false)
+		self._pack=self.Packs[_UtilLogic:RandomIntegerRange(1,#self.Packs)]
+		if not self:Relocate() then return false end
+		self._remaining=self.Duration self._attackWait=self.AttackInterval
+		self._damage=_GameManager:GetTimeStepHp(_GameManager:GetTimeStep())*self.DamageRatio
+		return true
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean Relocate()
+		-- 같은 물리 맵 내 존 이동도 감지한다. 비전투 사이드맵에서는 실제 현재 맵의 플레이어를 따른다.
+		local map=_CardManager:GetCurrentMap()
+		local info=_MapManager:GetZoneInfo(_MapManager.CurrentMapIndex)
+		if not isvalid(map) or info==nil then return false end
+		local p=Vector3(info.spawnX-1,info.landY,-2)
+		if _MapManager.AwayOnSideMap then
+			local users=_UserService.UserEntities
+			for _,user in pairs(users) do
+				if user.CurrentMap==map then local wp=user.TransformComponent.WorldPosition p=Vector3(wp.x-1,wp.y,-2) break end
+			end
+		end
+		local fresh=_CardManager:SpawnEffectWithModel(self._pack.stand,_MonsterSpawner:ToLocalSpawnPos(map,p),0,1,self._pack.scale or 1,1,"persistenteffect")
+		if not isvalid(fresh) then return false end
+		if isvalid(self._summon) then self._summon:Destroy() end
+		self._summon=fresh self._parent=map self._zone=_MapManager.CurrentMapIndex self._phase=0 self._phaseTime=0
+		return true
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnUpdate(number delta)
+		-- 일시정지 동안 수명/공격 시간을 함께 멈추고 게임 종료에는 즉시 정리한다.
+		if self._remaining<=0 then return end
+		if _GameManager.GameOver or not _GameManager.GameStarted then self:EndSummon(false) return end
+		if _GameManager:IsGamePaused() then return end
+		self._remaining=self._remaining-delta
+		if self._remaining<=0 then self:EndSummon(true) return end
+		local map=_CardManager:GetCurrentMap()
+		if not isvalid(self._summon) or self._zone~=_MapManager.CurrentMapIndex or self._parent~=map then
+			if not self:Relocate() then return end
+		end
+		if _MapManager.AwayOnSideMap then return end
+		if self._phase>0 then
+			self._phaseTime=self._phaseTime+delta
+			if self._phase==1 and self._phaseTime>=0.6 then self:ResolveHit() self._phase=2 end
+			if self._phaseTime>=1.2 then self._summon.SpriteRendererComponent.SpriteRUID=self._pack.stand self._phase=0 end
+			return
+		end
+		self._attackWait=self._attackWait-delta
+		local target=_CardManager:FindClosestByPosition(map,self._summon.TransformComponent.Position)
+		if not isvalid(target) or not isvalid(target.Entity) or target._dead then return end
+		local tp=target.Entity.TransformComponent.WorldPosition
+		local p=self._summon.TransformComponent.WorldPosition
+		local dx=tp.x-p.x
+		local r=self._summon.SpriteRendererComponent
+		r.FlipX=dx>0
+		if math.abs(dx)>1.2 then
+			-- persistenteffect에는 물리 body가 없으므로 지면 높이를 유지한 채 짧게 다가간다.
+			local step=math.min(math.abs(dx)-1.2,delta*2)
+			self._summon.TransformComponent.Position=_MonsterSpawner:ToLocalSpawnPos(map,Vector3(p.x+(dx>0 and step or -step),p.y,p.z))
+			if r.SpriteRUID~=self._pack.move then r.SpriteRUID=self._pack.move end
+		else
+			if self._attackWait<=0 then
+				self._hitCenter=tp self._attackZone=self._zone self._phase=1 self._phaseTime=0
+				self._attackWait=self.AttackInterval-1.2 r.SpriteRUID=self._pack.attack
+				_SoundOptionLogic:PlaySfx(self._pack.sound,1)
+			elseif r.SpriteRUID~=self._pack.stand then r.SpriteRUID=self._pack.stand end
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResolveHit()
+		-- 공격 중 대상이 죽어도 현재 존의 범위 판정은 끝까지 수행한다. 다른 존에는 피해를 주지 않는다.
+		if self._attackZone~=_MapManager.CurrentMapIndex or not isvalid(self._summon) then return end
+		local map=_CardManager:GetCurrentMap() local center=self._hitCenter
+		for _,m in ipairs(_CardManager:GetMonstersInCurrentZone(map)) do
+			if isvalid(m) and not m._dead and isvalid(m.Entity) then
+				local p=m.Entity.TransformComponent.WorldPosition local dx=p.x-center.x local dy=p.y-center.y
+				if dx*dx+dy*dy<=self.AoeRadius*self.AoeRadius then
+					m:TakeDamage(self._damage)
+					local fx=_CardManager:SpawnEffectWithModel(self._pack.hit[1],_MonsterSpawner:ToLocalSpawnPos(map,Vector3(p.x,p.y+0.3,p.z-0.05)),0,1,1,1,"skilleffect")
+					if isvalid(fx) then
+						if #self._pack.hit>1 then
+							local frames=self._pack.hit
+							for i=2,#frames do
+								local ruid=frames[i]
+								_TimerService:SetTimerOnce(function() if isvalid(fx) then fx.SpriteRendererComponent.SpriteRUID=ruid end end,(i-1)*0.08)
+							end
+						end
+						fx:Destroy(0.6)
+					end
+				end
+			end
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void EndSummon(boolean animate)
+		-- 과거 소환의 공격 예약을 남기지 않는다. 만료에만 사망 클립을 잠깐 보여준다.
+		self._remaining=0 self._phase=0 self._zone=-1
+		if isvalid(self._summon) then
+			if animate then self._summon.SpriteRendererComponent.SpriteRUID=self._pack.die self._summon:Destroy(0.8)
+			else self._summon:Destroy() end
+		end
+		self._summon=nil self._parent=nil
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnEndPlay()
+		-- 플레이 종료에 생성된 효과를 정리한다.
+		self:EndSummon(false)
+	end
+end

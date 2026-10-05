@@ -1,0 +1,137 @@
+@Logic
+script Ep4BalloonPuzzleUI extends Logic
+	-- 풍선 그림과 계산기 패드. 모든 안내는 번역 문구이며 정답 판정은 서버에서 한다.
+	property Entity popupGroup = "f9bad9d3-af3e-4907-9ee4-345c6256d552"
+	property Entity panel = "1af1be98-789d-43fb-8fd0-65e084a405e1"
+	property integer _session = 0
+	property integer _revision = 0
+	property integer _closedSession = 0
+	property boolean _open = false
+	property boolean _pending = false
+	property boolean _wrong = false
+	property number _pendingRemaining = 0
+	property string _input = ""
+	property string _locale = ""
+	property table _connections = {}
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		self.popupGroup.Enable=false
+		local pad=self.panel:GetChildByName("Pad")
+		for digit=0,9 do
+			local value=digit
+			self:Bind(pad:GetChildByName("Digit" .. digit),function() self:AppendDigit(value) end)
+		end
+		self:Bind(pad:GetChildByName("Clear"),function()
+			if self._pending then return end
+			self._input="" self:UpdateInput()
+		end)
+		self:Bind(pad:GetChildByName("Back"),function()
+			if self._pending then return end
+			self._input=string.sub(self._input,1,math.max(0,#self._input-1)) self:UpdateInput()
+		end)
+		self:Bind(self.panel:GetChildByName("Submit"),function() self:Submit() end)
+		self:Bind(self.panel:GetChildByName("Close"),function() self:Cancel() end)
+		log("Ep4BalloonUI: ready numeric keypad")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Bind(Entity entity, any action)
+		local h=entity:ConnectEvent(ButtonClickEvent,function()
+			_SoundService:PlaySound("972843e759204d3e9ad84e7d3fa94f83",0.4)
+			action()
+		end)
+		table.insert(self._connections,{entity=entity,connection=h})
+	end
+
+	@ExecSpace("Client")
+	method void ShowPuzzle(integer session, integer revision, string first, string second, string third, boolean wrong)
+		-- 닫힌 세션의 늦은 응답이나 지난 답변 응답이 UI를 다시 열지 못하게 한다.
+		if session<=self._closedSession or session<self._session then return end
+		if session==self._session and revision<self._revision then return end
+		if session~=self._session then self._input="" end
+		self._session=session self._revision=revision self._wrong=wrong
+		self._open=true self._pending=false self._pendingRemaining=0
+		self.popupGroup.Enable=true
+		local equation=self.panel:GetChildByName("Equation")
+		local three=third~=""
+		local icons={first,second,third}
+		for i=1,3 do
+			local image=equation:GetChildByName("Balloon" .. i)
+			image.Enable=i<3 or three
+			if image.Enable then
+				image.SpriteGUIRendererComponent.ImageRUID=icons[i]
+				image.UITransformComponent.anchoredPosition=Vector2(three and (-200+(i-1)*200) or (-110+(i-1)*220),0)
+			end
+		end
+		equation:GetChildByName("Plus1").UITransformComponent.anchoredPosition=Vector2(three and -100 or 0,0)
+		equation:GetChildByName("Plus2").Enable=three
+		self:RefreshTexts() self:UpdateInput()
+		log("Ep4BalloonUI: show terms=" .. (three and 3 or 2) .. " wrong=" .. tostring(wrong))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void AppendDigit(integer digit)
+		if not self._open or self._pending or digit<0 or digit>9 or #self._input>=4 then return end
+		if self._input=="0" then self._input="" end
+		self._input=self._input .. string.format("%d",digit) self:UpdateInput()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void UpdateInput()
+		self.panel:GetChildByName("Answer").TextGUIRendererComponent.Text=self._input=="" and "?" or self._input
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Submit()
+		if not self._open or self._pending then return end
+		if self._input=="" then _UIToast:ShowMessage("EP4M3_ENTER_ANSWER") return end
+		self._pending=true self._pendingRemaining=5
+		_Ep4Map3EasterEggLogic:RequestAnswer(self._session,self._revision,tonumber(self._input))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Cancel()
+		if not self._open then return end
+		self._pending=true self._pendingRemaining=5
+		_Ep4Map3EasterEggLogic:RequestCancel(self._session)
+	end
+
+	@ExecSpace("Client")
+	method void HidePuzzle(integer session)
+		self._closedSession=math.max(self._closedSession,session)
+		if session~=self._session then return end
+		self._open=false self._pending=false self._pendingRemaining=0
+		self.popupGroup.Enable=false
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshTexts()
+		self._locale=_LocalizationService.CurrentLocaleId
+		local tr=_LocalizationService:GetTranslatorForLocale(self._locale)
+		self.panel:GetChildByName("Title").TextGUIRendererComponent.Text=tr:GetText("EP4M3_TITLE")
+		self.panel:GetChildByName("Rule").TextGUIRendererComponent.Text=tr:GetText("EP4M3_RULE")
+		self.panel:GetChildByName("Hint").TextGUIRendererComponent.Text=tr:GetText(self._wrong and "EP4M3_WRONG" or "EP4M3_HINT")
+		self.panel:GetChildByName("Submit").TextGUIRendererComponent.Text=tr:GetText("EP4M3_SUBMIT")
+		self.panel:GetChildByName("AnswerLabel").TextGUIRendererComponent.Text=tr:GetText("EP4M3_ANSWER")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUpdate(number delta)
+		if not self._open then return end
+		if self._locale~=_LocalizationService.CurrentLocaleId then self:RefreshTexts() end
+		if self._pending then
+			self._pendingRemaining=self._pendingRemaining-delta
+			if self._pendingRemaining<=0 then self._pending=false end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		for _,rec in ipairs(self._connections) do
+			if isvalid(rec.entity) then rec.entity:DisconnectEvent(ButtonClickEvent,rec.connection) end
+		end
+		self._connections={} self._open=false
+		if isvalid(self.popupGroup) then self.popupGroup.Enable=false end
+	end
+end

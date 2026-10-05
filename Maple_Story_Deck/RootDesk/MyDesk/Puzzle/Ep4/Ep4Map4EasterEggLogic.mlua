@@ -1,0 +1,234 @@
+@Logic
+script Ep4Map4EasterEggLogic extends Logic
+	-- 배치 좌표는 유지하고, 보상이 든 상자 한 곳만 매 도전 새로 선택한다.
+	@Sync property boolean QuestActive = false
+	@Sync property boolean QuestComplete = false
+	@Sync property boolean QuestReady = false
+	@Sync property integer KillCount = 0
+	property integer KillGoal = 100
+	property string CoinItemId = "ep4_helper_coin"
+	property string ScrewItemId = "squaroid_screw"
+	property string KeyItemId = "ep4_balloon_key"
+	property integer PortalTargetIndex = 174
+	property integer _rewardEgg = 0
+	property string _targetMonster = ""
+	property string _questUserId = ""
+	property table _touchCounts = {}
+	property table _used = {}
+	property table _lastTouches = {}
+	property integer _generation = 0
+	property Entity _bubble = nil
+	property table MonsterBounds = {
+		["070de25962bf4c6ea5b8af6282c43886"]={-45.0,44.0,-7.0,94.0},
+		["323debc896394684a8e1576eb8a6ad71"]={-94.0,82.0,-4.0,175.0},
+		["5101710b998e4d5683ac6aa24faafea5"]={-72.0,58.0,-7.0,122.0},
+		["8f0451fcf96a4ce0b43a7dbd023dfd77"]={-45.0,44.0,-7.0,94.0},
+		["2ea242f8358a47848e011d2f0c3d5fa0"]={-94.0,82.0,-4.0,175.0},
+		["5cbdc6de2f6d4429a75997cc2e99aa62"]={-72.0,58.0,-7.0,122.0},
+		["5b5052c10fc84ccdac89e603234f7644"]={-93.0,112.0,-2.0,234.0},
+		["5ff2c1d0aa794de78a07aa10061f497b"]={-93.0,125.0,-3.0,223.0},
+	}
+	property Vector2 QuestIconCenter = Vector2(0,0.11)
+	property Vector2 QuestIconBoxSize = Vector2(0.82,0.74)
+	property Vector3 QuestCountPosition = Vector3(0.36,-0.14,0.0001)
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		self:ResetForNewRun()
+	end
+
+	@ExecSpace("ServerOnly")
+	method Entity GetEgg(integer egg)
+		return _EntityService:GetEntityByPath("/maps/ep4_map4/esteregg_" .. egg)
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean ValidObject(integer egg, Entity obj, string userId)
+		if egg<1 or egg>24 or not isvalid(obj) or not obj.Enable then return false end
+		if obj~=self:GetEgg(egg) then return false end
+		if not _GameManager.GameStarted or _GameManager.GameOver or _GameManager:IsGamePaused() then return false end
+		local user=_UserService:GetUserEntityByUserId(userId)
+		if not isvalid(user) or user.CurrentMap~=obj.CurrentMap then return false end
+		local zone=_MapManager.CurrentMapIndex
+		if zone<164 or zone>173 then return false end
+		return math.abs(obj.TransformComponent.WorldPosition.x-_MapManager:GetSpawnPositionForIndex(zone).x)<8
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnObjectTouched(integer egg, Entity obj, string userId)
+		if not self:ValidObject(egg,obj,userId) then return end
+		local now=_UtilLogic.ElapsedSeconds
+		if self._lastTouches[egg]~=nil and now-self._lastTouches[egg]<0.08 then return end
+		self._lastTouches[egg]=now
+		if egg<=13 then
+			if self._used[egg] then return end
+			self._touchCounts[egg]=(self._touchCounts[egg] or 0)+1
+			if self._touchCounts[egg]<2 then return end
+			self._used[egg]=true
+			if egg==self._rewardEgg then
+				_Ep4Map1EasterEggLogic:GrantStandardReward(obj)
+				_EasterEggMessageLogic:Found()
+				log("Ep4Map4: hidden reward egg=" .. egg)
+			else _EasterEggMessageLogic:Miss() end
+		elseif egg==14 then
+			if self._used[egg] then return end
+			if not _PlayerInventory:RemoveItem(self.CoinItemId,1) then
+				_UIToast:ShowMessage("EP4M2_NO_COIN",userId)
+				self:ShowRequirement(obj,"ecfe24412de04eaf98b1dd188bbb21b8",{2,31,1,30}) return
+			end
+			self._used[egg]=true
+			self:GrantSkill(obj) self:GrantItem(obj,self.ScrewItemId)
+			_AchievementLogic:OnEasterEgg()
+			log("Ep4Map4: coin exchanged for screw and slot skill")
+		elseif egg==15 then
+			self:ShowKillQuest(obj,userId)
+		elseif egg==16 then
+			if not self.QuestComplete then return end
+			if _PlayerInventory:GetItemCount(self.KeyItemId)<1 then
+				_UIToast:ShowMessage("EP4M4_NO_KEY",userId) return
+			end
+			-- 소지한 열쇠로 이용한다. 재방문 시에도 열쇠는 유지한다.
+			_MapManager:MoveToMap(_MapManager.CurrentMapIndex,self.PortalTargetIndex)
+			log("Ep4Map4: keyed portal to zone174")
+		elseif egg==17 then
+			if self._used[egg] then return end
+			if not _PlayerInventory:RemoveItem(self.ScrewItemId,1) then
+				_UIToast:ShowMessage("EP4M4_NO_SCREW",userId)
+				self:ShowRequirement(obj,"bd52be01464f42d0b76a8e96509bf39f",{3,28,4,28}) return
+			end
+			self._used[egg]=true self:GrantSkill(obj)
+			local p=obj.TransformComponent.WorldPosition local f=_GameManager:GetGroundFallFor(obj,p)
+			_GameManager:ApplyPotionDrop(2,p,f.x,f.y,1) _AchievementLogic:OnEasterEgg()
+			log("Ep4Map4: screw exchanged for potion and slot skill")
+		elseif egg==18 then
+			if self._used[egg] or not self:IsTreasureUncovered() then return end
+			self._used[egg]=true
+			local p=obj.TransformComponent.WorldPosition local f=_GameManager:GetGroundFallFor(obj,p)
+			_GameManager:ApplyPotionDrop(3,p,f.x,f.y,1)
+			obj.Enable=false _AchievementLogic:OnEasterEgg() _EasterEggMessageLogic:Found()
+			log("Ep4Map4: uncovered treasure granted elixir")
+		else
+			if self._used[egg] then return end
+			self._used[egg]=true obj.Enable=false
+			_UIToast:ShowMessage("EP4M4_FOG_CLEARED",userId)
+			self:UpdateTreasureTouch()
+			log("Ep4Map4: cleared fog=" .. egg)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void GrantSkill(Entity obj)
+		local p=obj.TransformComponent.WorldPosition local f=_GameManager:GetGroundFallFor(obj,p)
+		local pool=_CardManager:BuildActiveUpgradePool()
+		if #pool>0 then _CardManager:GrantCardUpgradesFromPool(pool,p,f.x,f.y,1,1,0) end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void GrantItem(Entity obj, string id)
+		local def=_PlayerInventory:GetItemDef(id) if def==nil then return end
+		local p=obj.TransformComponent.WorldPosition local f=_GameManager:GetGroundFallFor(obj,p)
+		local generation=self._generation
+		_PlayerInventory:ReserveAcquisitionOrder(id)
+		_GameManager:ScheduleLootDrop(p,def.icon,f.x,f.y,function()
+			if generation==self._generation then _PlayerInventory:AddItem(id,1) end
+		end,1)
+	end
+
+	@ExecSpace("ServerOnly")
+	method table GetMonsterPool()
+		local pool={} local seen={}
+		for z=164,173 do
+			for species=1,_GameManager:GetEp4MonsterCount(z) do
+				local ruid=_GameManager:GetMapStandRUID(z,species)
+				if ruid~="" and not seen[ruid] and self.MonsterBounds[ruid]~=nil then
+					seen[ruid]=true table.insert(pool,ruid)
+				end
+			end
+		end
+		return pool
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ShowKillQuest(Entity obj, string userId)
+		if self.QuestComplete then _UIToast:ShowMessage("EP4M4_QUEST_COMPLETE",userId) return end
+		if self.QuestReady then
+			local portal=self:GetEgg(16) if not isvalid(portal) then return end
+			self.QuestComplete=true self:ClearBubble() portal.Enable=true
+			_AchievementLogic:OnEasterEgg()
+			_UIToast:ShowMessage("EP4M4_QUEST_COMPLETE",userId)
+			log("Ep4Map4: Spiegelmann quest turned in; portal created")
+			return
+		end
+		if not self.QuestActive then
+			local pool=self:GetMonsterPool() if #pool==0 then return end
+			self._targetMonster=pool[_UtilLogic:RandomIntegerRange(1,#pool)]
+			self.QuestActive=true self.KillCount=0 self._questUserId=userId
+			log("Ep4Map4: quest accepted target=" .. self._targetMonster .. " goal=100")
+		end
+		self:ShowRequirement(obj,self._targetMonster,self.MonsterBounds[self._targetMonster])
+		if isvalid(self._bubble) then
+			_CollectBubbleLogic:FillText(self._bubble,"Count","X" .. (self.KillGoal-self.KillCount),self.QuestCountPosition,2)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnMonsterKilled(integer zone, string standRuid)
+		-- 잡템 획득량이 아닌 실제 사망 시점만 센다. 다른 맵/종은 목표에 포함하지 않는다.
+		if not self.QuestActive or self.QuestReady or self.QuestComplete or zone<164 or zone>173 then return end
+		if not _GameManager.GameStarted or _GameManager.GameOver then return end
+		if standRuid~=self._targetMonster then return end
+		self.KillCount=math.min(self.KillGoal,self.KillCount+1)
+		if self.KillCount>=self.KillGoal then
+			self.QuestReady=true self:ClearBubble()
+			_UIToast:ShowMessage("EP4M4_QUEST_RETURN",self._questUserId)
+			log("Ep4Map4: 100 kills reached; return to Spiegelmann before portal unlock")
+		elseif isvalid(self._bubble) then
+			_CollectBubbleLogic:FillText(self._bubble,"Count","X" .. (self.KillGoal-self.KillCount),self.QuestCountPosition,2)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ShowRequirement(Entity obj, string icon, table bounds)
+		self:ClearBubble()
+		local p=obj.TransformComponent.WorldPosition
+		_Ep2Map1GiftNpcLogic:SpawnBubble(obj.CurrentMap,Vector3(p.x-0.765297,p.y+0.9155867,p.z-0.5),icon,"",false,1,_Ep2Map1GiftNpcLogic.DefaultIconPosition,_Ep2Map1GiftNpcLogic.DefaultIconScale)
+		local bubble=_Ep2Map1GiftNpcLogic._activeBubble self._bubble=bubble
+		if isvalid(bubble) then
+			_CollectBubbleLogic:ApplyForegroundDepth(bubble)
+			_CollectBubbleLogic:FitIcon(bubble,"Icon",icon,bounds[1],bounds[2],bounds[3],bounds[4],self.QuestIconCenter,self.QuestIconBoxSize,0)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean IsTreasureUncovered()
+		-- 23/24번은 18번 바로 앞에 겹친 안개다. 다른 존의 안개는 각자 독립적으로 걷힌다.
+		return self._used[23]==true and self._used[24]==true
+	end
+
+	@ExecSpace("ServerOnly")
+	method void UpdateTreasureTouch()
+		local obj=self:GetEgg(18)
+		if isvalid(obj) and obj.TouchReceiveComponent~=nil then
+			obj.TouchReceiveComponent.Enable=self:IsTreasureUncovered() and not self._used[18]
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ClearBubble()
+		if isvalid(self._bubble) then self._bubble:Destroy() end
+		self._bubble=nil
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		self._generation=self._generation+1 self:ClearBubble()
+		local previous=self._rewardEgg
+		self._rewardEgg=_UtilLogic:RandomIntegerRange(1,13)
+		if self._rewardEgg==previous then self._rewardEgg=(previous+_UtilLogic:RandomIntegerRange(1,12)-1)%13+1 end
+		self._touchCounts={} self._used={} self._lastTouches={}
+		self.QuestActive=false self.QuestComplete=false self.QuestReady=false self.KillCount=0 self._targetMonster="" self._questUserId=""
+		for egg=1,24 do local obj=self:GetEgg(egg) if isvalid(obj) then obj.Enable=egg~=16 end end
+		self:UpdateTreasureTouch()
+		log("Ep4Map4: reset hidden reward location=" .. self._rewardEgg)
+	end
+end

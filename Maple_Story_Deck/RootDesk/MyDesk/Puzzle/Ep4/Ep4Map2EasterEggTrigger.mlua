@@ -1,0 +1,68 @@
+@Component
+script Ep4Map2EasterEggTrigger extends Component
+	property integer EggNumber = 1
+	property any _touchHandler = nil
+	property any _holdHandler = nil
+	property any _releaseHandler = nil
+	property boolean _dragging = false
+	property integer _touchId = 0
+	property Vector2 _offset = Vector2(0,0)
+	property Vector3 _dragStart = Vector3(0,0,0)
+
+	method void OnBeginPlay()
+		-- 맵 오브젝트의 원래 터치 영역을 그대로 이용한다.
+		if self:IsClient() then self._touchHandler=self.Entity:ConnectEvent(TouchEvent,self.OnTouched) end
+	end
+	@ExecSpace("ClientOnly")
+	method void OnTouched(TouchEvent event)
+		-- 몬스터/로비/일시정지 입력을 양보한다. 첫 번째 오브젝트만 배치 드래그다.
+		if not _GameManager.GameStarted or _GameManager.GameOver or _GameManager:IsGamePaused() then return end
+		if _TitleUI.titleGroup.Enable or _CardManager:IsMonsterUnderTouch(event.TouchPoint) then return end
+		if self.EggNumber~=1 then self:RequestTouch() return end
+		if self._dragging or _Ep4Map2EasterEggLogic.Placed then return end
+		self._dragging=true self._touchId=event.TouchId
+		local p=self.Entity.TransformComponent.Position local w=_UILogic:ScreenToWorldPosition(event.TouchPoint)
+		self._dragStart=p self._offset=Vector2(p.x-w.x,p.y-w.y)
+		self._holdHandler=_InputService:ConnectEvent(ScreenTouchHoldEvent,self.OnDragHold)
+		self._releaseHandler=_InputService:ConnectEvent(ScreenTouchReleaseEvent,self.OnDragRelease)
+	end
+	@ExecSpace("ClientOnly")
+	method void OnDragHold(ScreenTouchHoldEvent event)
+		-- 손가락 이동은 미리보기만 한다. 범위와 보상은 서버에서 검증한다.
+		if not self._dragging or event.TouchId~=self._touchId then return end
+		if _GameManager:IsGamePaused() or _GameManager.GameOver then self:FinishDrag(false) return end
+		local w=_UILogic:ScreenToWorldPosition(event.TouchPoint)
+		self.Entity.TransformComponent.Position=Vector3(w.x+self._offset.x,w.y+self._offset.y,self._dragStart.z)
+	end
+	@ExecSpace("ClientOnly")
+	method void OnDragRelease(ScreenTouchReleaseEvent event)
+		-- 놓은 좌표만 서버에 요청하고 미리보기는 원위치로 되돌려 동기화를 기다린다.
+		if self._dragging and event.TouchId==self._touchId then self:FinishDrag(true) end
+	end
+	@ExecSpace("ClientOnly")
+	method void FinishDrag(boolean submit)
+		-- 성공/실패/화면 종료 모두 동일하게 입력 구독을 정리한다.
+		local p=self.Entity.TransformComponent.Position
+		self._dragging=false self.Entity.TransformComponent.Position=self._dragStart
+		if self._holdHandler~=nil then _InputService:DisconnectEvent(ScreenTouchHoldEvent,self._holdHandler) self._holdHandler=nil end
+		if self._releaseHandler~=nil then _InputService:DisconnectEvent(ScreenTouchReleaseEvent,self._releaseHandler) self._releaseHandler=nil end
+		if submit then self:RequestPlacement(p.x,p.y) end
+	end
+	@ExecSpace("Server")
+	method void RequestPlacement(number x, number y)
+		-- 호출자가 소유한 실제 입력만 맵2 배치 판정으로 전달한다.
+		if self.EggNumber==1 then _Ep4Map2EasterEggLogic:CheckPlacement(self.Entity,x,y,senderUserId) end
+	end
+	@ExecSpace("Server")
+	method void RequestTouch()
+		-- 치료/동전 교환/확률 상자의 서버 권한 진입점이다.
+		if self.EggNumber~=1 then _Ep4Map2EasterEggLogic:OnObjectTouched(self.EggNumber,self.Entity,senderUserId) end
+	end
+	method void OnEndPlay()
+		-- 재입장/플레이 종료 시 중복 핸들러를 남기지 않는다.
+		if not self:IsClient() then return end
+		if self._touchHandler~=nil then self.Entity:DisconnectEvent(TouchEvent,self._touchHandler) end
+		if self._holdHandler~=nil then _InputService:DisconnectEvent(ScreenTouchHoldEvent,self._holdHandler) end
+		if self._releaseHandler~=nil then _InputService:DisconnectEvent(ScreenTouchReleaseEvent,self._releaseHandler) end
+	end
+end

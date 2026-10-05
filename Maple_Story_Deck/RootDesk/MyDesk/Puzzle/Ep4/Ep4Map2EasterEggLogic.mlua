@@ -1,0 +1,187 @@
+@Logic
+script Ep4Map2EasterEggLogic extends Logic
+	-- 맵2 배치 퍼즐, 치료/동전 교환과 세 개의 확률형 상자. 성공 상태는 런 동안 유지한다.
+	@Sync property boolean Placed = false
+	@Sync property boolean Healed = false
+	@Sync property boolean SummonUsed = false
+	property string CoinItemId = "ep4_helper_coin"
+	property string HealedRUID = "a83e09461764419d8e040c50e0e33e81"
+	property number TargetX = -3.065727
+	property number TargetY = -0.2741847
+	property number PlacementTolerance = 0.4
+	-- 말풍선 꼬리를 제외한 본체 중앙과 기존 포션 표시 크기. 기준점이 다른 두 그림을 따로 보정한다.
+	property Vector2 RequirementIconCenter = Vector2(0,0.11)
+	property Vector2 RequirementIconBoxSize = Vector2(0.74,0.74)
+	property table _requirementIconBounds = {
+		["289c7bdcbdc8484ab7bad688b2519ca7"]={3,30,3,30},
+		["ecfe24412de04eaf98b1dd188bbb21b8"]={2,31,1,30}
+	}
+	property table _originalPositions = {}
+	property table _originalSprites = {}
+	property table _used = {}
+	property table _invaders = {}
+	property integer _revision = 0
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		-- 원래 배치와 그림은 새 런에서 복구한다.
+		for i=1,6 do
+			local e=_EntityService:GetEntityByPath("/maps/ep4_map2/esteregg_" .. i)
+			if isvalid(e) then
+				self._originalPositions[i]=e.TransformComponent.Position
+				self._originalSprites[i]=e.SpriteRendererComponent.SpriteRUID
+			end
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean ValidObject(integer egg, Entity obj, string userId)
+		-- 서버에서 실제 맵/존/호출자와 원래 배치를 검증한다. 드래그 미리보기 좌표를 신뢰하지 않는다.
+		if egg<1 or egg>6 or not isvalid(obj) then return false end
+		if obj~=_EntityService:GetEntityByPath("/maps/ep4_map2/esteregg_" .. egg) then return false end
+		if not _GameManager.GameStarted or _GameManager.GameOver or _GameManager:IsGamePaused() then return false end
+		local user=_UserService:GetUserEntityByUserId(userId)
+		if not isvalid(user) or user.CurrentMap~=obj.CurrentMap then return false end
+		local zone=_MapManager.CurrentMapIndex
+		if zone<144 or zone>153 then return false end
+		local p=self._originalPositions[egg]
+		return p~=nil and math.abs(p.x-_MapManager:GetSpawnPositionForIndex(zone).x)<8
+	end
+
+	@ExecSpace("ServerOnly")
+	method void CheckPlacement(Entity obj, number x, number y, string userId)
+		-- 기존 배치 퍼즐과 같은 0.4 오차 안에서만 성공하며 보상은 한 번 지급한다.
+		if self.Placed or not self:ValidObject(1,obj,userId) then return end
+		local dx=x-self.TargetX local dy=y-self.TargetY
+		if x~=x or y~=y or dx*dx+dy*dy>self.PlacementTolerance*self.PlacementTolerance then
+			obj.TransformComponent.Position=self._originalPositions[1]
+			return
+		end
+		self.Placed=true
+		obj.TransformComponent.Position=Vector3(self.TargetX,self.TargetY,self._originalPositions[1].z)
+		_Ep4Map1EasterEggLogic:GrantStandardReward(obj)
+		_UIToast:ShowMessage("EP4M2_PLACED",userId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnObjectTouched(integer egg, Entity obj, string userId)
+		-- 중복 지급은 조건 충족 직후 차단하고 보상은 기존 드롭 연출을 재사용한다.
+		if not self:ValidObject(egg,obj,userId) then return end
+		if egg==2 then
+			if self.Healed then return end
+			if _CardManager.PotionLevel<2 then
+				_UIToast:ShowMessage("EP4M2_NEEDS_HEAL",userId)
+				self:ShowRequirement(obj,_CardManager.Potion2RUID)
+				return
+			end
+			self.Healed=true
+			obj.SpriteRendererComponent.SpriteRUID=self.HealedRUID
+			self:GrantSkill(obj)
+			local p=obj.TransformComponent.WorldPosition local f=_GameManager:GetGroundFallFor(obj,p)
+			local revision=self._revision
+			_PlayerInventory:ReserveAcquisitionOrder(self.CoinItemId)
+			_GameManager:ScheduleLootDrop(p,"ecfe24412de04eaf98b1dd188bbb21b8",f.x,f.y,function()
+				if revision==self._revision and self.Healed then _PlayerInventory:AddItem(self.CoinItemId,1) end
+			end,1)
+			_UIToast:ShowMessage("EP4M2_HEALED",userId)
+		elseif egg==3 then
+			if self.SummonUsed then return end
+			if not _PlayerInventory:RemoveItem(self.CoinItemId,1) then
+				_UIToast:ShowMessage("EP4M2_NO_COIN",userId)
+				self:ShowRequirement(obj,"ecfe24412de04eaf98b1dd188bbb21b8")
+				return
+			end
+			-- 동전은 시도 비용이다. 20% 꽝도 같은 런의 시도를 소모한다.
+			if _UtilLogic:RandomIntegerRange(1,100)<=20 then
+				self.SummonUsed=true
+				_UIToast:ShowMessage("EP4M2_SUMMON_MISS",userId)
+				return
+			end
+			if not _Ep4Map2SummonLogic:SummonAlly() then _PlayerInventory:AddItem(self.CoinItemId,1) return end
+			self.SummonUsed=true
+			_UIToast:ShowMessage("EP4M2_SUMMON",userId)
+		elseif egg>=4 then
+			if self._used[egg] then return end
+			self._used[egg]=true
+			if _UtilLogic:RandomIntegerRange(1,100)<=60 then
+				if self:SpawnInvaders(obj)==0 then self._used[egg]=nil return end
+				_UIToast:ShowMessage("EP4M2_INVADERS",userId)
+			else
+				self:GrantSkill(obj)
+			end
+			obj.Enable=false
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void GrantSkill(Entity obj)
+		-- 소장 스킬이 아닌 현재 인게임 슬롯의 강화 가능 스킬 한 개를 지급한다.
+		local p=obj.TransformComponent.WorldPosition local f=_GameManager:GetGroundFallFor(obj,p)
+		local pool=_CardManager:BuildActiveUpgradePool()
+		if #pool>0 then _CardManager:GrantCardUpgradesFromPool(pool,p,f.x,f.y,1,1,0) end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ShowRequirement(Entity obj, string icon)
+		-- 기존 흰 말풍선의 위치/크기/표시 시간은 유지하고 그림의 실제 외곽만 중앙에 맞춘다.
+		local p=obj.TransformComponent.WorldPosition
+		_Ep2Map1GiftNpcLogic:SpawnBubble(obj.CurrentMap,Vector3(p.x-0.765297,p.y+0.9155867,p.z-0.5),icon,"",false,1,_Ep2Map1GiftNpcLogic.DefaultIconPosition,_Ep2Map1GiftNpcLogic.DefaultIconScale)
+		local bubble=_Ep2Map1GiftNpcLogic._activeBubble
+		if isvalid(bubble) then
+			_CollectBubbleLogic:ApplyForegroundDepth(bubble)
+			local bounds=self._requirementIconBounds[icon]
+			if bounds~=nil then
+				_CollectBubbleLogic:FitIcon(bubble,"Icon",icon,bounds[1],bounds[2],bounds[3],bounds[4],self.RequirementIconCenter,self.RequirementIconBoxSize,0)
+			end
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer SpawnInvaders(Entity obj)
+		-- 기존 지상 침입자 초기화로 광기의 무도회 주민 5마리를 지면에 펼쳐 놓는다.
+		local zone=_MapManager.CurrentMapIndex local info=_MapManager:GetZoneInfo(zone)
+		local map=_MonsterSpawner:GetZoneEntity(zone)
+		if not isvalid(map) or info==nil then return 0 end
+		local count=0 local hp=_GameManager:GetTimeStepHp(_GameManager:GetTimeStep())*2
+		for i=1,5 do
+			local world=Vector3(info.spawnX+(i-3)*1.2,info.landY,0)
+			local p=_MonsterSpawner:ToLocalSpawnPos(map,world)
+			local e=_SpawnService:SpawnByModelId(_MonsterSpawner.MonsterModelId,"Ep4BallResident" .. i,p,map)
+			if isvalid(e) then
+				---@type MonsterAI
+				local ai=e:GetComponent("script.MonsterAI")
+				if ai~=nil then
+					ai:InitializeGroundAlienInvader(zone,hp,_GameManager:GetWaveApproachSpeed(_GameManager.Wave),"36c9662683db4d0cb67c48627b080796","2c8b00d5a1774085b063d18551d1e279","2ba57894b82f4efda5e80dbedb7cf67b","2805bf31ea364d80ba136776ed3e0663",0.8,"b4a1ab38881847618788a82c13b38746",p.x,p.y)
+					ai:SetMinionAttack("b4a1ab38881847618788a82c13b38746",1.2,true)
+					ai:SetMinionHitEffect("8f40bd74d19b4104a463e90296d127bd",0.6)
+					ai:SetAlienInvaderSounds("2a8c07434f1744519429d36205eb8d4d","5743a7d40141467fba61d7de41af378d","46ddfba0306d4f489fd953e36aa9cb2f")
+					table.insert(self._invaders,e) count=count+1
+				else e:Destroy() end
+			end
+		end
+		log("Ep4Map2: invaders=" .. count .. " hp=" .. hp)
+		return count
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		-- 새 게임/다시하기만 초기화한다. 이어하기에서는 동전/성공 상태를 유지한다.
+		self._revision=self._revision+1 self.Placed=false self.Healed=false self.SummonUsed=false self._used={}
+		-- 맵2에 새로 연결한 공용 두 번 터치 상태만 새 런에서 비운다.
+		for i=7,8 do
+			local key="ep4_map2_esteregg_" .. i
+			_Ep1TouchEasterEggLogic._touchCounts[key]=nil
+			_Ep1TouchEasterEggLogic._used[key]=nil
+		end
+		_Ep4Map2SummonLogic:EndSummon(false)
+		for _,e in ipairs(self._invaders) do if isvalid(e) then e:Destroy() end end
+		self._invaders={}
+		for i=1,6 do
+			local e=_EntityService:GetEntityByPath("/maps/ep4_map2/esteregg_" .. i)
+			if isvalid(e) and self._originalPositions[i]~=nil then
+				e.Enable=true e.TransformComponent.Position=self._originalPositions[i]
+				e.SpriteRendererComponent.SpriteRUID=self._originalSprites[i]
+			end
+		end
+	end
+end

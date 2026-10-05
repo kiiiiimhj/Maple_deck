@@ -18,6 +18,13 @@ script MapManager extends Logic
 	-- 이 동안 플레이 시계·포션 등 전투 틱을 멈춘다(유저 지정 2026-09-17, GameManager.IsPlayClockFrozen 참고)
 	property boolean InColosseum = false
 
+	-- 유저 요청 테스트 진입: 루디브리엄 선택 시 Maker에서만 맵5 존1로 시작.
+	property boolean TestStartAtEp4Map5 = false
+	-- Maker only: 모든 맵의 레벨5 이동 제한 해제(IsLevelGateBypassed, 2026-10-06 유저 지정 테스트용)
+	property boolean TestUnlockLevelGateInMaker = false
+	-- Maker only: ep1 starts at the Sylph rescue scene for testing.
+	property boolean TestStartAtSylphUnlock = false
+
 	property integer MinMapIndex = 1
 	-- 맵11(해변 존)이 맵6의 우측 분기로 추가되면서, 그리고 맵12가 맵11의 순차적 연장으로 추가되면서
 	-- 스폰/정리 루프(SpawnWave, ClearAllMonsters 등)가 도는 범위에 11~12도 포함되도록 12로 올린다.
@@ -91,6 +98,11 @@ script MapManager extends Logic
 	-- ZoneInfo 자체는 OnBeginPlay에서 채운다 — OnInitialize에서 채웠더니 이 Logic의 OnBeginPlay보다
 	-- 늦게 실행되는 경우가 있어([LEA-2007] ZoneInfo가 nil인 채로 OnBeginPlay가 GetMapName을 호출) 실측으로
 	-- 확인 후 옮김. MonsterSpawner._activeMaps와 동일하게 "OnBeginPlay 맨 앞에서 초기화" 패턴을 따른다.
+	method boolean IsEp4Map1Ester1Zone(integer mapIndex)
+		-- 기부 포탈 전용 히든맵은 1~5존만 사용한다.
+		return mapIndex>=184 and mapIndex<=188
+	end
+
 	method any GetZoneInfo(integer mapIndex)
 		return self.ZoneInfo[mapIndex]
 	end
@@ -107,6 +119,14 @@ script MapManager extends Logic
 	-- (MinMapIndex~MaxMapIndex)·ResolveCurrentMapIndex 폴백·시작 리다이렉트가 전부 해당 에피소드의
 	-- 범위 안에서만 동작하게 한다. ZoneInfo 자체는 1~44(에피1)/45~88(에피2)/89~98(에피3) 항목을 항상
 	-- 같이 들고 있으므로(위 OnBeginPlay 참고) 여기서 테이블을 바꿔치기할 필요는 없다 — 순회 범위만 좁히면 된다.
+	method boolean IsLevelGateBypassed(integer mapIndex)
+		-- 루디브리엄 맵5 테스트 진입은 레벨1부터 기존 이동 경로를 자유롭게 확인한다.
+		-- 정식 플레이와 다른 에피소드의 레벨 잠금에는 영향을 주지 않는다.
+		-- 테스트용(유저 지정 2026-10-06 "맵이동 풀어야함(5레벨제한)"): Maker 플레이에서만 모든 맵의 레벨5 제한을 푼다
+		if self.TestUnlockLevelGateInMaker and Environment:IsMakerPlay() then return true end
+		return self.TestUnlockAllZones or (self.TestStartAtEp4Map5 and Environment:IsMakerPlay() and mapIndex>=134 and mapIndex<=183)
+	end
+
 	@ExecSpace("ServerOnly")
 	method void SetEpisodeRange(integer episode)
 		if episode == 2 then
@@ -129,13 +149,13 @@ script MapManager extends Logic
 			self.MaxMapIndex = 133
 			self.DesiredStartMapIndex = 129
 		elseif episode == 4 then
-			-- 에피소드4(mapIndex134~173, 루디브리엄 컨셉, 2026-09-28) — map1(134~143)/map2(144~153)/
-			-- map3(154~163)/map4(164~173). 에피3와 같은 연결 구조: 143→144, 153→154, 163→164 순차 +
-			-- map1 존5↔map2 존1, map1 존1 "<"→map3 존1, map3 존6↔map4 존3 곁가지(MoveByDelta/RequestMoveToEp4* 참고).
-			-- 129~133(에피3 히든맵)을 건너뛰어 134부터 시작한다. 비밀의 맵은 아직 없다(유저 지정).
+			-- 에피소드4: map1~4(134~173)은 순차 연결, map5(174~183)는 퀘스트 포탈로만 입장.
+			-- 추가 위/아래 길: map1 존5↔map2 존1, map2 존5↔map3 존1.
+			-- map1 존1의 왼쪽 / map4 존10의 오른쪽은 막다른 길이다.
 			self.MinMapIndex = 134
-			self.MaxMapIndex = 183  -- map5(174~183) 추가(2026-09-28)
-			self.DesiredStartMapIndex = 134
+			self.MaxMapIndex = 189  -- 맵1 히든맵 5존과 파풀라투스 단일 존
+			self.DesiredStartMapIndex = (self.TestStartAtEp4Map5 and Environment:IsMakerPlay()) and 174 or 134
+			if self.DesiredStartMapIndex==174 then log("MapManager: Ludibrium test entry -> ep4_map5 zone1") end
 		elseif episode == 3 then
 			-- 에피소드3(mapIndex89~128, "엘라스 산맥" 컨셉) — map1(존1~10=89~98)/map2(존1~10=99~108)/
 			-- map3(존1~10=109~118)/map4(존1~10=119~128). 98→99, 108→109, 118→119 전부 인접 mapIndex라
@@ -146,8 +166,9 @@ script MapManager extends Logic
 		else
 			self.MinMapIndex = 1
 			self.MaxMapIndex = 44
-			self.DesiredStartMapIndex = 1
+			self.DesiredStartMapIndex = (self.TestStartAtSylphUnlock and Environment:IsMakerPlay()) and 35 or 1
 		end
+		self.DesiredStartMapIndex=_CompanionRescueMakerTest:GetStartIndex(episode,self.DesiredStartMapIndex)
 	end
 
 	-- 네이티브 기본 줌(100)이면 맵 가장자리(발판/배경이 끝나는 지점)에서 카메라가 그 바깥의 빈 공간을
@@ -700,7 +721,7 @@ script MapManager extends Logic
 			[171] = { file = "ep4_map4", container = "Zone8", spawnX = 109.677361, landY = -1.32 },
 			[172] = { file = "ep4_map4", container = "Zone9", spawnX = 121.2312, landY = -1.32 },
 			[173] = { file = "ep4_map4", container = "Zone10", spawnX = 139.5, landY = -1.32 },
-			-- 에피4 map5(ep4_map5, 2026-09-28) — map4 존10(173)의 ">"로 이어지는 순차 연장. spawnX는 컨테이너 실제 X
+			-- 에피4 map5(ep4_map5) — 슈피겔만 퀘스트 포탈로 진입. spawnX는 컨테이너 실제 X
 			-- (존2=15.360178, 존6=68.82012로 간격이 다르다), landY는 맨 아래 발판 실측(존4·5만 둔덕 -0.72).
 			[174] = { file = "ep4_map5", container = nil, spawnX = 0, landY = -1.32 },
 			[175] = { file = "ep4_map5", container = "Zone2", spawnX = 15.360178, landY = -1.32 },
@@ -712,6 +733,13 @@ script MapManager extends Logic
 			[181] = { file = "ep4_map5", container = "Zone8", spawnX = 109.677361, landY = -1.32 },
 			[182] = { file = "ep4_map5", container = "Zone9", spawnX = 121.2312, landY = -1.32 },
 			[183] = { file = "ep4_map5", container = "Zone10", spawnX = 139.5, landY = -1.32 },
+			-- ep4_map1_ester1: 첫 다섯 존의 실제 바닥 높이. Zone4 컨테이너가 없으므로 맵 루트로 통일한다.
+			[184] = { file = "ep4_map1_ester1", container = nil, spawnX = 0, landY = -1.32 },
+			[185] = { file = "ep4_map1_ester1", container = nil, spawnX = 15.5, landY = -1.32 },
+			[186] = { file = "ep4_map1_ester1", container = nil, spawnX = 31, landY = -1.32 },
+			[187] = { file = "ep4_map1_ester1", container = nil, spawnX = 46.5, landY = -0.72 },
+			[188] = { file = "ep4_map1_ester1", container = nil, spawnX = 62, landY = -0.12 },
+			[189] = { file = "ep4_map5_ester1", container = nil, spawnX = 0, landY = -1.32 },
 		}
 		-- 몬스터 스폰/시작맵 리다이렉트는 GameStarted가 될 때까지 미룬다(BeginGameplay 참고) —
 		-- 타이틀 화면을 보는 동안 몬스터가 먼저 쌓이면 안 된다. 여기서는 현재 위치만 계산해둔다.
@@ -1131,7 +1159,7 @@ script MapManager extends Logic
 		self:MoveToMap(actualIndex, 114)
 	end
 
-	-- ── 에피소드4 곁가지(2026-09-28, 유저 지정 "ep3처럼 연결") — 에피3의 4개 스퍼와 1:1로 같은 자리 ──
+	-- 에피소드4 위/아래 연결: map1 존5↔map2 존1, map2 존5↔map3 존1.
 	-- map1 존5(138) "위로" → map2 존1(144) / map2 존1 "아래로" → map1 존5
 	@ExecSpace("Server")
 	method void RequestMoveToEp4Map2Zone1()
@@ -1149,21 +1177,19 @@ script MapManager extends Logic
 		self:MoveToMap(actualIndex, 138)
 	end
 
-	-- map3 존6(159) "아래로" → map4 존3(166) / map4 존3 "위로" → map3 존6
+	-- map2 존5(148) "위로" → map3 존1(154), 반대 방향은 "아래로".
 	@ExecSpace("Server")
-	method void RequestMoveToEp4Map4Zone3()
-		-- ep4 map3 존6 → map4 존3
+	method void RequestMoveToEp4Map3Zone1()
 		local actualIndex = self.CurrentMapIndex
-		if actualIndex ~= 159 then return end
-		self:MoveToMap(actualIndex, 166)
+		if actualIndex ~= 148 then return end
+		self:MoveToMap(actualIndex, 154)
 	end
 
 	@ExecSpace("Server")
-	method void RequestMoveToEp4Map3Zone6()
-		-- ep4 map4 존3 → map3 존6(위 경로의 역방향)
+	method void RequestMoveToEp4Map2Zone5()
 		local actualIndex = self.CurrentMapIndex
-		if actualIndex ~= 166 then return end
-		self:MoveToMap(actualIndex, 159)
+		if actualIndex ~= 154 then return end
+		self:MoveToMap(actualIndex, 148)
 	end
 
 	-- self.CurrentMapIndex를 그대로 신뢰한다 — 그룹D(맵11/12) 병합 이후 ResolveCurrentMapIndex()는
@@ -1172,6 +1198,7 @@ script MapManager extends Logic
 	@ExecSpace("ServerOnly")
 	method void MoveByDelta(integer delta)
 		local actualIndex = self.CurrentMapIndex
+		if actualIndex==189 then return end -- 파풀 방은 좌우 이동 없음
 		local targetIndex = actualIndex + delta
 
 		-- 맵6↔11 특수 분기: 맵6의 오른쪽은 7이 아니라 11(신규 해변 존)로 이어지고, 맵11의 왼쪽은
@@ -1290,11 +1317,19 @@ script MapManager extends Logic
 			-- 숨겨뒀던 이 버튼도 다시 보이게 해야 한다(UpdateButtonVisibility 참고).
 			targetIndex = 109
 		elseif actualIndex == 134 and delta == -1 then
-			-- 에피소드4 map1 존1(134)의 "<" — 에피3의 89→109와 같은 곁가지로 map3 존1(154)에 직행한다
-			-- (델타 그대로면 133 = 에피3 히든맵으로 샌다).
-			targetIndex = 154
+			-- map1 존1 왼쪽은 막다른 길. 이동 버튼도 숨긴다.
+			return
+		elseif actualIndex == 173 and delta == 1 then
+			-- map5는 슈피겔만 퀘스트 포탈 전용. 일반 오른쪽 이동으로 입장하지 않는다.
+			return
+		elseif actualIndex == 184 and delta == -1 then
+			-- 히든맵 입구 왼쪽은 맵1의 기부 포탈이 있는 존3으로 복귀한다.
+			targetIndex = 136
+		elseif actualIndex == 188 and delta == 1 then
+			-- 히든맵은 존5가 끝이다.
+			return
 		elseif actualIndex == 183 and delta == 1 then
-			-- 에피소드4 마지막 존(map5 존10) — 막다른 길. map4 존10(173)의 ">"는 이제 map5 존1(174)로 순차 이동한다(2026-09-28)
+			-- map5 존10 오른쪽은 막다른 길.
 			return
 		end
 
@@ -1389,6 +1424,8 @@ script MapManager extends Logic
 	-- 빠른 이동 페널티 전체 스위치(유저 지정 2026-09-28 테스트용 "맵이동 빨리하면 몬스터 강해지는거 막아줘").
 	-- false면 스트릭을 아예 세지 않아 몬스터 당기기/강화/절망의 칼날이 전부 안 나온다. 2026-09-29 출시 전 유저 지정으로 다시 true
 	property boolean RushPenaltyEnabled = true
+	-- 테스트용(유저 지정 2026-10-06 "맵 빨리 이동하면 뜨는 패널티 다 꺼"): true면 Maker 플레이에서만 페널티 전부 끔. 출시판엔 영향 없음
+	property boolean TestDisableRushPenaltyInMaker = false
 
 	-- 존 도착마다 호출 — countsAsMove=false(SilentMoveToMap의 시스템 리다이렉트)는 시계만 리셋하고
 	-- 스트릭 판정은 건너뛴다. countsAsMove=true(실제 이동 버튼 결과, DoScrollMapChange/DoMapChange)만
@@ -1410,7 +1447,8 @@ script MapManager extends Logic
 	method void RegisterZoneArrival(integer targetIndex, boolean countsAsMove)
 		local now = _UtilLogic.ElapsedSeconds
 		local tier = 0
-		if countsAsMove and self._zoneEnterTime > 0 and self.RushPenaltyEnabled then
+		local rushOn = self.RushPenaltyEnabled and not (self.TestDisableRushPenaltyInMaker and Environment:IsMakerPlay())
+		if countsAsMove and self._zoneEnterTime > 0 and rushOn then
 			local stayed = now - self._zoneEnterTime
 			if stayed < self.RushStayThreshold then
 				self._rushMoveStreak = self._rushMoveStreak + 1
@@ -1457,7 +1495,7 @@ script MapManager extends Logic
 		-- MaxMapIndex(에피3=128) 밖이지만 유효한 목적지다(ZoneInfo엔 등록돼 있음) — 정상 진행으로는
 		-- 절대 도달 못 하고(MoveByDelta의 129/133 막다른 길 분기 참고) 오직 존1(129) 진입은
 		-- Ep3Map4Ester1PortalLogic이, 존간 이동(130~132)은 이 예외를 타고 여기까지 온다.
-		local isEsterZone = targetIndex >= 129 and targetIndex <= 133
+		local isEsterZone = (targetIndex >= 129 and targetIndex <= 133) or self:IsEp4Map1Ester1Zone(targetIndex) or targetIndex==189
 		if (targetIndex < self.MinMapIndex or targetIndex > self.MaxMapIndex) and not isEsterZone then return end
 		if targetIndex == fromIndex then return end
 
@@ -1492,7 +1530,7 @@ script MapManager extends Logic
 		-- 임시 테스트 변경(2026-08-26) — 시작 지점을 ep3_map3 존1(109)로 옮겨두면 localIndex가 항상
 		-- >=4라 레벨5 미만인 새 캐릭터는 어느 방향으로도 못 움직인다. TestUnlockAllZones로 이 잠금을
 		-- 통째로 우회한다 — 테스트 끝나면 false로 되돌릴 것(MapMoveUI 자물쇠 표시도 같이 되돌아감).
-		if not self.TestUnlockAllZones and localIndex >= 4 and _GameManager.Level < 5 then
+		if not self:IsLevelGateBypassed(targetIndex) and localIndex >= 4 and _GameManager.Level < 5 then
 			log("MapManager: map" .. targetIndex .. " (local " .. localIndex .. ") locked until level 5")
 			return
 		end
@@ -1648,6 +1686,34 @@ script MapManager extends Logic
 	-- ⚠ 이 파일 수정 후 빌드 로그에 "ResetCameraConfine(integer mapIndex, number groundY)" LEA-1121이
 	-- 뜨면 Maker 컴파일본이 예전 2인자 버전으로 굳은 것이다 — 파일을 한 번 더 건드리고 refresh할 것.
 	property number CameraYLockViewLift = 0.465
+
+	-- 화면 정중앙의 월드 Y(서버에서도 쓰기 위한 근사 — 카메라는 클라에만 있다). 2026-10-06 실측:
+	-- Y 고정 맵은 고정Y + 1.29(ep4 존174 -1.32→-0.03, 존177 둔덕에서도 같음), 따라가는 맵은 플레이어 발 + 1.41.
+	property number LockedScreenCenterAboveFixedY = 1.29
+	property number FreeScreenCenterAbovePlayer = 1.41
+
+	method number GetFixedCameraY(integer mapIndex)
+		-- ResetCameraConfine의 Y 고정 분기와 같은 범위. 고정이 없으면 -9999
+		if mapIndex >= 45 and mapIndex <= 54 then return self.Ep2Map1FixedCameraY end
+		if mapIndex >= 55 and mapIndex <= 64 then return self.Ep2Map2FixedCameraY end
+		if mapIndex >= 65 and mapIndex <= 74 then return self.Ep2Map3FixedCameraY end
+		if mapIndex >= 75 and mapIndex <= 84 then return self.Ep2Map4FixedCameraY end
+		if mapIndex >= 85 and mapIndex <= 88 then return self.Ep2Map2HiddenFixedCameraY end
+		if mapIndex >= 89 and mapIndex <= 98 then return self.Ep3Map1FixedCameraY end
+		if mapIndex >= 99 and mapIndex <= 108 then return self.Ep3Map2FixedCameraY end
+		if mapIndex >= 109 and mapIndex <= 118 then return self.Ep3Map3FixedCameraY end
+		if mapIndex >= 119 and mapIndex <= 128 then return self.Ep3Map4FixedCameraY end
+		if mapIndex >= 129 and mapIndex <= 133 then return self.Ep3Map4Ester1FixedCameraY end
+		if mapIndex == 189 or self:IsEp4Map1Ester1Zone(mapIndex) or (mapIndex >= 134 and mapIndex <= 183) then return self.Ep4FixedCameraY end
+		return -9999
+	end
+
+	method number GetScreenCenterWorldY(number playerY)
+		-- 지금 존의 화면 정중앙 월드 Y(원거리 착탄 범위 등 "화면 기준" 배치용)
+		local fixedY = self:GetFixedCameraY(self.CurrentMapIndex)
+		if fixedY > -9000 then return fixedY + self.LockedScreenCenterAboveFixedY end
+		return playerY + self.FreeScreenCenterAbovePlayer
+	end
 
 	-- 존 이동 직후 카메라 세로 추적을 잠깐 얼리는 시간(초). 실측(2026-09-14): 존 이동 순간 한 프레임은
 	-- 캐릭터 새 위치가 오프셋 계산(이 Logic의 OnUpdate)보다 늦게 도착해서, 카메라는 새 Y를 따라가는데
@@ -1815,6 +1881,22 @@ script MapManager extends Logic
 			cam.DeadZone = Vector2(self.DefaultDeadZone.x, 0)
 			cam.SoftZone = Vector2(self.DefaultSoftZone.x, 0)
 			self:LockCameraY(self.Ep3Map4Ester1FixedCameraY)
+		elseif mapIndex==189 then
+			-- 파풀라투스는 존1 안에서만 전투한다.
+			cam.ConfineCameraArea=false cam.UseCustomBound=true
+			cam.LeftBottom=Vector2(self.Ep4ConfineMinX,self.Ep4FixedCameraY)
+			cam.RightTop=Vector2(7.75,self.Ep4FixedCameraY)
+			cam.DeadZone=Vector2(self.DefaultDeadZone.x,0) cam.SoftZone=Vector2(self.DefaultSoftZone.x,0)
+			self:LockCameraY(self.Ep4FixedCameraY)
+		elseif self:IsEp4Map1Ester1Zone(mapIndex) then
+			-- 존5와 미사용 존6 사이(x69.75)에서 화면 범위를 끝내고 Y는 존1 기준으로 고정한다.
+			cam.ConfineCameraArea = false
+			cam.UseCustomBound = true
+			cam.LeftBottom = Vector2(self.Ep4ConfineMinX, self.Ep4FixedCameraY)
+			cam.RightTop = Vector2(69.75, self.Ep4FixedCameraY)
+			cam.DeadZone = Vector2(self.DefaultDeadZone.x, 0)
+			cam.SoftZone = Vector2(self.DefaultSoftZone.x, 0)
+			self:LockCameraY(self.Ep4FixedCameraY)
 		elseif mapIndex >= 134 and mapIndex <= 183 then
 			-- 에피소드4 map1~4(존1~10 ×4) — 에피3와 같은 Y 고정 패턴(위 Ep4FixedCameraY 주석 참고)
 			cam.ConfineCameraArea = false

@@ -1,0 +1,48 @@
+@Logic
+script Ep4Map1HiddenExpLogic extends Logic
+	@Sync property boolean Active = false
+	@Sync property integer RemainingSeconds = 0
+	property number Duration = 60
+	property number _remaining = 60
+	property boolean Consumed = false
+	property boolean _returnPending = false
+	property string BoardPath = "/ui/DefaultGroup/ExpBoostBoard"
+	property string TimerPath = "/ui/DefaultGroup/ExpBoostBoard/Inner/TimerText"
+
+	method void OnUpdate(number delta)
+		-- 경험치방에서만 한 판의 60초 예산을 소모하며 기존 타이머 보드를 재사용한다.
+		local inside=_MapManager:IsEp4Map1Ester1Zone(_MapManager.CurrentMapIndex) and not _MapManager.AwayOnSideMap
+		if self:IsClient() then
+			if inside or self._T.ownedBoard then
+				local board=_EntityService:GetEntityByPath(self.BoardPath)
+				if isvalid(board) then board.Enable=inside and self.Active and not _GameManager.GameOver end
+				local text=_EntityService:GetEntityByPath(self.TimerPath)
+				if isvalid(text) and text.TextGUIRendererComponent~=nil then
+					text.TextGUIRendererComponent.Text=string.format("%02d:%02d",math.floor(self.RemainingSeconds/60),self.RemainingSeconds%60)
+				end
+				self._T.ownedBoard=inside
+			end
+			return
+		end
+		if not inside then self.Active=false self._returnPending=false return end
+		if not _GameManager.GameStarted or _GameManager.GameOver or _GameManager:IsGamePaused() then return end
+		if self._returnPending or self.Consumed then
+			if not _MapManager._moveLocked then _MapManager:MoveToMap(_MapManager.CurrentMapIndex,136) end
+			return
+		end
+		if not self.Active then log("Ep4HiddenExp: 60 second timer resumed") end
+		self.Active=true self._remaining=math.max(0,self._remaining-delta)
+		self.RemainingSeconds=math.ceil(self._remaining)
+		if self._remaining<=0 then
+			self.Active=false self.Consumed=true self._returnPending=true
+			_UIToast:ShowMessage("EP4M1_HIDDEN_TIME_UP")
+			log("Ep4HiddenExp: 60 seconds consumed, returning to136")
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		-- 새 게임과 다시하기에서는 다시 1분, 이어하기에서는 남은 시간을 유지한다.
+		self.Active=false self.RemainingSeconds=0 self._remaining=self.Duration self.Consumed=false self._returnPending=false
+	end
+end

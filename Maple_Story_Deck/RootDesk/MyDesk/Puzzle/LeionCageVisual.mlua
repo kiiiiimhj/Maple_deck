@@ -1,0 +1,129 @@
+@Component
+script LeionCageVisual extends Component
+
+	property Entity _openCage = nil
+	property Entity _hero = nil
+	property Entity _arrow = nil
+	property any _touchHandler = nil
+	property any _arrowTouchHandler = nil
+	property Vector3 _basePosition = Vector3(0,0,0)
+	property Vector3 _baseScale = Vector3(1,1,1)
+	property table _heroMetrics = {}
+	property number _age = 0
+	property number _releaseAge = 0
+	property number _dropAge = 0
+	property boolean _impactLogged = false
+	property integer _revision = -1
+	property boolean _releaseLogged = false
+	property boolean _heroLogged = false
+	property boolean _ready = false
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		self._basePosition=self.Entity.TransformComponent.Position
+		self._baseScale=self.Entity.TransformComponent.Scale
+		self._openCage=_EntityService:GetEntityByPath("/maps/ep2_map2_estermap_1/LeionOpenCage")
+		self._hero=_EntityService:GetEntityByPath("/maps/ep2_map2_estermap_1/RescuedLeion")
+		self._arrow=_EntityService:GetEntityByPath("/maps/ep2_map2_estermap_1/LeionRescueArrow")
+		self._heroMetrics=_CardManager:GetSpriteMetrics("c26beb96e46e41289ecd838a62c60da1")
+		self._touchHandler=self.Entity:ConnectEvent(TouchEvent,self.OnCageTouched)
+		if isvalid(self._arrow) then self._arrowTouchHandler=self._arrow:ConnectEvent(TouchEvent,self.OnArrowTouched) end
+		self._ready=true
+		self:ResetLocalCage()
+		log("LeionCageVisual: drawn colosseum cage ready")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnCageTouched(TouchEvent event)
+		if _TitleUI.titleGroup.Enable then return end
+		self:RequestLeionCageTouch(self.Entity.Path)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnArrowTouched(TouchEvent event)
+		if _TitleUI.titleGroup.Enable then return end
+		self:RequestLeionCageTouch("/maps/ep2_map2_estermap_1/LeionRescueArrow")
+	end
+
+	@ExecSpace("Server")
+	method void RequestLeionCageTouch(string targetPath)
+		_Ep2Map2ArenaLogic:OnLeionRescueTouched(_EntityService:GetEntityByPath(targetPath),senderUserId)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ResetLocalCage()
+		self._releaseAge=0 self._releaseLogged=false self._heroLogged=false self._dropAge=0 self._impactLogged=false
+		self.Entity.TransformComponent.Position=self._basePosition
+		self.Entity.TransformComponent.Scale=self._baseScale
+		self.Entity.SpriteRendererComponent.Color=Color(1,1,1,0)
+		if isvalid(self._openCage) then self._openCage.SpriteRendererComponent.Color=Color(1,1,1,0) end
+		if isvalid(self._hero) then self._hero.SpriteRendererComponent.Color=Color(1,1,1,0) end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUpdate(number delta)
+		if not self._ready or not isvalid(self._hero) or not isvalid(self._openCage) then return end
+		if self._revision~=_Ep2Map2ArenaLogic.LeionSceneRevision then
+			self._revision=_Ep2Map2ArenaLogic.LeionSceneRevision self:ResetLocalCage()
+		end
+		local closedAlpha=0 local openedAlpha=0 local heroAlpha=0 local forward=0 local exitLeft=0 local shake=0
+		local dropY=0 local squash=0
+		if _Ep2Map2ArenaLogic.LeionDropping then
+			self._dropAge=self._dropAge+delta closedAlpha=1
+			local fall=math.max(0,math.min(1,self._dropAge/0.58))
+			dropY=5.5*(1-fall*fall)
+			if self._dropAge>=0.58 then
+				local impact=self._dropAge-0.58
+				dropY=math.abs(math.sin(impact*18))*0.16*math.exp(-impact*9)
+				squash=math.max(0,1-impact/0.18)*0.075
+				shake=math.sin(impact*65)*0.035*math.exp(-impact*12)
+				if not self._impactLogged then
+					self._impactLogged=true
+					local cam=_CameraService:GetCurrentCameraComponent()
+					if cam~=nil then cam:ShakeCamera(0.045,0.16) end
+					log("LeionCageVisual: cage impact on colosseum floor")
+				end
+			end
+		elseif _Ep2Map2ArenaLogic.LeionLanded then closedAlpha=1 end
+		if _Ep2Map2ArenaLogic.LeionOpening then
+			self._releaseAge=self._releaseAge+delta
+			local age=self._releaseAge
+			if not self._releaseLogged then self._releaseLogged=true log("LeionCageVisual: lock release and cage opening started") end
+			shake=math.sin(age*40)*0.012*math.max(0,1-age/0.22)
+			local t=math.max(0,math.min(1,(age-0.20)/0.60))
+			local ease=t*t*(3-2*t)
+			closedAlpha=1-ease openedAlpha=ease
+			local reveal=math.max(0,math.min(1,(age-0.56)/0.32))
+			heroAlpha=reveal*reveal*(3-2*reveal)
+			forward=math.max(0,math.min(1,(age-0.60)/0.70))*0.35
+			local step=math.max(0,math.min(1,(age-0.54)/0.65))
+			exitLeft=step*step*(3-2*step)*1.45
+			heroAlpha=heroAlpha*(1-math.max(0,math.min(1,(age-1.70)/0.35)))
+			if age>0.95 and not self._heroLogged then self._heroLogged=true log("LeionCageVisual: native hero stepped out of open cage") end
+		elseif _Ep2Map2ArenaLogic.LeionLanded and (_Ep2Map2ArenaLogic.LeionAwaitingAcquire or (_CharacterUnlockLogic.LeionUnlocked and not _CompanionRescueMakerTest:RepeatRescue(2))) then
+			closedAlpha=0 openedAlpha=1
+		end
+		local p=self._basePosition
+		self.Entity.TransformComponent.Position=Vector3(p.x+shake,p.y+dropY-1.1943*squash,p.z)
+		self.Entity.TransformComponent.Scale=Vector3(self._baseScale.x*(1+squash*0.5),self._baseScale.y*(1-squash),self._baseScale.z)
+		self.Entity.TouchReceiveComponent.Enable=_Ep2Map2ArenaLogic.LeionLanded and _Ep2Map2ArenaLogic.LeionRescueReady
+		self.Entity.SpriteRendererComponent.Color=Color(1,1,1,closedAlpha)
+		self._openCage.SpriteRendererComponent.Color=Color(1,1,1,openedAlpha)
+		local m=self._heroMetrics local s=1.38/math.max(0.1,m.h)
+		self._hero.TransformComponent.Scale=Vector3(s,s,1)
+		self._hero.TransformComponent.Position=Vector3(p.x-exitLeft+(m.px-0.5)*m.w*s,p.y-0.15+(m.py-0.5)*m.h*s-forward,p.z-0.05)
+		self._hero.SpriteRendererComponent.Color=Color(1,1,1,heroAlpha)
+		self._age=self._age+delta
+		if isvalid(self._arrow) then
+			self._arrow.TransformComponent.Scale=Vector3(2,2,1)
+			self._arrow.TransformComponent.Position=Vector3(p.x,p.y+1.70+math.sin(self._age*3)*0.08,p.z-0.10)
+			self._arrow.SpriteRendererComponent.Color=Color(1,1,1,0.90+math.sin(self._age*3)*0.10)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		if self._touchHandler~=nil then self.Entity:DisconnectEvent(TouchEvent,self._touchHandler) end
+		if self._arrowTouchHandler~=nil and isvalid(self._arrow) then self._arrow:DisconnectEvent(TouchEvent,self._arrowTouchHandler) end
+	end
+end

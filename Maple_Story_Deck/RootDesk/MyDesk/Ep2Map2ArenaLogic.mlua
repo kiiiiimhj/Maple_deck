@@ -4,6 +4,16 @@ script Ep2Map2ArenaLogic extends Logic
 	@Sync
 	property string Phase = "Idle"
 
+	@Sync property boolean LeionRescueReady = false
+	@Sync property boolean LeionOpening = false
+	@Sync property boolean LeionDropping = false
+	@Sync property boolean LeionLanded = false
+	@Sync property boolean LeionAwaitingAcquire = false
+	@Sync property integer LeionSceneRevision = 0
+	property boolean _leionClaimBusy = false
+	property string LeionCagePath = "/maps/ep2_map2_estermap_1/LeionCage"
+	property string LeionArrowPath = "/maps/ep2_map2_estermap_1/LeionRescueArrow"
+
 	property number MoveSpeed = 2.0
 
 	property number MeleeRange = 1.0
@@ -32,14 +42,8 @@ script Ep2Map2ArenaLogic extends Logic
 
 	property string Portal7Path = "/maps/ep2_map2_estermap_1/portal-7"
 
-	-- 선택 단계(10마리 고르는 화면)와 결과 단계(단상) 양쪽에서 같이 쓰는 딤드(월드 스프라이트).
-	-- 몬스터들이 같은 맵에 붙어있는 월드 엔티티라 UI 딤으로는 절대 그 위로 못 올린다(구조적 한계,
-	-- GalleryArenaUI.mlua 헤더 주석 참고) — 대신 딤 자체를 월드 스프라이트로 두고 Z(999.999)/
-	-- OrderInLayer(0)를 몬스터(999.5/2)보다 뒤에 둬서 몬스터가 자연히 위에 뜨게 한다. 결과 화면의
-	-- Podium(UI)은 월드보다 항상 위 렌더 패스라 이 딤 위에 뜨는 것도 별도 처리 없이 보장된다.
+	-- 선택 단계는 월드 딤드로 몬스터를 살리고, 결과 단계는 GalleryArenaUI의 전체 화면 딤드를 쓴다.
 	property Entity galleryDim = "1493fb8b-4d16-4184-9727-cc522a82d951"
-
-	property integer RetryCost = 300
 
 	property any _fighters = nil
 
@@ -52,12 +56,16 @@ script Ep2Map2ArenaLogic extends Logic
 	property boolean _battleActive = false
 
 	property string _selectedName = ""
+	@Sync property string SelectedFighterName = ""
+	@Sync property number SelectedFighterHp = 0
+	@Sync property number SelectedFighterMaxHp = 1
 
 	property any _selectIconEntity = nil
 
 	property string _currentUserId = ""
 
 	property boolean _usedFreeRetryThisRun = false
+	property integer _paidRetryCount = 0
 
 	-- 유저 지적: "몬스터 선택안했는데 강제 시작되는 경우도 있는듯" — OnFighterClicked가 예약하는
 	-- StartBattle 타이머(2초 뒤)가 StartSelectionPhase로 취소되지 않고 그대로 남아있다가, 이후
@@ -138,6 +146,7 @@ script Ep2Map2ArenaLogic extends Logic
 
 	@ExecSpace("ServerOnly")
 	method void StartSelectionPhase(string userId)
+		self:ResetLeionRescueScene()
 		self._currentUserId = userId
 		self._battleActive = false
 		self._deathOrder = {}
@@ -194,24 +203,60 @@ script Ep2Map2ArenaLogic extends Logic
 	@ExecSpace("ServerOnly")
 	method void SpawnSelectIcon(Entity aboveEntity)
 		self:ClearSelectIcon()
-		local pos = aboveEntity.TransformComponent.Position
-		local iconPos = Vector3(pos.x, pos.y + 1.4, pos.z - 0.1)
-		self._selectIconEntity = _CardManager:SpawnEffectWithModel(self.SelectIconRUID, iconPos, 0, 1.0, 2.0, 1.0, "persistenteffect")
-		if self._selectIconEntity ~= nil and isvalid(self._selectIconEntity) then
-			local renderer = self._selectIconEntity.SpriteRendererComponent
-			if renderer ~= nil then
-				renderer.SortingLayer = "Default"
-				renderer.OrderInLayer = 50
-			end
-		end
+		self.SelectedFighterName=aboveEntity.Name
+		local f=self._fighters[aboveEntity.Name]
+		self.SelectedFighterHp=f.hp self.SelectedFighterMaxHp=f.data.hp
+		log("Arena: overhead selection started " .. aboveEntity.Name)
 	end
 
 	@ExecSpace("ServerOnly")
 	method void ClearSelectIcon()
-		if self._selectIconEntity ~= nil and isvalid(self._selectIconEntity) then
-			self._selectIconEntity:Destroy()
+		self.SelectedFighterName="" self.SelectedFighterHp=0
+		if isvalid(self._selectIconEntity) then self._selectIconEntity:Destroy() end
+		self._selectIconEntity=nil
+	end
+
+	@ExecSpace("ClientOnly")
+	method void UpdateSelectedIndicator()
+		local player=_UserService.LocalPlayer
+		local active=self.SelectedFighterName~="" and self.SelectedFighterHp>0 and (self.Phase=="PreBattle" or self.Phase=="Battle")
+		active=active and isvalid(player) and isvalid(player.CurrentMap) and player.CurrentMap.Name=="ep2_map2_estermap_1"
+		if not active then
+			if isvalid(self._T.selectionBar) then self._T.selectionBar:Destroy() end
+			if isvalid(self._T.selectionHeart) then self._T.selectionHeart:Destroy() end
+			self._T.selectionBar=nil self._T.selectionHeart=nil return
 		end
-		self._selectIconEntity = nil
+		local fighter=_EntityService:GetEntityByPath("/maps/ep2_map2_estermap_1/" .. self.SelectedFighterName)
+		if not isvalid(fighter) or not fighter.Enable then return end
+		local tf=fighter.TransformComponent local pos=tf.WorldPosition local sx=math.abs(tf.Scale.x)
+		local data=self:GetFighterData()[self.SelectedFighterName]
+		local body=_CardManager:GetSpriteMetrics(data.stand)
+		local x=pos.x+(0.5-body.px)*body.w*sx
+		local y=pos.y+(1-body.py)*body.h*sx+0.20
+		if not isvalid(self._T.selectionBar) then
+			self._T.selectionBar=_SpawnService:SpawnByModelId("bosshealthbar","SelectedMonsterHp",pos,player.CurrentMap)
+			self._T.selectionHeart=_SpawnService:SpawnByModelId("persistenteffect","SelectedMonsterHeart",pos,player.CurrentMap)
+			self._T.selectionBar.PixelRendererComponent:ResetWithColor(32,5,Color(0.1,0.06,0.04,1))
+			self._T.selectionHeart.SpriteRendererComponent.SpriteRUID=self.SelectIconRUID
+			self._T.selectionFill=-1
+			log("Arena: client selection indicator created " .. self.SelectedFighterName)
+		end
+		local bar=self._T.selectionBar local heart=self._T.selectionHeart
+		bar.TransformComponent.WorldPosition=Vector3(x,y,pos.z-0.1)
+		bar.TransformComponent.Scale=Vector3(math.max(1,math.min(1.65,body.w*sx))/0.32,3.5,1)
+		heart.TransformComponent.WorldPosition=Vector3(x,y+0.40,pos.z-0.2)
+		heart.TransformComponent.Scale=Vector3(1.4,1.4,1)
+		bar.PixelRendererComponent.SortingLayer="Default" bar.PixelRendererComponent.OrderInLayer=100
+		heart.SpriteRendererComponent.SortingLayer="Default" heart.SpriteRendererComponent.OrderInLayer=101
+		local fill=math.floor(math.max(0,math.min(1,self.SelectedFighterHp/self.SelectedFighterMaxHp))*30+0.5)
+		if self._T.selectionFill==fill then return end self._T.selectionFill=fill
+		for xx=1,32 do for yy=1,5 do
+			local c=Color(0.13,0.07,0.035,1)
+			if xx>1 and xx<32 and yy>1 and yy<5 then
+				c=xx<=fill+1 and (yy==4 and Color(0.64,1,0.38,1) or Color(0.24,0.8,0.14,1)) or Color(0.20,0.15,0.10,1)
+			elseif yy==5 then c=Color(0.95,0.75,0.30,1) end
+			bar.PixelRendererComponent:SetPixel(xx,yy,c)
+		end end
 	end
 
 	@ExecSpace("ServerOnly")
@@ -234,8 +279,8 @@ script Ep2Map2ArenaLogic extends Logic
 		self._battleActive = true
 	end
 
-	@ExecSpace("ServerOnly")
 	method void OnUpdate(number delta)
+		if self:IsClient() then self:UpdateSelectedIndicator() return end
 		if not self._battleActive then return end
 		local aliveCount = 0
 		local lastAliveName = ""
@@ -442,6 +487,7 @@ script Ep2Map2ArenaLogic extends Logic
 		local target = self._fighters[targetName]
 		if target ~= nil and target.alive and isvalid(target.entity) then
 			target.hp = target.hp - f.atk
+			if targetName==self.SelectedFighterName then self.SelectedFighterHp=math.max(0,target.hp) end
 			self:PlayArenaDamageSkin(target.entity, f.atk)
 			if target.hp <= 0 then
 				self:KillFighter(targetName, target)
@@ -463,6 +509,7 @@ script Ep2Map2ArenaLogic extends Logic
 	method void KillFighter(string name, any f)
 		f.alive = false
 		f.hp = 0
+		if name==self.SelectedFighterName then self.SelectedFighterHp=0 end
 		f.anim = ""
 		self:SetFighterAnim(f, "die")
 		table.insert(self._deathOrder, name)
@@ -492,9 +539,8 @@ script Ep2Map2ArenaLogic extends Logic
 		-- GalleryArenaUI의 닫기(X) 버튼을 눌러야만(OnResultClosed) 드러낸다. 그래야 결과 화면을 보지도
 		-- 않고 바로 포탈로 나가버리는 걸 막는다.
 		self:ClearSelectIcon()
-		-- 유저 지정: "Podium 이거는 내가 만든 디머 위에 올라가게" — 결과(단상) 화면도 같은 딤을 다시 켜서
-		-- 배경으로 깐다. Podium은 UI라 월드 딤보다 항상 위 렌더 패스라 별도 처리 없이 위에 뜬다.
-		self:SetDimVisible(true)
+		-- 결과에서는 UI 딤드 하나만 깔아 중복으로 어두워지지 않게 한다.
+		self:SetDimVisible(false)
 		
 		-- 전투가 끝나면 이제 단상/등수 아이콘은 GalleryArenaUI(UI)가 전부 그린다 — 실제 전투에
 		-- 쓰인 월드 몬스터 엔티티는 더 이상 필요 없으니 전부 숨긴다(예전엔 우승/2등/3등만 남기고
@@ -505,11 +551,7 @@ script Ep2Map2ArenaLogic extends Logic
 		end
 		
 		local showRetry = winnerName ~= self._selectedName
-		local retryLabel = "MLUA_EP2MAP2ARENALOGIC_003"
-		if self._usedFreeRetryThisRun then
-			retryLabel = "FMT_EP2MAP2ARENALOGIC_001|" .. tostring(self.RetryCost)
-		end
-		self:ShowPodiumResultUI(ranking, showRetry, retryLabel)
+		self:ShowPodiumResultUI(ranking, showRetry, self:GetNextRetryCost(), not showRetry)
 		
 		if winnerName == self._selectedName then
 			self:GrantVictoryReward()
@@ -521,11 +563,28 @@ script Ep2Map2ArenaLogic extends Logic
 	@ExecSpace("ServerOnly")
 	method void OnResultClosed()
 		if self.Phase ~= "Result" then return end
-		self:SetPortalRevealed(true)
+		if not self:IsArenaRescueUser(self._currentUserId) then return end
+		self:SetDimVisible(false)
+		if self.LeionRescueReady then
+			self.Phase="RescueDrop" self.LeionDropping=true
+			self:SetLeionRescueArrow(false)
+			local revision=self.LeionSceneRevision
+			log("LeionRescue: podium closed, cage falling")
+			_TimerService:SetTimerOnce(function()
+				if revision~=self.LeionSceneRevision or self.Phase~="RescueDrop" or not self:IsArenaRescueUser(self._currentUserId) then return end
+				self.LeionDropping=false self.LeionLanded=true self.Phase="RescueReady"
+				self:SetLeionRescueArrow(true)
+				_UIToast:ShowMessage("LEION_CAGE_RESCUE_READY")
+				log("LeionRescue: cage landed, rescue arrow revealed")
+			end,1.15)
+		else
+			self.Phase="ResultClosed"
+			self:SetPortalRevealed(true)
+		end
 	end
 
 	@ExecSpace("ServerOnly")
-	method void ShowPodiumResultUI(any ranking, boolean showRetry, string retryLabel)
+	method void ShowPodiumResultUI(any ranking, boolean showRetry, integer retryCost, boolean champion)
 		-- 유저 제안대로("좌표 그대로 UI로 만들면 되지않음?") 딤드+단상+3마리+버튼을 전부
 		-- GalleryArenaUI(.ui) 쪽 UI로 옮겼다 — Client RPC라 3개 슬롯의 RUID/크기를 한 번에 넘긴다.
 		local data = self:GetFighterData()
@@ -540,7 +599,7 @@ script Ep2Map2ArenaLogic extends Logic
 				h[place] = data[name].iconH * self.PodiumIconScale
 			end
 		end
-		_GalleryArenaUI:ShowResult(ruid[1], w[1], h[1], ruid[2], w[2], h[2], ruid[3], w[3], h[3], showRetry, retryLabel)
+		_GalleryArenaUI:ShowResult(ruid[1], w[1], h[1], ruid[2], w[2], h[2], ruid[3], w[3], h[3], showRetry, retryCost, champion)
 	end
 
 	@ExecSpace("ServerOnly")
@@ -551,24 +610,41 @@ script Ep2Map2ArenaLogic extends Logic
 
 	@ExecSpace("ServerOnly")
 	method void GrantVictoryReward()
-		if _CharacterUnlockLogic.LeionUnlocked then
+		if _CharacterUnlockLogic.LeionUnlocked and not _CompanionRescueMakerTest:RepeatRescue(2) then
 			_UIToast:ShowMessage("MLUA_EP2MAP2ARENALOGIC_005")
 			return
 		end
-		_CharacterUnlockLogic:UnlockLeion()
-		_CharacterUnlockUI:Open("c26beb96e46e41289ecd838a62c60da1", "MLUA_EP2MAP2ARENALOGIC_006", "MLUA_EP2MAP2ARENALOGIC_007")
+		self.LeionRescueReady=true
+		log("LeionRescue: selected fighter won, waiting for result close")
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer GetNextRetryCost()
+		if not self._usedFreeRetryThisRun then return 0 end
+		if self._paidRetryCount==0 then return 50 end
+		if self._paidRetryCount==1 then return 100 end
+		return 200
+	end
+
+	@ExecSpace("ServerOnly")
+	method void RetryArenaForUser(string userId)
+		if not self:IsArenaRescueUser(userId) then return end
+		self:OnRetryClicked()
 	end
 
 	@ExecSpace("ServerOnly")
 	method void OnRetryClicked()
-		if self.Phase ~= "Result" then return end
-		if not self._usedFreeRetryThisRun then
-			self._usedFreeRetryThisRun = true
-		else
-			if not _GameManager:SpendCoins(self.RetryCost) then
-				_UIToast:ShowMessage("MLUA_EP2MAP2ARENALOGIC_008")
+		if self.Phase ~= "Result" or self.LeionRescueReady or self.LeionOpening or self.LeionAwaitingAcquire then return end
+		if not self:IsArenaRescueUser(self._currentUserId) then return end
+		local cost=self:GetNextRetryCost()
+		if cost>0 then
+			if not _GameManager:SpendDiamond(cost) then
+				_GalleryArenaUI:OpenRetryDiamondShop(self._currentUserId)
 				return
 			end
+			self._paidRetryCount=self._paidRetryCount+1
+		else
+			self._usedFreeRetryThisRun=true
 		end
 		self:StartSelectionPhase(self._currentUserId)
 	end
@@ -576,6 +652,85 @@ script Ep2Map2ArenaLogic extends Logic
 	@ExecSpace("ServerOnly")
 	method void ResetForNewRun()
 		self._usedFreeRetryThisRun = false
+		self._paidRetryCount = 0
+		self._selectionToken=self._selectionToken+1 self._battleActive=false self.Phase="Idle"
+		self:ResetLeionRescueScene()
+		self:SetPortalRevealed(false) self:SetDimVisible(false)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetLeionRescueScene()
+		self.LeionSceneRevision=self.LeionSceneRevision+1
+		self.LeionRescueReady=false self.LeionOpening=false self.LeionAwaitingAcquire=false self._leionClaimBusy=false
+		self.LeionDropping=false self.LeionLanded=false
+		self:SetLeionRescueArrow(false)
+		self:CloseLeionRescuePopup()
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean IsArenaRescueUser(string userId)
+		local u=_UserService:GetUserEntityByUserId(userId)
+		return userId==self._currentUserId and isvalid(u) and u.CurrentMap==_EntityService:GetEntityByPath("/maps/ep2_map2_estermap_1") and _MapManager.AwayOnSideMap and _GameManager.GameStarted and not _GameManager.GameOver
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean CanLeaveArena(string userId)
+		return self:IsArenaRescueUser(userId) and self.Phase=="ResultClosed" and not self.LeionRescueReady and not self.LeionOpening and not self.LeionAwaitingAcquire
+	end
+
+	@ExecSpace("ServerOnly")
+	method void CloseArenaResultForUser(string userId)
+		if not self:IsArenaRescueUser(userId) then return end
+		self:OnResultClosed()
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SetLeionRescueArrow(boolean show)
+		local arrow=_EntityService:GetEntityByPath(self.LeionArrowPath)
+		if isvalid(arrow) then arrow.Enable=show end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnLeionRescueTouched(Entity target, string userId)
+		if self.Phase~="RescueReady" or not self.LeionRescueReady or self.LeionOpening or self.LeionAwaitingAcquire or (_CharacterUnlockLogic.LeionUnlocked and not _CompanionRescueMakerTest:RepeatRescue(2)) then return end
+		if not self:IsArenaRescueUser(userId) or not isvalid(target) or not target.Enable then return end
+		if target~=_EntityService:GetEntityByPath(self.LeionCagePath) and target~=_EntityService:GetEntityByPath(self.LeionArrowPath) then return end
+		self.LeionRescueReady=false self.LeionOpening=true self.Phase="RescueOpening"
+		self:SetLeionRescueArrow(false)
+		local revision=self.LeionSceneRevision
+		log("LeionRescue: cage opening, arena remains paused")
+		_TimerService:SetTimerOnce(function()
+			if revision~=self.LeionSceneRevision or not self:IsArenaRescueUser(userId) then return end
+			self.LeionOpening=false self.LeionAwaitingAcquire=true self.Phase="RescueAcquire"
+			self:OpenLeionRescuePopup(userId)
+			log("LeionRescue: unlock popup opened after release")
+		end,2.2)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OpenLeionRescuePopup(string userId)
+		_CharacterUnlockUI:Open("c26beb96e46e41289ecd838a62c60da1","MLUA_EP2MAP2ARENALOGIC_006","MLUA_EP2MAP2ARENALOGIC_007",userId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void AcquireLeion(string userId)
+		if not self.LeionAwaitingAcquire or self._leionClaimBusy or not self:IsArenaRescueUser(userId) then return end
+		self._leionClaimBusy=true local revision=self.LeionSceneRevision
+		local saved=_CharacterUnlockLogic:UnlockLeion()
+		if revision~=self.LeionSceneRevision then return end
+		self._leionClaimBusy=false
+		if not saved then self:OpenLeionRescuePopup(userId) return end
+		_CompanionRescueMakerTest:CompleteRescue(2)
+		self.LeionAwaitingAcquire=false self.Phase="ResultClosed"
+		self:SetPortalRevealed(true)
+		log("LeionRescue: acquired and saved, return portal revealed")
+	end
+
+	@ExecSpace("Client")
+	method void CloseLeionRescuePopup()
+		if _CharacterUnlockUI._pendingCharacterName~="MLUA_EP2MAP2ARENALOGIC_006" then return end
+		_AcquisitionFxUI:StopTarget(_CharacterUnlockUI.iconSprite.Entity)
+		_CharacterUnlockUI.popupGroup.Enable=false _CharacterUnlockUI._pendingCharacterName=""
 	end
 
 end

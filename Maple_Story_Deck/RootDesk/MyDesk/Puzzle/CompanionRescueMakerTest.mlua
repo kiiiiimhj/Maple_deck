@@ -1,0 +1,72 @@
+@Logic
+script CompanionRescueMakerTest extends Logic
+	-- Temporary rescue test entry. This switch only applies in Maker Play.
+	property boolean Enabled = false
+	@Sync property integer ActiveEpisode = 0
+	@Sync property boolean Completed = false
+	property boolean _prepared = false
+
+	method boolean CanTest()
+		return self.Enabled and Environment:IsMakerPlay()
+	end
+
+	method integer GetStartIndex(integer episode, integer normalIndex)
+		if not self:CanTest() then return normalIndex end
+		if episode==1 then return 35 end
+		if episode==2 then return 84 end
+		if episode==4 then return 189 end
+		return normalIndex
+	end
+
+	method boolean RepeatRescue(integer episode)
+		return self.ActiveEpisode==episode and not self.Completed
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetForEpisode(integer episode)
+		self.ActiveEpisode=0 self.Completed=false self._prepared=false
+		if self:CanTest() and (episode==1 or episode==2 or episode==4) then self.ActiveEpisode=episode end
+		_MapManager.AwayOnSideMap=false
+	end
+
+	@ExecSpace("ServerOnly")
+	method void CompleteRescue(integer episode)
+		if self.ActiveEpisode==episode then self.Completed=true end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void PrepareEntry()
+		if not self:CanTest() or self._prepared or self.ActiveEpisode==0 then return end
+		if not _GameManager.GameStarted or _GameManager.GameOver then return end
+		self._prepared=true
+		if self.ActiveEpisode==1 or self.ActiveEpisode==4 then self:SetRescueTestHudVisible(true) end
+		if self.ActiveEpisode==1 and _MapManager.CurrentMapIndex==35 then
+			_Map21TreePuzzleLogic:ResetMakerPuzzle()
+			_Map21RelicEasterEgg:ResetForNewRun()
+			log("CompanionRescueMakerTest: ep1 unsolved Sylph puzzle ready, owned flag unchanged")
+		elseif self.ActiveEpisode==2 and _MapManager.CurrentMapIndex==84 then
+			local userId=_CharacterUnlockLogic:GetSoleUserId()
+			local user=_UserService:GetUserEntityByUserId(userId)
+			if not isvalid(user) then self._prepared=false return end
+			_MapManager:SetMonstersPausedForZone(_MonsterSpawner:GetZoneEntity(84),84,true)
+			_MapManager.AwayOnSideMap=true _MapManager:SetInColosseum(true)
+			user.PlayerComponent:MoveToEntityByPath("/maps/ep2_map2_estermap_1/GalleryEntryPoint")
+			_MapManager:SetGalleryCameraConfine()
+			_Ep2Map2ArenaLogic:StartSelectionPhase(userId)
+			local entry=_EntityService:GetEntityByPath("/maps/ep2_map4/portal-7")
+			if isvalid(entry) then entry.Enable=true end
+			self:SetRescueTestHudVisible(false)
+			log("CompanionRescueMakerTest: ep2 tournament selection ready, victory still required")
+		elseif self.ActiveEpisode==4 and _MapManager.CurrentMapIndex==189 then
+			_Ep4PapulatusLogic:Activate()
+			log("CompanionRescueMakerTest: ep4 Papulatus fight ready, victory still required")
+		end
+	end
+
+	@ExecSpace("Multicast")
+	method void SetRescueTestHudVisible(boolean visible)
+		if not self:IsClient() then return end
+		local hud=_EntityService:GetEntityByPath("/ui/DefaultGroup")
+		if isvalid(hud) then hud.Enable=visible end
+	end
+end

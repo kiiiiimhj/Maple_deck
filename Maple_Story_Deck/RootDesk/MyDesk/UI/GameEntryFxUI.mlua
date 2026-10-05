@@ -28,6 +28,8 @@ script GameEntryFxUI extends Logic
 	property any _entryCamera = nil
 	property number _cameraBaseZoom = 100
 	property boolean _cameraActive = false
+	-- 모바일 화면 맞춤 결과(눈꺼풀 띠 위치·크기) — FitToMobileScreen이 채운다
+	property any _mobileMatte = nil
 
 	@ExecSpace("ClientOnly")
 	method void OnBeginPlay()
@@ -93,6 +95,12 @@ script GameEntryFxUI extends Logic
 	end
 
 	@ExecSpace("ClientOnly")
+	method boolean IsPlaying()
+		-- 입장 연출 중인지(유저 지정 2026-10-06: 연출 중엔 맵 이동 버튼 등 화면 입력을 막는다 — MapMoveUI가 확인)
+		return self._running
+	end
+
+	@ExecSpace("ClientOnly")
 	method boolean Play(integer characterIndex)
 		return self:PlayWithCompletion(characterIndex, nil)
 	end
@@ -150,13 +158,49 @@ script GameEntryFxUI extends Logic
 		self._entryCamera = _CameraService:GetCurrentCameraComponent()
 		self._cameraActive = isvalid(self._entryCamera)
 		if self._cameraActive then self._cameraBaseZoom = self._entryCamera.ZoomRatio end
-		self:RenderFrame(0)
 		self.effectRoot.Enable = true
+		self:FitToMobileScreen()
+		self:RenderFrame(0)
 		log("GameEntryFxUI create char=" .. tostring(characterIndex) .. " turn=" .. tostring(self._turnEntry) .. " duration=" .. tostring(self._activeDuration) .. " ruid=" .. data.iconRuid)
 		-- UI 준비와 텍스처 로딩이 끝난 뒤 재생을 시작한다.
 		self._elapsed = 0
 		self._running = true
 		return true
+	end
+
+	@ExecSpace("ClientOnly")
+	method void FitToMobileScreen()
+		-- 모바일(아이폰 등)은 UI 캔버스가 안전영역 안쪽에만 깔려서, 어두운 막(Shade)·입력 막(InputBlocker)과
+		-- 위아래 눈꺼풀 띠(VisionTop/Bottom)가 화면 가장자리까지 안 덮였다(유저 리포트 2026-10-06).
+		-- 연출 시작 때 실제 화면 끝을 재서 그만큼 넓힌다. PC는 아무것도 바꾸지 않는다.
+		if not _MobileScreenFitLogic:IsActive() then return end
+		local rt = self.effectRoot.UITransformComponent
+		local W = rt.RectSize.x
+		local H = rt.RectSize.y
+		local r = _MobileScreenFitLogic:BuildCoverRect(rt, W, H, Vector2(0, 0))
+		-- 막 두 개(stretch, 가운데 pivot): 화면 사각형까지 오프셋으로 넓힌다
+		for _, name in ipairs({"Shade", "InputBlocker"}) do
+			local e = self.effectRoot:GetChildByName(name)
+			if isvalid(e) then
+				e.UITransformComponent.OffsetMin = Vector2(r.x0 + W / 2, r.y0 + H / 2)
+				e.UITransformComponent.OffsetMax = Vector2(r.x1 - W / 2, r.y1 - H / 2)
+			end
+		end
+		-- 눈꺼풀 띠: 위 띠는 화면 위끝, 아래 띠는 화면 아래끝에 붙이고 둘이 화면 가운데에서 만나게 한다
+		local cx = (r.x0 + r.x1) / 2
+		local cy = (r.y0 + r.y1) / 2
+		local width = (r.x1 - r.x0) + 4
+		self._mobileMatte = {
+			top = { pos = Vector2(cx, r.y1 - H / 2), size = Vector2(width, (r.y1 - cy) + 2) },
+			bottom = { pos = Vector2(cx, r.y0 + H / 2), size = Vector2(width, (cy - r.y0) + 2) },
+		}
+		for _, matte in ipairs(self._mattes) do
+			local m = self._mobileMatte.bottom
+			if matte.entity.Name == "VisionTop" then m = self._mobileMatte.top end
+			matte.transform.anchoredPosition = m.pos
+			matte.transform.RectSize = m.size
+		end
+		log(string.format("GameEntryFxUI: mobile fit screen x %.0f..%.0f y %.0f..%.0f measured=%s", r.x0, r.x1, r.y0, r.y1, tostring(r.measured)))
 	end
 
 	@ExecSpace("ClientOnly")

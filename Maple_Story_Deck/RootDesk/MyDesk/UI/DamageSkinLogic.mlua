@@ -30,6 +30,8 @@ script DamageSkinLogic extends Logic
 
 	property any _storage = nil
 	property boolean _dirty = false
+	property boolean _attendanceGrantBusy = false
+	property boolean _attendanceReady = false
 	property integer _flushTimerId = 0
 	property number FlushIntervalSeconds = 5
 
@@ -89,6 +91,10 @@ script DamageSkinLogic extends Logic
 		if user == nil then return end
 		self._storage = _DataStorageService:GetUserDataStorage(user.PlayerComponent.ProfileCode)
 		local errorCode, raw = self._storage:GetAndWait(self.StorageKey)
+		if errorCode ~= 0 and errorCode ~= 1000002 then
+			log_warning("DamageSkinLogic: load failed code=" .. tostring(errorCode))
+			return
+		end
 
 		-- 저장 포맷: "<장착key>|<보유key1>,<보유key2>,..." — 플랫 문자열이라 4000바이트 근처도 안 간다
 		local loaded = false
@@ -118,6 +124,8 @@ script DamageSkinLogic extends Logic
 			self._dirty = true
 		end
 
+		self._attendanceReady = true
+
 		-- 코인/다이아와 동일한 지연 flush — 구매/장착이 연달아 일어나도 저장은 모아서 한 번만 쓴다
 		if self._flushTimerId == 0 then
 			self._flushTimerId = _TimerService:SetTimerRepeat(function() self:FlushIfDirty() end,
@@ -129,10 +137,14 @@ script DamageSkinLogic extends Logic
 
 	@ExecSpace("ServerOnly")
 	method void FlushIfDirty()
-		-- 유저 입장(로드) 전이면 저장하지 않는다
-		if not self._dirty or self._storage == nil then return end
-		self._dirty = false
-		self._storage:SetAndWait(self.StorageKey, self.EquippedKey .. "|" .. self.OwnedKeys)
+		-- 출석 지급과 동시에 같은 키를 덮어쓰지 않는다. 실패하거나 대기 중 변경되면 dirty를 유지한다.
+		if self._attendanceGrantBusy or not self._dirty or self._storage == nil then return end
+		self._attendanceGrantBusy = true
+		local payload = self.EquippedKey .. "|" .. self.OwnedKeys
+		local code = self._storage:SetAndWait(self.StorageKey, payload)
+		self._dirty = code ~= 0 or self.EquippedKey .. "|" .. self.OwnedKeys ~= payload
+		self._attendanceGrantBusy = false
+		if code ~= 0 then log_warning("DamageSkinLogic: save failed code=" .. tostring(code)) end
 	end
 
 	@ExecSpace("ServerOnly")
@@ -151,6 +163,8 @@ script DamageSkinLogic extends Logic
 
 	@ExecSpace("Server")
 	method void RequestBuy(string key)
+		-- 저장 중인 출석 스킨과 구매/장착을 직렬화한다.
+		if self._attendanceGrantBusy or not self._attendanceReady then return end
 		local entry = self:FindByKey(key)
 		if entry == nil then return end
 		if entry.starterOnly then return end   -- 스타터팩 전용은 상점에서 살 수 없다
@@ -171,6 +185,8 @@ script DamageSkinLogic extends Logic
 
 	@ExecSpace("Server")
 	method void RequestEquip(string key)
+		-- 저장 중인 출석 스킨과 구매/장착을 직렬화한다.
+		if self._attendanceGrantBusy or not self._attendanceReady then return end
 		local entry = self:FindByKey(key)
 		if entry == nil then return end
 		if not self:IsOwned(key) then return end
@@ -186,6 +202,7 @@ script DamageSkinLogic extends Logic
 		-- 서버가 보유/장착을 바꾸면 상점 카드 표시를 즉시 갱신한다
 		if name == "OwnedKeys" or name == "EquippedKey" then
 			_ShopUI:RefreshSkinCards()
+			_MonthlyAttendanceUI:RefreshAll()
 		end
 	end
 
@@ -193,6 +210,38 @@ script DamageSkinLogic extends Logic
 	method void OnEndPlay()
 		if self._flushTimerId ~= 0 then _TimerService:ClearTimer(self._flushTimerId) end
 		self:FlushIfDirty()
+	end
+
+
+	@ExecSpace("ServerOnly")
+	method boolean IsReadyForAttendance()
+		-- 저장소 로드가 끝난 계정만 마지막 출석 스킨을 받을 수 있다.
+		return self._attendanceReady and self._storage ~= nil and not self._attendanceGrantBusy
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean TryGrantAttendanceSkin(string key)
+		-- 실제 스킨 데이터는 기존 카탈로그를 유지하며, 보유 기록을 저장한 뒤에만 성공을 반환한다.
+		if not self:IsReadyForAttendance() or self:FindByKey(key) == nil then return false end
+		if self:IsOwned(key) then return true end
+		self._attendanceGrantBusy = true
+		local code = -1
+		local owned = ""
+		local stable = false
+		while not stable do
+			local before = self.OwnedKeys
+			owned = self:IsOwned(key) and before or before .. "," .. key
+			code = self._storage:SetAndWait(self.StorageKey, self.EquippedKey .. "|" .. owned)
+			if code ~= 0 then break end
+			stable = self.OwnedKeys == before
+		end
+		if code == 0 then
+			self.OwnedKeys = owned
+			self._dirty = false
+			log("DamageSkinLogic: attendance skin granted=" .. key)
+		end
+		self._attendanceGrantBusy = false
+		return code == 0
 	end
 
 end

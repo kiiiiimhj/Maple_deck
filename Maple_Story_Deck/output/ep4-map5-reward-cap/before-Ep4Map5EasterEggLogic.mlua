@@ -1,0 +1,188 @@
+@Logic
+script Ep4Map5EasterEggLogic extends Logic
+	@Sync property boolean Collected = false
+	@Sync property boolean PuzzleComplete = false
+	@Sync property integer RunRevision = 0
+	@Sync property integer PlacedCount = 0
+	property integer CollectAmount = 30
+	property number PlacementTolerance = 0.4
+	property table TargetXs = {132.6218,133.6991,136.0805,137.1704,139.5504,140.6604}
+	property number TargetY = 0.5833969
+	property table RewardRUIDs = {"6ee3603b96b54e398a596010f1da94bf","b6ba66b76d09470ebe80338826c05a3a","c332a074623e4ca9827b312f3ed42058","8f6cf090704843b392685b44a8662865"}
+	property table RewardObjects = {"/maps/ep4_map5/MapObject_11","/maps/ep4_map5/MapObject_14","/maps/ep4_map5/MapObject_203","/maps/ep4_map5/MapObject_22","/maps/ep4_map5/MapObject_24","/maps/ep4_map5/MapObject_251","/maps/ep4_map5/MapObject_26","/maps/ep4_map5/MapObject_269","/maps/ep4_map5/MapObject_270","/maps/ep4_map5/MapObject_271","/maps/ep4_map5/MapObject_272","/maps/ep4_map5/MapObject_29","/maps/ep4_map5/MapObject_295","/maps/ep4_map5/MapObject_296","/maps/ep4_map5/MapObject_297","/maps/ep4_map5/MapObject_30","/maps/ep4_map5/MapObject_32","/maps/ep4_map5/MapObject_342","/maps/ep4_map5/MapObject_343","/maps/ep4_map5/MapObject_344","/maps/ep4_map5/MapObject_345","/maps/ep4_map5/MapObject_346","/maps/ep4_map5/MapObject_35","/maps/ep4_map5/MapObject_4","/maps/ep4_map5/MapObject_42","/maps/ep4_map5/MapObject_45","/maps/ep4_map5/MapObject_5","/maps/ep4_map5/MapObject_58","/maps/ep4_map5/MapObject_59","/maps/ep4_map5/MapObject_6","/maps/ep4_map5/MapObject_7","/maps/ep4_map5/MapObject_8","/maps/ep4_map5/MapObject_9"}
+	property table _originalPositions = {}
+	property table _occupied = {}
+	property table _placed = {}
+	property table _used = {}
+	property table _touchCounts = {}
+	property table _lastTouches = {}
+	property string _pickedItem = ""
+	property Entity _bubble = nil
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		for i=1,9 do
+			local e=self:GetEgg(i)
+			if isvalid(e) then self._originalPositions[i]=e.TransformComponent.Position end
+		end
+		self:ResetForNewRun()
+		log("Ep4Map5: collection and six-light puzzle ready")
+	end
+
+	@ExecSpace("ServerOnly")
+	method Entity GetEgg(integer egg)
+		return _EntityService:GetEntityByPath("/maps/ep4_map5/esteregg_" .. egg)
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean ValidUser(Entity obj, string userId)
+		if not isvalid(obj) or not obj.Enable or not _GameManager.GameStarted or _GameManager.GameOver or _GameManager:IsGamePaused() then return false end
+		local user=_UserService:GetUserEntityByUserId(userId)
+		if not isvalid(user) or user.CurrentMap~=obj.CurrentMap then return false end
+		local zone=_MapManager.CurrentMapIndex
+		if zone<174 or zone>183 then return false end
+		-- map5 존 간격은 일정하지 않다. 고정 반경 대신 가장 가까운 존으로 소속을 판정한다.
+		local x=obj.TransformComponent.WorldPosition.x local nearest=174 local best=math.huge
+		for z=174,183 do
+			local distance=math.abs(x-_MapManager:GetSpawnPositionForIndex(z).x)
+			if distance<best then nearest=z best=distance end
+		end
+		return nearest==zone
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean ValidEgg(integer egg, Entity obj, string userId)
+		return egg>=1 and egg<=9 and obj==self:GetEgg(egg) and self:ValidUser(obj,userId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnObjectTouched(integer egg, Entity obj, integer revision, string userId)
+		if revision~=self.RunRevision or not self:ValidEgg(egg,obj,userId) then return end
+		if egg==1 then self:Collect(obj,userId)
+		elseif egg==2 then _UIToast:ShowTimedMessage("EP4M5_RIDDLE",5,userId) end
+	end
+
+	@ExecSpace("ServerOnly")
+	method table GetLootPool()
+		local pool={} local seen={}
+		for z=174,183 do
+			for species=1,_GameManager:GetEp4MonsterCount(z) do
+				local id=_GameManager:GetMonsterLootItemId(z,species)
+				if id~="" and not seen[id] and _PlayerInventory:GetItemDef(id)~=nil then
+					seen[id]=true table.insert(pool,id)
+				end
+			end
+		end
+		return pool
+	end
+
+	@ExecSpace("ServerOnly")
+	method void Collect(Entity obj, string userId)
+		if self.Collected then return end
+		if self._pickedItem=="" then
+			local pool=self:GetLootPool() if #pool==0 then return end
+			self._pickedItem=pool[_UtilLogic:RandomIntegerRange(1,#pool)]
+		end
+		local have=_PlayerInventory:GetItemCount(self._pickedItem)
+		if have<self.CollectAmount then
+			self:ClearBubble()
+			local p=obj.TransformComponent.WorldPosition
+			local bubble=_CollectBubbleLogic:SpawnItemQuestBubble(obj.CurrentMap,Vector3(p.x-1.25,p.y+1.25,p.z-0.5),"Ep4Map5CollectBubble",self._pickedItem,"X" .. (self.CollectAmount-have),false)
+			self._bubble=bubble
+			_TimerService:SetTimerOnce(function()
+				if isvalid(bubble) then bubble:Destroy() end
+				if self._bubble==bubble then self._bubble=nil end
+			end,2)
+			log("Ep4Map5: collect " .. self._pickedItem .. " " .. have .. "/" .. self.CollectAmount)
+			return
+		end
+		if not _PlayerInventory:RemoveItem(self._pickedItem,self.CollectAmount) then return end
+		self.Collected=true self:ClearBubble()
+		_Ep4Map1EasterEggLogic:GrantStandardReward(obj)
+		_AchievementLogic:OnEasterEgg()
+		_UIToast:ShowMessage("EP4_COLLECT_SUCCESS",userId)
+		log("Ep4Map5: collection complete amount=" .. self.CollectAmount)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void CheckPlacement(integer egg, Entity obj, number x, number y, integer revision, string userId)
+		if revision~=self.RunRevision or egg<4 or egg>9 or self.PuzzleComplete or self._placed[egg] then return end
+		if not self:ValidEgg(egg,obj,userId) then return end
+		if x~=x or y~=y then return end
+		local slot=0 local best=self.PlacementTolerance*self.PlacementTolerance
+		for i,tx in ipairs(self.TargetXs) do
+			local dx=x-tx local dy=y-self.TargetY local distance=dx*dx+dy*dy
+			if distance<=best then best=distance slot=i end
+		end
+		local trigger=obj:GetComponent("script.Ep4Map5EasterEggTrigger")
+		if slot==0 or self._occupied[slot] then
+			local p=self._originalPositions[egg]
+			obj.TransformComponent.Position=p
+			if trigger~=nil then trigger:ResetPreview(p) end
+			if slot~=0 then _UIToast:ShowMessage("EP4M5_OCCUPIED",userId) end
+			return
+		end
+		self._occupied[slot]=egg self._placed[egg]=slot self.PlacedCount=self.PlacedCount+1
+		local p=Vector3(self.TargetXs[slot],self.TargetY,self._originalPositions[egg].z)
+		obj.TransformComponent.Position=p
+		if trigger~=nil then trigger.Placed=true trigger:ResetPreview(p) end
+		obj.TouchReceiveComponent.Enable=false
+		log("Ep4Map5: light=" .. egg .. " slot=" .. slot .. " placed=" .. self.PlacedCount)
+		if self.PlacedCount==6 then
+			self.PuzzleComplete=true
+			local portal=self:GetEgg(3) if isvalid(portal) then portal.Enable=true end
+			_AchievementLogic:OnEasterEgg()
+			_UIToast:ShowMessage("EP4M5_LIGHT_SUCCESS",userId)
+			log("Ep4Map5: six lights placed, portal revealed")
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnRewardTouched(Entity obj, integer revision, string userId)
+		if revision~=self.RunRevision or not self:ValidUser(obj,userId) then return end
+		local approved=false
+		for _,path in ipairs(self.RewardObjects) do if obj==_EntityService:GetEntityByPath(path) then approved=true break end end
+		if not approved then return end
+		local key=obj.Path if self._used[key] then return end
+		local now=_UtilLogic.ElapsedSeconds
+		if self._lastTouches[key]~=nil and now-self._lastTouches[key]<0.15 then return end
+		self._lastTouches[key]=now self._touchCounts[key]=(self._touchCounts[key] or 0)+1
+		if self._touchCounts[key]<2 then return end
+		self._used[key]=true
+		_Ep4Map1EasterEggLogic:GrantStandardReward(obj)
+		_AchievementLogic:OnEasterEgg()
+		log("Ep4Map5: two-touch reward " .. key)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ClearBubble()
+		if isvalid(self._bubble) then self._bubble:Destroy() end self._bubble=nil
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		self:ClearBubble() self.RunRevision=self.RunRevision+1
+		self.Collected=false self.PuzzleComplete=false self.PlacedCount=0
+		self.CollectAmount=_UtilLogic:RandomIntegerRange(1,2)==1 and 30 or 50
+		self._pickedItem="" self._occupied={} self._placed={} self._used={} self._touchCounts={} self._lastTouches={}
+		for i=1,9 do
+			local e=self:GetEgg(i)
+			if isvalid(e) then
+				e.Enable=i~=3
+				local p=self._originalPositions[i]
+				if p~=nil then e.TransformComponent.Position=p end
+				if i~=3 then
+					e.TouchReceiveComponent.Enable=true
+					local trigger=e:GetComponent("script.Ep4Map5EasterEggTrigger")
+					if trigger~=nil then trigger.Placed=false if p~=nil then trigger:ResetPreview(p) end end
+				end
+			end
+		end
+		log("Ep4Map5: new run amount=" .. self.CollectAmount)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnEndPlay()
+		self:ClearBubble() self.RunRevision=self.RunRevision+1
+	end
+end

@@ -1,0 +1,16 @@
+const fs=require('fs');
+const {MapBuilder}=require('G:/Maple_Story_Deck/.agents/skills/msw-general/scripts/map/msw_map_builder.cjs');
+const {ModelBuilder}=require('G:/Maple_Story_Deck/.agents/skills/msw-general/scripts/model/msw_model_builder.cjs');
+const f='G:/Maple_Story_Deck/map/ep4_map5.map',b=MapBuilder.read(f),path='/maps/ep4_map5/esteregg_3';
+const p=b.component(path,'MOD.Core.PortalComponent');if(!p)throw Error('Puzzle portal missing');
+b.patchComponent(path,'MOD.Core.PortalComponent',{Enable:false});
+b.upsertComponent(path,'MOD.Core.TouchReceiveComponent',{'@type':'MOD.Core.TouchReceiveComponent',Enable:true,AutoFitToSize:false,RelayEventToBehind:false,TouchArea:p.BoxSize,Offset:p.BoxOffset});
+b.upsertComponent(path,'script.Ep4Map5PortalTrigger',{'@type':'script.Ep4Map5PortalTrigger',Enable:true});b.write(f);
+const m=ModelBuilder.fromTemplate('G:/Maple_Story_Deck/.agents/skills/msw-general/models/TransformOnly.model','BossHealthBar');
+m.addComponent('MOD.Core.PixelRendererComponent');
+m.value('MOD.Core.PixelRendererComponent','SortingLayer','MapLayer0','string');
+m.value('MOD.Core.PixelRendererComponent','OrderInLayer',20,'int');
+const model='G:/Maple_Story_Deck/RootDesk/MyDesk/Models/UI/BossHealthBar.model';
+if(fs.existsSync(model))throw Error('Boss health model already exists');fs.mkdirSync(require('path').dirname(model),{recursive:true});m.write(model);
+fs.writeFileSync('outputs/ep4-papulatus/boss-health-model.json',JSON.stringify(m.snapshot(),null,2));
+console.log('Click portal linked; native boss health model created.');

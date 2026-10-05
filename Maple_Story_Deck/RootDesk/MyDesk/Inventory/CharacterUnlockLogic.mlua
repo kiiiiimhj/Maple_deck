@@ -12,6 +12,8 @@ script CharacterUnlockLogic extends Logic
 	@Sync property boolean ShadeUnlocked = false
 	-- 린 해금 여부 — 누적 몬스터 처치 100,000마리(유저 지정 2026-09-16). 쉐이드와 동일한 누적 카운터 방식.
 	@Sync property boolean RinUnlocked = false
+	@Sync property boolean BenoaUnlocked = false
+	property boolean _benoaLoadReady = false
 	-- 아직 못 보여준 해금 축하 팝업(유저 지정 2026-09-30: "게임 도중에 뜨면 안 되고, 조건 완료 후 로비에 가면 떠야 한다").
 	-- "shade", "rin"을 쉼표로 이어 둔다. 진행도 JSON("pp")에 같이 저장되어 판 도중에 꺼도 다음 로비에서 뜬다.
 	-- 실제 표시는 클라(CharacterUnlockUI.TryShowPending)가 로비가 보일 때만 한다.
@@ -67,6 +69,7 @@ script CharacterUnlockLogic extends Logic
 		if leionErrorCode == 0 and leionRaw == "1" then
 			self.LeionUnlocked = true
 		end
+		self:LoadBenoaUnlock()
 		self:LoadProgress()
 		-- 입장 시점에 이미 목표를 넘겨 있으면 바로 해금한다(유저 리포트 2026-09-30: 목표를 낮춘 업데이트 뒤 이미
 		-- 달성한 계정이 로비에선 안 풀리고, 판에 들어가 다음 처치가 나와서야 인게임 팝업이 떴다).
@@ -91,6 +94,7 @@ script CharacterUnlockLogic extends Logic
 			self.LeionUnlocked = true
 			self.ShadeUnlocked = true
 			self.RinUnlocked = true
+			self.BenoaUnlocked = true
 			log("CharacterUnlockLogic: [TEST] all characters unlocked (not saved)")
 		end
 		-- 테스트용 실피드·레이온만 해금 — 위와 같이 실제 값을 읽은 뒤 메모리에서만 켠다(계정 저장값은 그대로)
@@ -99,6 +103,34 @@ script CharacterUnlockLogic extends Logic
 			self.LeionUnlocked = true
 			log("CharacterUnlockLogic: [TEST] sylph + leion unlocked (not saved)")
 		end
+	end
+
+	method boolean IsBenoaUnlocked()
+		return self.BenoaUnlocked
+	end
+
+	@ExecSpace("ServerOnly")
+	method void LoadBenoaUnlock()
+		self._benoaLoadReady=false
+		if self._unlockStorage==nil then return end
+		local code,raw=self._unlockStorage:GetAndWait("Unlock.Benoa")
+		if code==0 or code==1000002 then
+			self.BenoaUnlocked=raw=="1" self._benoaLoadReady=true
+		else log_warning("CharacterUnlockLogic: Benoa load failed code="..tostring(code)) end
+		log("CharacterUnlockLogic: Benoa loaded="..tostring(self.BenoaUnlocked))
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean UnlockBenoa()
+		if self.BenoaUnlocked then return true end
+		if not self._benoaLoadReady then self:LoadBenoaUnlock() end
+		if self.BenoaUnlocked then return true end
+		if not self._benoaLoadReady or self._unlockStorage==nil then return false end
+		local code=self._unlockStorage:SetAndWait("Unlock.Benoa","1")
+		if code~=0 then log_warning("CharacterUnlockLogic: Benoa save failed code="..tostring(code)) return false end
+		self.BenoaUnlocked=true
+		log("CharacterUnlockLogic: Benoa unlocked and saved")
+		return true
 	end
 
 	-- ── 접근자(다른 Logic/UI에서 property 직접 읽기 금지 — 이걸로 읽는다) ────────
@@ -276,19 +308,25 @@ script CharacterUnlockLogic extends Logic
 	end
 
 	@ExecSpace("ServerOnly")
-	method void UnlockSylph()
-		if self.SylphUnlocked then return end
-		self.SylphUnlocked = true
-		if self._unlockStorage ~= nil then self._unlockStorage:SetAndWait("Unlock.Sylph", "1") end
+	method boolean UnlockSylph()
+		if self.SylphUnlocked then return true end
+		if self._unlockStorage==nil then return false end
+		local code=self._unlockStorage:SetAndWait("Unlock.Sylph","1")
+		if code~=0 then log_warning("CharacterUnlockLogic: Sylph save failed code="..tostring(code)) return false end
+		self.SylphUnlocked=true
 		log("CharacterUnlockLogic: Sylph unlocked and saved")
+		return true
 	end
 
 	@ExecSpace("ServerOnly")
-	method void UnlockLeion()
-		if self.LeionUnlocked then return end
-		self.LeionUnlocked = true
-		if self._unlockStorage ~= nil then self._unlockStorage:SetAndWait("Unlock.Leion", "1") end
+	method boolean UnlockLeion()
+		if self.LeionUnlocked then return true end
+		if self._unlockStorage==nil then return false end
+		local code=self._unlockStorage:SetAndWait("Unlock.Leion","1")
+		if code~=0 then log_warning("CharacterUnlockLogic: Leion save failed code="..tostring(code)) return false end
+		self.LeionUnlocked=true
 		log("CharacterUnlockLogic: Leion unlocked and saved")
+		return true
 	end
 
 	-- [DEBUG] O키 → 실피드 해금 상태를 미해금으로 되돌린다(재테스트용). CardManager.DebugMode

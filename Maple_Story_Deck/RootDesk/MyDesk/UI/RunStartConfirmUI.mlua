@@ -20,6 +20,9 @@ script RunStartConfirmUI extends Logic
 	property integer _requestSeq = 0
 	property integer _timeoutTimerId = 0
 	property table _handlers = {}
+	-- ShowCustom으로 빌려 쓸 때의 [예]/[아니오] 콜백
+	property any _customYes = nil
+	property any _customNo = nil
 
 	@ExecSpace("ClientOnly")
 	method void OnBeginPlay()
@@ -78,13 +81,52 @@ script RunStartConfirmUI extends Logic
 		end
 		if isvalid(self.messageText) then self.messageText.Text = _LocalizationService:GetTextFormat("FMT_RUNSTARTCONFIRMUI_001", _LocText:ResolveList(fullNames, "·")) end
 		if isvalid(self.subText) then self.subText.Text = _LocalizationService:GetText("MLUA_RUNSTARTCONFIRMUI_002") end
+		self:SetButtonLabels("UI_RUNSTARTCONFIRMGROUP_001", "MLUA_UIUSEPOPUP_004")
 		if isvalid(self.rootGroup) then self.rootGroup.Enable = true end
 		log("RunStartConfirmUI: popup shown")
 	end
 
 	@ExecSpace("ClientOnly")
+	method void ShowCustom(string message, string subMessage, string yesKey, string noKey, any onYes, any onNo)
+		-- 같은 확인창을 다른 질문에 빌려 쓴다(랭킹 시즌 보상 안내 — RankUI.CheckSeasonThen, 2026-10-06).
+		-- [예]는 onYes, [아니오]는 onNo를 부른다. 인벤 확인이 진행 중이면 겹치지 않게 그냥 onNo로 넘긴다
+		if self._pending ~= nil then
+			if onNo ~= nil then onNo() end
+			return
+		end
+		self._customYes = onYes
+		self._customNo = onNo
+		if isvalid(self.messageText) then self.messageText.Text = message end
+		if isvalid(self.subText) then self.subText.Text = subMessage end
+		self:SetButtonLabels(yesKey, noKey)
+		if isvalid(self.rootGroup) then self.rootGroup.Enable = true end
+		log("RunStartConfirmUI: custom popup shown")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetButtonLabels(string yesKey, string noKey)
+		-- 버튼 글자는 번역 키로 넣는다(IsLocalizationKey=true)
+		if isvalid(self.btnYes) and isvalid(self.btnYes.Entity.TextGUIRendererComponent) then self.btnYes.Entity.TextGUIRendererComponent.Text = yesKey end
+		if isvalid(self.btnNo) and isvalid(self.btnNo.Entity.TextGUIRendererComponent) then self.btnNo.Entity.TextGUIRendererComponent.Text = noKey end
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean RunCustom(boolean yes)
+		-- 빌려 쓴 질문이 떠 있으면 그쪽 답으로 처리하고 true
+		if self._customYes == nil and self._customNo == nil then return false end
+		local fn = self._customNo
+		if yes then fn = self._customYes end
+		self._customYes = nil
+		self._customNo = nil
+		if isvalid(self.rootGroup) then self.rootGroup.Enable = false end
+		if fn ~= nil then fn() end
+		return true
+	end
+
+	@ExecSpace("ClientOnly")
 	method void OnYesClicked()
 		-- [시작] — 팝업을 닫고 원래 하려던 입장/다시하기를 진행한다
+		if self:RunCustom(true) then return end
 		if self._pending == nil then return end
 		log("RunStartConfirmUI: yes")
 		self:RunPending()
@@ -93,6 +135,7 @@ script RunStartConfirmUI extends Logic
 	@ExecSpace("ClientOnly")
 	method void OnNoClicked()
 		-- [취소] — 아무것도 하지 않고 팝업만 닫는다(선택 팝업 / 게임오버 창에 그대로 남는다)
+		if self:RunCustom(false) then return end
 		log("RunStartConfirmUI: no")
 		self._pending = nil
 		if isvalid(self.rootGroup) then self.rootGroup.Enable = false end

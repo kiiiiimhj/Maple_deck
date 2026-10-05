@@ -94,7 +94,7 @@ script GameManager extends Logic
 	-- ⚠ 테스트 전용(유저 지정 2026-09-30 "테스트하게 임시로 체력 2천") — 0보다 크면 일반 몬스터의 기본 체력을 이 값으로 고정한다
 	-- (MonsterAI.InitializeStats). 보스는 그대로. 출시 전 반드시 0으로 되돌릴 것.
 	-- 2026-10-03 베노아 스킬 테스트용(10000 → 1000) — ⚠ 출시 전 0
-	property number TestMonsterHp = 1000
+	property number TestMonsterHp = 0
 
 	-- 2026-09-12 유저 지정 2.0 → 1.5
 	property number BossAttackMultiplier = 1.5
@@ -195,12 +195,15 @@ script GameManager extends Logic
 	@Sync
 	property boolean ShopPaused = false
 
+	-- ep4 퀴즈/기부 모달이 소유하는 일시정지. 다른 모달의 정지 상태와 독립적이다.
+	@Sync property boolean EasterEggPaused = false
+
 	-- 전역 일시정지 여부 — 튜토리얼 카드선택 정지 / 옵션 팝업 정지 / 인게임 다이아 상점 정지.
 	-- ⚠ 정지 판정은 반드시 이 메서드로만 할 것. 개별 플래그를 직접 보면 한쪽이 빠진다
 	-- (다른 Logic에서는 콜론 호출로만 접근 — feedback_cross_logic_field_access_nil).
 	method boolean IsGamePaused()
 		-- 몬스터 이동/공격·스폰·플레이어 자동공격·타이머를 통째로 멈춰야 하는 상태인지
-		return self.TutorialPaused or self.OptionPaused or self.ShopPaused or self.EntryPresentationPending
+		return self.TutorialPaused or self.OptionPaused or self.ShopPaused or self.EntryPresentationPending or self.EasterEggPaused
 	end
 
 	-- 안전지대 정지(유저 지정 2026-09-17 — "그림자 상점에 가만히 서 있어도 시간이 흐른다 / 콜로세움도 / 포션 같은 것도").
@@ -225,6 +228,12 @@ script GameManager extends Logic
 	end
 
 	-- 인게임 다이아 상점 열림/닫힘을 서버에 알린다(정지 플래그는 서버가 소유 + @Sync로 되돌아온다).
+	@ExecSpace("ServerOnly")
+	method void SetEasterEggPaused(boolean paused)
+		-- 소유 Logic만 호출한다. 옵션/튜토리얼 정지를 덮어쓰지 않는다.
+		self.EasterEggPaused=paused and not self.GameOver
+	end
+
 	@ExecSpace("Server")
 	method void RequestSetShopPaused(boolean paused)
 		-- 인게임 다이아 상점 정지 토글. 게임오버 뒤엔 정지가 남지 않게 항상 해제로 정리한다
@@ -3371,11 +3380,12 @@ script GameManager extends Logic
 
 	-- 먹물 스플랫(UI 좌표계 연출)이 뜨는 범위. MonsterAI의 RangedHitFx*(월드 좌표계)와 같은 정책을
 	-- UI px로 옮긴 값이다 — 유저 지정 2026-09-07 "화면 중앙보다 위 / X는 양끝만 피하게 / 모든 원거리".
-	property number RangedFxCenterUIY = 195
+	-- 2026-10-06 유저 지정(스샷 회색 영역): UI x -554~+520 / y -255~+367 → 중심 +56, 위아래 ±311, 좌우 ±537
+	property number RangedFxCenterUIY = 56
 
-	property number RangedFxSpreadUIY = 135
+	property number RangedFxSpreadUIY = 311
 
-	property number RangedFxSpreadUIX = 720
+	property number RangedFxSpreadUIX = 537
 
 	-- 원거리(먹물) 공격 몬스터가 플레이어에게 도달했을 때 MonsterAI가 호출 — 몬스터 위치 근처 화면 좌표에
 	-- 먹물 스플랫 아이콘을 툭 튀어나오듯 팝시킨 뒤, 잠깐 붙어있다가 알파를 서서히 빼며 사라지게 한다
@@ -3547,7 +3557,7 @@ script GameManager extends Logic
 	method void OnBossDefeated(Vector3 worldPos, number fallHeight, number groundWorldY, number dropScale)
 		self.BossDefeated = true
 		_AchievementLogic:OnBossDefeated()
-		_MonsterSpawner:ClearCurrentBoss()
+		if _MapManager.CurrentMapIndex~=189 then _MonsterSpawner:ClearCurrentBoss() end
 		-- 보스 처치는 큰 보상으로 확정 레벨업 1회를 보장한다(그 시점 누적 Exp와 무관하게). 뺄셈이 아니라
 		-- 필요경험치만큼을 그대로 더해서(기존에 쌓아둔 Exp는 보존) 문턱을 확실히 넘기고, 그 뒤로는 일반
 		-- 레벨업과 동일한 연출(0%부터 다시 차오름)로 자연스럽게 이어지게 한다.
@@ -3570,7 +3580,7 @@ script GameManager extends Logic
 		self:ApplyPotionDrop(3, worldPos, fallHeight, groundWorldY, dropScale)
 		-- 슬롯 스킬 드롭 상한 해제 — 반드시 GrantBossCardRewards **뒤**여야 한다.
 		-- 보스 자신의 확정 보상도 "이 웨이브 최대 2개" 안에 들어가야 하기 때문이다.
-		_CardManager:EndBossWaveDropCap()
+		if _MapManager.CurrentMapIndex~=189 then _CardManager:EndBossWaveDropCap() end
 		-- 보스곡 → 지금 있는 맵의 원래 곡으로 복귀(유저 지정 2026-09-08).
 		-- 엔젤 슬라임처럼 분열하는 보스는 분열체까지 전멸해야 여기 도달하므로, 전투가 완전히 끝난
 		-- 시점에만 곡이 바뀐다.
@@ -3628,6 +3638,10 @@ script GameManager extends Logic
 			amount = amount * 0.5
 		end
 		amount = amount * self.ExpBoostMultiplier
+		-- 기존 2배 이벤트와 같은 런 경험치 계산. 히든맵 밖이나 별도 관전맵에는 배율이 새지 않는다.
+		if _MapManager:IsEp4Map1Ester1Zone(_MapManager.CurrentMapIndex) and _Ep4Map1HiddenExpLogic.Active and not _MapManager.AwayOnSideMap then
+			amount = amount * 2
+		end
 		return amount
 	end
 
@@ -3953,7 +3967,7 @@ script GameManager extends Logic
 
 	-- 에피소드4 존(mapIndex 134~173)인지
 	method boolean IsEp4Zone(integer mapIndex)
-		return mapIndex >= 134 and mapIndex <= 183  -- map1~4(134~173) + map5(174~183)
+		return mapIndex >= 134 and mapIndex <= 189  -- 기본맵 50존 + map1 히든맵 5존
 	end
 
 	-- 에피4 존의 idx번째 종 정의(표). 범위를 벗어난 idx는 가장 가까운 칸으로 접는다(기존 풀과 같은 규칙).
@@ -4040,23 +4054,25 @@ script GameManager extends Logic
 		s.buffoon = self:MakeEp4Species({ stand = "5101710b998e4d5683ac6aa24faafea5", move = "86e665a5dbfa410da3effcef85a465ab", hit = "40fcf0861bb34ef2aba3192919e34b76", die = "cada11407128495d9227486dae753b81", dieDur = 0.85, atk = "a1d0970699a84d40a7ac9a1da5312598", atkDur = 1.55, hitSnd = "ca25bb6128ee4a4d8be77007ddf7bbb1", dieSnd = "493dc0699db24ca3a128269088b8f6fb", scale = 0.75, loot = "buffoon_card" })
 		s.deep_buffoon = self:MakeEp4Species({ stand = "5cbdc6de2f6d4429a75997cc2e99aa62", move = "1094915b7123406ca8e64d244a5e5061", hit = "cc317eab2bf34ecda96d2cddc9f993c2", die = "3d548b81597d44b4b39622fbd1ed127d", dieDur = 0.85, atk = "81629f81914748df87db10b481d5edee", atkDur = 1.55, hitSnd = "6ef3f79d03b94e7ca5537248864a11e4", dieSnd = "670b69906f644b53bc0a7671b6d39a53", scale = 0.75, loot = "deep_buffoon_stone" })
 		-- 파이렛/듀얼 파이렛/바이킹/기간틱 바이킹 — 비행 + 원거리(유저 지정). 바이킹류는 자기 팩의 투사체(ball)까지 있다
-		s.pirate = self:MakeEp4Species({ stand = "323debc896394684a8e1576eb8a6ad71", hit = "23521d22f089487197bbfcf6af8ef6ab", die = "045594becc4f41c280e2d17e7736e0ca", atk = "81d93653a2e042e5a15027ec9afa232d", atkDur = 1.85, atkSnd = "5f08be1c60fe4292bb6a361177c40707", dieSnd = "015f90deeeee4ad4a26bc5a147f0c943", fly = true, ranged = true, hitFx = "a0d44ba4991a482ab6c5a82875086845", hitFxDur = 0.2, scale = 0.6, loot = "pirate_helm" })
-		s.dual_pirate = self:MakeEp4Species({ stand = "2ea242f8358a47848e011d2f0c3d5fa0", hit = "88183d896e714eb0b03158a346bb19a9", die = "b6ba3a6a449941428b4d3bdb56665082", atk = "d6dcfb98f5a64566b6a6fede39227a24", atkDur = 1.85, atkSnd = "49b51c5815f2487d8e336f9933f8d1a4", dieSnd = "5cd672a6f65046b8aa226f40061cf7d3", fly = true, ranged = true, hitFx = "3111efd8dcd04d7ca9e3260441191d05", hitFxDur = 0.2, scale = 0.6, loot = "dual_pirate_engine" })
-		s.viking = self:MakeEp4Species({ stand = "5b5052c10fc84ccdac89e603234f7644", hit = "79cbb91c5f6c40da96a73a4e44614031", die = "bd2f2273f028431fa2a97e4159475215", atk = "e923b5cf097246b1a90b33eff9dbb309", atkDur = 1.85, atkSnd = "dfdbf31212f5411ea0079072d882df1d", hitSnd = "bfca5e95138842899cb2b5cb7726be68", fly = true, ranged = true, proj = "8737225389124dd8926b3e737594c90f", hitFx = "87da1aa5a3674c2ab8a04d7f2aa7d59e", hitFxDur = 0.3, scale = 0.55, loot = "viking_helmet" })
-		s.gigantic_viking = self:MakeEp4Species({ stand = "5ff2c1d0aa794de78a07aa10061f497b", hit = "06c3a654ba5d49a4809092ec4325bd6c", die = "99332ef2483e41b7bf76c64615a2fd27", dieDur = 0.55, atk = "9cfa013e77ea4d1aa1b522452e235af5", atkDur = 1.85, atkSnd = "b949e2f3b67744f6a89778db906e83e9", hitSnd = "51748a0e5a7b461eb386c2fb11d277ba", fly = true, ranged = true, proj = "a791827c162c4dbca8477bbde18605d8", hitFx = "0c8fcc40f35647c194e15669be7e8c22", hitFxDur = 0.3, scale = 0.55, loot = "gigantic_viking_hat" })
+		-- 2026-10-06 유저 지정: 네 종 크기 2배(0.6→1.2 / 0.55→1.1)
+		s.pirate = self:MakeEp4Species({ stand = "323debc896394684a8e1576eb8a6ad71", hit = "23521d22f089487197bbfcf6af8ef6ab", die = "045594becc4f41c280e2d17e7736e0ca", atk = "81d93653a2e042e5a15027ec9afa232d", atkDur = 1.85, atkSnd = "5f08be1c60fe4292bb6a361177c40707", dieSnd = "015f90deeeee4ad4a26bc5a147f0c943", fly = true, ranged = true, hitFx = "a0d44ba4991a482ab6c5a82875086845", hitFxDur = 0.2, scale = 1.2, loot = "pirate_helm" })
+		s.dual_pirate = self:MakeEp4Species({ stand = "2ea242f8358a47848e011d2f0c3d5fa0", hit = "88183d896e714eb0b03158a346bb19a9", die = "b6ba3a6a449941428b4d3bdb56665082", atk = "d6dcfb98f5a64566b6a6fede39227a24", atkDur = 1.85, atkSnd = "49b51c5815f2487d8e336f9933f8d1a4", dieSnd = "5cd672a6f65046b8aa226f40061cf7d3", fly = true, ranged = true, hitFx = "3111efd8dcd04d7ca9e3260441191d05", hitFxDur = 0.2, scale = 1.2, loot = "dual_pirate_engine" })
+		s.viking = self:MakeEp4Species({ stand = "5b5052c10fc84ccdac89e603234f7644", hit = "79cbb91c5f6c40da96a73a4e44614031", die = "bd2f2273f028431fa2a97e4159475215", atk = "e923b5cf097246b1a90b33eff9dbb309", atkDur = 1.85, atkSnd = "dfdbf31212f5411ea0079072d882df1d", hitSnd = "bfca5e95138842899cb2b5cb7726be68", fly = true, ranged = true, proj = "8737225389124dd8926b3e737594c90f", hitFx = "87da1aa5a3674c2ab8a04d7f2aa7d59e", hitFxDur = 0.3, scale = 1.1, loot = "viking_helmet" })
+		s.gigantic_viking = self:MakeEp4Species({ stand = "5ff2c1d0aa794de78a07aa10061f497b", hit = "06c3a654ba5d49a4809092ec4325bd6c", die = "99332ef2483e41b7bf76c64615a2fd27", dieDur = 0.55, atk = "9cfa013e77ea4d1aa1b522452e235af5", atkDur = 1.85, atkSnd = "b949e2f3b67744f6a89778db906e83e9", hitSnd = "51748a0e5a7b461eb386c2fb11d277ba", fly = true, ranged = true, proj = "a791827c162c4dbca8477bbde18605d8", hitFx = "0c8fcc40f35647c194e15669be7e8c22", hitFxDur = 0.3, scale = 1.1, loot = "gigantic_viking_hat" })
 		-- map5 (ep4_map5, 2026-09-28 유저 지정) ─────────────────────────────
-		s.soul_teddy = self:MakeEp4Species({ stand = "d11188e012d547ae9b73bbbbd406d47f", move = "65870521568c40c99a700acc5418efd1", hit = "2243ef05cec34584b6b89b996612bec3", die = "409c5cc702e5427b9791636cdbcb03db", atk = "b0a6f61d60024ee3b840ef9ffc0ec774", atkDur = 1.25, atkSnd = "045e0fad1fce4f0f804d2ee4718742c3", hitSnd = "0471444e506944119f2af5fda1060b2d", dieSnd = "1f090d5af37e4aa29dab84de51fea755", scale = 0.75, loot = "soul_teddy_card" })
+		-- 2026-10-06 유저 지정 크기: 소울테니·팬텀워치·G.팬텀워치 ×1.6 / 데스테니 1.2(재지정) / 게이트키퍼 ×1.5 / 클라크·다크 클라크 ×1.2
+		s.soul_teddy = self:MakeEp4Species({ stand = "d11188e012d547ae9b73bbbbd406d47f", move = "65870521568c40c99a700acc5418efd1", hit = "2243ef05cec34584b6b89b996612bec3", die = "409c5cc702e5427b9791636cdbcb03db", atk = "b0a6f61d60024ee3b840ef9ffc0ec774", atkDur = 1.25, atkSnd = "045e0fad1fce4f0f804d2ee4718742c3", hitSnd = "0471444e506944119f2af5fda1060b2d", dieSnd = "1f090d5af37e4aa29dab84de51fea755", scale = 1.2, loot = "soul_teddy_card" })
 		s.master_soul_teddy = self:MakeEp4Species({ stand = "627b685f09e3446d9537567d5d2d26d8", move = "2a510521fe3d466a909b1afabc877e00", hit = "568f795aa4cd4aefa3c59c2d8c94283b", die = "3273d024695b4cb0b774eb4f21ef8f04", atk = "24c9fa8ce4384c27820fcee3ae730469", atkDur = 1.25, atkSnd = "20972409f65c4457a9f75e55df8ced66", hitSnd = "a2bf8e326c8b4c57ad422421c65767da", dieSnd = "b4a133f0355f4a9eb50622e1824265ea", scale = 0.7, loot = "master_soul_teddy_card" })
-		s.klock = self:MakeEp4Species({ stand = "f85f8a0f856c4f06bf0df4d123fa4063", move = "a1267117a6714a35bc1ab5000314a214", hit = "8356d60912314c79881685a9b8fcbb6e", die = "c52aba8f224a4737a34c4348f2beef67", atk = "552f5cb29f3544d186d19b485624a1eb", atkDur = 1.25, atkSnd = "d22c7c2a03e04bed809c68278c85d87c", hitSnd = "dfcdd7a77035473684e345a9f92e6e87", dieSnd = "5272e83447534359bc7a75bc5bf79e31", scale = 0.75, loot = "klock_card" })
-		s.dark_klock = self:MakeEp4Species({ stand = "ece6ac49c6eb46b7a33a9a283a673849", move = "659fe5bae7b348a7911f467a51455b8f", hit = "dd533959c5824a6499fd126bf61d9a02", die = "6595dc3f6ee54421b8996824f357ae14", atk = "b4d01f35ad1944b790d33070848124e6", atkDur = 1.25, atkSnd = "9eb1c463e59e480799f2fced01e8f365", hitSnd = "8a5e6f0c45d74768a0c6da59783e1164", dieSnd = "aab280ec7f3143de9e5e8e1c8b134cb1", scale = 0.7, loot = "dark_klock_watch" })
+		s.klock = self:MakeEp4Species({ stand = "f85f8a0f856c4f06bf0df4d123fa4063", move = "a1267117a6714a35bc1ab5000314a214", hit = "8356d60912314c79881685a9b8fcbb6e", die = "c52aba8f224a4737a34c4348f2beef67", atk = "552f5cb29f3544d186d19b485624a1eb", atkDur = 1.25, atkSnd = "d22c7c2a03e04bed809c68278c85d87c", hitSnd = "dfcdd7a77035473684e345a9f92e6e87", dieSnd = "5272e83447534359bc7a75bc5bf79e31", scale = 0.9, loot = "klock_card" })
+		s.dark_klock = self:MakeEp4Species({ stand = "ece6ac49c6eb46b7a33a9a283a673849", move = "659fe5bae7b348a7911f467a51455b8f", hit = "dd533959c5824a6499fd126bf61d9a02", die = "6595dc3f6ee54421b8996824f357ae14", atk = "b4d01f35ad1944b790d33070848124e6", atkDur = 1.25, atkSnd = "9eb1c463e59e480799f2fced01e8f365", hitSnd = "8a5e6f0c45d74768a0c6da59783e1164", dieSnd = "aab280ec7f3143de9e5e8e1c8b134cb1", scale = 0.84, loot = "dark_klock_watch" })
 		-- 데스테니/마스터 데스테니 — 비행 + 원거리(유저 지정). 자기 팩 투사체(ball)·착탄(hit). 공격 모션이 있어 스케일 들이받기 없음
-		s.death_teddy = self:MakeEp4Species({ stand = "4f4cbf63b65a460caa9deac96ada79d2", hit = "6ad325f9e35345e4a6cb1c0144657ee4", die = "228fa67492024363a10311504f36a843", dieDur = 0.55, atk = "cce5f1013d1246b0aaa5a1013bff632b", atkDur = 1.25, hitSnd = "b1285ee0908a4a7f819d768868ef23d6", dieSnd = "1d341b8fcf054f6e97b7d046c22e5d27", fly = true, ranged = true, proj = "76f93eafb59547a7a3d716d9fa216fc6", hitFx = "2f4f60b59e2e45b3995611f284df61f9", hitFxDur = 0.2, scale = 0.65, loot = "death_teddy_button" })
+		s.death_teddy = self:MakeEp4Species({ stand = "4f4cbf63b65a460caa9deac96ada79d2", hit = "6ad325f9e35345e4a6cb1c0144657ee4", die = "228fa67492024363a10311504f36a843", dieDur = 0.55, atk = "cce5f1013d1246b0aaa5a1013bff632b", atkDur = 1.25, hitSnd = "b1285ee0908a4a7f819d768868ef23d6", dieSnd = "1d341b8fcf054f6e97b7d046c22e5d27", fly = true, ranged = true, proj = "76f93eafb59547a7a3d716d9fa216fc6", hitFx = "2f4f60b59e2e45b3995611f284df61f9", hitFxDur = 0.2, scale = 1.2, loot = "death_teddy_button" })
 		s.master_death_teddy = self:MakeEp4Species({ stand = "368721ea7f9f454cae87e3b02b817427", hit = "329722b578c3490cae3031ab59fed3e6", die = "a2ab5c17c7fc44c49857c6ad6ed51adf", dieDur = 0.55, atk = "0c189368eb954c8292d8889f41203dc0", atkDur = 1.25, hitSnd = "f3f24863adf046dda3bdc4df8cebfd1e", fly = true, ranged = true, proj = "e784bfc14bc04d5b86b8f9df9eb2a63e", hitFx = "afbd361bc2414fdd82e8120edb41fea1", hitFxDur = 0.2, scale = 0.65, loot = "master_death_teddy_card" })
 		-- 팬텀워치/G.팬텀워치 — 원거리(유저 지정). G.팬텀워치 팩엔 투사체가 없어 착탄만 쓴다
-		s.phantom_watch = self:MakeEp4Species({ stand = "01c34d843a294d6e8b9b9ac6d15ca15e", move = "13e1f2cf1fea43ff99e6ec18023a5047", hit = "06ab0a1285e64753a5e0cf570a828537", die = "5bead81e18254e5ca6690c6c7cd1ea7c", dieDur = 1.15, atk = "f9d15ca985cf498399938fe9c121a162", atkDur = 1.25, hitSnd = "6dbe10d8d1b14a38a566f8dba83efc28", dieSnd = "6d7d870e856f47e282bdab82588b1a3f", ranged = true, proj = "0305508e90644c99bbaafd76e41b3f8a", hitFx = "351f48ac3bc94b25b1b8bb6eb662312b", hitFxDur = 0.3, scale = 0.6, loot = "phantom_watch_card" })
-		s.g_phantom_watch = self:MakeEp4Species({ stand = "3b8d0662d1e84f5cb7a3b99a79b0745e", move = "23fec8a8a0a8411c84ddbebc56c83501", hit = "e3c3cddc3eaf4f2196d4c2e8c4d6b4a2", die = "5fad506092a0491f9d7ba41f35692c7d", dieDur = 1.15, atk = "3199d484edd942a3b14ac04a492725cd", atkDur = 1.25, atkSnd = "14fcc6911fd14005964c7c548f43d28e", hitSnd = "f99f5fcf753c491c86dec54f72785e1f", dieSnd = "76ed519147f14597a41e29d4b92128e4", ranged = true, hitFx = "57fb646728fd45eaa5aaa5e3be528381", hitFxDur = 0.2, scale = 0.6, loot = "g_phantom_watch_card" })
+		s.phantom_watch = self:MakeEp4Species({ stand = "01c34d843a294d6e8b9b9ac6d15ca15e", move = "13e1f2cf1fea43ff99e6ec18023a5047", hit = "06ab0a1285e64753a5e0cf570a828537", die = "5bead81e18254e5ca6690c6c7cd1ea7c", dieDur = 1.15, atk = "f9d15ca985cf498399938fe9c121a162", atkDur = 1.25, hitSnd = "6dbe10d8d1b14a38a566f8dba83efc28", dieSnd = "6d7d870e856f47e282bdab82588b1a3f", ranged = true, proj = "0305508e90644c99bbaafd76e41b3f8a", hitFx = "351f48ac3bc94b25b1b8bb6eb662312b", hitFxDur = 0.3, scale = 0.96, loot = "phantom_watch_card" })
+		s.g_phantom_watch = self:MakeEp4Species({ stand = "3b8d0662d1e84f5cb7a3b99a79b0745e", move = "23fec8a8a0a8411c84ddbebc56c83501", hit = "e3c3cddc3eaf4f2196d4c2e8c4d6b4a2", die = "5fad506092a0491f9d7ba41f35692c7d", dieDur = 1.15, atk = "3199d484edd942a3b14ac04a492725cd", atkDur = 1.25, atkSnd = "14fcc6911fd14005964c7c548f43d28e", hitSnd = "f99f5fcf753c491c86dec54f72785e1f", dieSnd = "76ed519147f14597a41e29d4b92128e4", ranged = true, hitFx = "57fb646728fd45eaa5aaa5e3be528381", hitFxDur = 0.2, scale = 0.96, loot = "g_phantom_watch_card" })
 		-- 게이트키퍼 — 돌진(유저 지정). 덩치(266px)가 커서 0.45배
-		s.gatekeeper = self:MakeEp4Species({ stand = "1e1265c453ad4ed7a9b7780ca40d7d48", move = "ee458018a61344e59e59ef65f0f4908c", hit = "49151a3d8a6e4df58c58acf7bc1fea3d", die = "2a1b0fe14cda4f77834ebfe3b6f8e99d", dieDur = 0.85, atk = "919fe48b6d5149bda73f0819e120758e", atkDur = 2.45, hitSnd = "0f9591d86199407187436ddd6458873d", dieSnd = "69cb67ee44c74cd2a049e96d3c47cf8a", charge = true, scale = 0.45, loot = "gatekeeper_armband" })
+		s.gatekeeper = self:MakeEp4Species({ stand = "1e1265c453ad4ed7a9b7780ca40d7d48", move = "ee458018a61344e59e59ef65f0f4908c", hit = "49151a3d8a6e4df58c58acf7bc1fea3d", die = "2a1b0fe14cda4f77834ebfe3b6f8e99d", dieDur = 0.85, atk = "919fe48b6d5149bda73f0819e120758e", atkDur = 2.45, hitSnd = "0f9591d86199407187436ddd6458873d", dieSnd = "69cb67ee44c74cd2a049e96d3c47cf8a", charge = true, scale = 0.675, loot = "gatekeeper_armband" })
 		self._ep4Species = s
 
 		-- 존별 종 순서(= idx). 앞 존은 2종으로 가볍게 시작해 뒤로 갈수록 3~4종 섞이고, 각 맵 존10은 4종 마무리.
@@ -4117,6 +4133,14 @@ script GameManager extends Logic
 			[182] = {"g_phantom_watch", "gatekeeper", "master_soul_teddy"},
 			[183] = {"master_death_teddy", "dark_klock", "g_phantom_watch", "gatekeeper"},
 		}
+		-- 맵1 복사 지형의 히든맵: 같은 첫 다섯 존 몬스터/행동/잡템 정의를 재사용한다.
+		for i=0,4 do self._ep4Zones[184+i]=self._ep4Zones[134+i] end
+		-- 파풀 처치 후에는 맵5 전체에서 중복 없이 모은 종 중 무작위로 등장한다.
+		local pool={} local seen={}
+		for z=174,183 do for _,name in ipairs(self._ep4Zones[z]) do
+			if not seen[name] then seen[name]=true table.insert(pool,name) end
+		end end
+		self._ep4Zones[189]=pool
 		log("GameManager: ep4 monster data built")
 	end
 
@@ -6467,7 +6491,8 @@ script GameManager extends Logic
 	-- attackerWorldPos = 때린 몬스터의 위치 — 피격 연출(HitFeelLogic: 맞은 방향 가장자리 플래시 + 순간 줌)이 방향을 정하는 데 쓴다(2026-09-30).
 	-- isChargeRam = 돌진 몬스터 도착 첫 타(2026-10-01) — 피격 연출이 순간 줌 대신 화면이 뒤로 밀리는 줌 아웃을 쓴다.
 	method void OnMonsterReached(number dmgMultiplier, boolean ignoreHitImmune, boolean isBoss, Vector2 attackerWorldPos, boolean isChargeRam)
-		if self.GameOver then return end
+		-- 퀴즈 모달 전에 예약된 타격도 체력을 깎지 않도록 마지막 피해 지점을 막는다.
+		if self.GameOver or self.EasterEggPaused then return end
 		if self._hitImmune and not ignoreHitImmune then return end
 		
 		-- 허수아비가 소환되어 있는 동안은 몬스터의 공격을 플레이어 대신 허수아비가 맞는다 —
@@ -6732,7 +6757,11 @@ script GameManager extends Logic
 		local cycleIndex = configData:GetCycleIndex(_DateTimeLogic:GetTimeElapsed())
 		
 		for _, userEntity in ipairs(_UserService.UserEntities.Values) do
-			if isvalid(userEntity) and userEntity.PlayerDBManager.IsLoadSuccess then
+			-- 지난 시즌 보상을 안 받았으면 이번 기록은 남기지 않는다(유저 지정 2026-10-06, RankSeasonLogic)
+			if isvalid(userEntity) and _RankSeasonLogic:IsSubmitBlocked(boardId) then
+				log("GameManager: ranking submit blocked (season reward unclaimed) boardId=" .. tostring(boardId))
+			elseif isvalid(userEntity) and userEntity.PlayerDBManager.IsLoadSuccess then
+				_RankSeasonLogic:MarkPlayed(boardId, cycleIndex)
 				local tag = userEntity.PlayerComponent.Nickname
 				local updated = userEntity.PlayerRanking:SetScoreAndWait(boardId, cycleIndex, stored, tag, "", false)
 				-- 기록이 실제로 갱신됐을 때만 그 판 정보(이어하기 횟수 등)를 운영자 조회용으로 남긴다(2026-09-29)
@@ -6795,6 +6824,7 @@ script GameManager extends Logic
 		end
 		if kind == 1 then _MapManager:BeginGameplay() end
 		if kind == 2 then _MonsterSpawner:RestartSpawning() end
+		if kind==1 or kind==2 then _CompanionRescueMakerTest:PrepareEntry() end
 	end
 
 	@ExecSpace("ServerOnly")
@@ -6819,6 +6849,8 @@ script GameManager extends Logic
 
 	@ExecSpace("ServerOnly")
 	method void StartGame(boolean timeAttack, integer characterIndex, string userId, integer episode)
+		_Ep1ProjectileFx:ResetForRun()
+		_MonsterProjectileFx:ResetForRun()
 		-- 버그 수정(2026-08-26, 유저 리포트 "아르카나 말고 다른 캐릭 골랐는데 에너지볼트같은 공격이
 		-- 적한테 들어가네") — GameOver 없이(죽지 않은 채) 타이틀로 돌아가 "게임 시작"을 다시 누르면
 		-- TitleUI.OnStartClicked가 RequestStartGame(다시하기 아님)을 호출한다. 이땐 GameStarted가 이미
@@ -6830,10 +6862,20 @@ script GameManager extends Logic
 		local characterChanged = self.GameStarted and characterIndex ~= self.SelectedCharacter
 		self.SelectedCharacter = characterIndex
 		self.SelectedEpisode = episode
+		_CompanionRescueMakerTest:ResetForEpisode(episode)
 		self.TimeAttackMode = timeAttack
 		self.TimeAttackRemaining = timeAttack and self.TimeAttackDuration or 0
 		-- 튜토리얼 정지가 남은 채로 새 런이 시작되면 게임이 멈춘 채로 시작된다 — 항상 풀고 들어간다
 		self.TutorialPaused = false ; self.OptionPaused = false ; self.ShopPaused = false
+		_Ep4Map1EasterEggLogic:ResetForNewRun()
+		_Ep4Map2EasterEggLogic:ResetForNewRun()
+		_Ep4Map3EasterEggLogic:ResetForNewRun()
+		_Ep4Map4EasterEggLogic:ResetForNewRun()
+		_Ep4Map5EasterEggLogic:ResetForNewRun()
+		_Ep4Map1HiddenExpLogic:ResetForNewRun()
+		_Ep4PapulatusLogic:ResetForNewRun()
+		_Map21RelicEasterEgg:ResetForNewRun()
+		_Ep2Map2ArenaLogic:ResetForNewRun()
 		_MapManager:SetInColosseum(false)
 		-- 타이틀 화면에서 처음 한 번만 실제 웨이브 스폰을 활성화한다. 그 전까지 OnBeginPlay에서
 		-- 곧바로 스폰을 켜두면, 유저가 타이틀 화면을 보는 동안에도 몬스터가 쌓이게 된다.
@@ -6853,7 +6895,7 @@ script GameManager extends Logic
 		-- BeginGameplay()의 ActivateMap과 겹쳐 초기 스폰이 두 번(그래서 에피1보다 몬스터가 더 많이)
 		-- 일어나는 버그가 있었다(유저 리포트로 발견) — 에피1 새 시작은 이 분기를 안 타서 항상
 		-- BeginGameplay() 한 번뿐이었으므로 에피2/3만 비대칭이었다.
-		if episode == 2 or episode == 3 or episode == 4 then
+		if episode == 2 or episode == 3 or episode == 4 or (episode==1 and _MapManager.TestStartAtSylphUnlock and Environment:IsMakerPlay()) then
 			_MapManager:SilentMoveToMap(_MapManager.CurrentMapIndex, _MapManager.DesiredStartMapIndex)
 		end
 		self.GameStarted = true
@@ -6960,6 +7002,8 @@ script GameManager extends Logic
 
 	@ExecSpace("ServerOnly")
 	method void RestartGame(boolean timeAttack, integer characterIndex, string userId, integer episode)
+		_Ep1ProjectileFx:ResetForRun()
+		_MonsterProjectileFx:ResetForRun()
 		-- 처음부터 다시 시작: 모든 상태를 초기화
 		-- 아래에서 GameOver=false로 풀리는 순간 자동 공격이 다시 돌기 때문에, 이전 판 몬스터를 먼저 멈추고 지운다
 		-- (안 그러면 초기화 도중 …AndWait 사이에 죽은 몹의 골드/처치/경험치가 새 판에 들어간다 — 2026-09-29)
@@ -6968,6 +7012,7 @@ script GameManager extends Logic
 		_AchievementLogic:OnRunStarted()
 		self.SelectedCharacter = characterIndex
 		self.SelectedEpisode = episode
+		_CompanionRescueMakerTest:ResetForEpisode(episode)
 		_MapManager:SetEpisodeRange(episode)
 		self.PlayerMaxHp = 100
 		self.PlayerHp = 100
@@ -6989,6 +7034,14 @@ script GameManager extends Logic
 		self.TimeAttackRemaining = timeAttack and self.TimeAttackDuration or 0
 		-- 다시하기로 새 런을 시작할 때도 튜토리얼 정지는 반드시 풀고 들어간다(StartGame과 동일)
 		self.TutorialPaused = false ; self.OptionPaused = false ; self.ShopPaused = false
+		_Ep4Map1EasterEggLogic:ResetForNewRun()
+		_Ep4Map2EasterEggLogic:ResetForNewRun()
+		_Ep4Map3EasterEggLogic:ResetForNewRun()
+		_Ep4Map4EasterEggLogic:ResetForNewRun()
+		_Ep4Map5EasterEggLogic:ResetForNewRun()
+		_Ep4Map1HiddenExpLogic:ResetForNewRun()
+		_Ep4PapulatusLogic:ResetForNewRun()
+		_Map21RelicEasterEgg:ResetForNewRun()
 		_MapManager:SetInColosseum(false)
 		self._timeAttackOvertimeDeath = false
 		self._gaveUp = false
@@ -7098,6 +7151,9 @@ script GameManager extends Logic
 		_Ep3Map3CollectLogic:ResetForNewRun()
 		-- 에피1 map04 존6 잡템 부탁 NPC(object-1917_1, 몬스터→잡템 X30)도 동일 — 목표 재추첨
 		_Map04CollectLogic:ResetForNewRun()
+		-- 에피1 map22 잡템 퀘스트(object-184_14, X30)·map18 직업 퀴즈(object-2047_8)도 동일(2026-10-05)
+		_Map22CollectLogic:ResetForNewRun()
+		_Map18JobQuizLogic:ResetForNewRun()
 		-- 에피3 map2 가리개 스킬 이스터에그(object-15_127→133)도 동일한 정책으로 초기화 — 가리개를
 		-- 다시 보이게(알파1.0) 되돌려서 재도전할 수 있게 한다
 		_Ep3Map2SkillCoverLogic:ResetForNewRun()
@@ -9281,7 +9337,8 @@ script GameManager extends Logic
 	-- @Sync라서 OnSyncProperty의 HP바/카메라 흔들림 갱신은 그대로 정상 동작한다.
 	@ExecSpace("ServerOnly")
 	method void ApplyDespairBladeDamage()
-		if self.GameOver then return end
+		-- 퀴즈 모달 전에 예약된 타격도 체력을 깎지 않도록 마지막 피해 지점을 막는다.
+		if self.GameOver or self.EasterEggPaused then return end
 		local dmg = math.floor(self.PlayerMaxHp * self.DespairBladeDamagePercent)
 		local armorReduction = _CardManager:GetMagicArmorReduction()
 		if armorReduction > 0 then dmg = math.floor(dmg * (1.0 - armorReduction)) end

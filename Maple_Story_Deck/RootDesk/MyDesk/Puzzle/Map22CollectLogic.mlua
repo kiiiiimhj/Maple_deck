@@ -1,0 +1,115 @@
+@Logic
+script Map22CollectLogic extends Logic
+
+	-- 에피1 map22(존36~39, 정글) 존38 자리 object-184_14 잡템 퀘스트(유저 지정 2026-10-05).
+	-- Map04CollectLogic과 같은 교환 구조: 첫 터치에 map22 몬스터 잡템 중 하나를 무작위로 정하고,
+	-- 모자라면 "몬스터 그림 → 잡템 X남은개수" 말풍선, 30개를 모아 누르면 가져가고 보상.
+	-- 보상은 다른 잡템 퀘스트와 같다: 하얀 포션 + 보유 스킬 1개 강화 + 덤(EasterEggBonusLogic).
+	-- "다시하기"/"새로 시작"은 GameManager.RestartGame()이 ResetForNewRun()으로 초기화(목표 재추첨).
+	@Sync property boolean Redeemed = false
+	@Sync property string PickedItemId = ""
+
+	property integer GiftAmount = 30
+	-- 목표 풀 = map22 전체(존36~39) 몬스터 잡템. 그림/외곽은 CollectBubbleLogic._monsterByItem
+	property table TargetItems = {"jr_necki_hide", "ligator_hide", "croco_hide", "swamp_mud", "sprout_mud", "melody_broom", "steagy_wing"}
+
+	property number BubbleXOffset = -1.25
+	property number BubbleYOffset = 1.25
+	property number BubbleShowDuration = 2.0
+
+	-- 교환 완료 하트 말풍선(Map04CollectLogic과 같은 GiftBubble 값)
+	property string HeartBubbleModelId = "giftbubble"
+	property string HeartIconRUID = "7ecb5769578f4b05808afaad17ee83ac"
+	property Vector3 HeartIconPosition = Vector3(-0.4361, -0.2908, 0)
+	property Vector3 HeartIconScale = Vector3(5.788959, 5.78895855, 1)
+
+	property any _activeBubble = nil
+
+	-- Map22CollectTrigger.RequestTouch()가 터치된 오브젝트 엔티티를 넘긴다
+	@ExecSpace("ServerOnly")
+	method void OnObjectTouched(Entity touchedObject)
+		-- 목표 확정 → 모자라면 진행상황 말풍선, 다 모았으면 교환+보상
+		if self.Redeemed then return end
+		if not isvalid(touchedObject) then return end
+		local map = touchedObject.CurrentMap
+		if map == nil then return end
+		local worldPos = touchedObject.TransformComponent.WorldPosition
+		local bubblePos = Vector3(worldPos.x + self.BubbleXOffset, worldPos.y + self.BubbleYOffset, worldPos.z - 0.5)
+
+		if self.PickedItemId == "" then
+			self.PickedItemId = self.TargetItems[_UtilLogic:RandomIntegerRange(1, #self.TargetItems)]
+		end
+		local itemId = self.PickedItemId
+
+		local have = _PlayerInventory:GetItemCount(itemId)
+		if have < self.GiftAmount then
+			local remaining = self.GiftAmount - have
+			self:ClearBubble()
+			local bubble = _CollectBubbleLogic:SpawnItemQuestBubble(map, bubblePos, "Map22CollectBubble", itemId, "X" .. remaining, false)
+			if bubble ~= nil then
+				self._activeBubble = bubble
+				self:ScheduleBubbleDestroy(bubble)
+			end
+			log("Map22Collect: still collecting - " .. itemId .. " (" .. have .. "/" .. self.GiftAmount .. ", " .. remaining .. " left)")
+			return
+		end
+
+		self.Redeemed = true
+		_PlayerInventory:RemoveItem(itemId, self.GiftAmount)
+		local fall = _GameManager:GetGroundFallFor(touchedObject, worldPos)
+		_GameManager:ApplyPotionDrop(2, worldPos, fall.x, fall.y, 1.0)
+		local pool = _CardManager:BuildActiveUpgradePool()
+		if #pool > 0 then
+			_CardManager:GrantCardUpgradesFromPool(pool, worldPos, fall.x, fall.y, 1.0, 1, 0)
+		end
+		_EasterEggBonusLogic:RollBonus(worldPos, fall.x, fall.y)
+		log("Map22Collect: redeemed " .. itemId .. " x" .. self.GiftAmount .. " -> white potion + card upgrade(pool=" .. #pool .. ") + bonus roll")
+		self:SpawnHeartBubble(map, bubblePos)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ClearBubble()
+		-- 떠 있는 말풍선을 지운다
+		if self._activeBubble ~= nil and isvalid(self._activeBubble) then
+			self._activeBubble:Destroy()
+		end
+		self._activeBubble = nil
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ScheduleBubbleDestroy(Entity bubble)
+		-- BubbleShowDuration 뒤 자동으로 지운다
+		_TimerService:SetTimerOnce(function()
+			if isvalid(bubble) then bubble:Destroy() end
+			if self._activeBubble == bubble then self._activeBubble = nil end
+		end, self.BubbleShowDuration)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SpawnHeartBubble(Entity map, Vector3 pos)
+		-- 교환 완료 하트 말풍선(GiftBubble)
+		self:ClearBubble()
+		local bubble = _SpawnService:SpawnByModelId(self.HeartBubbleModelId, "Map22CollectHeart", pos, map)
+		if bubble == nil then return end
+		self._activeBubble = bubble
+		local icon = bubble:GetChildByName("Icon")
+		if icon ~= nil and icon.SpriteRendererComponent ~= nil then
+			icon.SpriteRendererComponent.SpriteRUID = self.HeartIconRUID
+			icon.TransformComponent.Position = self.HeartIconPosition
+			icon.TransformComponent.Scale = self.HeartIconScale
+			icon.Enable = true
+		end
+		local count = bubble:GetChildByName("Count")
+		if count ~= nil then count.Enable = false end
+		self:ScheduleBubbleDestroy(bubble)
+	end
+
+	-- GameManager.RestartGame()이 호출 — 새 런에서는 다시 교환 가능하고 목표도 재추첨
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		self.Redeemed = false
+		self.PickedItemId = ""
+		self:ClearBubble()
+	end
+
+end

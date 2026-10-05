@@ -7,12 +7,7 @@ script GalleryArenaUI extends Logic
 	-- 되므로 targetUserId를 호출부 마지막 인자로 넘겨서 단일 클라이언트에만 반영한다.
 	property TextGUIRendererComponent bannerText = "ae1f3ad6-6a6b-40f8-92cd-51d20a02890f"
 
-	-- 결과 화면(단상+단상 위 3마리+다시하기 버튼) 전용 UI. 딤드 자체는 더 이상 이 UI에 없다 — 선택
-	-- 단계와 결과 단계가 공유하는 월드 스프라이트 GalleryDim(Ep2Map2ArenaLogic.SetDimVisible)이
-	-- 배경을 담당한다(월드 몬스터가 UI 딤 위로 못 올라오는 구조적 한계 때문에 딤 자체를 월드로 뺐다 —
-	-- 상세 이유는 Ep2Map2ArenaLogic.galleryDim 주석 참고). resultGroup은 단상+아이콘 3개+버튼만
-	-- 켜고 끈다. resultGroup은 GalleryArenaUI(.ui) 자식이라 여전히 카드슬롯 등 다른 UI보다 위에
-	-- 그려진다(OnBeginPlay의 SetSiblingIndex).
+	-- 결과 전용 전체 화면 딤드. 선택 단계의 월드 딤드와 별도로 UI를 가린다.
 	property Entity resultGroup = "f54302eb-b272-4a4f-8961-9c37f150b15f"
 
 	-- 등수 1/2/3위 아이콘. Ep2Map2ArenaLogic.PlaceOnPodium이 종별 stand 애니메이션클립 RUID를 넘겨준다.
@@ -31,6 +26,10 @@ script GalleryArenaUI extends Logic
 	-- "딤드가 카드 슬롯이랑 이런거 위에 덮혀야한다니깐". 실제 렌더 순서를 결정하는 형제 인덱스를
 	-- OnBeginPlay에서 확정적으로 맨 뒤(=맨 앞)로 올려야 한다.
 	property Entity rootGroup = "135eaa2f-fb1a-4194-8f71-6f22dfc69090"
+
+	property TextGUIRendererComponent resultTitle = "de821440-ddd2-4e42-841d-fe0503578393"
+	property TextGUIRendererComponent retryCostText = "acac8042-d80d-4b75-a15e-ad09446e2cb8"
+	property Entity retryDiamond = "7fc6b09b-36c3-46b7-8968-c6b7b0b0642d"
 
 	property any _retryTouchHandler = nil
 
@@ -70,17 +69,28 @@ script GalleryArenaUI extends Logic
 	-- 그 슬롯은 숨김), slotW/H는 종별 아이콘 원본 픽셀 크기(찌그러짐 방지, Pivot=(0.5,0.5)라
 	-- 크기만 바꿔도 중심은 안 움직인다). showRetry/retryLabel은 "다시하기" 버튼 노출 여부와 문구.
 	@ExecSpace("Client")
-	method void ShowResult(string slotRuid1, number slotW1, number slotH1, string slotRuid2, number slotW2, number slotH2, string slotRuid3, number slotW3, number slotH3, boolean showRetry, string retryLabel)
-		-- 유저 지정: "Podium 뜰 때는 텍스트는 뜨면 안 된다" — StartBattle에서 이미 HideBanner를
-		-- 호출하지만, 결과 화면 진입 지점에서도 한 번 더 확정적으로 꺼둔다.
+	method void ShowResult(string slotRuid1, number slotW1, number slotH1, string slotRuid2, number slotW2, number slotH2, string slotRuid3, number slotW3, number slotH3, boolean showRetry, integer retryCost, boolean champion)
 		self:HideBanner()
 		self:ApplySlot(self.resultSlot1, slotRuid1, slotW1, slotH1)
 		self:ApplySlot(self.resultSlot2, slotRuid2, slotW2, slotH2)
 		self:ApplySlot(self.resultSlot3, slotRuid3, slotW3, slotH3)
 		self.retryButton.Entity.Enable = showRetry
-		if showRetry then
-			-- button()이 만든 텍스트는 같은 엔티티 위의 TextGUIRendererComponent다(별도 자식 아님).
-			self.retryButton.Entity.TextGUIRendererComponent.Text = _LocText:Resolve(retryLabel)
+		local titleKey="ARENA_RESULT_TITLE"
+		if champion then titleKey="ARENA_RESULT_CHAMPION" end
+		self.resultTitle.Text=_LocText:Resolve(titleKey)
+		local label=self.retryButton.Entity:GetChildByName("Label",false)
+		label.TextGUIRendererComponent.Text=_LocText:Resolve("ARENA_RETRY_LABEL")
+		self.retryDiamond.Enable=retryCost>0
+		if retryCost>0 then
+			self.retryCostText.Text=tostring(retryCost)
+			local width=math.max(42,self.retryCostText:GetPreferredWidth(self.retryCostText.Text)+4)
+			self.retryCostText.Entity.UITransformComponent.RectSize=Vector2(width,38)
+			self.retryCostText.Entity.UITransformComponent.anchoredPosition=Vector2(23,-22)
+			self.retryDiamond.UITransformComponent.anchoredPosition=Vector2(-(width+12)/2,-22)
+		else
+			self.retryCostText.Text=_LocText:Resolve("ARENA_RETRY_FREE")
+			self.retryCostText.Entity.UITransformComponent.RectSize=Vector2(250,38)
+			self.retryCostText.Entity.UITransformComponent.anchoredPosition=Vector2(0,-22)
 		end
 		self.resultGroup.Enable = true
 	end
@@ -120,12 +130,18 @@ script GalleryArenaUI extends Logic
 
 	@ExecSpace("Server")
 	method void RequestCloseResult()
-		_Ep2Map2ArenaLogic:OnResultClosed()
+		_Ep2Map2ArenaLogic:CloseArenaResultForUser(senderUserId)
 	end
 
 	@ExecSpace("Server")
 	method void RequestRetry()
-		_Ep2Map2ArenaLogic:OnRetryClicked()
+		_Ep2Map2ArenaLogic:RetryArenaForUser(senderUserId)
+	end
+
+	@ExecSpace("Client")
+	method void OpenRetryDiamondShop()
+		_DiaShopUI:OpenInGame(_LocText:Resolve("MLUA_CARDMANAGER_064"))
+		log("Arena: insufficient diamonds opened existing shop")
 	end
 
 end

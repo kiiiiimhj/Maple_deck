@@ -1,0 +1,148 @@
+@Logic
+script Ep4PapulatusLogic extends Logic
+	@Sync property boolean Defeated = false
+	@Sync property integer Phase = 0
+	property Entity Boss = nil
+	property integer RunRevision = 0
+	property number NormalBossHp = 0
+	property table _durationCache = {}
+	property table _phaseDefs = {}
+	property boolean _loading = false
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		-- 플레이 초반부터 원본 모션을 준비해 퍼즐 포탈 입장 때 기다리지 않게 한다.
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) then return end self:GetPhaseDef(1)
+			if not isvalid(self) then return end self:GetPhaseDef(2)
+		end,0.5)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnPortalTouched(Entity portal, string userId)
+		-- 퍼즐을 끝낸 현재 맵5 사용자만 포탈을 눌러 단일 존 보스방에 들어간다.
+		if not _Ep4Map5EasterEggLogic.PuzzleComplete or not isvalid(portal) or not portal.Enable then return end
+		if portal~=_EntityService:GetEntityByPath("/maps/ep4_map5/esteregg_3") then return end
+		if not _GameManager.GameStarted or _GameManager.GameOver or _GameManager:IsGamePaused() or _MapManager._moveLocked then return end
+		local user=_UserService:GetUserEntityByUserId(userId)
+		if not isvalid(user) or user.CurrentMap~=portal.CurrentMap then return end
+		if not _Ep4Map5EasterEggLogic:ValidUser(portal,userId) then return end
+		_MapManager:MoveToMap(_MapManager.CurrentMapIndex,189)
+		log("Ep4Papulatus: portal request from " .. userId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method number ClipDuration(string ruid)
+		-- 리소스 프레임의 실제 지연 합계를 사용해 긴 공격과 사망 모션을 자르지 않는다.
+		if ruid=="" then return 0 end
+		if self._durationCache[ruid]~=nil then return self._durationCache[ruid] end
+		local clip=_ResourceService:LoadAnimationClipAndWait(ruid)
+		if clip==nil or clip.Frames==nil or clip.Frames.Count==0 then log_error("Ep4Papulatus: missing animation " .. ruid) return 1 end
+		local total=0
+		for i=1,clip.Frames.Count do total=total+clip.Frames[i].Delay end
+		if clip.PlayRate>0 then total=total/clip.PlayRate end
+		self._durationCache[ruid]=math.max(0.1,total)
+		log("Ep4Papulatus: clip " .. ruid .. " duration=" .. self._durationCache[ruid])
+		return self._durationCache[ruid]
+	end
+
+	@ExecSpace("ServerOnly")
+	method table GetPhaseDef(integer phase)
+		if self._phaseDefs[phase]~=nil then return self._phaseDefs[phase] end
+		-- 시계 몸체와 분리된 비행 본체의 원본 모션, 사운드, 착탄 연출을 묶는다.
+		local def=nil
+		if phase==1 then
+			def={stand="e610d38361084636874bf267bd5cf8e9",move="853bf2c7e576432dac8fda3cffceb7a2",hit="755dded4843640c28d910e0e48346822",die="9369aa7f4dc84776843c2a20aab48d1d",dieSfx="",attacks={
+				{ruid="c4651cd917e34aea994797fb543cb968",sfx="0dc99e83905746639700b7b3df6b7374",hitFx="d2f0f67b02684e26af83ddfb85246124",selfFx="6163024c163a4b7aa8a9d62f56a84b94"},
+				{ruid="9a180d66d8c74242ba6e855c6de904b3",sfx="f8ed030a9a014ce28158c7c02ac5fcd0",hitFx="98da41c5ddae4faeb68bc4682109b70c",selfFx="2629085ed497403d9f645119c92549b1"},
+				{ruid="b353d3b35e28436faf9fa3628c703da7",sfx="db76961ec5a24e7c9a9c8f2ca12630d9",hitFx="",selfFx="ac16ba3a665e4dc3b056060546bb71e1"},
+				{ruid="ea2d5a645fff45a2a5469a7e15cd6c10",sfx="7cd7d35982884284912615d6ac8f0ea6",hitFx="740ae970125e4ddf93121e345c491f37",selfFx="9d51292ef03b401a8949fb94dbdd2023"}
+			}}
+		else
+			def={stand="19b872d8ea324046a7dafbc1c34ac3e2",move="c8d1570580c34e609dcdab0e087bbb1c",hit="f794b5a53e3144feb654c3f2b2d030f4",die="8355d69619424496b5ba492c90bb07b1",dieSfx="8af2b14280f14e73b17c3a09d508937b",attacks={
+				{ruid="c7076a2ad4254970af60f7426c6feed2",sfx="772d699129f94649a4322c3840d0bea6",hitFx="c13e70686d4c435381c768541cd2270f",ball="7d4e952721ba4c998255141de7207c9d"},
+				{ruid="b084f08dd95d4a78a7287a5fd617f191",sfx="7e00584c08aa43f497cbd6904b94e2b5",hitFx=""},
+				{ruid="c7076a2ad4254970af60f7426c6feed2",sfx="772d699129f94649a4322c3840d0bea6",hitFx="c13e70686d4c435381c768541cd2270f",ball="7d4e952721ba4c998255141de7207c9d"},
+				{ruid="3d44031466ac48dea506b4afffe2be2f",sfx="2482677bb159493ba29d2815e22c2c91",hitFx="",alarm=true}
+			}}
+		end
+		def.dieDur=self:ClipDuration(def.die)
+		for _,attack in ipairs(def.attacks) do
+			attack.dur=self:ClipDuration(attack.ruid)
+			attack.hitFxDur=self:ClipDuration(attack.hitFx or "")
+			attack.selfFxDur=self:ClipDuration(attack.selfFx or "")
+		end
+		self._phaseDefs[phase]=def
+		return def
+	end
+
+	@ExecSpace("ServerOnly")
+	method void Activate()
+		-- 첫 입장에는 파풀 한 마리만, 처치 후에는 맵5 일반 몬스터를 채운다.
+		if self.Defeated then
+			_MonsterSpawner:SpawnBatchOnMap(_MonsterSpawner:GetZoneEntity(189),_GameManager.Wave,false,false,189,false,_MonsterSpawner.MinMonstersOnArrival)
+			return
+		end
+		if isvalid(self.Boss) or self._loading then return end
+		-- 리소스를 불러오는 동안 일반 몬스터로 피격되거나 변신이 늦어지는 일을 막는다.
+		self._loading=true local revision=self.RunRevision
+		local phase1=self:GetPhaseDef(1) self:GetPhaseDef(2)
+		if self.RunRevision~=revision then return end
+		self._loading=false
+		if _GameManager.GameOver or _MapManager.CurrentMapIndex~=189 then return end
+		local map=_MonsterSpawner:GetZoneEntity(189) if not isvalid(map) then return end
+		local entity=_SpawnService:SpawnByModelId(_MonsterSpawner.MonsterModelId,"Papulatus",Vector3(0,-1.32,0),map)
+		if not isvalid(entity) then log_error("Ep4Papulatus: boss spawn failed") return end
+		local ai=entity:GetComponent("script.MonsterAI") if ai==nil then entity:Destroy() return end
+		self.Boss=entity self.Phase=1
+		local first=_MonsterSpawner:GetFirstBossHpOverride()
+		self.NormalBossHp=first>0 and first or _GameManager:GetTimeStepHp(_GameManager:GetTimeStep())*_GameManager.BossHpMultiplier
+		ai:InitializeStats(189,_GameManager.Wave,false,1)
+		ai:InitializePapulatus(1,math.max(5000,math.floor(self.NormalBossHp*1.5)),phase1)
+		_UIToast:ShowBossMessage("EP4_PAP_APPEAR")
+		local run=self.RunRevision
+		_TimerService:SetTimerOnce(function() if self.RunRevision==run and self.Phase<3 and _MapManager.CurrentMapIndex==189 then _MapManager:PlayBossBgm() end end,0.2)
+		log("Ep4Papulatus: phase1 appeared HP=" .. ai.MaxHp .. " normal=" .. self.NormalBossHp)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void BeginPhase2(Entity entity)
+		-- 1페이즈 die1이 모두 끝난 같은 엔티티를 비행 본체로 이어받는다.
+		if entity~=self.Boss or self.Defeated or self.Phase~=1 or _GameManager.GameOver then return end
+		local ai=entity:GetComponent("script.MonsterAI") if ai==nil then return end
+		self.Phase=2
+		ai:InitializePapulatus(2,math.max(5000,math.floor(self.NormalBossHp*0.8)),self:GetPhaseDef(2))
+		_UIToast:ShowBossMessage("EP4_PAP_PHASE2")
+		log("Ep4Papulatus: phase2 appeared HP=" .. ai.MaxHp)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnDefeated(Entity entity)
+		-- 최종 처치는 한 번만 인정하며 일반 보스 순번을 변경하지 않는다.
+		if entity~=self.Boss or self.Phase~=2 or self.Defeated then return end
+		self.Phase=3
+		local run=self.RunRevision local ai=entity:GetComponent("script.MonsterAI")
+		_TimerService:SetTimerOnce(function()
+			if self.RunRevision~=run or _GameManager.GameOver then return end
+			self.Defeated=true self.Boss=nil
+			_UIToast:ShowBossMessage("EP4_PAP_DEFEATED")
+			_MapManager:ForcePlayBgmForCurrentMap()
+			_MonsterSpawner:SpawnBatchOnMap(_MonsterSpawner:GetZoneEntity(189),_GameManager.Wave,false,false,189,false,_MonsterSpawner.MinMonstersOnArrival)
+			log("Ep4Papulatus: defeated, map5 random monsters enabled")
+		end,ai._dieDuration+0.2)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		-- 새 판에서는 보스와 지연된 페이즈 콜백을 모두 무효화한다.
+		self.RunRevision=self.RunRevision+1
+		if isvalid(self.Boss) then self.Boss:Destroy() end
+		self.Boss=nil self.Phase=0 self.Defeated=false self.NormalBossHp=0 self._loading=false
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnEndPlay()
+		-- 세션 종료 시 보스 상태를 해제한다.
+		self:ResetForNewRun()
+	end
+end

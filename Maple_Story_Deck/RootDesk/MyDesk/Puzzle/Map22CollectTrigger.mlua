@@ -1,0 +1,58 @@
+@Component
+script Map22CollectTrigger extends Component
+
+	-- 에피1 map22 object-184_14(잡템 퀘스트) — 누르면 Map22CollectLogic이 말풍선을 띄운다(유저 지정 2026-10-05)
+	property any _touchHandler = nil
+	property any _shakeTween = nil
+	property number ShakeDuration = 0.35
+	property number ShakeAngle = 10
+
+	method void OnBeginPlay()
+		-- 클라: 터치 연결
+		if self:IsClient() then
+			self._touchHandler = self.Entity:ConnectEvent(TouchEvent, self.OnTouched)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnTouched(TouchEvent event)
+		-- 몬스터가 겹쳐 있거나 게임오버/로비 화면이면 무시(다른 이스터에그 트리거와 동일)
+		if _CardManager:IsMonsterUnderTouch(event.TouchPoint) then return end
+		if _GameManager.GameOver then return end
+		if _TitleUI.titleGroup.Enable then return end
+		self:PlayShake()
+		self:RequestTouch()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayShake()
+		-- 눌렀을 때 살짝 흔들기(Map04CollectTrigger와 동일)
+		if self._shakeTween ~= nil then
+			self._shakeTween:Stop()
+			self._shakeTween = nil
+		end
+		local transform = self.Entity.TransformComponent
+		self._shakeTween = _TweenLogic:PlayTween(0.0, 1.0, self.ShakeDuration, EaseType.Linear, function(t)
+			if not isvalid(self) or not isvalid(self.Entity) then return end
+			transform.ZRotation = self.ShakeAngle * math.sin(t * math.pi * 3) * (1.0 - t)
+			if t >= 1.0 then
+				transform.ZRotation = 0
+				self._shakeTween = nil
+			end
+		end)
+	end
+
+	@ExecSpace("Server")
+	method void RequestTouch()
+		-- 엔티티를 그대로 서버 Logic에 넘긴다
+		_Map22CollectLogic:OnObjectTouched(self.Entity)
+	end
+
+	method void OnEndPlay()
+		-- 터치 연결 해제
+		if self:IsClient() and self._touchHandler ~= nil then
+			self.Entity:DisconnectEvent(TouchEvent, self._touchHandler)
+		end
+	end
+
+end

@@ -1,0 +1,286 @@
+@Logic
+script Ep4Map3EasterEggLogic extends Logic
+	-- 한 도전 동안 수집 목표와 풍선 문제를 유지한다. 새 게임/다시하기에서만 초기화한다.
+	@Sync property boolean Collected = false
+	@Sync property boolean PuzzleComplete = false
+	property integer CollectAmount = 50
+	property string PrizeItemId = "ep4_balloon_key"
+	property string CoinItemId = "ep4_helper_coin"
+	property table BalloonRUIDs = {"ae3882d4340a49fda3b2f9d4351767d9","b3d3f5859f324a36b2307cffd0a7051d","fb4435b6db9a454da4cf637de062dd54","f5152b0a5eaa4371b69ed7aaf4293de7"}
+	property string _pickedItem = ""
+	property Entity _bubble = nil
+	property table _balloonCounts = {}
+	property table _terms = {}
+	property integer _answer = 0
+	property integer _kind = 1
+	property integer _factor = 2
+	property integer _session = 0
+	property integer _revision = 0
+	property integer _generation = 0
+	property boolean _open = false
+	property boolean _busy = false
+	property boolean _wrong = false
+	property Entity _object = nil
+	property string _userId = ""
+	property integer _zone = 0
+	property number _modalRemaining = 0
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		self:ResetForNewRun()
+		log("Ep4Map3: ready collect=50 balloon puzzle")
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean ValidObject(integer egg, Entity obj, string userId)
+		-- 다른 맵/존에서 보내거나 오브젝트를 바꿔 보낸 요청은 받지 않는다.
+		if egg<1 or egg>2 or not isvalid(obj) then return false end
+		if obj~=_EntityService:GetEntityByPath("/maps/ep4_map3/esteregg_" .. egg) then return false end
+		if not _GameManager.GameStarted or _GameManager.GameOver then return false end
+		local user=_UserService:GetUserEntityByUserId(userId)
+		if not isvalid(user) or user.CurrentMap~=obj.CurrentMap then return false end
+		local zone=_MapManager.CurrentMapIndex
+		if zone<154 or zone>163 then return false end
+		local spawn=_MapManager:GetSpawnPositionForIndex(zone)
+		return math.abs(obj.TransformComponent.WorldPosition.x-spawn.x)<8
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnObjectTouched(integer egg, Entity obj, string userId)
+		if self._open or _GameManager:IsGamePaused() or not self:ValidObject(egg,obj,userId) then return end
+		if egg==1 then self:Collect(obj,userId) return end
+		if self.PuzzleComplete then _UIToast:ShowMessage("EP4_EGG_DONE",userId) return end
+		if #self._terms==0 and not self:BuildQuestion(obj.CurrentMap) then
+			_UIToast:ShowMessage("EP4M3_NOT_READY",userId) return
+		end
+		self._session=self._session+1 self._revision=self._revision+1
+		self._open=true self._object=obj self._userId=userId
+		self._zone=_MapManager.CurrentMapIndex self._modalRemaining=300
+		_GameManager:SetEasterEggPaused(true)
+		self:ShowQuestion()
+		log("Ep4Map3: puzzle open session=" .. self._session .. " terms=" .. #self._terms)
+	end
+
+	@ExecSpace("ServerOnly")
+	method table GetLootPool()
+		-- map3의 실제 몬스터 드롭표에 있는 잡템 한 종류를 목표로 선택한다.
+		local pool={} local seen={}
+		for zone=154,163 do
+			for species=1,4 do
+				local id=_GameManager:GetMonsterLootItemId(zone,species)
+				if id~="" and not seen[id] and _PlayerInventory:GetItemDef(id)~=nil then
+					seen[id]=true table.insert(pool,id)
+				end
+			end
+		end
+		return pool
+	end
+
+	@ExecSpace("ServerOnly")
+	method void Collect(Entity obj, string userId)
+		if self.Collected then return end
+		if self._pickedItem=="" then
+			local pool=self:GetLootPool()
+			if #pool==0 then return end
+			self._pickedItem=pool[_UtilLogic:RandomIntegerRange(1,#pool)]
+		end
+		local have=_PlayerInventory:GetItemCount(self._pickedItem)
+		if have<self.CollectAmount then
+			self:ClearBubble()
+			local p=obj.TransformComponent.WorldPosition
+			local bubble=_CollectBubbleLogic:SpawnItemQuestBubble(obj.CurrentMap,Vector3(p.x-1.25,p.y+1.25,p.z-0.5),"Ep4Map3CollectBubble",self._pickedItem,"X" .. (self.CollectAmount-have),false)
+			self._bubble=bubble
+			_TimerService:SetTimerOnce(function()
+				if isvalid(bubble) then bubble:Destroy() end
+				if self._bubble==bubble then self._bubble=nil end
+			end,2)
+			log("Ep4Map3: collect " .. self._pickedItem .. " " .. have .. "/50")
+			return
+		end
+		if not _PlayerInventory:RemoveItem(self._pickedItem,self.CollectAmount) then return end
+		self.Collected=true self:ClearBubble()
+		_Ep4Map1EasterEggLogic:GrantStandardReward(obj)
+		_UIToast:ShowMessage("EP4_COLLECT_SUCCESS",userId)
+		log("Ep4Map3: collection complete item=" .. self._pickedItem)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ClearBubble()
+		if isvalid(self._bubble) then self._bubble:Destroy() end
+		self._bubble=nil
+	end
+
+	@ExecSpace("ServerOnly")
+	method void CountBalloons(Entity parent, table counts)
+		-- 이름이 balloon_N인 실제 배치만 센다. 번호가 늘거나 중간 번호가 빠져도 모두 반영한다.
+		for _,child in pairs(parent.Children) do
+			if string.match(child.Name,"^balloon_%d+$") and child.Enable and child.Visible then
+				local sprite=child.SpriteRendererComponent
+				if sprite~=nil then
+					for color,ruid in ipairs(self.BalloonRUIDs) do
+						if sprite.SpriteRUID==ruid then counts[color]=counts[color]+1 break end
+					end
+				end
+			end
+			self:CountBalloons(child,counts)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean BuildQuestion(Entity map)
+		-- 사칙연산/괄호 열 유형 중 하나를 고른다. 음수/소수 답은 만들지 않는다.
+		local counts={0,0,0,0} self:CountBalloons(map,counts)
+		local colors={}
+		for color,n in ipairs(counts) do if n>0 then table.insert(colors,color) end end
+		if #colors<2 then return false end
+		local first=table.remove(colors,_UtilLogic:RandomIntegerRange(1,#colors))
+		local second=table.remove(colors,_UtilLogic:RandomIntegerRange(1,#colors))
+		local kind=_UtilLogic:RandomIntegerRange(1,10)
+		local factor=2 local terms={first,second}
+		if kind==2 or kind==10 then
+			local third=#colors>0 and colors[_UtilLogic:RandomIntegerRange(1,#colors)] or first
+			table.insert(terms,third)
+		end
+		if kind==3 and counts[first]<counts[second] then terms={second,first} end
+		if kind>=5 and kind<=9 then
+			if kind==5 or kind==7 then
+				local numerator=(kind==5 and counts[first] or counts[first]+counts[second])*3
+				local divisors={3}
+				if numerator%2==0 then table.insert(divisors,2) end
+				factor=divisors[_UtilLogic:RandomIntegerRange(1,#divisors)]
+			else factor=_UtilLogic:RandomIntegerRange(2,3) end
+			if kind==5 then terms={first,0}
+			elseif kind==9 then
+				if counts[first]<counts[second] then first,second=second,first end
+				terms={first,0,second}
+			else terms={first,second,0} end
+		end
+		local answer=self:ComputeQuestion(counts,terms,kind,factor)
+		if kind==10 and answer<0 then
+			terms[2],terms[3]=terms[3],terms[2]
+			answer=self:ComputeQuestion(counts,terms,kind,factor)
+		end
+		if answer>9999 then
+			kind=1 terms={first,second} answer=self:ComputeQuestion(counts,terms,kind,factor)
+		end
+		if answer<0 or answer>9999 or answer%1~=0 then return false end
+		self._balloonCounts=counts self._terms=terms self._answer=answer
+		self._kind=kind self._factor=factor self._wrong=false
+		log("Ep4Map3: counted objects=" .. (counts[1]+counts[2]+counts[3]+counts[4]) .. " kind=" .. kind)
+		return true
+	end
+
+	@ExecSpace("ServerOnly")
+	method number ComputeQuestion(table counts, table terms, integer kind, integer factor)
+		-- 그림은 해당 색 오브젝트 수×3, 0번 항은 화면에 직접 표시하는 숫자다.
+		local a=counts[terms[1]]*3
+		local b=terms[2]==0 and factor or counts[terms[2]]*3
+		local c=0
+		if #terms==3 then c=terms[3]==0 and factor or counts[terms[3]]*3 end
+		if kind==1 then return a+b end
+		if kind==2 then return a+b+c end
+		if kind==3 then return a-b end
+		if kind==4 then return a*b end
+		if kind==5 then return a/b end
+		if kind==6 then return (a+b)*c end
+		if kind==7 then return (a+b)/c end
+		if kind==8 then return a+b*c end
+		if kind==9 then return a*b-c end
+		if kind==10 then return a+b-c end
+		return -1
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ShowQuestion()
+		-- 연산 유형과 그림/숫자만 보낸다. 풍선 개수와 정답은 서버에 둔다.
+		local first=self.BalloonRUIDs[self._terms[1]]
+		local second=self._terms[2]==0 and "" or self.BalloonRUIDs[self._terms[2]]
+		local third=#self._terms==3 and (self._terms[3]==0 and "" or self.BalloonRUIDs[self._terms[3]]) or ""
+		_Ep4BalloonPuzzleUI:ShowPuzzle(self._session,self._revision,first,second,third,self._kind,self._factor,self._wrong,self._userId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean ValidSession(integer session, integer revision, string userId)
+		return self._open and not self._busy and not self.PuzzleComplete and session==self._session and revision==self._revision and userId==self._userId and self._zone==_MapManager.CurrentMapIndex and self:ValidObject(2,self._object,userId)
+	end
+
+	@ExecSpace("Server")
+	method void RequestAnswer(integer session, integer revision, integer answer)
+		if not self:ValidSession(session,revision,senderUserId) then return end
+		self._revision=self._revision+1 self._modalRemaining=300
+		if answer<0 or answer>9999 or answer~=self._answer then
+			self._wrong=true self:ShowQuestion()
+			log("Ep4Map3: wrong answer; same question retained")
+			return
+		end
+		self._busy=true self.PuzzleComplete=true
+		local obj=self._object local userId=self._userId
+		self:EndModal()
+		self:GrantPuzzleReward(obj)
+		_UIToast:ShowMessage("EP4M3_SUCCESS",userId)
+		self._busy=false
+		log("Ep4Map3: puzzle complete key=1 coin=1 slotSkill=1")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void DropRunItem(Entity obj, string itemId, number xOffset)
+		-- 확정 보상은 정답 판정 즉시 지급한다. 연출 도중 게임오버되어도 열쇠가 누락되지 않는다.
+		local p=obj.TransformComponent.WorldPosition
+		p=Vector3(p.x+xOffset,p.y,p.z)
+		local f=_GameManager:GetGroundFallFor(obj,p)
+		local def=_PlayerInventory:GetItemDef(itemId)
+		if def==nil then return end
+		_PlayerInventory:AddItem(itemId,1)
+		log("Ep4Map3: guaranteed reward granted item=" .. itemId .. " count=" .. _PlayerInventory:GetItemCount(itemId))
+		-- 기존 낙하/획득 연출은 유지하되 완료 콜백에서는 중복 지급하지 않는다.
+		_GameManager:ScheduleLootDrop(p,def.icon,f.x,f.y,function() end,1)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void GrantPuzzleReward(Entity obj)
+		if not isvalid(obj) then return end
+		self:DropRunItem(obj,self.PrizeItemId,-0.25)
+		self:DropRunItem(obj,self.CoinItemId,0.25)
+		local p=obj.TransformComponent.WorldPosition local f=_GameManager:GetGroundFallFor(obj,p)
+		local pool=_CardManager:BuildActiveUpgradePool()
+		if #pool>0 then _CardManager:GrantCardUpgradesFromPool(pool,p,f.x,f.y,1,1,0) end
+		_AchievementLogic:OnEasterEgg()
+	end
+
+	@ExecSpace("Server")
+	method void RequestCancel(integer session)
+		if not self._open or session~=self._session or senderUserId~=self._userId then return end
+		self:EndModal()
+	end
+
+	@ExecSpace("ServerOnly")
+	method void EndModal()
+		-- 닫기/오답은 문제를 초기화하지 않는다. 이 모달이 걸었던 정지만 해제한다.
+		if not self._open then return end
+		local session=self._session local userId=self._userId
+		self._open=false self._object=nil self._userId="" self._modalRemaining=0
+		_GameManager:SetEasterEggPaused(false)
+		_Ep4BalloonPuzzleUI:HidePuzzle(session,userId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnUpdate(number delta)
+		if not self._open then return end
+		self._modalRemaining=self._modalRemaining-delta
+		if self._modalRemaining<=0 or self._zone~=_MapManager.CurrentMapIndex or not self:ValidObject(2,self._object,self._userId) then self:EndModal() end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		self:EndModal() self:ClearBubble()
+		self._generation=self._generation+1 self._session=self._session+1 self._revision=self._revision+1
+		self.Collected=false self.PuzzleComplete=false self._busy=false self._wrong=false
+		self._pickedItem="" self._balloonCounts={} self._terms={} self._answer=0 self._kind=1 self._factor=2
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnEndPlay()
+		self:EndModal() self:ClearBubble()
+		self._generation=self._generation+1
+	end
+end

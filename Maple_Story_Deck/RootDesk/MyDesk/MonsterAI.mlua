@@ -1,10 +1,20 @@
 @Component
 script MonsterAI extends Component
+	@Sync property integer PapulatusPhase = 0
+	@Sync property number BossHealthCurrent = 0
+	@Sync property number BossHealthMaximum = 0
+	@Sync property integer BossHealthZone = 0
+	property integer _papActionRevision = 0
+	property table _papAttacks = nil
+	property integer _papAttackIndex = 0
+	property number _papClock = 0
+	property Vector3 _papFlightStart = Vector3(0,0,0)
 
 	-- 몬스터 스탯
 	property number MaxHp = 100
 
 	property number CurrentHp = 100
+	property integer ProjectileLifeRevision = 0
 
 	@Sync
 	property string MonsterSprite = ""
@@ -431,6 +441,13 @@ script MonsterAI extends Component
 	property number RangedHitFxSpreadY = 0.8
 
 	property number RangedHitFxSpreadX = 4.2
+
+	-- 2026-10-06 유저 지정(스샷 회색 영역): 모든 원거리 투사체 도착점·착탄 연출을 **화면 기준** 넓은 사각형에 뿌린다.
+	-- 화면 정중앙(MapManager.GetScreenCenterWorldY) 기준 유닛 — 실측: 회색 영역 좌우 -3.19~+3.00, 위아래 -1.46~+2.13
+	-- (1920×1080 화면에서 x 21~77%, 아래에서 26~84%). 위 RangedHitFx* 값은 더 이상 안 쓴다.
+	property number RangedTargetSpreadX = 3.1
+	property number RangedTargetCenterAboveScreen = 0.335
+	property number RangedTargetSpreadY = 1.795
 
 	-- ── 보스 2번째 공격 = 소환기(에피소드1 로스터의 attack2/summon* 칸) ──────────────────
 	-- _summonCooldown이 0이면 이 보스는 소환기가 없다(로직 자체가 안 돈다). 도달(_reachedPlayer)한
@@ -1014,6 +1031,9 @@ script MonsterAI extends Component
 	-- MonsterSpawner가 미리 뽑아서 넘겨주는 값. 0 이하면 기존처럼 여기서 무작위로 고른다.
 	@ExecSpace("ServerOnly")
 	method void InitializeStats(integer zoneIndex, integer wave, boolean isBoss, integer forcedSpeciesIdx)
+		self:CancelBodyAttackMotion(true)
+		self.ProjectileLifeRevision=self.ProjectileLifeRevision+1
+		self.PapulatusPhase=0 self._papActionRevision=self._papActionRevision+1
 		-- 방금 막 스폰된 몬스터는 절대 죽어있을 수 없다 — 그런데도 스폰 직후 이 값이 이미 true로
 		-- 관측되는 경우가 실측 확인됐다(같은 틱에 다른 몬스터가 죽은 직후 엔티티 재사용 시 이전
 		-- 점유자의 _dead가 새 스폰에 남아있는 것으로 추정). 남아있으면 얼음 파편처럼 "방금 스폰된
@@ -3180,8 +3200,14 @@ script MonsterAI extends Component
 		end
 	end
 
-	@ExecSpace("ServerOnly")
 	method void OnUpdate(number delta)
+		if self:IsClient() then self:UpdateBossHealthBar(delta) return end
+		self:UpdateBodyAttackMotion(delta)
+		if self._isBoss then
+			if self.BossHealthCurrent~=self.CurrentHp then self.BossHealthCurrent=self.CurrentHp end
+			if self.BossHealthMaximum~=self.MaxHp then self.BossHealthMaximum=self.MaxHp end
+			if self.BossHealthZone~=self._spawnZoneIndex then self.BossHealthZone=self._spawnZoneIndex end
+		end
 		if self._dead then return end
 		if _GameManager.GameOver then return end
 		-- 첫 플레이 튜토리얼의 카드 선택 단계 — 존과 무관하게 모든 몬스터가 그 자리에 멈춘다.
@@ -3194,6 +3220,7 @@ script MonsterAI extends Component
 		if self._transformLocked then return end
 		-- 등장 소환 모션 중(에피4 타르가)엔 제자리에서 소환만 한다
 		if self._openingSummonLock then return end
+		if self.PapulatusPhase>0 then self:UpdatePapulatus(delta) return end
 
 		-- 에피4 북치는 토끼 — 비행/지상/도달 여부와 무관하게 주기마다 북을 친다(아래 분기들이 일찍 return하므로 맨 앞)
 		if self._isDrumBuffer then
@@ -3516,6 +3543,10 @@ script MonsterAI extends Component
 		if self._customAttackInterval > 0 then base = self._customAttackInterval end
 		-- 에피4 북치는 토끼 공속 버프(없으면 1.0이라 무영향)
 		base = base / self:GetAttackSpeedBuffMult()
+		local projectileProfile=_MonsterProjectileFx:GetProfile(self._standRUID)
+		if not self._isBoss and not self._isElite and projectileProfile~=nil then
+			base=base/(projectileProfile.attackSpeed or 1)
+		end
 		if self._growAtkBonus <= 0 then return base end
 		return base / (1.0 + self._growAtkBonus)
 	end
@@ -4064,6 +4095,8 @@ script MonsterAI extends Component
 		-- 스턴/속박(ApplyStun) 중에는 지상 몬스터처럼 완전히 멈춰야 한다 — ApproachSpeed=0만으로는
 		-- 공중 몬스터(사인파 기반 UpdateFlying)를 막지 못해서 별도로 체크한다. 완전빙결도 동일하다.
 		if self._isStunned or self._isHardFrozen then return end
+		-- Let a short dive own its transform; keep the regular attack cooldown running.
+		if self._T.attackBodyMotion==nil then
 		self._flyTime = self._flyTime + delta
 		local x = self._flyCenterX + math.sin(self._flyTime * self.FlySpeedX * self._flySpeedMultX + self._flyPhaseX) * self.FlyRangeX
 		local yAmplitude = (self.FlyingWanderMaxY - self.FlyingWanderMinY) * 0.5
@@ -4086,6 +4119,7 @@ script MonsterAI extends Component
 			self.Entity.TransformComponent.Scale = Vector3(swarmScale * self._scaleMultiplier, swarmScale * self._scaleMultiplier, 1.0)
 		end
 		
+		end
 		self._attackTimer = self._attackTimer - delta
 		if self._attackTimer <= 0 then
 			-- 미니무르/_neverAttacks(노란 미니빈 등)는 순수 이스터에그용(플레이어를 공격하지 않음) —
@@ -4285,6 +4319,8 @@ script MonsterAI extends Component
 	method void TakeDamage(number damage)
 		-- 카드 공격 시 호출
 		local dpsSource = _DpsMeterLogic:ConsumeSource()
+		-- 퀴즈/퍼즐 정지 중에는 예약 타격도 HP/DPS/흡혈에 반영하지 않는다.
+		if _GameManager.EasterEggPaused then return end
 		-- 파워 포션(BuffPotionLogic) 효과 중 공격력 배율 — 플레이어→몬스터 대미지는 전부 이 5개 진입점을 거친다
 		damage = damage * _BuffPotionLogic:GetDamageMult()
 		if self._dead then return end
@@ -4346,7 +4382,7 @@ script MonsterAI extends Component
 		if self._dead then return end
 		-- 공격 연출 중에는 피격 포즈로 갈아끼우지 않는다(유저 지정 — 대미지는 그대로 들어간다).
 		-- 사운드도 같이 건너뛴다: 스프라이트를 안 바꾸는데 피격음만 나면 어색하다.
-		if self._noHitAnimDuringAttack and self._isPlayingAttackSprite then return end
+		if self._isPlayingAttackSprite and (self._noHitAnimDuringAttack or self._T.projectileAttackGeneration==self._transientSpriteGeneration) then return end
 		if sfxRUID ~= "" then _SoundOptionLogic:PlaySfx(sfxRUID, 1.0) end
 		local renderer = self.Entity.SpriteRendererComponent
 		if renderer == nil or hitRUID == "" then return end
@@ -4408,6 +4444,8 @@ script MonsterAI extends Component
 	@ExecSpace("ServerOnly")
 	method void TakeDamageWithOffset(number damage, Vector2 offset)
 		local dpsSource = _DpsMeterLogic:ConsumeSource()
+		-- 퀴즈/퍼즐 정지 중에는 예약 타격도 HP/DPS/흡혈에 반영하지 않는다.
+		if _GameManager.EasterEggPaused then return end
 		-- 파워 포션(BuffPotionLogic) 효과 중 공격력 배율 — 플레이어→몬스터 대미지는 전부 이 5개 진입점을 거친다
 		damage = damage * _BuffPotionLogic:GetDamageMult()
 		if self._dead then return end
@@ -4456,6 +4494,8 @@ script MonsterAI extends Component
 	@ExecSpace("ServerOnly")
 	method void TakeDamageCritWithOffset(number damage, Vector2 offset)
 		local dpsSource = _DpsMeterLogic:ConsumeSource()
+		-- 퀴즈/퍼즐 정지 중에는 예약 타격도 HP/DPS/흡혈에 반영하지 않는다.
+		if _GameManager.EasterEggPaused then return end
 		-- 파워 포션(BuffPotionLogic) 효과 중 공격력 배율 — 플레이어→몬스터 대미지는 전부 이 5개 진입점을 거친다
 		damage = damage * _BuffPotionLogic:GetDamageMult()
 		if self._dead then return end
@@ -4509,6 +4549,8 @@ script MonsterAI extends Component
 	@ExecSpace("ServerOnly")
 	method void TakeDamageCrit(number damage)
 		local dpsSource = _DpsMeterLogic:ConsumeSource()
+		-- 퀴즈/퍼즐 정지 중에는 예약 타격도 HP/DPS/흡혈에 반영하지 않는다.
+		if _GameManager.EasterEggPaused then return end
 		-- 파워 포션(BuffPotionLogic) 효과 중 공격력 배율 — 플레이어→몬스터 대미지는 전부 이 5개 진입점을 거친다
 		damage = damage * _BuffPotionLogic:GetDamageMult()
 		if self._dead then return end
@@ -4569,6 +4611,8 @@ script MonsterAI extends Component
 	@ExecSpace("ServerOnly")
 	method void TakeDamageDelayedDeath(number damage, boolean isCrit, number deathDelay)
 		local dpsSource = _DpsMeterLogic:ConsumeSource()
+		-- 퀴즈/퍼즐 정지 중에는 예약 타격도 HP/DPS/흡혈에 반영하지 않는다.
+		if _GameManager.EasterEggPaused then return end
 		-- 파워 포션(BuffPotionLogic) 효과 중 공격력 배율 — 플레이어→몬스터 대미지는 전부 이 5개 진입점을 거친다
 		damage = damage * _BuffPotionLogic:GetDamageMult()
 		if self._dead then return end
@@ -4990,6 +5034,7 @@ script MonsterAI extends Component
 
 	@ExecSpace("ServerOnly")
 	method void ApplyDot(number damagePerTick, integer ticks, number tickInterval)
+		if _GameManager.EasterEggPaused then return end
 		-- 도트 데미지 적용. 중복 시 이전 도트를 취소하고 새 도트로 덮어씀
 		-- 베노아 엘리멘탈 드레인(카드233) — 틱 대미지 +3~15%(다른 캐릭터는 레벨 0이라 배율 1.0)
 		damagePerTick = damagePerTick * _CardManager:GetElementalDrainMult()
@@ -5005,6 +5050,8 @@ script MonsterAI extends Component
 				self._dotTimerId = 0
 				return
 			end
+			-- 정지 동안 독의 남은 타격도 소비하지 않는다.
+			if _GameManager.EasterEggPaused then return end
 			self:TakeDamage(self._dotDamage)
 			self._dotTicksLeft = self._dotTicksLeft - 1
 			if self._dotTicksLeft <= 0 then
@@ -5132,6 +5179,7 @@ script MonsterAI extends Component
 	@ExecSpace("ServerOnly")
 	method void PushBack()
 		if self._dead then return end
+		self:CancelBodyAttackMotion(true)
 		-- 상태이상 타이머 정리
 		if self._slowTimerId ~= 0 then _TimerService:ClearTimer(self._slowTimerId) ; self._slowTimerId = 0 end
 		if self._stunTimerId ~= 0 then _TimerService:ClearTimer(self._stunTimerId) ; self._stunTimerId = 0 end
@@ -5230,7 +5278,9 @@ script MonsterAI extends Component
 
 	@ExecSpace("ServerOnly")
 	method void Die()
+		self:CancelBodyAttackMotion(true)
 		if self._dead then return end
+		if self.PapulatusPhase==1 then self:TransitionPapulatusPhase() return end
 		-- 거대 네펜데스 1페이즈는 진짜 죽지 않는다 — 죽는 연출만 재생한 뒤 2페이즈로 부활한다.
 		-- 2페이즈(_giantNepenthesRevived=true)부터는 아래 일반 사망 처리로 그대로 흘러간다.
 		if self._isGiantNepenthes and not self._giantNepenthesRevived then
@@ -5314,6 +5364,7 @@ script MonsterAI extends Component
 		log("Monster died")
 		-- 인게임 HUD 처치 수 — 보상 경로(일반/루돌프/보스)와 무관하게 사망 1회당 1
 		_GameManager:AddKillCount()
+		_Ep4Map4EasterEggLogic:OnMonsterKilled(self._spawnZoneIndex,self._standRUID)
 		-- 업적: 처치 수/엘리트/비행/종류별(종류는 잡템 이름으로 분류 — 2페이즈 진화체는 진화 후 잡템)
 		local achLoot = ""
 		if self._phase2Revived then achLoot = _GameManager:GetMonsterLootItemIdPhase2(self._spawnZoneIndex, self._speciesIdx) end
@@ -5508,14 +5559,17 @@ script MonsterAI extends Component
 			-- 동반 보스(에피2 1번 픽시맘·파파픽시)가 있으면 **둘 다** 죽어야 보스 웨이브가 끝난다 —
 			-- 분열체 전멸 판정(OnEp1SplitKilled)과 같은 방식으로 스포너가 남은 수를 세고,
 			-- 마지막 1마리가 죽을 때만 OnBossDefeated를 부른다. 파티가 아닌 보스는 즉시 호출된다.
-			if _MonsterSpawner:HasBossParty() then
+			if self.PapulatusPhase==2 then
+				_GameManager:OnBossDefeated(self.Entity.TransformComponent.WorldPosition,fallHeight,groundWorldY,dropScale)
+				_Ep4PapulatusLogic:OnDefeated(self.Entity)
+			elseif _MonsterSpawner:HasBossParty() then
 				_MonsterSpawner:OnBossPartyMemberKilled(self.Entity.TransformComponent.WorldPosition, fallHeight, groundWorldY, dropScale)
 			else
 				_GameManager:OnBossDefeated(self.Entity.TransformComponent.WorldPosition, fallHeight, groundWorldY, dropScale)
 			end
 			-- 두목이 죽으면 호위병(1번 블루 머쉬맘의 파란버섯)도 전부 같이 죽는다(유저 지정).
 			-- 호위병이 없는 보스면 스포너가 그냥 리턴한다. 보상은 일반 처치와 동일하게 들어간다.
-			_MonsterSpawner:KillBossEscorts()
+			if self.PapulatusPhase==0 then _MonsterSpawner:KillBossEscorts() end
 			-- 소환 부하도 두목과 같이 없애는 보스(유저 지정 — 에피3 하이레프 리더). 이 플래그가
 			-- 꺼진 보스(마녀/구미호)의 부하는 예전처럼 남아서 따로 잡아야 한다.
 			if self._minionDieWithBoss then _MonsterSpawner:KillBossMinions() end
@@ -5563,6 +5617,8 @@ script MonsterAI extends Component
 	@ExecSpace("Multicast")
 	method void PlayPhase1TransformAnimation(string dieRUID, string dieSoundRUID)
 		if self:IsServer() then return end
+		self._transientSpriteGeneration=self._transientSpriteGeneration+1
+		self._isPlayingTransientSprite=false self._isPlayingAttackSprite=false
 		if dieSoundRUID ~= "" then _SoundOptionLogic:PlaySfx(dieSoundRUID, 1.0) end
 		local renderer = self.Entity.SpriteRendererComponent
 		if renderer == nil then return end
@@ -5797,6 +5853,7 @@ script MonsterAI extends Component
 	@ExecSpace("ServerOnly")
 	method void Pause()
 		if self._neverPauses then return end
+		self:CancelBodyAttackMotion(true)
 		self._paused = true
 	end
 
@@ -5978,6 +6035,9 @@ script MonsterAI extends Component
 		-- 무리원 전체가 항상(선점 실패해도) 실행한다. TryClaimGroupAttack이 false를 반환해도 함수
 		-- 전체를 리턴하지 않고 isGroupWinner만 꺼둔 채로 계속 진행한다.
 		local isGroupWinner = true
+		local ep1Projectile=self._spawnZoneIndex>=1 and self._spawnZoneIndex<=39 and self._isRangedInk and (self._standRUID=="abbd76a6010149e780fbee0b2c5acb7e" or self._standRUID=="c86800e208dc4de4a8cf71b51778a2fb")
+		local monsterProjectile=_MonsterProjectileFx:Supports(self)
+		local projectileDamage=0
 		if self._isSwarmMember then
 			isGroupWinner = _Ep2MiniBeanEasterEggLogic:TryClaimGroupAttack()
 		end
@@ -6037,7 +6097,9 @@ script MonsterAI extends Component
 				-- 피격 연출(HitFeelLogic)이 "어느 쪽에서 맞았는지"를 정할 때 쓰는 이 몬스터의 위치
 				local myWorldPos = self.Entity.TransformComponent.WorldPosition
 				local attackerWorldPos = Vector2(myWorldPos.x, myWorldPos.y)
-				if self._isRangedSlash then
+				if ep1Projectile or monsterProjectile then
+					projectileDamage=dmgMultiplier
+				elseif self._isRangedSlash then
 					-- 발톱자국 이펙트가 실제로 최대 스케일(화면에 닿는 시점)에 도달했을 때 대미지가 들어가도록
 					-- PlaySlashEffect와 동일한 지연(공격모션 절반 + 이펙트 성장 시간)만큼 늦춘다(유저 요청 —
 					-- "스케일이 0.6까지 도달했을때 대미지 들어오도록"). 다른 종(근접/비행/먹물)은 기존처럼 즉시.
@@ -6054,7 +6116,11 @@ script MonsterAI extends Component
 					-- 프레임을 무시하고 항상 들어가게 한다 — 다른 몬스터끼리의 무적 프레임 상호작용은 그대로 유지.
 					-- _ignoresHitImmune(Tired Knight)도 동일한 경로로 무적 프레임을 무시한다.
 					-- 돌진 도착 첫 타면 피격 연출이 화면을 뒤로 밀리게 한다(_chargeRamPending은 이 함수 끝에서 꺼진다)
-					_GameManager:OnMonsterReached(dmgMultiplier, self._isSwarmMember or self._ignoresHitImmune or self._isBoss or (self._isElite and not self._isEp1BossSplit), self._isBoss, attackerWorldPos, self._chargeRamPending)
+					if self:UsesBodyAttackMotion() then
+						self:QueueBodyAttackContact(dmgMultiplier,self._isSwarmMember or self._ignoresHitImmune or (self._isElite and not self._isEp1BossSplit),attackerWorldPos)
+					else
+						_GameManager:OnMonsterReached(dmgMultiplier, self._isSwarmMember or self._ignoresHitImmune or self._isBoss or (self._isElite and not self._isEp1BossSplit), self._isBoss, attackerWorldPos, self._chargeRamPending)
+					end
 				end
 			end
 		end
@@ -6070,7 +6136,19 @@ script MonsterAI extends Component
 		-- 공격 슬롯 순환(에피3 하이레프 리더/익스트림 빅풋) — 실제 재생 **직전에** 다음 슬롯으로 넘긴다.
 		-- 슬롯이 없는 종은 아무것도 안 하고 false를 돌려주므로 기존 동작 그대로다.
 		local variantIsSummon = self:AdvanceAttackVariant()
-		if self._isFlying then
+		if monsterProjectile then
+            local profile=_MonsterProjectileFx:GetProfile(self._standRUID)
+			if self._attackRUID~="" and profile.releaseFrame==nil then
+				self:PlayAttackAnimation(self._attackRUID,self.MonsterSprite,self._attackDuration,self._attackSoundRUID)
+				self:FlashHideDepthOverlay(self._attackDuration)
+            elseif self._attackRUID=="" then self:PlaySquirtAnimation()
+            else self:FlashHideDepthOverlay(self._attackDuration) end
+			_MonsterProjectileFx:QueueAttack(self,projectileDamage,self._isSwarmMember or self._ignoresHitImmune)
+		elseif ep1Projectile then
+			self:PlayAttackAnimation(self._attackRUID,self.MonsterSprite,self._attackDuration,self._attackSoundRUID)
+			self:FlashHideDepthOverlay(self._attackDuration)
+			_Ep1ProjectileFx:QueueAttack(self,projectileDamage,self._isSwarmMember or self._ignoresHitImmune or self._isBoss or (self._isElite and not self._isEp1BossSplit))
+		elseif self._isFlying then
 			if self._attackRUID ~= "" then
 				self:PlayAttackAnimation(self._attackRUID, self.MonsterSprite, self._attackDuration, self._attackSoundRUID)
 			end
@@ -6323,6 +6401,10 @@ script MonsterAI extends Component
 		-- — 대미지는 어차피 공격 시점에 즉시 들어가므로 짧을수록 오히려 타이밍이 맞다.
 		local delay = self._attackDuration * 0.5
 		if self._hitEffectDelayOverride > 0 then delay = self._hitEffectDelayOverride end
+		-- 이번 공격에서 투사체가 정해 둔 도착점이 있으면 거기서 터진다(한 번 쓰고 비운다 — 투사체 없는 공격에 옛 자리가 남지 않게)
+		local hasShotTarget = self._hasProjGrowTarget
+		local shotTarget = self._projGrowTarget
+		self._hasProjGrowTarget = false
 		-- ⚠ 지연 콜백 안에서 self._dead를 다시 보지 않는다(2026-09-08 버그 수정, 유저 리포트
 		-- "블랙 나이트/오징어 착탄 이미지가 안 뜬다"). 엔티티 재사용 시 이전 점유자의 _dead(@Sync)가
 		-- 스폰 직후에도 true로 남아 읽히는 현상이 있어서(InitializeStats 맨 앞 주석의 "실측 확인"과
@@ -6347,13 +6429,10 @@ script MonsterAI extends Component
 			-- 그래서 Y 밴드는 화면 중앙(py+1.41)보다 확실히 위인 py+1.7 ~ py+3.3으로 잡았고,
 			-- 이펙트 반높이(약 0.93유닛)를 더해도 화면 위로 안 삐져나간다(3.3+0.93 = 4.23 < 4.54).
 			-- X는 ±4.2유닛 — 가시 반폭 5.56의 76%라 "양끝만 피하고" 나머지는 넓게 쓴다.
-			local offsetX = (_UtilLogic:RandomDouble() * 2 - 1) * self.RangedHitFxSpreadX
-			local offsetY = (_UtilLogic:RandomDouble() * 2 - 1) * self.RangedHitFxSpreadY
-			local fxY = py + self.RangedHitFxCenterY + offsetY
-			local fxPos = Vector3(px + offsetX, fxY, z - 0.2)
-			-- 화면으로 날아오는 물방울(_projectileGrowToScreen)은 물방울이 도착한 그 자리에서 터진다
-			if self._projectileGrowToScreen and self._hasProjGrowTarget then
-				fxPos = Vector3(self._projGrowTarget.x, self._projGrowTarget.y, z - 0.2)
+			-- 2026-10-06: 화면 기준 회색 영역(GetRangedTargetPoint) — 투사체가 있으면 투사체가 도착한 그 자리
+			local fxPos = self:GetRangedTargetPoint(px, py, z - 0.2)
+			if hasShotTarget then
+				fxPos = Vector3(shotTarget.x, shotTarget.y, z - 0.2)
 			end
 			-- 실제 스폰/중복 방지는 GameManager가 전담한다(문어 PlayInkSplat과 동일한 전역 가드 —
 			-- 유저 요청: "문어처럼", 여러 마리가 동시에 쏴도 화면엔 한 번에 하나만 뜨게 함).
@@ -6415,8 +6494,10 @@ script MonsterAI extends Component
 	method void PlayGrowingProjectile(Vector3 startPos, number px, number py, number dropScale, number travelDuration, Entity map)
 		-- 화면 중앙 쪽으로 커지며 날아오는 투사체(더키 패밀리 물방울). 도착 지점을 먼저 정해 _projGrowTarget에 남기고
 		-- (착탄 이펙트가 같은 자리를 쓴다), QuadEaseIn으로 가까워질수록 빠르게 커져 "화면으로 다가오는" 느낌을 낸다.
-		local tx = px + (_UtilLogic:RandomDouble() * 2 - 1) * self.ProjGrowSpreadX
-		local ty = py + self.ProjGrowScreenCenterY + (_UtilLogic:RandomDouble() * 2 - 1) * self.ProjGrowSpreadY
+		-- 2026-10-06: 도착점도 다른 원거리와 같은 화면 기준 회색 영역
+		local target = self:GetRangedTargetPoint(px, py, startPos.z)
+		local tx = target.x
+		local ty = target.y
 		self._projGrowTarget = Vector3(tx, ty, startPos.z)
 		self._hasProjGrowTarget = true
 		local fx = _SpawnService:SpawnByModelId("skilleffect", "WaterDropFX", startPos, map)
@@ -6438,6 +6519,15 @@ script MonsterAI extends Component
 	end
 
 	@ExecSpace("ServerOnly")
+	method Vector3 GetRangedTargetPoint(number px, number py, number z)
+		-- 원거리 투사체 도착점/착탄 연출 위치 — 화면 정중앙 기준 회색 영역 안의 무작위 한 점(2026-10-06 유저 지정)
+		local centerY = _MapManager:GetScreenCenterWorldY(py)
+		local x = px + (_UtilLogic:RandomDouble() * 2 - 1) * self.RangedTargetSpreadX
+		local y = centerY + self.RangedTargetCenterAboveScreen + (_UtilLogic:RandomDouble() * 2 - 1) * self.RangedTargetSpreadY
+		return Vector3(x, y, z)
+	end
+
+	@ExecSpace("ServerOnly")
 	method void PlayRangedProjectile()
 		if self._projectileRUID == "" then return end
 		local map = self.Entity.CurrentMap
@@ -6452,16 +6542,20 @@ script MonsterAI extends Component
 			self:PlayGrowingProjectile(startPos, px, py, dropScale, travelDuration, map)
 			return
 		end
+		-- 2026-10-06: 플레이어 발밑 대신 화면 기준 회색 영역의 한 점으로 날아가고, 착탄 연출도 그 자리(PlayRangedHitEffect)
+		local target = self:GetRangedTargetPoint(px, py, startPos.z)
+		self._projGrowTarget = target
+		self._hasProjGrowTarget = true
 		local fx = _SpawnService:SpawnByModelId("skilleffect", "SnowballFX", startPos, map)
 		if fx == nil then return end
 		local renderer = fx.SpriteRendererComponent
 		if renderer ~= nil then renderer.SpriteRUID = self._projectileRUID end
 		fx.TransformComponent.Scale = Vector3(dropScale, dropScale, 1)
-		
+
 		_TweenLogic:PlayTween(0.0, 1.0, travelDuration, EaseType.Linear, function(t)
 			if not isvalid(fx) then return end
-			local x = startPos.x + (px - startPos.x) * t
-			local y = startPos.y + (py - startPos.y) * t
+			local x = startPos.x + (target.x - startPos.x) * t
+			local y = startPos.y + (target.y - startPos.y) * t
 			fx.TransformComponent.Position = Vector3(x, y, startPos.z - 0.3)
 		end)
 		
@@ -6472,11 +6566,22 @@ script MonsterAI extends Component
 	-- ⚠ sfxRUID를 **인자로 받는다** — 이유는 PlayHitAnimation 주석 참고(Multicast + 비@Sync 프로퍼티
 	-- 조합이라 예전엔 클라에서 빈 문자열로 읽혀 공격음이 안 났다). PlayAttack2Animation도 같은 형태다.
 	method void PlayAttackAnimation(string attackRUID, string standRUID, number duration, string sfxRUID)
-		if self:IsServer() then return end
+        if self:IsServer() then return end
+        self:PlayAttackPresentation(attackRUID,standRUID,duration,sfxRUID)
+    end
+
+    @ExecSpace("ClientOnly")
+    method void PlayAttackPresentation(string attackRUID, string standRUID, number duration, string sfxRUID)
 		if self._dead then return end
 		if sfxRUID ~= "" then _SoundOptionLogic:PlaySfx(sfxRUID, 1.0) end
 		local renderer = self.Entity.SpriteRendererComponent
 		if renderer == nil or attackRUID == "" then return end
+		if _MonsterProjectileFx:GetAttackSequence(attackRUID)~=nil then
+			self._isPlayingTransientSprite=true self._isPlayingAttackSprite=true
+			self._transientSpriteGeneration=self._transientSpriteGeneration+1
+			_MonsterProjectileFx:StartSingleAttack(self,attackRUID,standRUID,duration,self._transientSpriteGeneration)
+			return
+		end
 		self:ApplyBodySprite(attackRUID)
 		-- OnSyncProperty(MonsterSprite)가 이 재생 중에 되돌리지 못하도록 표시(위 _isPlayingTransientSprite
 		-- 주석 참고). 세대 번호를 찍어서, 공격 주기가 겹쳐 들어와도 "가장 최신 호출"의 타이머만 실제로
@@ -6553,9 +6658,121 @@ script MonsterAI extends Component
 	-- 되돌아오게 해서 위치를 옮기지 않고도 "들이받는" 느낌을 준다. lungeBoost는 baseScale 대비
 	-- 최대로 커지는 양(예: baseScale=1.0에 0.4를 주면 피크 스케일 1.4). hopHeight가 0보다 크면
 	-- 같은 타이밍에 위로 살짝 뛰었다 착지하는 Y 모션을 더한다(0이면 기존과 동일하게 제자리 들이받기).
+    @ExecSpace("ServerOnly")
+    method boolean UsesBodyAttackMotion()
+        -- Junior Boogie was explicitly requested: preserve its native sprite and replace only its old lunge.
+        local scaleOnly=self._attackRUID=="" or (self._isFlying and self._standRUID=="2358e38b0c9b4d9da987387deba59de0")
+        return scaleOnly and self._attack2RUID=="" and self._hitEffectRUID=="" and self._selfAttackEffectRUID==""
+            and not self._isRangedInk and not self._isRangedSlash and not self._skipAttackLunge
+            and not self._isBoss and not self._isBonusBoss and not self._isCharge and not self._isErdas
+            and not self._neverAttacks and not self._isLevitating
+    end
+
+    @ExecSpace("ServerOnly")
+    method void CancelBodyAttackMotion(boolean restore)
+        local motion=self._T.attackBodyMotion
+        self._T.attackBodyMotion=nil self._T.bodyAttackContacts=nil
+        local slots=_MonsterSpawner._T.bodyAttackDives
+        if slots~=nil then slots[self]=nil end
+        if restore and motion~=nil and isvalid(self.Entity) and self.Entity.TransformComponent~=nil then
+            self.Entity.TransformComponent.Position=motion.position
+            self.Entity.TransformComponent.Scale=motion.scale
+        end
+    end
+
+    @ExecSpace("ServerOnly")
+    method void StartBodyAttackMotion(number hopHeight)
+        if self._dead or not self:UsesBodyAttackMotion() or self._T.attackBodyMotion~=nil then return end
+        local tf=self.Entity.TransformComponent
+        if tf==nil then return end
+        local strength=1
+        if self._isFlying then
+            if _MonsterSpawner._T.bodyAttackDives==nil then _MonsterSpawner._T.bodyAttackDives={} end
+            local slots=_MonsterSpawner._T.bodyAttackDives local count=0
+            for ai,pose in pairs(slots) do
+                if not isvalid(ai) or ai._dead or ai._T.attackBodyMotion~=pose or pose.zone~=_MapManager.CurrentMapIndex then slots[ai]=nil
+                else count=count+1 end
+            end
+            if count>=3 then strength=.5 end
+        end
+        local renderer=self.Entity.SpriteRendererComponent
+        local direction=renderer~=nil and renderer.FlipX and 1 or -1
+        local motion={age=0,position=tf.Position,scale=tf.Scale,life=self.ProjectileLifeRevision,
+            zone=self._spawnZoneIndex,flying=self._isFlying,strength=strength,direction=direction,
+            windup=self._isFlying and .16 or .10,strike=self._isFlying and .12 or .08,
+            recovery=self._isFlying and .22 or .20,hop=math.min(.06,math.max(0,hopHeight))}
+        self._T.attackBodyMotion=motion
+        if motion.flying and strength==1 then _MonsterSpawner._T.bodyAttackDives[self]=motion end
+    end
+
+    @ExecSpace("ServerOnly")
+    method void QueueBodyAttackContact(number damage, boolean ignoreImmune, Vector2 attacker)
+        if self._T.bodyAttackContacts==nil then self._T.bodyAttackContacts={} end
+        table.insert(self._T.bodyAttackContacts,{age=0,delay=self._isFlying and .28 or .18,damage=damage,
+            ignore=ignoreImmune,attacker=attacker,life=self.ProjectileLifeRevision,zone=self._spawnZoneIndex})
+    end
+
+    @ExecSpace("ServerOnly")
+    method void UpdateBodyAttackMotion(number delta)
+        local motion=self._T.attackBodyMotion local contacts=self._T.bodyAttackContacts
+        if motion==nil and contacts==nil then return end
+        if not isvalid(self.Entity) or self._dead then self:CancelBodyAttackMotion(false) return end
+        if (motion~=nil and (motion.life~=self.ProjectileLifeRevision or motion.zone~=self._spawnZoneIndex)) then
+            self:CancelBodyAttackMotion(false) return
+        end
+        if _GameManager.GameOver or not _GameManager.GameStarted or self._spawnZoneIndex~=_MapManager.CurrentMapIndex or _MapManager.AwayOnSideMap then
+            self:CancelBodyAttackMotion(true) return
+        end
+        if self._isPushingBack or self._transformLocked or self._openingSummonLock or self._isLevitating then
+            self:CancelBodyAttackMotion(false) return
+        end
+        if _GameManager:IsGamePaused() or self._paused or self._isStunned or self._isHardFrozen then return end
+        if motion~=nil then
+            motion.age=motion.age+math.max(0,delta)
+            local back=motion.flying and .045 or .04 local peak=motion.flying and .10 or .10
+            local lift=motion.flying and .12 or motion.hop
+            local drop=motion.flying and -.18 or motion.hop*.5
+            local backward=motion.flying and -.04 or -.02 local forward=motion.flying and .06 or .04
+            local scaleOffset=0 local yOffset=0 local xOffset=0
+            if motion.age<motion.windup then
+                local u=motion.age/motion.windup u=u*u*(3-2*u)
+                scaleOffset=-back*u yOffset=lift*u xOffset=backward*u
+            elseif motion.age<motion.windup+motion.strike then
+                local u=(motion.age-motion.windup)/motion.strike u=u*u*(3-2*u)
+                scaleOffset=-back+(peak+back)*u yOffset=lift+(drop-lift)*u xOffset=backward+(forward-backward)*u
+            else
+                local u=math.min(1,(motion.age-motion.windup-motion.strike)/motion.recovery) u=u*u*(3-2*u)
+                scaleOffset=peak*(1-u) yOffset=drop*(1-u) xOffset=forward*(1-u)
+            end
+            local factor=1+scaleOffset*motion.strength local tf=self.Entity.TransformComponent
+            tf.Scale=Vector3(motion.scale.x*factor,motion.scale.y*factor,motion.scale.z)
+            tf.Position=Vector3(motion.position.x+xOffset*motion.direction*motion.strength,
+                motion.position.y+yOffset*motion.strength,motion.position.z)
+            if motion.age>=motion.windup+motion.strike+motion.recovery then
+                tf.Position=motion.position tf.Scale=motion.scale self._T.attackBodyMotion=nil
+                local slots=_MonsterSpawner._T.bodyAttackDives if slots~=nil then slots[self]=nil end
+            end
+        end
+        if contacts~=nil then
+            for i=#contacts,1,-1 do
+                local contact=contacts[i]
+                if contact.life~=self.ProjectileLifeRevision or contact.zone~=self._spawnZoneIndex then table.remove(contacts,i)
+                else
+                    contact.age=contact.age+math.max(0,delta)
+                    if contact.age>=contact.delay then
+                        table.remove(contacts,i)
+                        _GameManager:OnMonsterReached(contact.damage,contact.ignore,false,contact.attacker,false)
+                    end
+                end
+            end
+            if #contacts==0 then self._T.bodyAttackContacts=nil end
+        end
+    end
+
 	@ExecSpace("ServerOnly")
 	method void PlayLungeAnimation(number lungeBoost, number hopHeight)
 		if self._dead then return end
+		if self:UsesBodyAttackMotion() then self:StartBodyAttackMotion(hopHeight) return end
 		local mult = self._scaleMultiplier
 		local baseScale = self._currentScale
 		local baseY = self.Entity.TransformComponent.Position.y
@@ -6570,8 +6787,12 @@ script MonsterAI extends Component
 		end)
 	end
 
-	@ExecSpace("ServerOnly")
 	method void OnEndPlay()
+		if self:IsServer() then self:CancelBodyAttackMotion(false) end
+		if self:IsClient() then
+			if isvalid(self._T.bossHpBar) then self._T.bossHpBar:Destroy() end
+			self._T.bossHpBar=nil return
+		end
 		-- 슬로우·스턴·도트 타이머 정리
 		if self._slowTimerId ~= 0 then
 			_TimerService:ClearTimer(self._slowTimerId)
@@ -6609,15 +6830,132 @@ script MonsterAI extends Component
 		_MonsterSpawner:UnregisterZoneMonster(self._spawnZoneIndex, self)
 	end
 
+	@ExecSpace("ServerOnly")
+	method void InitializePapulatus(integer phase, number hp, table def)
+		-- 범용 피격/스킬 타겟 처리를 유지하면서 시계 몸체와 비행 본체만 전용으로 초기화한다.
+		self.PapulatusPhase=phase self._papActionRevision=self._papActionRevision+1
+		self._dead=false self._isBoss=true self._isElite=false self._hasPhase2=false self._isGiantNepenthes=false
+		self._isCharge=false self._isFlying=phase==2 self._isRangedInk=false self._isRangedSlash=false
+		self._neverAttacks=false self._neverPauses=false self._paused=false self._isLevitating=false
+		self._standRUID=def.stand self._moveRUID=def.move self._hitRUID=def.hit self._hitSoundRUID=""
+		self._dieRUID=def.die self._dieDuration=def.dieDur self._dieSoundRUID=def.dieSfx
+		self._bookKey="B:" .. def.stand self._papAttacks=def.attacks self._papAttackIndex=0
+		self._summonCooldown=0 self._attackVariants=nil self._isStunned=false self._isHardFrozen=false
+		self._papClock=0 self._papFlightStart=self.Entity.TransformComponent.Position
+		self._attackTimer=1.2 self.MaxHp=hp self.CurrentHp=hp
+		self.BossHealthCurrent=hp self.BossHealthMaximum=hp self.BossHealthZone=self._spawnZoneIndex
+		self._currentScale=1 self._scaleMultiplier=phase==1 and 0.95 or 1.2
+		self.Entity.TransformComponent.Scale=Vector3(self._scaleMultiplier,self._scaleMultiplier,1)
+		self.MonsterSprite=phase==2 and def.move or def.stand self:ApplyBodySprite(self.MonsterSprite) self:SyncDepthOverlaySprite()
+		self:RefreshHeadMark() self:HideDepthOverlay()
+		local renderer=self.Entity.SpriteRendererComponent
+		if renderer~=nil then renderer.Color=Color(1,1,1,1) renderer.PlayRate=1 end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void UpdatePapulatus(number delta)
+		-- 본체는 화면 안에서 비행하고, 긴 원본 공격 모션이 끝난 뒤 다음 공격을 시작한다.
+		if self._isStunned or self._isHardFrozen then return end
+		self._papClock=self._papClock+delta
+		if self.PapulatusPhase==2 then
+			local t=self._papClock local lift=math.min(1,t/0.65)
+			local p=self.Entity.TransformComponent.Position
+			local x=self._papFlightStart.x*(1-lift)+math.sin(t*1.5)*2.4*lift
+			local y=self._papFlightStart.y*(1-lift)+(-0.65+math.sin(t*2)*0.3)*lift
+			self.Entity.TransformComponent.Position=Vector3(x,y,p.z)
+		end
+		self._attackTimer=self._attackTimer-delta
+		if self._attackTimer<=0 then self:StartPapulatusAttack() end
+		self:UpdateComboOrbPositions(delta)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void StartPapulatusAttack()
+		-- 파풀 원본 공격을 순환하고 모션의 타격 시점에만 실제 피해를 적용한다.
+		if self._papAttacks==nil or #self._papAttacks==0 then return end
+		self._papAttackIndex=self._papAttackIndex%#self._papAttacks+1
+		local attack=self._papAttacks[self._papAttackIndex]
+		self._attackTimer=attack.dur+(self.PapulatusPhase==2 and 0.65 or 0.9)
+		self._attackRUID=attack.ruid self._attackDuration=attack.dur self._noHitAnimDuringAttack=true
+		self:PlayAttackAnimation(attack.ruid,self.MonsterSprite,attack.dur,attack.sfx)
+		local p=self.Entity.TransformComponent.WorldPosition
+		if attack.selfFx~=nil and attack.selfFx~="" then self:SpawnOneShotFx(attack.selfFx,p,attack.selfFxDur,self._scaleMultiplier) end
+		if attack.ball~=nil then self._projectileRUID=attack.ball self:PlayRangedProjectile() end
+		if attack.hitFx~=nil and attack.hitFx~="" then
+			self._hitEffectRUID=attack.hitFx self._hitEffectDuration=attack.hitFxDur self:PlayRangedHitEffect()
+		end
+		if attack.alarm==true then self:PlayPapulatusAlarm("bc89644eb7b549b980b0c2e12aa9197e") end
+		local revision=self._papActionRevision local run=_Ep4PapulatusLogic.RunRevision
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) or not isvalid(self.Entity) or self._dead or self._papActionRevision~=revision or _Ep4PapulatusLogic.RunRevision~=run then return end
+			if _MapManager.CurrentMapIndex~=self._spawnZoneIndex or _MapManager.AwayOnSideMap or self._paused or _GameManager.GameOver or _GameManager:IsGamePaused() then return end
+			local missed=self._accuracyDebuffPercent>0 and _UtilLogic:RandomDouble()<self._accuracyDebuffPercent*0.5
+			for _,chance in ipairs({_CardManager:GetDarkSightEvadeChance(),_CardManager:GetRadicalDarknessEvadeChance(),_CardManager:GetConcentrationEvadeChance()}) do
+				if not missed and chance>0 and _UtilLogic:RandomDouble()<chance then missed=true end
+			end
+			local pos=self.Entity.TransformComponent.WorldPosition
+			if not missed then _GameManager:OnMonsterReached(_GameManager.BossAttackMultiplier,true,true,Vector2(pos.x,pos.y),false) end
+			if attack.alarm==true then self:PlayPapulatusAlarm("af89c3a931334b2197915cad660fb495") end
+			log("Ep4Papulatus: attack phase=" .. self.PapulatusPhase .. " slot=" .. self._papAttackIndex)
+		end,attack.dur*0.5)
+	end
+
+	@ExecSpace("Multicast")
+	method void PlayPapulatusAlarm(string soundRUID)
+		-- 원본 알람 시작/종료 사운드를 클라이언트에서 재생한다.
+		if self:IsClient() then _SoundOptionLogic:PlaySfx(soundRUID,0.8) end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void TransitionPapulatusPhase()
+		-- 1페이즈에서는 보상과 킬을 지급하지 않고 die1 끝까지 무적 상태로 재생한다.
+		self._dead=true self.CurrentHp=0 self.BossHealthCurrent=0 self._papActionRevision=self._papActionRevision+1
+		self:HideDepthOverlay() self:ClearAllComboOrbs() self:ClearShieldOrbs()
+		self._isStunned=false self._isHardFrozen=false self:UpdateAnimationFreeze()
+		self:PlayPhase1TransformAnimation(self._dieRUID,self._dieSoundRUID)
+		local run=_Ep4PapulatusLogic.RunRevision
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) or not isvalid(self.Entity) or _Ep4PapulatusLogic.RunRevision~=run then return end
+			_Ep4PapulatusLogic:BeginPhase2(self.Entity)
+		end,self._dieDuration)
+		log("Ep4Papulatus: phase1 die1 started duration=" .. self._dieDuration)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void UpdateBossHealthBar(number delta)
+		-- 모든 보스의 체력바를 실제 스프라이트 머리 위에 배치한다. 일반 몬스터는 생성하지 않는다.
+		if not self._isBoss then
+			if isvalid(self._T.bossHpBar) then self._T.bossHpBar:Destroy() end self._T.bossHpBar=nil return
+		end
+		local visible=not self._dead and not _GameManager.GameOver and self.BossHealthZone==_MapManager.CurrentMapIndex and not _MapManager.AwayOnSideMap
+		if not visible then if isvalid(self._T.bossHpBar) then self._T.bossHpBar.Enable=false end return end
+		if not isvalid(self._T.bossHpBar) then
+			local bar=_SpawnService:SpawnByModelId("bosshealthbar","BossHealthBar",self.Entity.TransformComponent.WorldPosition,self.Entity.CurrentMap)
+			if not isvalid(bar) then return end
+			self._T.bossHpBar=bar self._T.bossHpRatio=-1
+			bar.PixelRendererComponent:ResetWithColor(32,5,Color(0.1,0.06,0.04,0.95))
+			log("BossHealthBar: created for " .. self.Entity.Name)
+		end
+		local bar=self._T.bossHpBar bar.Enable=true
+		local body=_CardManager:GetSpriteMetrics(self.MonsterSprite)
+		local tf=self.Entity.TransformComponent local p=tf.WorldPosition local sx=math.abs(tf.Scale.x)
+		local x=p.x+(0.5-body.px)*math.max(0,body.w)*sx
+		local top=body.h>0 and (1-body.py)*body.h*sx or 1.2*sx
+		bar.TransformComponent.Position=Vector3(x,p.y+top+0.10,p.z-0.1) -- 머리 위 간격을 8px(0.08 world unit) 줄인다.
+		local width=math.max(2,math.min(3.2,body.w*sx))
+		bar.TransformComponent.Scale=Vector3(width/0.32,3.5,1)
+		local pixel=bar.PixelRendererComponent local renderer=self.Entity.SpriteRendererComponent
+		pixel.SortingLayer=renderer.SortingLayer pixel.OrderInLayer=renderer.OrderInLayer+8
+		local ratio=self.BossHealthMaximum>0 and math.max(0,math.min(1,self.BossHealthCurrent/self.BossHealthMaximum)) or 1
+		local fill=math.floor(ratio*30+0.5)
+		if self._T.bossHpRatio==fill then return end self._T.bossHpRatio=fill
+		for xx=1,32 do for yy=1,5 do
+			local c=Color(0.15,0.075,0.035,1)
+			if xx>1 and xx<32 and yy>1 and yy<5 then
+				c=xx<=fill+1 and (yy==4 and Color(1,0.42,0.35,1) or Color(0.88,0.12,0.08,1)) or Color(0.22,0.15,0.13,0.95)
+			elseif yy==5 then c=Color(0.85,0.62,0.22,1) end
+			pixel:SetPixel(xx,yy,c)
+		end end
+	end
+
 end
-
-
-
-
-
-
-
-
-
-
-

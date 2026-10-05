@@ -1,0 +1,189 @@
+@Logic
+script Ep1ProjectileFx extends Logic
+
+    @Sync property integer RunRevision = 0
+    property any _shots = nil
+    property integer _serial = 0
+    property number FlightDuration = 0.52
+
+    @ExecSpace("ClientOnly")
+    method void OnBeginPlay()
+        self._T.shots={} self._T.updating=false
+        local assets={"19cb5a8c16654c00bfb6d153fadece14","cf3f13f9911f400c807ab4b1867e93ab"}
+        for _,peel in ipairs({false,true}) do for _,ruid in ipairs(self:GetHitFrames(peel)) do table.insert(assets,ruid) end end
+        _ResourceService:PreloadAsync(assets,function()
+            if not isvalid(self) then return end
+            for _,ruid in ipairs(assets) do _CardManager:GetSpriteMetrics(ruid) end
+        end)
+    end
+
+    method any GetHitFrames(boolean peel)
+        if peel then return {"4eb0ca58885c43bbbef2c81e18a98881","17881ab2a47746f9b862f0bac62f7186","cdc1d6c2a6a344c19be2b0da5dcdae34","6e6a9d4a9849439f83a51d9b6fb04cab","c2a38f988dfb4f2faf6e349b233a61ff","bfbfa0e900a24cefb0c4e2af20336a34"} end
+        return {"31f8af646b4b4a31a3e52d0e5846d8c1","51ac694b5ee64c789459b686e2eccb30","3263098ad4524ce08d9798f44a2e72a6","4c12a123602443b380951d392127c2c8","16961489d9b943fbb0ff20c53363cfea","9151b9ba17a348d3a05bffda1225f1a9"}
+    end
+
+    @ExecSpace("ServerOnly")
+    method void ResetForRun()
+        self.RunRevision=self.RunRevision+1 self._shots={} self._T.loggedShots={}
+        self:ClearVisuals()
+    end
+
+    @ExecSpace("ServerOnly")
+    method void QueueAttack(MonsterAI ai, number multiplier, boolean ignoreImmune)
+        if not isvalid(ai) or not isvalid(ai.Entity) or ai._dead or _GameManager.GameOver then return end
+        if self._shots==nil then self._shots={} end
+        self._serial=self._serial+1
+        local peel=ai._standRUID=="c86800e208dc4de4a8cf71b51778a2fb"
+        local ruid=peel and "cf3f13f9911f400c807ab4b1867e93ab" or "19cb5a8c16654c00bfb6d153fadece14"
+        local hit=peel and "1af9badbf81e4664b87c273783170073" or "8072902461784a6fbab61834b992fde7"
+        -- Wind-up follows the throw pose. Once released, the shot survives the thrower's death.
+        local windup=math.max(0.20,math.min(0.48,ai._attackDuration*0.40))
+        local p=ai.Entity.TransformComponent.WorldPosition
+        table.insert(self._shots,{id=self._serial,ai=ai,zone=ai._spawnZoneIndex,revision=self.RunRevision,life=ai.ProjectileLifeRevision,age=0,
+            windup=windup,damage=multiplier,ignore=ignoreImmune,boss=ai._isBoss,released=false,origin=Vector2(p.x,p.y)})
+        if self._T.loggedShots==nil then self._T.loggedShots={} end
+        if not self._T.loggedShots[ruid] then self._T.loggedShots[ruid]=true log("Ep1Projectile: queued " .. (peel and "peel" or "banana") .. " impact delay=" .. tostring(windup+self.FlightDuration)) end
+        self:PrepareVisual(self._serial,ai.Entity,ruid,hit,windup,self.FlightDuration,ai._spawnZoneIndex,self.RunRevision,peel)
+    end
+
+    method void OnUpdate(number delta)
+        if self:IsClient() then self:UpdateVisuals(delta) return end
+        if self._shots==nil then return end
+        for i=#self._shots,1,-1 do
+            local shot=self._shots[i]
+            local cancel=shot.revision~=self.RunRevision or shot.zone~=_MapManager.CurrentMapIndex or _MapManager.AwayOnSideMap or _GameManager.GameOver or not _GameManager.GameStarted
+            if not shot.released and (not isvalid(shot.ai) or shot.ai._dead or shot.ai._spawnZoneIndex~=shot.zone or shot.ai.ProjectileLifeRevision~=shot.life) then cancel=true end
+            if cancel then
+                self:CancelVisual(shot.id) table.remove(self._shots,i)
+            elseif not _GameManager:IsGamePaused() then
+                shot.age=shot.age+delta
+                if shot.age>=shot.windup then shot.released=true end
+                if shot.age>=shot.windup+self.FlightDuration then
+                    if shot.damage>0 then _GameManager:OnMonsterReached(shot.damage,shot.ignore,shot.boss,shot.origin,false) end
+                    table.remove(self._shots,i)
+                end
+            end
+        end
+    end
+
+    @ExecSpace("Client")
+    method void PrepareVisual(integer id, Entity source, string ruid, string hitRuid, number windup, number flight, integer zone, integer revision, boolean peel)
+        if self._T.shots==nil then self._T.shots={} end
+        if #self._T.shots>=16 then self:DestroyVisual(self._T.shots[1]) table.remove(self._T.shots,1) end
+        local metrics=_CardManager:GetSpriteMetrics(ruid)
+        local hitFrames={}
+        for _,frame in ipairs(self:GetHitFrames(peel)) do table.insert(hitFrames,{ruid=frame,metrics=_CardManager:GetSpriteMetrics(frame)}) end
+        if revision~=self.RunRevision then return end
+        table.insert(self._T.shots,{id=id,metrics=metrics,hitFrames=hitFrames,source=source,ruid=ruid,hitRuid=hitRuid,windup=windup,flight=flight,zone=zone,revision=revision,peel=peel,age=0,fx=nil,ghosts={},impact=nil})
+    end
+
+    @ExecSpace("ClientOnly")
+    method Entity SpawnVisual(string ruid, Entity map, Vector3 pos, integer order)
+        local fx=_SpawnService:SpawnByModelId("persistenteffect","Ep1ThrownProjectile",pos,map)
+        if not isvalid(fx) then return nil end
+        if fx.TransformComponent==nil or fx.SpriteRendererComponent==nil then fx:Destroy() return nil end
+        fx.SpriteRendererComponent.SpriteRUID=ruid
+        fx.SpriteRendererComponent.SortingLayer="UI" fx.SpriteRendererComponent.OrderInLayer=order
+        return fx
+    end
+
+    @ExecSpace("ClientOnly")
+    method void UpdateVisuals(number delta)
+        if self._T.shots==nil or self._T.updating then return end
+        self._T.updating=true
+        local player=_UserService.LocalPlayer
+        for i=#self._T.shots,1,-1 do
+            local shot=self._T.shots[i]
+            local cancel=not isvalid(player) or not isvalid(player.CurrentMap) or shot.revision~=self.RunRevision or shot.zone~=_MapManager.CurrentMapIndex or _MapManager.AwayOnSideMap or _GameManager.GameOver or not _GameManager.GameStarted
+            if cancel then self:DestroyVisual(shot) table.remove(self._T.shots,i)
+            elseif not _GameManager:IsGamePaused() then
+                shot.age=shot.age+delta
+                if shot.age>=shot.windup and not isvalid(shot.fx) then
+                    if not isvalid(shot.source) or not shot.source.Enable or shot.source.TransformComponent==nil or shot.source.SpriteRendererComponent==nil then self:DestroyVisual(shot) table.remove(self._T.shots,i)
+                    else
+                        local tf=shot.source.TransformComponent local pos=tf.WorldPosition local scale=math.abs(tf.Scale.x)
+                        local body=_CardManager:GetSpriteMetrics(shot.source.SpriteRendererComponent.SpriteRUID)
+                        -- Throw from the sprite's upper body, compensating for the original animation pivot.
+                        shot.start=Vector3(pos.x+(0.5-body.px)*body.w*scale,pos.y+(0.72-body.py)*body.h*scale,pos.z-0.3)
+                        shot.targetScreen=Vector2(_UILogic.ScreenWidth*(0.30+_UtilLogic:RandomDouble()*0.40),_UILogic.ScreenHeight*(0.59+_UtilLogic:RandomDouble()*0.12))
+                        local endPos=_UILogic:ScreenToWorldPosition(shot.targetScreen)
+                        local unit=_UILogic:ScreenToWorldPosition(Vector2(shot.targetScreen.x+1,shot.targetScreen.y))
+                        local width=shot.metrics.w>0 and shot.metrics.w or 0.32
+                        shot.s0=math.max(0.45,scale*0.70)
+                        shot.s1=math.abs(unit.x-endPos.x)*math.min(_UILogic.ScreenHeight*0.17,_UILogic.ScreenWidth*0.15)/width
+                        shot.fx=self:SpawnVisual(shot.ruid,player.CurrentMap,shot.start,92)
+                        for j=1,2 do shot.ghosts[j]=self:SpawnVisual(shot.ruid,player.CurrentMap,shot.start,92-j) end
+                    end
+                end
+                if isvalid(shot.fx) and shot.fx.TransformComponent~=nil and shot.fx.SpriteRendererComponent~=nil then
+                    local t=math.max(0,math.min(1,(shot.age-shot.windup)/shot.flight))
+                    local endPos=_UILogic:ScreenToWorldPosition(shot.targetScreen)
+                    local u=t^1.55 local s=shot.s0+(shot.s1-shot.s0)*t^2.2
+                    local pos=Vector3(shot.start.x+(endPos.x-shot.start.x)*u,shot.start.y+(endPos.y-shot.start.y)*u+math.sin(t*math.pi)*0.28,shot.start.z)
+                    self:PlaceVisual(shot.fx,shot.metrics,pos,s,(shot.peel and -210 or 300)*t)
+                    for j,ghost in ipairs(shot.ghosts) do if isvalid(ghost) and ghost.TransformComponent~=nil and ghost.SpriteRendererComponent~=nil then
+                        local gt=math.max(0,t-j*0.07) local gu=gt^1.55 local gs=shot.s0+(shot.s1-shot.s0)*gt^2.2
+                        self:PlaceVisual(ghost,shot.metrics,Vector3(shot.start.x+(endPos.x-shot.start.x)*gu,shot.start.y+(endPos.y-shot.start.y)*gu+math.sin(gt*math.pi)*0.28,shot.start.z),gs,(shot.peel and -210 or 300)*gt)
+                        ghost.SpriteRendererComponent.Color=Color(1,1,1,t<1 and (0.19-j*0.06) or 0)
+                    end end
+                    if t>=1 then
+                        if not shot.impacted then
+                            shot.impacted=true
+                            if self._T.loggedImpact==nil then self._T.loggedImpact={} end
+                            if not self._T.loggedImpact[shot.ruid] then self._T.loggedImpact[shot.ruid]=true log("Ep1Projectile: screen impact " .. shot.ruid) end
+                            shot.impact=self:SpawnVisual(shot.hitFrames[1].ruid,player.CurrentMap,pos,93)
+                            
+                        end
+                        local fade=math.max(0,(shot.age-shot.windup-shot.flight)/0.20)
+                        self:PlaceVisual(shot.fx,shot.metrics,pos,s*(1+0.08*fade),(shot.peel and -210 or 300)*t)
+                        shot.fx.SpriteRendererComponent.Color=Color(1,1,1,math.max(0,1-fade))
+                        if isvalid(shot.impact) and shot.impact.TransformComponent~=nil and shot.impact.SpriteRendererComponent~=nil then
+                            local frameIndex=math.min(#shot.hitFrames,1+math.floor((shot.age-shot.windup-shot.flight)/0.08))
+                            local frame=shot.hitFrames[frameIndex]
+                            if shot.hitFrame~=frameIndex then shot.impact.SpriteRendererComponent.SpriteRUID=frame.ruid shot.hitFrame=frameIndex end
+                            self:PlaceVisual(shot.impact,frame.metrics,pos,shot.s1,0)
+                            shot.impact.SpriteRendererComponent.Color=Color(1,1,1,math.max(0,1-math.max(0,shot.age-shot.windup-shot.flight-0.32)/0.16))
+                        end
+                        if shot.age>=shot.windup+shot.flight+0.48 then self:DestroyVisual(shot) table.remove(self._T.shots,i) end
+                    end
+                end
+            end
+        end
+        self._T.updating=false
+    end
+
+    @ExecSpace("ClientOnly")
+    method void PlaceVisual(Entity fx, any metrics, Vector3 center, number scale, number rotation)
+        if not isvalid(fx) or fx.TransformComponent==nil then return end
+        -- Original item and hit sprites use different pivots. Rotate around the visible center.
+        local ox=(0.5-metrics.px)*math.max(0,metrics.w)*scale
+        local oy=(0.5-metrics.py)*math.max(0,metrics.h)*scale
+        local angle=rotation*math.pi/180 local c=math.cos(angle) local sn=math.sin(angle)
+        fx.TransformComponent.Scale=Vector3(scale,scale,1) fx.TransformComponent.ZRotation=rotation
+        fx.TransformComponent.WorldPosition=Vector3(center.x-ox*c+oy*sn,center.y-ox*sn-oy*c,center.z)
+    end
+
+    @ExecSpace("ClientOnly")
+    method void DestroyVisual(any shot)
+        if isvalid(shot.fx) then shot.fx:Destroy() end
+        if isvalid(shot.impact) then shot.impact:Destroy() end
+        for _,ghost in ipairs(shot.ghosts) do if isvalid(ghost) then ghost:Destroy() end end
+    end
+
+    @ExecSpace("Client")
+    method void CancelVisual(integer id)
+        if self._T.shots==nil then return end
+        for i=#self._T.shots,1,-1 do if self._T.shots[i].id==id then self:DestroyVisual(self._T.shots[i]) table.remove(self._T.shots,i) end end
+    end
+
+    @ExecSpace("Client")
+    method void ClearVisuals()
+        if self._T.shots~=nil then for _,shot in ipairs(self._T.shots) do self:DestroyVisual(shot) end end
+        self._T.shots={} self._T.loggedImpact={}
+    end
+
+    @ExecSpace("ClientOnly")
+    method void OnEndPlay()
+        self:ClearVisuals()
+    end
+end

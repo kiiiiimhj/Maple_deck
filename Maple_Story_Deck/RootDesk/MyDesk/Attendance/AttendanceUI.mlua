@@ -22,6 +22,9 @@ script AttendanceUI extends Logic
 	property number PulseSpeed = 5.0
 
 	-- 내부 상태
+	-- 한국어는 원본 아트, 다른 언어는 글자 없는 아트 + 번역 텍스트를 사용한다.
+	property string _displayLocaleId = ""
+	property any _localeTranslator = nil
 	property boolean _isOpen = false
 	property boolean _lobbyTabVisible = true
 	property integer _animatingDay = 0
@@ -57,6 +60,65 @@ script AttendanceUI extends Logic
 		log("AttendanceUI started")
 	end
 
+
+	@ExecSpace("ClientOnly")
+	method void ApplyLocaleLayout(string localeId)
+		-- 국가/IP 대신 클라이언트의 게임 언어를 따른다. 미지원 언어는 영어로 표시한다.
+		local locale = string.lower(localeId or "en")
+		if string.sub(locale, 1, 2) == "ko" then locale = "ko"
+		elseif string.sub(locale, 1, 2) == "ja" then locale = "ja"
+		elseif string.sub(locale, 1, 2) == "zh" then locale = "zh-tw"
+		else locale = "en" end
+		if self._displayLocaleId == locale then return end
+		if not isvalid(self.popupGroup) then return end
+		local panel = self.popupGroup:GetChildByName("Panel")
+		if not isvalid(panel) then return end
+		local board = panel:GetChildByName("Board")
+		if not isvalid(board) then return end
+		self._displayLocaleId = locale
+		self._localeTranslator = _LocalizationService:GetTranslatorForLocale(locale)
+		local original = locale == "ko"
+		board.SpriteGUIRendererComponent.ImageRUID = original and "33a152a2f3da4b4e9628c3ca422a709a" or "cc225de4579649029c046d8440f13414"
+		local title = board:GetChildByName("LocaleTitle")
+		if isvalid(title) then
+			title.Enable = not original
+			title.TextGUIRendererComponent.Text = self:GetLocaleText("UI_ATTENDANCE_TITLE", "Attendance\nRewards")
+		end
+		local originals = {"ce1270afb20d4555a1d7c2bee67210bc", "d353d57ade7a459b86d621348da26c1d", "6a06b8847366415d8b2a4178b26f7cef", "33a68145b4fc4de99acc22d32d3c8e3b", "74739d69081a4df0b87d2563fc6c887e", "bd55899300d34ac296e28728c1bcbbfd", "ecbde8d0defc4725840ea26b32270ad4"}
+		for day = 1, 7 do
+			local slot = self:GetSlot(day)
+			if isvalid(slot) then
+				local blank = day == 7 and "8b66df2b272d4ebb83c4da455541050a" or "ceb8bce4384b441795afed987a68cafc"
+				slot.SpriteGUIRendererComponent.ImageRUID = original and originals[day] or blank
+				local label = slot:GetChildByName("DayLabel")
+				if isvalid(label) then
+					label.Enable = not original
+					label.TextGUIRendererComponent.Text = self._localeTranslator:GetTextFormat("FMT_ATTENDANCEUI_DAY", day)
+				end
+			end
+		end
+		log("AttendanceUI locale=" .. locale .. " textFreeArtwork=" .. tostring(not original))
+	end
+
+	@ExecSpace("ClientOnly")
+	method string GetLocaleText(string key, string fallback)
+		local text = nil
+		if self._localeTranslator ~= nil then text = self._localeTranslator:GetText(key)
+		else text = _LocalizationService:GetText(key) end
+		if text == nil or text == "" or text == key then return fallback end
+		return text
+	end
+
+	@ExecSpace("ClientOnly")
+	method string GetAmountText(integer day)
+		-- 지급량은 기존 로직 그대로 읽고, 뽑기권의 단위만 화면 언어로 해석한다.
+		local kind = _AttendanceLogic:GetRewardKind(day)
+		if self._localeTranslator ~= nil and (kind == "relicPull" or kind == "skillPull") then
+			return self._localeTranslator:GetTextFormat("FMT_ATTENDANCELOGIC_001", _AttendanceLogic:GetRewardAmount(day))
+		end
+		return _AttendanceLogic:GetRewardAmountText(day)
+	end
+
 	@ExecSpace("ClientOnly")
 	method Entity GetSlot(integer day)
 		if not isvalid(self.slotsRoot) then return nil end
@@ -65,11 +127,15 @@ script AttendanceUI extends Logic
 
 	@ExecSpace("ClientOnly")
 	method void OnLobbyButtonClicked()
-		self:Open()
+		-- 뉴비 출석 완료 후에는 30일 출석을 기본으로 연다.
+		if _AttendanceLogic:IsAllDone() then _MonthlyAttendanceUI:Open() else self:Open() end
 	end
 
 	@ExecSpace("ClientOnly")
 	method void Open()
+		-- 뉴비 7일을 마친 계정은 같은 출석 버튼에서 30일 출석으로 이어진다.
+		if _AttendanceLogic:IsMonthlyUnlocked() then _MonthlyAttendanceUI:Open() return end
+		_MonthlyAttendanceUI:Close()
 		_AttendanceLogic:RequestRefresh()
 		self:RefreshAll()
 		self.popupGroup.Enable = true
@@ -95,6 +161,7 @@ script AttendanceUI extends Logic
 	method void RefreshAll()
 		-- 7칸 + 로비 버튼을 현재 동기화된 상태로 다시 그린다(수령 연출 중인 칸은 건드리지 않는다)
 		if not isvalid(self.slotsRoot) then return end
+		self:ApplyLocaleLayout(_LocalizationService.CurrentLocaleId)
 		local claimed = _AttendanceLogic:GetClaimedCount()
 		for i = 1, 7 do
 			if i ~= self._animatingDay then
@@ -117,9 +184,9 @@ script AttendanceUI extends Logic
 		end
 		if isvalid(amountText) then
 			if claimed then
-				amountText.TextGUIRendererComponent.Text = _LocalizationService:GetText("MLUA_ATTENDANCEUI_001")
+				amountText.TextGUIRendererComponent.Text = self:GetLocaleText("MLUA_ATTENDANCEUI_001", "Done")
 			else
-				amountText.TextGUIRendererComponent.Text = _AttendanceLogic:GetRewardAmountText(day)
+				amountText.TextGUIRendererComponent.Text = self:GetAmountText(day)
 			end
 		end
 		if isvalid(check) then
@@ -133,12 +200,13 @@ script AttendanceUI extends Logic
 
 	@ExecSpace("ClientOnly")
 	method void RefreshLobbyButton()
-		-- 7칸을 다 받으면 버튼 자체를 숨긴다(유저 지정). 로비의 다른 탭(상점/스킬 등)에서도 숨긴다
+		-- 두 출석을 모두 끝내면 숨긴다. 로비의 다른 탭에서도 숨기는 기존 동작을 유지한다.
 		if not isvalid(self.lobbyButton) then return end
-		local show = self._lobbyTabVisible and not _AttendanceLogic:IsAllDone()
+		local show = self._lobbyTabVisible and (not _AttendanceLogic:IsAllDone() or not _AttendanceLogic:IsMonthlyAllDone())
 		self.lobbyButton.Entity.Enable = show
 		if isvalid(self.lobbyRedDot) then
-			self.lobbyRedDot.Enable = _AttendanceLogic:CanClaim()
+			if _AttendanceLogic:IsMonthlyUnlocked() then self.lobbyRedDot.Enable = _AttendanceLogic:CanClaimMonthly()
+			else self.lobbyRedDot.Enable = _AttendanceLogic:CanClaim() end
 		end
 	end
 
@@ -229,7 +297,7 @@ script AttendanceUI extends Logic
 		self._animatingDay = day
 		slot.UITransformComponent.Scale = Vector3(1, 1, 1)
 		if isvalid(icon) then icon.Enable = false end
-		if isvalid(amountText) then amountText.TextGUIRendererComponent.Text = _LocalizationService:GetText("MLUA_ATTENDANCEUI_001") end
+		if isvalid(amountText) then amountText.TextGUIRendererComponent.Text = self:GetLocaleText("MLUA_ATTENDANCEUI_001", "Done") end
 
 		local tr = check.UITransformComponent
 		local sprite = check.SpriteGUIRendererComponent

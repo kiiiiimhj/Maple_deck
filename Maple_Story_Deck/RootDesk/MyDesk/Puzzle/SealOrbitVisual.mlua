@@ -1,0 +1,87 @@
+@Component
+script SealOrbitVisual extends Component
+	property string SealPath = ""
+	property integer MapIndex = 0
+	property number SealHeight = 3
+	property number OrbitWidth = 1.4
+	property number _age = 0
+	property Entity _seal = nil
+	property table _particles = {}
+	property number _lightHeight = 1
+	property boolean _ready = false
+	property boolean _visible = false
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		self._seal=_EntityService:GetEntityByPath(self.SealPath)
+		self._particles={}
+		self._lightHeight=math.max(0.1,_CardManager:GetSpriteMetrics("29b8c43f17ae45cc92390e8f2dd49676").h)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PrepareParticles()
+		if self._ready then return end
+		for ring=1,2 do
+			for segment=0,31 do
+				local e=_SpawnService:SpawnByModelId("sealorbitlight","SealOrbit_"..ring.."_"..segment,Vector3(0,0,0),self.Entity)
+				if not isvalid(e) then
+					log_warning("SealOrbitVisual: light particle missing") return
+				end
+				e.SpriteRendererComponent.Color=Color(1,1,1,0)
+				table.insert(self._particles,{entity=e,ring=ring,segment=segment})
+			end
+		end
+		self._ready=true
+		log("SealOrbitVisual: two continuous comet trails ready "..self.SealPath)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void HideOrbits()
+		if not self._visible then return end
+		for _,entry in ipairs(self._particles) do
+			if isvalid(entry.entity) then entry.entity.Enable=false end
+		end
+		self._visible=false
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUpdate(number delta)
+		if _MapManager.CurrentMapIndex~=self.MapIndex or not isvalid(self._seal) or not self._seal.Enable then self:HideOrbits() return end
+		local alpha=self._seal.SpriteRendererComponent.Color.a
+		if alpha<0.01 then self:HideOrbits() return end
+		self:PrepareParticles()
+		if not self._ready then return end
+		self._visible=true
+		self._age=self._age+delta
+		local p=self._seal.TransformComponent.Position
+		for _,entry in ipairs(self._particles) do
+			local e=entry.entity
+			if isvalid(e) then
+				local direction=1 local tilt=0.40 local speed=1.65 local phase=0
+				if entry.ring==2 then direction=-1 tilt=-0.43 speed=1.40 phase=math.pi end
+				local theta=self._age*speed*direction+phase-entry.segment*0.037*direction
+				local x=math.cos(theta)*self.OrbitWidth
+				local y=math.sin(theta)*self.SealHeight*0.14
+				local dx=x*math.cos(tilt)-y*math.sin(tilt)
+				local dy=x*math.sin(tilt)+y*math.cos(tilt)
+				local t=entry.segment/31
+				local lightSize=(0.80-0.40*t)/self._lightHeight
+				if entry.segment==0 then lightSize=1.0/self._lightHeight end
+				e.Enable=true
+				e.TransformComponent.Position=Vector3(p.x+dx,p.y+dy,p.z-0.12)
+				e.TransformComponent.Scale=Vector3(lightSize,lightSize,1)
+				-- Each tail crosses behind the seal then in front, giving the tilted orbit depth.
+				if math.sin(theta)>0 then e.SpriteRendererComponent.OrderInLayer=3 else e.SpriteRendererComponent.OrderInLayer=7 end
+				e.SpriteRendererComponent.Color=Color(0.88,0.98,1,alpha*(1-t)*(1-t)*0.90)
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		for _,entry in ipairs(self._particles) do
+			if isvalid(entry.entity) then entry.entity:Destroy() end
+		end
+		self._particles={} self._ready=false self._visible=false
+	end
+end

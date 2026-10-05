@@ -1,0 +1,90 @@
+@Component
+script Ep4Map5EasterEggTrigger extends Component
+	property integer EggNumber = 1
+	@Sync property boolean Placed = false
+	property any _touchHandler = nil
+	property any _holdHandler = nil
+	property any _releaseHandler = nil
+	property boolean _dragging = false
+	property integer _touchId = 0
+	property integer _dragZone = 0
+	property integer _dragRun = 0
+	property number _dragRemaining = 0
+	property Vector2 _offset = Vector2.zero
+	property Vector3 _dragStart = Vector3.zero
+
+	method void OnBeginPlay()
+		if self:IsClient() and self._touchHandler==nil then self._touchHandler=self.Entity:ConnectEvent(TouchEvent,self.OnTouched) end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnTouched(TouchEvent event)
+		if not _GameManager.GameStarted or _GameManager.GameOver or _GameManager:IsGamePaused() then return end
+		if _TitleUI.titleGroup.Enable or _CardManager:IsMonsterUnderTouch(event.TouchPoint) then return end
+		if self.EggNumber<4 then self:RequestTouch(_Ep4Map5EasterEggLogic.RunRevision) return end
+		if self._dragging or self.Placed or _Ep4Map5EasterEggLogic.PuzzleComplete then return end
+		self._dragging=true self._touchId=event.TouchId
+		self._dragZone=_MapManager.CurrentMapIndex self._dragRun=_Ep4Map5EasterEggLogic.RunRevision self._dragRemaining=12
+		local p=self.Entity.TransformComponent.Position local w=_UILogic:ScreenToWorldPosition(event.TouchPoint)
+		self._dragStart=Vector3(p.x,p.y,p.z) self._offset=Vector2(p.x-w.x,p.y-w.y)
+		self._holdHandler=_InputService:ConnectEvent(ScreenTouchHoldEvent,self.OnDragHold)
+		self._releaseHandler=_InputService:ConnectEvent(ScreenTouchReleaseEvent,self.OnDragRelease)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnDragHold(ScreenTouchHoldEvent event)
+		if not self._dragging or event.TouchId~=self._touchId then return end
+		if _GameManager:IsGamePaused() or _GameManager.GameOver then self:FinishDrag(false) return end
+		local w=_UILogic:ScreenToWorldPosition(event.TouchPoint)
+		self.Entity.TransformComponent.Position=Vector3(w.x+self._offset.x,w.y+self._offset.y,self._dragStart.z)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnDragRelease(ScreenTouchReleaseEvent event)
+		if self._dragging and event.TouchId==self._touchId then self:FinishDrag(true) end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void FinishDrag(boolean submit)
+		local p=self.Entity.TransformComponent.Position local revision=self._dragRun
+		self._dragging=false self.Entity.TransformComponent.Position=self._dragStart self:DisconnectDrag()
+		if submit then self:RequestPlacement(p.x,p.y,revision) end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void DisconnectDrag()
+		if self._holdHandler~=nil then _InputService:DisconnectEvent(ScreenTouchHoldEvent,self._holdHandler) self._holdHandler=nil end
+		if self._releaseHandler~=nil then _InputService:DisconnectEvent(ScreenTouchReleaseEvent,self._releaseHandler) self._releaseHandler=nil end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUpdate(number delta)
+		if not self._dragging then return end
+		self._dragRemaining=self._dragRemaining-delta
+		if self._dragRemaining<=0 or self.Placed or self._dragZone~=_MapManager.CurrentMapIndex or self._dragRun~=_Ep4Map5EasterEggLogic.RunRevision or _GameManager:IsGamePaused() or _GameManager.GameOver or not _GameManager.GameStarted then self:FinishDrag(false) end
+	end
+
+	@ExecSpace("Multicast")
+	method void ResetPreview(Vector3 position)
+		if not self:IsClient() then return end
+		self._dragging=false self:DisconnectDrag()
+		self._dragStart=position self.Entity.TransformComponent.Position=position
+	end
+
+	@ExecSpace("Server")
+	method void RequestPlacement(number x, number y, integer revision)
+		_Ep4Map5EasterEggLogic:CheckPlacement(self.EggNumber,self.Entity,x,y,revision,senderUserId)
+	end
+
+	@ExecSpace("Server")
+	method void RequestTouch(integer revision)
+		_Ep4Map5EasterEggLogic:OnObjectTouched(self.EggNumber,self.Entity,revision,senderUserId)
+	end
+
+	method void OnEndPlay()
+		if not self:IsClient() then return end
+		if self._dragging then self:FinishDrag(false) end
+		self:DisconnectDrag()
+		if self._touchHandler~=nil then self.Entity:DisconnectEvent(TouchEvent,self._touchHandler) self._touchHandler=nil end
+	end
+end

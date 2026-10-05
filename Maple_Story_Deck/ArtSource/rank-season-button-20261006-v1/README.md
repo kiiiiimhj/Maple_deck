@@ -1,0 +1,11 @@
+# Ranking season claim button — thin frame
+
+Drawn using the built-in ImageGen tool for the current 150 × 55 UI button at `/ui/TitleGroup/RankPanel/Board/MyRankRow/ClaimButton`. The image is prepared at 600 × 220 with exactly the same aspect ratio. The renderer uses Simple instead of stretching a thick fixed 9-slice border into this small button.
+
+The existing button UUID, position, dimensions, click events and translated `UI_TITLEGROUP_RANK_CLAIM` label are retained. Season rewards and rank logic are unchanged.
+
+Final asset: `season-claim.png`. Original output is retained under `generated-source/`. A native-size image is `actual-size-preview.png`.
+
+## Exact generation prompt
+
+Use case: precise-object-edit. Asset type: blank season-reward claim button background for a MapleStory-style game ranking UI. Input image is the existing project's green claim button, a style and color reference. Redraw it specifically for an EXACT 150 pixel wide by 55 pixel tall UI rectangle (aspect ratio 30:11, 2.72727:1). Output a clean single horizontal button isolated on genuine transparent alpha. Keep the glossy vivid grass-green center, soft upper highlight, deeper green bottom shading, warm gold beveled edging, dark brown fine outer contour and subtly chamfered corners in the same friendly painted game UI style. CRITICAL CHANGE: the frame must be VERY THIN, approximately 2 to 3 pixels thick when displayed at 150x55. The entire gold edge and dark contour together must use only about 5 percent of the button height at each edge. Make the green face occupy almost the whole button. Do not use a thick wood rim, multiple bulky nested gold rims, large angled side caps, heavy drop shadow, or ornamental structures. The left and right gold edges should be as thin as the top and bottom; avoid a wide side border. Remove the existing corner leaves so this tiny button stays uncluttered, preserving the green/gold visual language. Subtle volume is welcome, compact and legible. Leave the central face completely blank; the game supplies translated text. One button only, wide centered composition, show the complete silhouette with a minimal clear margin. No letters, text, symbols, icon, background plate, or drawn checkerboard. Exactly matching aspect ratio means it will be used without 9-slice stretching.

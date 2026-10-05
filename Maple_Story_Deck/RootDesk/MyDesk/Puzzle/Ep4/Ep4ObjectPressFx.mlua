@@ -1,0 +1,61 @@
+@Component
+script Ep4ObjectPressFx extends Component
+	-- 보상 판정과 독립적인 눌림 피드백. 연타해도 원래 위치·크기가 누적해서 바뀌지 않는다.
+	property any _touchHandler = nil
+	property any _pressTween = nil
+	property Vector3 _restPosition = Vector3.zero
+	property Vector3 _restScale = Vector3.one
+	property boolean _captured = false
+	property integer _revision = 0
+	property number PressDuration = 0.24
+	property number PressDownOffset = 0.10
+
+	method void OnBeginPlay()
+		if self:IsClient() then
+			local t=self.Entity.TransformComponent
+			self._restPosition=Vector3(t.Position.x,t.Position.y,t.Position.z)
+			self._restScale=Vector3(t.Scale.x,t.Scale.y,t.Scale.z) self._captured=true
+			if self._touchHandler==nil then self._touchHandler=self.Entity:ConnectEvent(TouchEvent,self.OnTouched) end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnTouched(TouchEvent event)
+		if not _GameManager.GameStarted or _GameManager.GameOver or _GameManager:IsGamePaused() then return end
+		if _TitleUI.titleGroup.Enable or _CardManager:IsMonsterUnderTouch(event.TouchPoint) then return end
+		self:PlayPress()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayPress()
+		if not self._captured then return end
+		self:StopPress() self._revision=self._revision+1
+		local revision=self._revision local p=self._restPosition local scale=self._restScale
+		log("Ep4Press: begin " .. self.Entity.Path)
+		self._pressTween=_TweenLogic:PlayTween(0,1,self.PressDuration,EaseType.Linear,function(t)
+			if not isvalid(self) or not isvalid(self.Entity) or revision~=self._revision then return end
+			local k=math.sin(t*math.pi) local transform=self.Entity.TransformComponent
+			transform.Position=Vector3(p.x,p.y-self.PressDownOffset*k,p.z)
+			transform.Scale=Vector3(scale.x*(1+0.06*k),scale.y*(1-0.10*k),scale.z)
+			if t>=1 then
+				transform.Position=p transform.Scale=scale self._pressTween=nil
+				log("Ep4Press: end " .. self.Entity.Path)
+			end
+		end)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void StopPress()
+		self._revision=self._revision+1
+		if self._pressTween~=nil then self._pressTween:Stop() self._pressTween=nil end
+		if self._captured and isvalid(self.Entity) then
+			self.Entity.TransformComponent.Position=self._restPosition self.Entity.TransformComponent.Scale=self._restScale
+		end
+	end
+
+	method void OnEndPlay()
+		if not self:IsClient() then return end
+		self:StopPress()
+		if self._touchHandler~=nil then self.Entity:DisconnectEvent(TouchEvent,self._touchHandler) self._touchHandler=nil end
+	end
+end

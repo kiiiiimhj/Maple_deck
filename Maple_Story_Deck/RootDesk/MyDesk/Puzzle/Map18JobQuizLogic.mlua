@@ -1,0 +1,145 @@
+@Logic
+script Map18JobQuizLogic extends Logic
+	-- 에피1 map18 존24 object-2047_8 — 메이플스토리 직업 O/X 퀴즈(유저 지정 2026-10-05).
+	-- 루디브리엄 퀴즈(Ep4Map1EasterEggLogic)와 같은 팝업(Ep4EasterEggUI)·흐름: 세 문제를 순서를 섞어 내고,
+	-- 모두 맞히면 런당 한 번 보상(하얀 포션 + 스킬 1개 강화 + 덤), 틀리면 처음부터 다시.
+	-- 문제 문구는 GameText.csv MAP18_QUIZ_Q1~Q3, 정답은 서버만 안다(Answers).
+	@Sync property boolean QuizComplete = false
+	property string ObjectPath = "/maps/map18/object-2047_8"
+	property integer ZoneIndex = 24
+	property table Answers = {true, false, true}
+	property table _quizIds = {}
+	property integer _step = 0
+	property integer _session = 0
+	property integer _revision = 0
+	property boolean _open = false
+	property string _userId = ""
+	property Entity _object = nil
+	property boolean _failed = false
+	property boolean _busy = false
+	property number _modalRemaining = 0
+
+	@ExecSpace("ServerOnly")
+	method boolean ValidObject(Entity obj, string userId)
+		-- 다른 맵/로비/화면 밖 요청은 서버에서 막는다(현재 존이 존24이고 같은 맵에 있을 때만)
+		if not isvalid(obj) or obj ~= _EntityService:GetEntityByPath(self.ObjectPath) then return false end
+		if not _GameManager.GameStarted or _GameManager.GameOver then return false end
+		local user = _UserService:GetUserEntityByUserId(userId)
+		if not isvalid(user) or user.CurrentMap ~= obj.CurrentMap then return false end
+		return _MapManager.CurrentMapIndex == self.ZoneIndex
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnObjectTouched(Entity obj, string userId)
+		-- 월드 터치 진입점. 이미 풀었으면 완료 안내만
+		if self._open or _GameManager:IsGamePaused() or not self:ValidObject(obj, userId) then return end
+		if self.QuizComplete then _UIToast:ShowMessage("EP4_EGG_DONE", userId) return end
+		self._session = self._session + 1
+		self._open = true self._object = obj self._userId = userId self._modalRemaining = 300
+		_GameManager:SetEasterEggPaused(true)
+		log("Map18JobQuiz: open session=" .. self._session)
+		self:StartQuestions()
+	end
+
+	@ExecSpace("ServerOnly")
+	method void StartQuestions()
+		-- 세 문제 순서를 섞는다. 재도전도 첫 문제부터
+		local pool = {1, 2, 3}
+		self._quizIds = {}
+		for i = 1, 3 do
+			table.insert(self._quizIds, table.remove(pool, _UtilLogic:RandomIntegerRange(1, #pool)))
+		end
+		self._step = 1 self._failed = false self._revision = self._revision + 1
+		self:ShowQuestion()
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ShowQuestion()
+		-- 클라에는 문제 번호와 진행도만 보낸다
+		_Ep4EasterEggUI:ShowJobQuiz(self._session, self._revision, self._quizIds[self._step], self._step, self._failed, self._userId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean ValidSession(integer session, integer revision, string userId)
+		-- 지난 문제 답변/중복 클릭/다른 사용자/존 이탈 차단
+		return not self._busy and self._open and self._session == session and self._revision == revision and self._userId == userId and self:ValidObject(self._object, userId)
+	end
+
+	@ExecSpace("Server")
+	method void RequestAnswer(integer session, integer revision, boolean answer)
+		-- 세 답변 모두 서버에서 판정한다
+		if not self:ValidSession(session, revision, senderUserId) or self._failed then return end
+		self._revision = self._revision + 1 self._modalRemaining = 300
+		if answer ~= (self.Answers[self._quizIds[self._step]] == true) then
+			self._failed = true self:ShowQuestion()
+			log("Map18JobQuiz: wrong at step " .. self._step .. "; retry from question 1")
+			return
+		end
+		if self._step < 3 then self._step = self._step + 1 self:ShowQuestion() return end
+		self.QuizComplete = true
+		local obj = self._object local userId = self._userId
+		self:EndModal()
+		self:GrantReward(obj)
+		_UIToast:ShowMessage("EP4_QUIZ_SUCCESS", userId)
+		log("Map18JobQuiz: success 3/3; reward once per run")
+	end
+
+	@ExecSpace("Server")
+	method void RequestRetry(integer session, integer revision)
+		-- 틀린 뒤에만 다시 도전
+		if not self:ValidSession(session, revision, senderUserId) or not self._failed then return end
+		self._modalRemaining = 300 self:StartQuestions()
+	end
+
+	@ExecSpace("Server")
+	method void RequestCancel(integer session)
+		-- 닫기
+		if not self._open or self._session ~= session or self._userId ~= senderUserId then return end
+		self:EndModal()
+	end
+
+	@ExecSpace("ServerOnly")
+	method void EndModal()
+		-- 팝업을 닫고 자기 일시정지만 푼다
+		if not self._open then return end
+		local userId = self._userId local session = self._session
+		self._open = false self._object = nil self._userId = "" self._modalRemaining = 0
+		_GameManager:SetEasterEggPaused(false)
+		if userId ~= "" then _Ep4EasterEggUI:HideModal(session, userId) end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void GrantReward(Entity obj)
+		-- 루디브리엄 퀴즈와 같은 보상: 하얀 포션 + 장착 스킬 1회 강화 + 공용 덤
+		if not isvalid(obj) then return end
+		local p = obj.TransformComponent.WorldPosition
+		local f = _GameManager:GetGroundFallFor(obj, p)
+		_GameManager:ApplyPotionDrop(2, p, f.x, f.y, 1)
+		local pool = _CardManager:BuildActiveUpgradePool()
+		if #pool > 0 then _CardManager:GrantCardUpgradesFromPool(pool, p, f.x, f.y, 1, 1, 0) end
+		_EasterEggBonusLogic:RollBonus(p, f.x, f.y)
+		_AchievementLogic:OnEasterEgg()
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnUpdate(number delta)
+		-- 게임오버/존 이탈/장시간 방치로 정지가 남지 않게 정리
+		if not self._open then return end
+		self._modalRemaining = self._modalRemaining - delta
+		if self._modalRemaining <= 0 or not self:ValidObject(self._object, self._userId) then self:EndModal() end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		-- 새 게임/다시하기에 초기화
+		self:EndModal()
+		self.QuizComplete = false
+		self._quizIds = {} self._step = 0 self._failed = false self._busy = false
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnEndPlay()
+		-- 세션 종료 시 일시정지 정리
+		self:EndModal()
+	end
+end

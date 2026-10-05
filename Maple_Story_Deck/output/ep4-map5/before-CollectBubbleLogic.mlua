@@ -1,0 +1,236 @@
+@Logic
+script CollectBubbleLogic extends Logic
+
+	-- 잡템 모아오기 퀘스트 공용 말풍선(유저 지정 2026-09-30): "몬스터 그림 → 잡템 아이콘 X남은개수".
+	-- 쓰는 곳: Map04CollectLogic(에피1 맵4 NPC) / Ep2Map1GiftNpcLogic / Ep3Map2CollectLogic /
+	--          Ep3Map3CollectLogic(목표 2개 → 말풍선 2개 좌우 대칭, 다 모은 쪽은 안 띄움).
+	-- 모델은 DualGiftBubble(Icon1/Count1/Icon2/Count2)을 재활용하고 전체를 BubbleScale배로 키운다.
+	-- 그림은 도감처럼 정해진 칸(박스)에 비율 유지로 꽉 맞춘다 — 큰 몬스터는 줄이고 작은 건 키워서 말풍선 밖으로
+	-- 안 나가게(유저 지정 "베스트핏"). 박스/글자 값은 유저가 맵4 프리뷰에서 여우/여우꼬리로 맞춘 자리에서 계산했다.
+	-- 대칭(mirror): 배경만 좌우로 뒤집고(꼬리 방향), 안의 "몬스터 → 잡템" 순서/그림은 뒤집지 않는다.
+	-- ⚠ 새 잡템 퀘스트/목표를 추가하면 _monsterByItem(그 잡템을 주는 몬스터 그림 + 외곽)과
+	--   _itemBounds(아이콘 외곽)에 같이 넣을 것. 외곽 값은 msw-search로 잰 "기준점 기준 px(좌, 우, 아래, 위)".
+
+	property string BubbleModelId = "dualgiftbubble"
+	property number BubbleScale = 1.3
+	-- 몬스터와 같은 Default 레이어에서 배경 < 아이콘 < 글씨 순서로 앞에 그린다.
+	property string BubbleSortingLayer = "Default"
+	property integer BubbleOrderInLayer = 1000
+	property string ArrowText = "→"
+	property Vector2 MonsterBoxCenter = Vector2(-0.5731, 0.1027)
+	property Vector2 MonsterBoxSize = Vector2(0.5717, 0.4678)
+	property Vector2 ItemBoxCenter = Vector2(0.4421, 0.1324)
+	property Vector2 ItemBoxSize = Vector2(0.4788, 0.4104)
+	property Vector3 ArrowTextPosition = Vector3(-0.0409, 0.0632, 0.0001)
+	property number ArrowFontSize = 3
+	property Vector3 CountTextPosition = Vector3(0.7055, -0.0274, 0.0001)
+	property number CountFontSize = 2
+	-- 대칭 말풍선일 때 안쪽 내용 전체를 옆으로 미는 양(배경 뒤집는 기준점이 가운데가 아니면 내용이 치우친다 — 프리뷰로 맞춤)
+	property number MirrorContentShiftX = 0
+
+	property string TextFont = "Maple"
+	property Color TextOutlineColor = Color(0, 0, 0, 1)
+	property number TextOutlineWidth = 0.25  -- 유저 지정 2026-09-30(글자 크기 2라 외곽선이 두꺼워 보여서 0.4189→0.25)
+	property number TextFaceDilate = 0.3590512
+	property Color TextFontColor = Color(1, 1, 1, 1)
+	property Vector2 TextRectSize = Vector2(0.59, 0.45)
+
+	-- 잡템 → 그 잡템을 떨어뜨리는 몬스터 stand 그림 + 외곽(GameManager.GetMonsterLootItemId/GetMapStandRUID 대응)
+	property table _monsterByItem = {
+		-- 에피4 map3: 실제 이미지 기준점/외곽을 공용 칸에 맞춘다.
+		block_golem_card = {"313597e842e0478683ed4637b039c0f2", -64, 84, 0, 132},
+		clock_spring = {"c3893f6cb42842b38137f532bbe104b5", -18, 19, 0, 37},
+		chronos_egg = {"1356c7ad27254459aaf789b51a75875c", -29, 26, 15, 77},
+		bloctopus_blueprint = {"826410e1bd4e4a12a612ab642c19c705", -23, 24, 0, 70},
+		ticktock_egg = {"cb4724a35f634855b2ade45e33282df5", -30, 31, 0, 65},
+		platoon_chronos_card = {"ab7c2d45061e4604b9f9cb4876fa0aad", -40, 37, 13, 92},
+		king_block_golem_card = {"7557013792a942949cbdb669319e1995", -69, 85, 0, 142},
+		king_bloctopus_card = {"cb5eb9faaf68477292af0b710e383c9d", -23, 24, 0, 74},
+		master_chronos_card = {"7cb31896e5284dd1a88d1630c04d5194", -40, 39, 6, 92},
+		-- 에피4 map1·map2: stand 전체 프레임의 실제 외곽, 기존 공용 칸에 맞춘다.
+		teddy_cotton = {"46fd51a318b64738a36beeb3db02a970", -49, 35, 0, 51},
+		pink_teddy_omok = {"c1da8423a262404a8823d5bb998b642a", -49, 35, 0, 56},
+		ratz_trap = {"383e34f2a8584a96a01b80a8fadbb813", -21, 31, 0, 41},
+		chirppy_card = {"460c55f55f4f4d4a9fe563028b4f6360", -27, 28, 21, 71},
+		panda_teddy_omok = {"eb42381dd5994cecb4a4b63fd502a6e4", -49, 35, 0, 51},
+		toy_trojan_tail = {"f9a2d6e8feaf4c90a3e00d022932fdaa", -62, 48, 0, 126},
+		roloduck_card = {"0f75b227ff894006bba780155aaa550c", -51, 50, 0, 45},
+		trixter_omok = {"ba8b7947b4ff4cdb89b0f85f5f55d2b6", -31, 36, 11, 235},
+		robotoy_battery = {"ac8a09b2038445539daebd786d5c6b81", -40, 40, 0, 94},
+		black_ratz_card = {"edde2cc491634e82855c35df83aa5e95", -27, 39, 0, 49},
+		pink_saver_card = {"067865d944154fc6b63acfe01397a7e9", -48, 29, 24, 72},
+		toy_drum = {"20283346c1db42b593fdddb218ea769a", -18, 18, 0, 50},
+		green_trixter_card = {"218a38c65758469fa278aa9a0810c529", -31, 36, 11, 235},
+		sky_saver_card = {"a5b6406d64bb4446ba1601b7fe8bd2de", -29, 30, 24, 65},
+		squaroid_screw = {"9102c5c5e6784e0f9e8434606e27994d", -34, 29, 0, 84},
+		master_robo_battery = {"f5d65e28cb0e4990bf5727015f22e0f1", -40, 40, 0, 94},
+		-- 에피2 map1(존45~54)
+		star_pixie_dust = {"ca136923b7e84267af993bdbabada385", -27, 33, 8, 66},        -- 스타픽시
+		luna_pixie_moon_shard = {"ff4a57bc3d4a4488b0053c33f4c3369f", -27, 33, 8, 66},  -- 루나픽시
+		nepenthes_seed = {"60ec738a94b94260b604b1d0298ceba0", -46, 18, 0, 52},         -- 네펜데스
+		luster_pixie_wing = {"35f555b27d3a4d438224a29e73fac305", -27, 33, 8, 66},      -- 러스터픽시
+		ghost_pixie_veil = {"6689cd11090a46d28de80d513c597e35", -32, 36, 2, 72},       -- 고스트픽시
+		dark_nepenthes_seed = {"322dd26916f4454c9e3c671a5454d45e", -46, 28, 0, 52},    -- 다크네펜데스
+		giant_nepenthes_seed = {"886d6be444184e68b0afc64787e954b3", -53, 39, -3, 109}, -- 거대네펜데스
+		-- 에피3 map2(존99~108)
+		jr_yeti_snowball = {"1975dd704eec461ab49bdeb0c11c54d9", -47, 25, -1, 63},      -- 주니어예티
+		dark_jr_yeti_hide = {"ce56cf9613174f80976dab5b61f7b604", -51, 25, -1, 71},     -- 다크주니어예티
+		lity_fur = {"498247438e4a4c3ea4cd26889b2caa28", -15, 17, 14, 50},              -- 리티
+		paranmini_bean_jelly = {"e9e6f404466c416796dc2918720e6f78", -27, 29, 12, 92},  -- 파랑미니빈
+		dark_lity_fur = {"937d0ab472854095a8ea9f37dfe80ea3", -15, 17, 14, 50},         -- 다크리티
+		yeti_horn = {"2fa39477afb34d8cb6412b7fe5085f42", -44, 56, 0, 108},             -- 예티
+		dark_yeti_horn = {"f6467914a7f84409b2937fa3668db94d", -44, 56, 0, 108},        -- 다크예티
+		yeti_pepe_ice_shard = {"cbf4102c85be4ed98ac4d9a381bcdd5a", -53, 59, 0, 160},   -- 예티와페페
+		dark_yeti_pepe_ice_shard = {"70329bd13ca243198d1afac3f77143a6", -53, 59, 0, 160}, -- 다크예티와페페
+		-- 에피3 map3(존109~118)
+		werewolf_fang = {"3378ea564ffc4be7a01ba02cffec532e", -73, 67, 0, 164},         -- 웨어울프
+		lycan_claw = {"c3a0976cc92843979454d75b814f34c6", -73, 67, 0, 164},            -- 라이칸스로프
+		flyeye_eyeball = {"04d56278279f45c6a99f6726ef5c91fe", -35, 53, 0, 52},         -- 플라이아이
+		snowman_crystal = {"bf93196a2da842eaaf93c944453416d8", -98, 114, 0, 176},      -- 스노우맨
+	}
+
+	-- 잡템 아이콘 외곽(기준점 기준 px: 좌, 우, 아래, 위)
+	property table _itemBounds = {
+		-- 에피4 map3: 실제 이미지 기준점/외곽을 공용 칸에 맞춘다.
+		block_golem_card = {0, 27, 0, 38},
+		clock_spring = {0, 32, 0, 32},
+		chronos_egg = {5, 27, 1, 29},
+		bloctopus_blueprint = {4, 30, 4, 28},
+		ticktock_egg = {2, 31, 1, 31},
+		platoon_chronos_card = {0, 27, 0, 38},
+		king_block_golem_card = {0, 27, 0, 38},
+		king_bloctopus_card = {0, 27, 0, 38},
+		master_chronos_card = {0, 27, 0, 38},
+		-- 에피4 map1·map2 잡템: 실제 스프라이트 외곽.
+		teddy_cotton = {4, 28, 4, 25},
+		pink_teddy_omok = {5, 28, 4, 26},
+		ratz_trap = {2, 30, 1, 29},
+		chirppy_card = {0, 27, 0, 38},
+		panda_teddy_omok = {5, 28, 4, 26},
+		toy_trojan_tail = {2, 28, 4, 31},
+		roloduck_card = {0, 27, 0, 38},
+		trixter_omok = {5, 28, 4, 26},
+		robotoy_battery = {1, 32, 3, 31},
+		black_ratz_card = {0, 27, 0, 38},
+		pink_saver_card = {0, 27, 0, 38},
+		toy_drum = {4, 31, 3, 28},
+		green_trixter_card = {0, 27, 0, 38},
+		sky_saver_card = {0, 27, 0, 38},
+		squaroid_screw = {3, 28, 4, 28},
+		master_robo_battery = {10, 23, 3, 29},
+		fox_tail = {2, 30, 3, 27}, pig_tail = {2, 30, 2, 30}, orange_mushroom_cap = {1, 33, 2, 30},
+		stump_tear = {3, 31, 1, 33}, old_leather = {1, 33, 1, 33},
+		star_pixie_dust = {2, 34, 2, 34}, luna_pixie_moon_shard = {2, 34, 1, 33}, nepenthes_seed = {5, 33, 1, 29},
+		luster_pixie_wing = {3, 31, 3, 31}, ghost_pixie_veil = {1, 33, 1, 33}, dark_nepenthes_seed = {2, 34, 0, 32},
+		giant_nepenthes_seed = {7, 27, 2, 30},
+		jr_yeti_snowball = {3, 31, 4, 28}, dark_jr_yeti_hide = {1, 33, 4, 32}, lity_fur = {5, 33, 2, 26},
+		paranmini_bean_jelly = {3, 31, 2, 30}, dark_lity_fur = {5, 33, 2, 26}, yeti_horn = {3, 31, 2, 30},
+		dark_yeti_horn = {3, 31, 2, 30}, yeti_pepe_ice_shard = {0, 32, 5, 29}, dark_yeti_pepe_ice_shard = {5, 29, 1, 33},
+		werewolf_fang = {3, 31, 3, 31}, lycan_claw = {3, 31, 3, 31}, snowman_crystal = {0, 32, 0, 36},
+		flyeye_eyeball = {0, 32, -1, 31},
+	}
+
+	@ExecSpace("ServerOnly")
+	method Entity SpawnItemQuestBubble(Entity map, Vector3 pos, string entityName, string itemId, string countText, boolean mirror)
+		-- 잡템 id만으로 말풍선(그 잡템을 주는 몬스터 그림을 표에서 찾는다). 표에 없으면 몬스터 칸은 비운다
+		local m = self._monsterByItem[itemId]
+		local ruid = ""
+		local mb = {-30, 30, 0, 60}
+		if m ~= nil then
+			ruid = m[1]
+			mb = {m[2], m[3], m[4], m[5]}
+		else
+			log_warning("CollectBubble: no monster mapped for " .. itemId)
+		end
+		return self:SpawnQuestBubble(map, pos, entityName, ruid, mb, itemId, countText, mirror)
+	end
+
+	@ExecSpace("ServerOnly")
+	method Entity SpawnQuestBubble(Entity map, Vector3 pos, string entityName, string monsterRuid, table mb, string itemId, string countText, boolean mirror)
+		-- 몬스터(mb = 외곽 {좌, 우, 아래, 위}) → 잡템 아이콘 + 개수 말풍선을 만들어 돌려준다(지우는 건 호출측)
+		local bubble = _SpawnService:SpawnByModelId(self.BubbleModelId, entityName, pos, map)
+		if bubble == nil then
+			log_error("CollectBubble: bubble spawn failed")
+			return nil
+		end
+		self:ApplyForegroundDepth(bubble)
+		local rootScale = bubble.TransformComponent.Scale
+		bubble.TransformComponent.Scale = Vector3(rootScale.x * self.BubbleScale, rootScale.y * self.BubbleScale, rootScale.z)
+		if bubble.SpriteRendererComponent ~= nil then bubble.SpriteRendererComponent.FlipX = mirror end
+		local shiftX = 0
+		if mirror then shiftX = self.MirrorContentShiftX end
+
+		if monsterRuid ~= "" then
+			self:FitIcon(bubble, "Icon1", monsterRuid, mb[1], mb[2], mb[3], mb[4], self.MonsterBoxCenter, self.MonsterBoxSize, shiftX)
+		end
+		local itemDef = _PlayerInventory:GetItemDef(itemId)
+		local ib = self._itemBounds[itemId]
+		if ib == nil then ib = {2, 30, 2, 30} end
+		if itemDef ~= nil then
+			self:FitIcon(bubble, "Icon2", itemDef.icon, ib[1], ib[2], ib[3], ib[4], self.ItemBoxCenter, self.ItemBoxSize, shiftX)
+		end
+		local ap = self.ArrowTextPosition
+		local cp = self.CountTextPosition
+		self:FillText(bubble, "Count1", self.ArrowText, Vector3(ap.x + shiftX, ap.y, ap.z), self.ArrowFontSize)
+		self:FillText(bubble, "Count2", countText, Vector3(cp.x + shiftX, cp.y, cp.z), self.CountFontSize)
+		return bubble
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ApplyForegroundDepth(Entity bubble)
+		-- Z만 당기면 다른 레이어의 몬스터에 가려지므로 말풍선의 모든 렌더러에 표시 우선순위를 준다.
+		local bg=bubble.SpriteRendererComponent
+		if bg~=nil then
+			bg.IgnoreMapLayerCheck=true bg.SortingLayer=self.BubbleSortingLayer bg.OrderInLayer=self.BubbleOrderInLayer
+		end
+		for _,child in pairs(bubble.Children) do
+			local icon=child.SpriteRendererComponent
+			if icon~=nil then
+				icon.IgnoreMapLayerCheck=true icon.SortingLayer=self.BubbleSortingLayer icon.OrderInLayer=self.BubbleOrderInLayer+1
+			end
+			local text=child.TextRendererComponent
+			if text~=nil then
+				text.IgnoreMapLayerCheck=true text.SortingLayer=self.BubbleSortingLayer text.OrderInLayer=self.BubbleOrderInLayer+2
+			end
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void FitIcon(Entity bubble, string childName, string ruid, number left, number right, number bottom, number top, Vector2 boxCenter, Vector2 boxSize, number shiftX)
+		-- 그림 외곽을 박스에 비율 유지로 꽉 맞추고(큰 건 줄이고 작은 건 키움) 그림 한가운데를 박스 중심에 둔다
+		local icon = bubble:GetChildByName(childName)
+		if icon == nil or icon.SpriteRendererComponent == nil then return end
+		icon.SpriteRendererComponent.SpriteRUID = ruid
+		local w = math.max(1, right - left) / 100
+		local h = math.max(1, top - bottom) / 100
+		local sc = math.min(boxSize.x / w, boxSize.y / h)
+		local midX = (left + right) * 0.5 / 100 * sc
+		local midY = (bottom + top) * 0.5 / 100 * sc
+		local z = icon.TransformComponent.Position.z
+		icon.TransformComponent.Scale = Vector3(sc, sc, 1)
+		icon.TransformComponent.Position = Vector3(boxCenter.x - midX + shiftX, boxCenter.y - midY, z)
+		icon.Enable = true
+	end
+
+	@ExecSpace("ServerOnly")
+	method void FillText(Entity bubble, string childName, string text, Vector3 textPos, number fontSize)
+		-- 글자 칸 하나(다른 수집 이스터에그와 같은 글꼴/외곽선)
+		local count = bubble:GetChildByName(childName)
+		if count == nil then return end
+		local textRenderer = count.TextRendererComponent
+		if textRenderer ~= nil then
+			textRenderer.Text = text
+			textRenderer.Font = self.TextFont
+			textRenderer.FontColor = self.TextFontColor
+			textRenderer.FontSize = fontSize
+			textRenderer.OutlineColor = self.TextOutlineColor
+			textRenderer.OutlineWidth = self.TextOutlineWidth
+			textRenderer.FaceDilate = self.TextFaceDilate
+			textRenderer.RectSize = self.TextRectSize
+			textRenderer.Wrapping = false
+		end
+		count.TransformComponent.Position = textPos
+		count.Enable = true
+	end
+
+end
