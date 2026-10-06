@@ -1,5 +1,5 @@
 // 2026-09-23 출시 전 번역 점검(이번 업데이트분).
-// ① 코드/.ui가 참조하는 번역 키가 GameText.csv에 있고 ko/en/zh-tw/ja가 모두 채워졌는지(전체)
+// ① 코드/.ui가 참조하는 번역 키가 GameText.csv에 있고 언어 칸(locale_lib LANGS)이 모두 채워졌는지(전체)
 // ② 마지막 커밋 이후 추가된 .mlua 줄에서 키로 안 바뀐 한글 문자열(주석·log 제외)
 // ③ 이번에 수정한 .ui에서 IsLocalizationKey가 아닌 한글 텍스트
 const fs = require('fs');
@@ -27,7 +27,7 @@ const head = csv[0];
 const col = (n) => head.indexOf(n);
 const table = new Map();
 for (const r of csv.slice(1)) if (r[0]) table.set(r[0], r);
-const LANGS = ['ko', 'en', 'zh-tw', 'ja'];
+const LANGS = require('./locale_lib.cjs').LANGS;
 console.log('columns:', head.join('|'), ' rows:', table.size);
 
 // ① 참조 키 수집

@@ -11,7 +11,7 @@ const { UIBuilder } = require("../.claude/skills/msw-ui-system/scripts/msw_ui_bu
 function parseCsv(s) { const r = []; let row = [], c = "", q = false; for (let i = 0; i < s.length; i++) { const ch = s[i]; if (q) { if (ch === '"') { if (s[i + 1] === '"') { c += '"'; i++; } else q = false; } else c += ch; } else if (ch === '"') q = true; else if (ch === ",") { row.push(c); c = ""; } else if (ch === "\r") { } else if (ch === "\n") { row.push(c); r.push(row); row = []; c = ""; } else c += ch; } if (c !== "" || row.length) { row.push(c); r.push(row); } return r; }
 const g = parseCsv(fs.readFileSync("RootDesk/MyDesk/Localization/GameText.csv", "utf8").replace(/^﻿/, ""));
 const gh = g.shift();
-const T = new Map(g.map((r) => [r[0], { ko: r[gh.indexOf("ko")], en: r[gh.indexOf("en")], zh: r[gh.indexOf("zh-tw")], ja: r[gh.indexOf("ja")] }]));
+const T = new Map(g.map((r) => [r[0], { ko: r[gh.indexOf("ko")], en: r[gh.indexOf("en")], zh: r[gh.indexOf("zh-tw")], cn: r[gh.indexOf("zh-cn")] || "", ja: r[gh.indexOf("ja")] }]));
 
 // ── 글자 폭 추정(글자크기 1 기준) ─────────────────────────────
 function cw(ch) {
@@ -110,18 +110,18 @@ for (const c of checks) {
   const id = c.key + "@" + c.box.path; if (seen.has(id)) continue; seen.add(id);
   if (c.box.sizeFit) continue; if (c.box.W < 20 || c.box.H < 12) continue; // 칸이 글자에 맞춰 늘어나는 설정
   const tr = T.get(c.key);
-  const koH = c.box.bestFit ? 0 : fits(fill(tr.ko), c.box.size, c.box.W, 1e9).h; const ko = evalText(fill(tr.ko), c.box, koH), en = evalText(fill(tr.en), c.box, koH), ja = evalText(fill(tr.ja), c.box, koH), zh = evalText(fill(tr.zh), c.box, koH);
+  const koH = c.box.bestFit ? 0 : fits(fill(tr.ko), c.box.size, c.box.W, 1e9).h; const ko = evalText(fill(tr.ko), c.box, koH), en = evalText(fill(tr.en), c.box, koH), ja = evalText(fill(tr.ja), c.box, koH), zh = evalText(fill(tr.zh), c.box, koH), cn = evalText(fill(tr.cn), c.box, koH);
   const status = (r) => r.ok ? (c.box.bestFit && r.size < c.box.max ? `축소 ${Math.round(r.size / c.box.max * 100)}%` : "OK") : `넘침 x${r.ratio.toFixed(2)}`;
-  rows.push({ c, tr, ko, en, ja, zh, sev: Math.max(en.ok ? 0 : en.ratio, ja.ok ? 0 : ja.ratio, zh.ok ? 0 : zh.ratio), newBad: ko.ok && (!en.ok || !ja.ok || !zh.ok), sk: status(ko), se: status(en), sj: status(ja), sz: status(zh) });
+  rows.push({ c, tr, ko, en, ja, zh, cn, sev: Math.max(en.ok ? 0 : en.ratio, ja.ok ? 0 : ja.ratio, zh.ok ? 0 : zh.ratio, cn.ok ? 0 : cn.ratio), newBad: ko.ok && (!en.ok || !ja.ok || !zh.ok || !cn.ok), sk: status(ko), se: status(en), sj: status(ja), sz: status(zh), sc: status(cn) });
 }
 rows.sort((a, b) => (b.newBad - a.newBad) || (b.sev - a.sev));
-const bad = rows.filter((r) => !r.en.ok || !r.ja.ok || !r.zh.ok);
+const bad = rows.filter((r) => !r.en.ok || !r.ja.ok || !r.zh.ok || !r.cn.ok);
 console.log(`점검한 텍스트: ${rows.length}개 (A .ui ${checks.filter((x) => x.src === "ui").length} + B/C 코드 연결)  →  en/ja 넘침 ${bad.length}개 (그중 한국어는 들어가던 곳 ${bad.filter((r) => r.newBad).length}개)`);
-const shrink = rows.filter((r) => r.en.ok && r.ja.ok && r.zh.ok && (/축소/.test(r.se) || /축소/.test(r.sj) || /축소/.test(r.sz)));
+const shrink = rows.filter((r) => r.en.ok && r.ja.ok && r.zh.ok && r.cn.ok && (/축소/.test(r.se) || /축소/.test(r.sj) || /축소/.test(r.sz) || /축소/.test(r.sc)));
 console.log(`BestFit으로 글자가 줄어드는 곳: ${shrink.length}개`);
-for (const r of bad.slice(0, 80)) console.log(`${r.newBad ? "🆕" : "  "} ${r.c.key.padEnd(34)} ko[${r.sk}] en[${r.se}] ja[${r.sj}] zh[${r.sz}]  ${r.c.box.file}:${r.c.box.path.replace(/^\/ui\/[^/]+\//, "")} (${Math.round(r.c.box.W)}x${Math.round(r.c.box.H)}, ${r.c.box.bestFit ? "BestFit" : r.c.box.size + "px"})  en="${r.tr.en.replace(/\n/g, "⏎").slice(0, 40)}"`);
+for (const r of bad.slice(0, 80)) console.log(`${r.newBad ? "🆕" : "  "} ${r.c.key.padEnd(34)} ko[${r.sk}] en[${r.se}] ja[${r.sj}] zh[${r.sz}] cn[${r.sc}]  ${r.c.box.file}:${r.c.box.path.replace(/^\/ui\/[^/]+\//, "")} (${Math.round(r.c.box.W)}x${Math.round(r.c.box.H)}, ${r.c.box.bestFit ? "BestFit" : r.c.box.size + "px"})  en="${r.tr.en.replace(/\n/g, "⏎").slice(0, 40)}"`);
 const cell = (v) => { const s = String(v ?? ""); return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
-const out = [["신규(한국어는OK)", "Key", "출처", "UI파일", "엔티티", "칸(WxH)", "글자", "ko", "en", "ja", "zh-tw", "ko원문", "en", "ja", "zh-tw"]].concat(
-  bad.concat(shrink).map((r) => [r.newBad ? "Y" : "", r.c.key, r.c.src, r.c.box.file, r.c.box.path, `${Math.round(r.c.box.W)}x${Math.round(r.c.box.H)}`, r.c.box.bestFit ? `BestFit ${r.c.box.min}-${r.c.box.max}` : r.c.box.size, r.sk, r.se, r.sj, r.sz, r.tr.ko, r.tr.en, r.tr.ja, r.tr.zh]));
+const out = [["신규(한국어는OK)", "Key", "출처", "UI파일", "엔티티", "칸(WxH)", "글자", "ko", "en", "ja", "zh-tw", "zh-cn", "ko원문", "en", "ja", "zh-tw", "zh-cn"]].concat(
+  bad.concat(shrink).map((r) => [r.newBad ? "Y" : "", r.c.key, r.c.src, r.c.box.file, r.c.box.path, `${Math.round(r.c.box.W)}x${Math.round(r.c.box.H)}`, r.c.box.bestFit ? `BestFit ${r.c.box.min}-${r.c.box.max}` : r.c.box.size, r.sk, r.se, r.sj, r.sz, r.sc, r.tr.ko, r.tr.en, r.tr.ja, r.tr.zh, r.tr.cn]));
 fs.writeFileSync("Docs/Localization/overflow_report.csv", "﻿" + out.map((r) => r.map(cell).join(",")).join("\r\n") + "\r\n", "utf8");
 console.log("\n→ Docs/Localization/overflow_report.csv");

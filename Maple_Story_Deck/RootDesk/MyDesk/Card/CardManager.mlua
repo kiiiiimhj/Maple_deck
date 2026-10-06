@@ -9376,6 +9376,8 @@ script CardManager extends Logic
 
 			local percent = self:GetDualShadowPartnerBasicPercent(self.DualShadowPartnerLevel)
 			if role == 1 then percent = self:GetDualShadowPartnerSkillPercent(self.DualShadowPartnerLevel) end
+			-- 듀얼 쉐도우 파트너(190) 자체의 최종 스킬 대미지 강화는 복제 비율에 곱한다(GetCardDamage(190)은 표시용)
+			percent = percent * self:GetFinalSkillBonusMult(190)
 			local baseDamage = self:GetCardDamage(cardIdx) * percent
 			local isCrit = self:RollCrit(cardIdx)
 
@@ -14982,7 +14984,7 @@ script CardManager extends Logic
 	-- 개발 중 다시 켤 때만 true로. true면 L/K/P/O 디버그 키가 전부 열린다.
 	-- 2026-09-30 테스트용으로 켰다가 2026-10-01 스킬 테스트 끝나 다시 false
 	-- 2026-10-03 베노아 테스트용으로 다시 true — ⚠ 출시 전 false
-	property boolean DebugMode = false
+	property boolean DebugMode = true
 	property any _debugKeyHandler = nil
 
 	-- 서버 전용 타이머 (슬롯별)
@@ -18909,6 +18911,37 @@ script CardManager extends Logic
 		return self.dropFlyIcon
 	end
 
+	-- ── 비행 아이콘 3개 공유 보호(2026-10-06 유저 리포트 "스킬 드롭 먹고 또 나왔는데 이미지가 안 뜸") ──
+	-- 드롭/선택 비행이 같은 아이콘을 겹쳐 쓰면, 먼저 시작한 연출의 "도착 시 끄기" 타이머가 나중 연출의
+	-- 아이콘을 꺼버렸다. 아이콘을 쓸 때마다 세대 번호를 올리고, 모든 트윈/타이머는 자기 세대일 때만 손댄다.
+	@ExecSpace("ClientOnly")
+	method integer ClaimDropIcon(SpriteGUIRendererComponent icon)
+		if self._T.dropIconGen == nil then self._T.dropIconGen = {} end
+		local key = icon.Entity.Id
+		local gen = (self._T.dropIconGen[key] or 0) + 1
+		self._T.dropIconGen[key] = gen
+		return gen
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean OwnsDropIcon(SpriteGUIRendererComponent icon, integer token)
+		-- 이 연출(token)이 아직 아이콘의 주인인가
+		if not isvalid(icon) or self._T.dropIconGen == nil then return false end
+		return self._T.dropIconGen[icon.Entity.Id] == token
+	end
+
+	@ExecSpace("ClientOnly")
+	method SpriteGUIRendererComponent PickDropIcon(integer preferredIdx)
+		-- 원하는 번호가 쉬고 있으면 그것, 아니면 쉬는 다른 아이콘, 셋 다 바쁘면 원하는 번호를 빼앗는다
+		local preferred = self:GetDropIcon(preferredIdx)
+		if isvalid(preferred) and not preferred.Entity.Enable then return preferred end
+		for i = 1, 3 do
+			local c = self:GetDropIcon(i)
+			if isvalid(c) and not c.Entity.Enable then return c end
+		end
+		return preferred
+	end
+
 	method SpriteGUIRendererComponent GetSlotRenderer(integer slotIdx)
 		if slotIdx == 1 then return self.slot1
 		elseif slotIdx == 2 then return self.slot2
@@ -19146,6 +19179,73 @@ script CardManager extends Logic
 		return 1.0
 	end
 
+	-- ── 최종 스킬 대미지 강화(2026-10-06 유저 지정) ─────────────────────────────────────
+	-- 레벨업 선택지가 3장이 안 될 때 예전엔 기본공격 강화로 채웠는데, 이제는 Lv3(최대)까지 끝낸
+	-- 최종 단계 스킬(조합/진화 스킬, 최대 레벨이 3인 것) 하나를 골라 "그 스킬만" 대미지를 올린다.
+	-- 한 번 고를 때마다 +5%, 그 스킬을 5번째로 고를 때마다 +10%(5,5,5,5,10 반복, 상한 없음, 합연산).
+	-- 그런 스킬이 하나도 없을 때만 예전 기본공격 강화가 빈칸을 채운다. 키 = tostring(cardIdx),
+	-- 값 = 고른 횟수. 클라 툴팁/선택지 문구도 같은 값을 읽으므로 @Sync.
+	@Sync property SyncTable<string, integer> FinalSkillBonusPicks
+
+	-- 최대 레벨이 3인 최종 단계 스킬 50종(GenerateLevelUpChoices의 "< 3" 강화 항목과 같은 목록)
+	property table FinalSkillCards = { 16, 17, 19, 20, 21, 23, 24, 27, 28,
+		114, 115, 116, 117, 118, 119, 120, 122, 123,
+		160, 165, 166, 167, 168, 169, 170, 193, 194,
+		185, 186, 187, 188, 189, 190, 191,
+		215, 216, 217, 218, 219, 220, 221, 222,
+		237, 238, 239, 240, 241, 242, 243, 244 }
+
+	method boolean IsFinalSkillCard(integer cardIdx)
+		-- 최대 레벨이 3인 최종 단계 스킬인지
+		for _, idx in ipairs(self.FinalSkillCards) do
+			if idx == cardIdx then return true end
+		end
+		return false
+	end
+
+	method integer GetFinalSkillBonusPicks(integer cardIdx)
+		-- 이 최종 스킬의 대미지 강화를 지금까지 몇 번 골랐는지
+		local v = self.FinalSkillBonusPicks[tostring(cardIdx)]
+		if v == nil then return 0 end
+		return v
+	end
+
+	method integer GetFinalSkillBonusPercent(integer picks)
+		-- picks번 골랐을 때 누적 대미지 보너스(%) — 매번 +5, 5의 배수 번째엔 +5 더(=+10)
+		return picks * 5 + (picks // 5) * 5
+	end
+
+	method integer GetFinalSkillNextStep(integer cardIdx)
+		-- 다음 한 번을 고르면 오를 %(5번째마다 10)
+		if (self:GetFinalSkillBonusPicks(cardIdx) + 1) % 5 == 0 then return 10 end
+		return 5
+	end
+
+	method number GetFinalSkillBonusMult(integer cardIdx)
+		-- GetCardDamage에 곱하는 배율(강화 안 했으면 1.0)
+		local picks = self:GetFinalSkillBonusPicks(cardIdx)
+		if picks <= 0 then return 1.0 end
+		return 1.0 + self:GetFinalSkillBonusPercent(picks) / 100
+	end
+
+	@ExecSpace("ServerOnly")
+	method table BuildFinalSkillBonusCandidates()
+		-- Lv3까지 끝낸 최종 스킬 목록(선택지 빈칸 채우기 후보)
+		local list = {}
+		for _, idx in ipairs(self.FinalSkillCards) do
+			if self:GetSlotLevelNum(idx) >= 3 then table.insert(list, idx) end
+		end
+		return list
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetFinalSkillBonus()
+		-- 새 판(다시하기/캐릭터 변경) — 고른 횟수를 전부 비운다
+		for _, idx in ipairs(self.FinalSkillCards) do
+			self.FinalSkillBonusPicks[tostring(idx)] = nil
+		end
+	end
+
 	-- 캐릭터별 기본공격 카드인지 — 유물 효과가 "기본 공격력"과 "스킬 피해량"으로 갈리므로 필요하다.
 	-- 1 파이어샷(아르카나) / 25 애로우샷(실피드) / 150 레이온 / 172 쉐이드
 	method boolean IsBasicAttackCard(integer cardIdx)
@@ -19276,7 +19376,7 @@ script CardManager extends Logic
 		if self:IsBasicAttackCard(cardIdx) then
 			relicMult = _RelicInventory:GetBasicAtkMult()
 		end
-		return base * self:GetMeditationMult() * self:GetSkillInvDamageMult(cardIdx) * self:GetRapidFireMult() * self:GetWarriorMasteryMult() * self:GetPhysicalTrainingMult() * self:GetThiefCunningMult() * self:GetHighWisdomMult() * _GearEffectLogic:GetDamageMult() * relicMult
+		return base * self:GetMeditationMult() * self:GetSkillInvDamageMult(cardIdx) * self:GetRapidFireMult() * self:GetWarriorMasteryMult() * self:GetPhysicalTrainingMult() * self:GetThiefCunningMult() * self:GetHighWisdomMult() * _GearEffectLogic:GetDamageMult() * relicMult * self:GetFinalSkillBonusMult(cardIdx)
 	end
 
 	-- 2026-08-03: 몬스터 체력을 플레이어 화력에 비례시키던 GetBasicAttackCardIdx/GetStrongestActiveDamage는
@@ -19669,7 +19769,7 @@ script CardManager extends Logic
 	-- 2026-09-17 출시 준비로 false 적용. 개발 재개 시에만 true로 되돌린다.
 	-- 2026-09-30 테스트용으로 켰다가 2026-10-01 스킬 테스트 끝나 다시 false
 	-- 2026-10-03 베노아 테스트용으로 다시 true — ⚠ 출시 전 false
-	property boolean CheatCycleLevelOnClick = false
+	property boolean CheatCycleLevelOnClick = true
 
 	-- ── 디버그: 플레이어 기본 공격 임시 차단(개발자 전용) ──────────────
 	-- 기본 false — 에피소드2 map3 소환수(Ep2Map3SummonLogic) 광역기 판정 반경 튜닝처럼, 플레이어
@@ -21851,6 +21951,8 @@ script CardManager extends Logic
 			end
 			self.potionImage.ImageRUID = ruid
 			self.potionImage.Color = Color(1, 1, 1, 1)
+			-- 레벨업 선택으로 고른 포션이 날아오는 중이면 도착할 때까지 숨긴다(PunchNoSlotTarget이 다시 그림)
+			if self._T.pendingPotionReveal then self.potionImage.Color = Color(1, 1, 1, 0) end
 			-- 처음 얻거나 레벨업한 시점엔 보통 쿨타임이 없으므로 오버레이를 끈 채로 둔다.
 			-- 단, 체력이 닳아있던 상태라면 같은 프레임에 곧바로 실제 사용(PlayPotionCooldownVisual)이
 			-- 먼저 일어나 쿨타임이 이미 돌고 있을 수 있다 — 그 경우엔 여기서 꺼버리면 안 된다.
@@ -22274,6 +22376,11 @@ script CardManager extends Logic
 
 		panel:SetEnable(true)
 		fill.Entity:SetEnable(false)  -- 영구 활성이므로 잔여시간 표시 불필요
+		-- 레벨업 선택으로 막 배운 패시브는 날아오는 아이콘이 도착할 때까지 크기 0으로 숨겨 둔다(자리는 잡힘).
+		-- 도착하면 PunchNoSlotTarget이 0에서 튀어나오게 한다(유저 지정 2026-10-06)
+		if self._T.pendingPassiveReveal ~= nil and self._T.pendingPassiveReveal[buffName] then
+			panel.UITransformComponent.Scale = Vector3(0, 0, 1)
+		end
 		self:RepositionBuffIcons()
 	end
 
@@ -23274,15 +23381,23 @@ script CardManager extends Logic
 		-- 지금 뽑으면 도달할 레벨까지 전체 이력을 한 번에 보여준다. 뽑으면 적용될 그 레벨 줄만
 		-- <color=#FFFF00>(노란색)로 감싸고, 나머지는 기본 흰색 그대로 둔다(TooltipChangelog의
 		-- IsRichText 기본값 true 덕분에 별도 세팅 없이 바로 동작).
-		local changelog = self:GetCardLevelChangelog(cardIdx)
 		local lines = {}
-		for i, entry in ipairs(changelog) do
-			-- 변경내역 표(GetCardLevelChangelog)에는 로컬라이제이션 키가 들어 있다 — 여기(ClientOnly)서 푼다
-			local line = "Lv." .. i .. ": " .. _LocText:Resolve(entry)
-			if i == nextLevel then
-				line = "<color=#FFFF00>" .. line .. "</color>"
+		if upgradeType == "finaldmg" then
+			-- 최종 스킬 대미지 강화는 레벨 이력이 없다 — 규칙 / 지금 보너스 / 고르면 될 보너스(노란색)
+			local picks = self:GetFinalSkillBonusPicks(cardIdx)
+			table.insert(lines, _LocalizationService:GetText("MLUA_CARDMANAGER_615"))
+			table.insert(lines, _LocalizationService:GetTextFormat("FMT_CARDMANAGER_126", self:GetFinalSkillBonusPercent(picks)))
+			table.insert(lines, "<color=#FFFF00>" .. _LocalizationService:GetTextFormat("FMT_CARDMANAGER_127", self:GetFinalSkillNextStep(cardIdx), self:GetFinalSkillBonusPercent(picks + 1)) .. "</color>")
+		else
+			local changelog = self:GetCardLevelChangelog(cardIdx)
+			for i, entry in ipairs(changelog) do
+				-- 변경내역 표(GetCardLevelChangelog)에는 로컬라이제이션 키가 들어 있다 — 여기(ClientOnly)서 푼다
+				local line = "Lv." .. i .. ": " .. _LocText:Resolve(entry)
+				if i == nextLevel then
+					line = "<color=#FFFF00>" .. line .. "</color>"
+				end
+				table.insert(lines, line)
 			end
-			table.insert(lines, line)
 		end
 
 		self.tooltipName.Text = self:GetSlotBaseName(cardIdx)
@@ -27682,7 +27797,25 @@ script CardManager extends Logic
 			end
 		end
 
-		-- 풀이 3개 미만이면 상시 기본공격(파이어샷/애로우샷/레이온 기본공격) 강화로 패딩 — 다른 모든
+		-- 풀이 3개 미만이면 먼저 Lv3까지 끝낸 최종 스킬의 대미지 강화(+5%, 5번째마다 +10%)로 채운다
+		-- (2026-10-06 유저 지정 — 기본공격 강화 대신). 한 화면에 같은 스킬이 두 번 나오지 않게 한다.
+		if #chosen < 3 then
+			local finals = self:BuildFinalSkillBonusCandidates()
+			for i = #finals, 2, -1 do
+				local j = _UtilLogic:RandomIntegerRange(1, i)
+				finals[i], finals[j] = finals[j], finals[i]
+			end
+			for _, idx in ipairs(finals) do
+				if #chosen >= 3 then break end
+				if not usedCards[idx] then
+					usedCards[idx] = true
+					table.insert(chosen, { card = idx, type = "finaldmg" })
+				end
+			end
+			log("GenerateLevelUpChoices: final-skill bonus candidates=" .. #finals .. " chosen=" .. #chosen)
+		end
+
+		-- 그래도 3개 미만(최종 스킬이 하나도 없을 때)이면 상시 기본공격(파이어샷/애로우샷/레이온 기본공격) 강화로 패딩 — 다른 모든
 		-- 카드가 업그레이드할 게 없을 때 진입하는 유일한 경로. 5회 이후로는 쿨타임 선택지가 없으므로
 		-- (영구 고정) 데미지만 나온다. 실피드/레이온은 아르카나 파이어샷이 아예 안 틱되므로 각자의
 		-- 기본공격(카드25/150)으로 패딩해야 한다 — 안 그러면 다른 카드를 다 채운 뒤엔 아무 효과 없는
@@ -27828,6 +27961,15 @@ script CardManager extends Logic
 		-- 이 icon UI 요소는 카드마다 재사용되므로, 회전이 필요한 카드(GetCardIconRotation)가 아니면
 		-- 매번 0으로 되돌려야 이전에 표시했던 카드의 회전이 남지 않는다.
 		icon.Entity.UITransformComponent.UIRotation = Vector3(0, 0, self:GetCardIconRotation(cardIdx))
+
+		-- 최종 스킬 대미지 강화: 레벨 대신 이번에 오를 %(+5 / 5번째마다 +10)를 크게 보여준다
+		if upgradeType == "finaldmg" then
+			icon.ImageRUID = self:GetCardIconRUID(cardIdx)
+			title.Text = "+" .. self:GetFinalSkillNextStep(cardIdx) .. "%"
+			name.Text  = self:GetSlotBaseName(cardIdx)
+			desc.Text  = _LocalizationService:GetText("MLUA_CARDMANAGER_614")
+			return
+		end
 
 		if cardIdx == 6 then
 			local potionNames = {"MLUA_CARDMANAGER_503", "MLUA_CARDMANAGER_504", "MLUA_CARDMANAGER_505", "MLUA_CARDMANAGER_506", "MLUA_CARDMANAGER_507"}
@@ -29099,11 +29241,17 @@ script CardManager extends Logic
 		-- 고른 카드가 실제로 들어간 슬롯으로 아이콘을 날린다(2026-09-24 유저 지정 "그냥 카드가 열려서 인지가
 		-- 잘 안 된다 — 필드 드롭이 슬롯에 들어갈 때처럼 반짝이"). 슬롯은 적용이 끝난 **뒤에** 찾는다 —
 		-- 조합 스킬은 기존 슬롯을 이어받는 등 규칙이 복잡해 미리 추측하면 틀린다. 슬롯이 없는 패시브는 생략
+		local flewToSlot = false
 		for s = 1, 6 do
 			if self:GetSlotCard(s) == cardIdx then
 				self:PlayChoiceFlyToSlot(choiceIndex, cardIdx, s)
+				flewToSlot = true
 				break
 			end
+		end
+		-- 슬롯이 없는 패시브/포션은 각자의 칸으로 날린다(패시브 여부는 클라가 판정)
+		if not flewToSlot then
+			self:PlayChoiceFlyNoSlot(choiceIndex, cardIdx, self.PotionLevel, upgradeType == "unlock")
 		end
 
 		-- 튜토리얼의 마지막 단계 — 정지를 풀고 마무리 문구를 띄운다. 아래 _pendingLevelUps 재생성보다
@@ -29231,6 +29379,8 @@ script CardManager extends Logic
 	method boolean CanUpgradeCard(integer cardIdx, string upgradeType)
 		-- 해금 드롭(신규 스킬 획득)과 구식 배율 누적(dmg/cd)은 레벨 상한 개념이 없어 항상 적용된다
 		if upgradeType == "unlock" or upgradeType == "dmg" or upgradeType == "cd" then return true end
+		-- 최종 스킬 대미지 강화는 Lv3에서만 나오고 상한이 없다
+		if upgradeType == "finaldmg" then return true end
 		for _, idx in ipairs(self:BuildActiveUpgradePoolRaw()) do
 			if idx == cardIdx then return true end
 		end
@@ -29257,6 +29407,14 @@ script CardManager extends Logic
 
 	@ExecSpace("ServerOnly")
 	method void ApplyCardUpgradeInner(integer cardIdx, string upgradeType)
+		-- 최종 스킬 대미지 강화(레벨은 그대로, 고른 횟수만 +1 — GetCardDamage가 배율로 반영)
+		if upgradeType == "finaldmg" then
+			local picks = self:GetFinalSkillBonusPicks(cardIdx) + 1
+			self.FinalSkillBonusPicks[tostring(cardIdx)] = picks
+			log("FinalSkillBonus: card=" .. cardIdx .. " picks=" .. picks .. " total=+" .. self:GetFinalSkillBonusPercent(picks) .. "%")
+			return
+		end
+
 		-- 포션
 		if cardIdx == 6 then
 			if self.PotionLevel < 5 then
@@ -31911,6 +32069,7 @@ script CardManager extends Logic
 
 		self.Card1UpgradeCount = 0
 		self.Card2UpgradeCount = 0 ; self.Card5UpgradeCount = 0
+		self:ResetFinalSkillBonus()
 		self.ThunderBoltLevel = 0
 		self.ColdBeamLevel = 0
 
@@ -32717,8 +32876,9 @@ script CardManager extends Logic
 		local rawUI = _UILogic:ScreenToUIPosition(_UILogic:WorldToScreenPosition(worldPos))
 		local spreadX = (dropIdx - 2) * 70
 		local startUI = Vector2(rawUI.x + spreadX, rawUI.y + self.DropYOffset)
-		local icon = self:GetDropIcon(dropIdx)
+		local icon = self:PickDropIcon(dropIdx)
 		if not isvalid(icon) then return end
+		local token = self:ClaimDropIcon(icon)
 		icon.ImageRUID = self:GetCardIconRUID(cardIdx)
 		icon.Color = Color(1, 1, 1, 1)
 		icon.Entity:SetEnable(true)
@@ -32733,9 +32893,9 @@ script CardManager extends Logic
 		local continueFromGround = function(groundStartUI)
 			self:PlayDropPop(icon, groundStartUI, function(landUI)
 				_TimerService:SetTimerOnce(function()
-					self:FlyCardDropToSlot(icon, landUI, slotIdx, dropScale)
+					self:FlyCardDropToSlot(icon, landUI, slotIdx, dropScale, token)
 				end, groundDelay)
-			end)
+			end, token)
 		end
 
 		-- 비행형 엘리트(존15/16 등)는 사망 위치가 공중이므로, 홉 연출 전에 먼저 실제 발판 높이까지
@@ -32756,7 +32916,7 @@ script CardManager extends Logic
 			-- 등장 시작점(startUI)에만 오프셋을 남겨서 "몸에서 팡 튀어나오는" 연출은 그대로 유지한다.
 			local groundRawUI = _UILogic:ScreenToUIPosition(_UILogic:WorldToScreenPosition(Vector2(worldPos.x, groundWorldY)))
 			local groundUI = Vector2(groundRawUI.x + spreadX, groundRawUI.y + landYCorrection)
-			self:PlayFallSpin(icon, startUI, groundUI, fallHeight, continueFromGround)
+			self:PlayFallSpin(icon, startUI, groundUI, fallHeight, continueFromGround, token)
 		else
 			continueFromGround(Vector2(rawUI.x + spreadX, rawUI.y + landYCorrection))
 		end
@@ -32768,7 +32928,7 @@ script CardManager extends Logic
 	-- 아무 각도로 딱 멈춰"). spinDegrees가 360의 배수가 아니면 낙하 도중 임의의 각도에서 회전이 끝났다가
 	-- 착지 순간 ZRotation=0으로 툭 꺾여 보인다 — GameManager 쪽엔 이미 있던 보정을 여기도 동일하게 적용.
 	@ExecSpace("ClientOnly")
-	method void PlayFallSpin(SpriteGUIRendererComponent icon, Vector2 startUI, Vector2 groundUI, number fallHeight, any onGrounded)
+	method void PlayFallSpin(SpriteGUIRendererComponent icon, Vector2 startUI, Vector2 groundUI, number fallHeight, any onGrounded, integer token)
 		if not isvalid(icon) then return end
 		local duration = math.min(0.6, 0.15 + fallHeight / 500)
 		-- 회전량을 항상 360의 배수로 맞춰서, 다 돌고 나면 항상 원래(0도) 각도로 자연스럽게 떨어지게 한다.
@@ -32777,23 +32937,23 @@ script CardManager extends Logic
 		if spinDegrees == 0 then spinDegrees = 360 end
 
 		_TweenLogic:PlayTween(0.0, 1.0, duration, EaseType.QuadEaseIn, function(t)
-			if not isvalid(icon) then return end
+			if not self:OwnsDropIcon(icon, token) then return end
 			local pos = Vector2(startUI.x + (groundUI.x - startUI.x) * t, startUI.y + (groundUI.y - startUI.y) * t)
 			icon.Entity.UITransformComponent.anchoredPosition = pos
 			icon.Entity.UITransformComponent.ZRotation = spinDegrees * t
 		end)
 
 		_TimerService:SetTimerOnce(function()
-			if not isvalid(icon) then return end
+			if not self:OwnsDropIcon(icon, token) then return end
 			icon.Entity.UITransformComponent.ZRotation = 0
 			if onGrounded ~= nil then onGrounded(groundUI) end
 		end, duration)
 	end
 
 	@ExecSpace("ClientOnly")
-	method void PlayDropPop(SpriteGUIRendererComponent icon, Vector2 startUI, any onLanded)
+	method void PlayDropPop(SpriteGUIRendererComponent icon, Vector2 startUI, any onLanded, integer token)
 		-- 메이플 아이템 드롭 특유의 "톡 튀어나와 바닥에 안착" 모션: 좌우 랜덤 방향 큰 홉 1회 + 점점 작아지는 제자리 바운스 2회
-		if not isvalid(icon) then return end
+		if not self:OwnsDropIcon(icon, token) then return end
 		local dir = (_UtilLogic:RandomDouble() < 0.5) and -1 or 1
 		local landUI = Vector2(startUI.x + dir * (45 + _UtilLogic:RandomDouble() * 45), startUI.y)
 
@@ -32801,33 +32961,39 @@ script CardManager extends Logic
 			self:PlayHop(icon, landUI, landUI, 24, 0.16, function()
 				self:PlayHop(icon, landUI, landUI, 10, 0.11, function()
 					if onLanded ~= nil then onLanded(landUI) end
-				end)
-			end)
-		end)
+				end, token)
+			end, token)
+		end, token)
 	end
 
 	@ExecSpace("ClientOnly")
-	method void PlayHop(SpriteGUIRendererComponent icon, Vector2 fromUI, Vector2 toUI, number height, number duration, any onDone)
-		-- fromUI → toUI 로 포물선(사인 아치)을 그리며 한 번 홉. fromUI==toUI면 제자리 바운스
+	method void PlayHop(SpriteGUIRendererComponent icon, Vector2 fromUI, Vector2 toUI, number height, number duration, any onDone, integer token)
+		-- fromUI → toUI 로 포물선(사인 아치)을 그리며 한 번 홉. fromUI==toUI면 제자리 바운스.
+		-- 다른 연출이 이 아이콘을 가져갔으면(token 불일치) 움직이지도, 다음 단계로 넘어가지도 않는다
 		_TweenLogic:PlayTween(0.0, 1.0, duration, EaseType.QuadEaseOut, function(t)
-			if not isvalid(icon) then return end
+			if not self:OwnsDropIcon(icon, token) then return end
 			local x = fromUI.x + (toUI.x - fromUI.x) * t
 			local y = fromUI.y + (toUI.y - fromUI.y) * t + math.sin(t * math.pi) * height
 			icon.Entity.UITransformComponent.anchoredPosition = Vector2(x, y)
 		end)
 		_TimerService:SetTimerOnce(function()
+			if not self:OwnsDropIcon(icon, token) then return end
 			if onDone ~= nil then onDone() end
 		end, duration)
 	end
 
 	@ExecSpace("ClientOnly")
-	method void FlyCardDropToSlot(SpriteGUIRendererComponent icon, Vector2 startUI, integer slotIdx, number dropScale)
-		if not isvalid(icon) then return end
+	method void FlyCardDropToSlot(SpriteGUIRendererComponent icon, Vector2 startUI, integer slotIdx, number dropScale, integer token)
+		if not self:OwnsDropIcon(icon, token) then
+			-- 다른 연출에 아이콘을 빼앗겼으면 비행은 생략하고 슬롯 도착 연출만
+			self:PunchSlotScale(slotIdx)
+			return
+		end
 		local endUI = self:GetSlotUIPosition(slotIdx)
 		local arcHeight = 220
 
 		_TweenLogic:PlayTween(0.0, 1.0, self.DropFlyDuration, EaseType.QuadEaseOut, function(t)
-			if not isvalid(icon) then return end
+			if not self:OwnsDropIcon(icon, token) then return end
 			local x = startUI.x + (endUI.x - startUI.x) * t
 			local y = startUI.y + (endUI.y - startUI.y) * t + math.sin(t * math.pi) * arcHeight
 			icon.Entity.UITransformComponent.anchoredPosition = Vector2(x, y)
@@ -32837,8 +33003,8 @@ script CardManager extends Logic
 		end)
 
 		_TimerService:SetTimerOnce(function()
-			if not isvalid(icon) then return end
-			icon.Entity:SetEnable(false)
+			-- 아이콘은 아직 내 것일 때만 끈다(빼앗겼으면 새 주인의 아이콘을 끄면 안 된다) — 도착 연출은 항상
+			if self:OwnsDropIcon(icon, token) then icon.Entity:SetEnable(false) end
 			self:PunchSlotScale(slotIdx)
 		end, self.DropFlyDuration)
 	end
@@ -32886,8 +33052,143 @@ script CardManager extends Logic
 		tc.Scale = Vector3(flyScale, flyScale, 1)
 		tc.UIRotation = Vector3(0, 0, self:GetCardIconRotation(cardIdx))
 		tc.ZRotation = 0
-		self:FlyCardDropToSlot(icon, startUI, slotIdx, flyScale)
+		self:FlyCardDropToSlot(icon, startUI, slotIdx, flyScale, self:ClaimDropIcon(icon))
 		log("CardManager: choice fly card=" .. cardIdx .. " -> slot " .. slotIdx)
+	end
+
+	-- 슬롯이 없는 선택(패시브 → 좌하단 패시브 아이콘 줄 / 포션 → 우하단 포션 칸)도 선택 카드 자리에서
+	-- 아이콘이 날아가 도착한 칸을 톡 튕긴다(유저 지정 2026-10-06 "패시브도 슬롯처럼 날아가게, 포션도").
+	-- 패시브 판정·좌표는 클라 UI 기준이라 서버는 카드 번호와 (포션이면) 적용 후 레벨만 넘긴다.
+	@ExecSpace("Multicast")
+	method void PlayChoiceFlyNoSlot(integer choiceIndex, integer cardIdx, integer potionLevel, boolean isNew)
+		if self:IsServer() then return end
+		local endUI = nil
+		local ruid = ""
+		if cardIdx == 6 then
+			if not isvalid(self.potionSlot) then return end
+			endUI = self:GetEntityCenterUI(self.potionSlot.Entity)
+			ruid = self:GetPotionIconRUID(math.max(1, potionLevel))
+			-- 칸 안의 포션 그림은 날아온 아이콘이 들어갈 때 생기게 숨겨 둔다
+			self._T.pendingPotionReveal = true
+			if isvalid(self.potionImage) then self.potionImage.Color = Color(1, 1, 1, 0) end
+		elseif self:IsPassiveCard(cardIdx) then
+			-- 처음 배운 패시브: 아이콘이 도착할 때 생기도록 숨김 예약(이미 켜졌으면 지금 숨김). 좌표는 숨긴 뒤에 잡는다
+			if isNew then
+				local key = self:GetBuffKeyForPassiveCard(cardIdx)
+				if self._T.pendingPassiveReveal == nil then self._T.pendingPassiveReveal = {} end
+				self._T.pendingPassiveReveal[key] = true
+				local panel = self:GetBuffPanelForKey(key)
+				if isvalid(panel) and panel.Enable then panel.UITransformComponent.Scale = Vector3(0, 0, 1) end
+			end
+			endUI = self:GetPassiveIconCenterUI(cardIdx)
+			ruid = self:GetCardIconRUID(cardIdx)
+		else
+			return
+		end
+		local icon = nil
+		for i = 1, 3 do
+			local candidate = self:GetDropIcon(i)
+			if isvalid(candidate) and not candidate.Entity.Enable then
+				icon = candidate
+				break
+			end
+		end
+		if icon == nil then
+			-- 드롭 연출이 셋 다 날고 있으면 비행은 건너뛰고 도착 연출만
+			self:PunchNoSlotTarget(cardIdx)
+			return
+		end
+		local startUI = self:GetChoiceCenterUI(choiceIndex)
+		local flyScale = 1.3
+		local token = self:ClaimDropIcon(icon)
+		icon.ImageRUID = ruid
+		icon.Color = Color(1, 1, 1, 1)
+		icon.Entity:SetEnable(true)
+		local tc = icon.Entity.UITransformComponent
+		tc.anchoredPosition = startUI
+		tc.Scale = Vector3(flyScale, flyScale, 1)
+		tc.UIRotation = Vector3(0, 0, self:GetCardIconRotation(cardIdx))
+		tc.ZRotation = 0
+		local arcHeight = 220
+		_TweenLogic:PlayTween(0.0, 1.0, self.DropFlyDuration, EaseType.QuadEaseOut, function(t)
+			if not self:OwnsDropIcon(icon, token) then return end
+			local x = startUI.x + (endUI.x - startUI.x) * t
+			local y = startUI.y + (endUI.y - startUI.y) * t + math.sin(t * math.pi) * arcHeight
+			icon.Entity.UITransformComponent.anchoredPosition = Vector2(x, y)
+			local scale = (1.0 - 0.5 * t) * flyScale
+			icon.Entity.UITransformComponent.Scale = Vector3(scale, scale, 1)
+			icon.Color = Color(1, 1, 1, 1.0 - 0.6 * t)
+		end)
+		_TimerService:SetTimerOnce(function()
+			-- 아이콘은 내 것일 때만 끄고, 도착 연출(숨겨둔 패시브/포션 드러내기)은 항상 한다
+			if self:OwnsDropIcon(icon, token) then icon.Entity:SetEnable(false) end
+			self:PunchNoSlotTarget(cardIdx)
+		end, self.DropFlyDuration)
+		log("CardManager: choice fly card=" .. cardIdx .. " -> no-slot target (" .. string.format("%.0f, %.0f", endUI.x, endUI.y) .. ")")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PunchNoSlotTarget(integer cardIdx)
+		-- 도착한 포션 칸 / 패시브 아이콘을 잠깐 키웠다 되돌린다(도착 시점에 다시 찾는다 — 처음 배운 패시브는
+		-- 비행 도중에 아이콘이 생긴다)
+		local target = nil
+		if cardIdx == 6 then
+			-- 숨겨 둔 포션 그림을 지금 레벨로 다시 그린다
+			self._T.pendingPotionReveal = nil
+			self:UpdatePotionVisual()
+			if isvalid(self.potionSlot) then target = self.potionSlot.Entity end
+		else
+			local key = self:GetBuffKeyForPassiveCard(cardIdx)
+			-- 숨김 예약은 도착 시점에 무조건 푼다 — 아이콘이 아직 안 켜졌으면 나중에 켜질 때 바로 보이게
+			if self._T.pendingPassiveReveal ~= nil then self._T.pendingPassiveReveal[key] = nil end
+			target = self:GetBuffPanelForKey(key)
+		end
+		if not isvalid(target) or not target.Enable then return end
+		log("CardManager: no-slot arrival punch card=" .. cardIdx .. " fromScale=" .. string.format("%.2f", target.UITransformComponent.Scale.x))
+		_ButtonPressFxLogic:SetFixedBaseScale(target, Vector3(1, 1, 1))
+		_TweenLogic:ScaleTo(target, Vector2(1.3, 1.3), 0.12, EaseType.BackEaseOut)
+		_TimerService:SetTimerOnce(function()
+			if isvalid(target) then
+				_TweenLogic:ScaleTo(target, Vector2(1, 1), 0.15, EaseType.QuadEaseOut)
+			end
+		end, 0.12)
+		-- ScaleTo(Vector2)는 Scale z를 0으로 남긴다 — 자식이 붙을 때 LEA-3021이 나므로 끝나면 (1,1,1)로 되돌린다
+		_TimerService:SetTimerOnce(function()
+			if isvalid(target) then target.UITransformComponent.Scale = Vector3(1, 1, 1) end
+		end, 0.3)
+		-- 슬롯 도착과 같은 반짝이 파티클을 그 칸 중앙에서
+		self:PlaySparkleAtUI(self:GetEntityCenterUI(target))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlaySparkleAtUI(Vector2 pos)
+		-- PlaySlotSparkle과 같은 반짝이를 임의 위치(화면 중앙 기준 UI 좌표)에서 재생
+		if self.slotSparkle == nil then return end
+		self.slotSparkle.Entity.UITransformComponent.anchoredPosition = pos
+		self.slotSparkle.Color = Color(1, 0.9137254901960784, 0.6588235294117647, 1)
+		self.slotSparkle:Play()
+		_TweenLogic:PlayTween(1.0, 0.0, 0.5, EaseType.QuadEaseIn, function(a)
+			if not isvalid(self.slotSparkle) then return end
+			local c = self.slotSparkle.Color
+			self.slotSparkle.Color = Color(c.r, c.g, c.b, a)
+		end)
+		_TimerService:SetTimerOnce(function()
+			if isvalid(self.slotSparkle) then self.slotSparkle:Stop() end
+		end, 0.5)
+	end
+
+	@ExecSpace("ClientOnly")
+	method Vector2 GetEntityCenterUI(Entity e)
+		-- 루트 캔버스 바로 아래 UI 엔티티의 중앙을 화면 중앙 기준 좌표로(실제 캔버스 크기 기준, 고정 앵커 전용)
+		local t = e.UITransformComponent
+		local canvas = Vector2(1920, 1080)
+		if isvalid(e.Parent) and e.Parent.UITransformComponent ~= nil then canvas = e.Parent.UITransformComponent.RectSize end
+		local ap = t.anchoredPosition
+		local amin = t.AnchorsMin
+		local pivot = t.Pivot
+		local size = t.RectSize
+		return Vector2((amin.x - 0.5) * canvas.x + ap.x + (0.5 - pivot.x) * size.x,
+			(amin.y - 0.5) * canvas.y + ap.y + (0.5 - pivot.y) * size.y)
 	end
 
 	@ExecSpace("ClientOnly")

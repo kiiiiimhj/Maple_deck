@@ -1,6 +1,5 @@
 // 레이드 보상 안내 + 인벤 가득참 안내 번역 키(2026-09-23).
-// GameText.csv 열: Key,Source,Note,ko,en,zh-TW,ja
-const fs = require("fs");
+// 아래 ROWS 형식: [Key, Source, Note, ko, en, zh-tw, ja] — 파일 칸 순서와는 무관(헤더로 맞춘다)
 const P = "RootDesk/MyDesk/Localization/GameText.csv";
 
 const ROWS = [
@@ -29,24 +28,24 @@ const ROWS = [
     "강화 주문서", "Scrolls", "強化卷軸", "強化の書"],
 ];
 
-let s = fs.readFileSync(P, "utf8");
-const eol = s.includes("\r\n") ? "\r\n" : "\n";
-const lines = s.split(eol);
+// 칸 순서는 헤더에서 찾고(따옴표 처리 포함), zh-cn은 zh-tw에서 자동 변환한다(locale_lib.cjs)
+const L = require("./locale_lib.cjs");
+const { head, rows, bom } = L.readCsv(P);
 
 let added = 0;
-for (const r of ROWS) {
-  if (lines.some((l) => l.startsWith(r[0] + ","))) {
-    console.log("skip (exists):", r[0]);
+for (const [key, source, note, ko, en, tw, ja] of ROWS) {
+  if (rows.some((r) => r[0] === key)) {
+    console.log("skip (exists):", key);
     continue;
   }
   // 같은 접두사 그룹 끝에 붙인다(번역 담당자가 보기 좋게)
-  const prefix = r[0].replace(/_\d+$/, "");
+  const prefix = key.replace(/_\d+$/, "");
   let at = -1;
-  for (let i = 0; i < lines.length; i++) if (lines[i].startsWith(prefix + "_")) at = i;
-  if (at < 0) at = lines.length - 1;
-  lines.splice(at + 1, 0, r.join(","));
+  for (let i = 0; i < rows.length; i++) if (rows[i][0].startsWith(prefix + "_")) at = i;
+  if (at < 0) at = rows.length - 1;
+  rows.splice(at + 1, 0, L.makeRow(head, { key, source, note, ko, en, "zh-tw": tw, ja }));
   added++;
 }
 
-fs.writeFileSync(P, lines.join(eol), "utf8");
+L.writeCsv(P, head, rows, bom);
 console.log("added rows:", added);

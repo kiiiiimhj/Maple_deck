@@ -11,15 +11,10 @@ const BASE = "f0b00f5";
 const changed = execSync(`git diff --name-only ${BASE} -- ui`, { cwd: repoRoot }).toString()
   .split("\n").filter((l) => l.endsWith(".ui")).map((l) => l.replace(/^Maple_Story_Deck\//, ""));
 
-const csv = fs.readFileSync(path.join(repoRoot, "RootDesk/MyDesk/Localization/GameText.csv"), "utf8").replace(/^﻿/, "");
+const L = require("./locale_lib.cjs");
+const { head, rows: csvRows } = L.readCsv(path.join(repoRoot, L.GAME_CSV));
 const rows = {};
-for (const line of csv.split(/\r?\n/)) {
-  if (!line) continue;
-  const cells = []; let cur = "", q = false;
-  for (const ch of line) { if (ch === '"') { q = !q; continue; } if (ch === "," && !q) { cells.push(cur); cur = ""; } else cur += ch; }
-  cells.push(cur);
-  rows[cells[0]] = cells;
-}
+for (const r of csvRows) rows[r[0]] = r;
 
 function texts(b) {
   const m = {};
@@ -52,7 +47,7 @@ for (const rel of changed) {
       const r = rows[t];
       if (!r) issue = "번역표에 키 없음";
       else {
-        const empty = ["ko", "en", "zh-tw", "ja"].filter((n, i) => !r[3 + i] || !r[3 + i].trim());
+        const empty = L.LANGS.filter((n) => { const i = head.indexOf(n); return i < 0 || !(r[i] || "").trim(); });
         issue = empty.length ? "번역 빈칸 " + empty.join("/") : "ok";
       }
     } else issue = "키 아님(숫자/기호?)";

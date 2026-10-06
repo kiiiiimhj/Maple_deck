@@ -1,6 +1,7 @@
 // UI 넘침 대응 — 번역문 줄이기 (2026-09-22). GameText.csv + Docs/Localization/translate_me.csv 둘 다 같은 값으로 고친다.
 //   node .builder-work/tr_shorten.cjs [--apply]
 const fs = require("fs");
+const L = require("./locale_lib.cjs");
 const APPLY = process.argv.includes("--apply");
 // [키, 언어, 새 문구]  (⏎ = 줄바꿈)
 const EDITS = [
@@ -51,6 +52,8 @@ for (const [file, bom] of [["RootDesk/MyDesk/Localization/GameText.csv", false],
     if (ph(text) !== ph(r[iKo]) || nl(text) !== nl(r[iKo])) { console.log(`  ⛔ ${key}/${lang}: 자리표시자/줄바꿈이 원문과 다름 — 건너뜀`); continue; }
     if (!APPLY) console.log(`  ${key} ${lang}: "${r[li].replace(/\n/g, "⏎")}" → "${text0}"`);
     r[li] = text; n++;
+    if (lang in L.DERIVED) console.log(`  ⚠ ${key}/${lang}: 자동 변환 칸을 직접 고침 — 원본(${L.DERIVED[lang]})을 다시 고치면 덮어써진다`);
+    else L.syncDerived(head, r); // zh-tw를 고치면 GameText의 zh-cn도 같이 (translate_me엔 zh-cn 칸이 없어 무시됨)
   }
   if (APPLY) fs.writeFileSync(file, (hadBom || bom ? "﻿" : "") + rows.map((r) => r.map(cell).join(",")).join("\r\n") + "\r\n", "utf8");
   console.log(`${APPLY ? "기록" : "드라이런"} ${file}: ${n}칸`);

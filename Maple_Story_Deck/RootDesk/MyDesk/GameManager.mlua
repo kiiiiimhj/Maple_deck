@@ -314,6 +314,11 @@ script GameManager extends Logic
 
 	property TextComponent hpText = "7d054dd7-e575-4be3-8664-9994e2a4b172"
 
+	-- 슈트 매직 보호막을 HP바 위에 덮어 그리는 하늘색 막대(HPBar 자식). 폭 = 안쪽 폭 × 보호막/최대HP
+	property SpriteGUIRendererComponent shieldFill = "818f89ce-a212-4cf4-940c-d1803c0a9b6a"
+	property number ShieldFillInnerWidth = 312
+	property number ShieldFillHeight = 20
+
 	property TextComponent playerNameText = "0c08115d-3aa6-4305-b587-c672c7398a4b"
 
 	property SpriteGUIRendererComponent expBarFill = "f611e821-754b-437f-9633-2b26ea571c8d"
@@ -3184,13 +3189,37 @@ script GameManager extends Logic
 		_GachaUI:OnGachaSpendApproved(count, isSkill, results, senderUserId)
 	end
 
+	-- HP바 + 퍼센트 글자 + 보호막 막대를 한 번에 다시 그린다. HP가 바뀔 때(아래 OnSyncProperty)와
+	-- 보호막이 바뀔 때(GearEffectLogic.OnSyncProperty) 둘 다 여기로 온다.
+	-- 글자는 (HP+보호막)/최대HP — 보호막 20%면 "120%"(유저 지정 2026-10-06)
+	@ExecSpace("ClientOnly")
+	method void RefreshHpBarUI()
+		if not isvalid(self.hpBar) then return end
+		local maxHp = self.PlayerMaxHp
+		if maxHp <= 0 then maxHp = 1 end
+		self.hpBar.MaxValue = self.PlayerMaxHp
+		self.hpBar.Value = self.PlayerHp
+		local shield = _GearEffectLogic.ShieldRemain
+		-- 보호막은 HP에 더해서 하나의 %로 보여준다(HP 100% + 보호막 20% → "120%")
+		local text = tostring(math.floor((self.PlayerHp + shield) / maxHp * 100)) .. "%"
+		if isvalid(self.hpText) then self.hpText.Text = text end
+		if isvalid(self.shieldFill) then
+			local shieldEntity = self.shieldFill.Entity
+			if shield > 0 then
+				local w = self.ShieldFillInnerWidth * math.min(1, shield / maxHp)
+				shieldEntity.UITransformComponent.RectSize = Vector2(w, self.ShieldFillHeight)
+				shieldEntity:SetEnable(true)
+			else
+				shieldEntity:SetEnable(false)
+			end
+		end
+	end
+
 	-- HP/EXP 동기화 → UI 갱신
 	@ExecSpace("ClientOnly")
 	method void OnSyncProperty(string name, any value)
 		if name == "PlayerHp" or name == "PlayerMaxHp" then
-			self.hpBar.MaxValue = self.PlayerMaxHp
-			self.hpBar.Value = self.PlayerHp
-			self.hpText.Text = tostring(math.floor(self.PlayerHp / self.PlayerMaxHp * 100)) .. "%"
+			self:RefreshHpBarUI()
 			if name == "PlayerHp" and self.PlayerHp < self._prevPlayerHp then
 				self:ShakeCameraOnHit()
 			end

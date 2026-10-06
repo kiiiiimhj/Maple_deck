@@ -1,4 +1,4 @@
-// 뽑기 화면 번역 누락 점검 — 뽑기 화면이 쓰는 모든 로컬라이즈 키가 GameText.csv에 있고 en/zh-tw/ja가 채워졌는지 확인
+// 뽑기 화면 번역 누락 점검 — 뽑기 화면이 쓰는 모든 로컬라이즈 키가 GameText.csv에 있고 언어 칸(locale_lib LANGS)이 채워졌는지 확인
 // 대상: GachaUI.mlua의 GetText/GetTextFormat 키, GachaGroup.ui의 IsLocalizationKey 글씨,
 //       확률표에 뜨는 스킬 이름(SkillInventory._skillDefs name 키)·유물 이름(RelicInventory._relicNames 키)
 const fs = require("fs");
@@ -22,7 +22,7 @@ const csv = parseCsv(fs.readFileSync("RootDesk/MyDesk/Localization/GameText.csv"
 const head = csv[0];
 const col = (n) => head.indexOf(n);
 const table = new Map(csv.slice(1).map((r) => [r[0], r]));
-const LANGS = ["ko", "en", "zh-tw", "ja"];
+const LANGS = require("./locale_lib.cjs").LANGS;
 
 const keys = new Map(); // key -> 출처
 const add = (k, src) => { if (k && !keys.has(k)) keys.set(k, src); };

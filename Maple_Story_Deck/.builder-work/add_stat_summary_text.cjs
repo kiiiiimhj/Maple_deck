@@ -1,5 +1,4 @@
 // 2026-09-23: 인벤 아바타 "능력치" 버튼 + 능력치 팝업 문구(ko/en/zh-tw/ja). 이미 있는 키는 건너뛴다
-const fs = require('fs');
 const P = 'RootDesk/MyDesk/Localization/GameText.csv';
 const NOTE = 'RootDesk/MyDesk/UIEquippedGearPanel.mlua (능력치 팝업)';
 const rows = [
@@ -15,15 +14,6 @@ const rows = [
   ['MLUA_UIEQUIPPEDGEARPANEL_019', '받는 피해 감소', 'DMG Reduction', '受到傷害減少', '被ダメージ減少'],
   ['MLUA_UIEQUIPPEDGEARPANEL_020', '엘리트·보스 피해', 'Elite/Boss DMG', '菁英·首領傷害', 'エリート・ボスダメージ'],
 ];
-const cell = (v) => (/[",\r\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v);
-let s = fs.readFileSync(P, 'utf8');
-const eol = s.includes('\r\n') ? '\r\n' : '\n';
-if (!s.endsWith(eol)) s += eol;
-let added = 0;
-for (const [key, ko, en, tw, ja] of rows) {
-  if (s.includes(eol + key + ',')) { console.log('skip', key); continue; }
-  s += [key, ko, NOTE, ko, en, tw, ja].map(cell).join(',') + eol;
-  added++;
-}
-fs.writeFileSync(P, s, 'utf8');
-console.log('added', added);
+// 칸 순서는 헤더에서 찾고, zh-cn은 zh-tw에서 자동 변환한다(locale_lib.cjs)
+const r = require('./locale_lib.cjs').addRows(P, rows.map(([key, ko, en, tw, ja]) => ({ key, note: NOTE, ko, en, 'zh-tw': tw, ja })));
+console.log('added', r.added, 'skip', r.skipped);

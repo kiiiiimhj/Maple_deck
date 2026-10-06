@@ -1,6 +1,5 @@
 // 2026-10-05 에피1 map18 직업 O/X 퀴즈 문제 3개(정답: Q1 O / Q2 X / Q3 O — Map18JobQuizLogic.Answers)
 //   node .builder-work/map18_quiz_keys.cjs
-const fs = require('fs');
 const P = 'RootDesk/MyDesk/Localization/GameText.csv';
 const note = 'RootDesk/MyDesk/Puzzle/Map18JobQuizLogic.mlua';
 const rows = [
@@ -17,15 +16,6 @@ const rows = [
     '皇家騎士團的破風使者是使用弓的弓箭手職業。',
     'シグナス騎士団のウィンドシューターは弓を使う弓使い職である。'],
 ];
-const cell = (v) => (/[",\r\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v);
-let text = fs.readFileSync(P, 'utf8');
-const existing = new Set(text.split(/\r\n/).map((l) => l.replace(/^﻿/, '').split(',')[0]));
-if (!text.endsWith('\r\n')) text += '\r\n';
-let added = 0;
-for (const [key, ko, en, zh, ja] of rows) {
-  if (existing.has(key)) { console.log('skip', key); continue; }
-  text += [key, ko, note, ko, en, zh, ja].map(cell).join(',') + '\r\n';
-  added++;
-}
-fs.writeFileSync(P, text, 'utf8');
-console.log('added', added);
+// 칸 순서는 헤더에서 찾고, zh-cn은 zh-tw에서 자동 변환한다(locale_lib.cjs)
+const r = require('./locale_lib.cjs').addRows(P, rows.map(([key, ko, en, tw, ja]) => ({ key, note, ko, en, 'zh-tw': tw, ja })));
+console.log('added', r.added, 'skip', r.skipped);

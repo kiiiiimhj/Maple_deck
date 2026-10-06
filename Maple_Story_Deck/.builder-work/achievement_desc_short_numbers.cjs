@@ -1,6 +1,5 @@
 // 2026-09-23 유저 지정: 업적 설명의 큰 숫자(1만 이상)를 언어별로 짧게 — 칸 넘침 방지.
-// ko 만 / en K·M / zh-tw 萬 / ja 万. Source(원문) 칸도 ko와 같이 바꾼다. 컬럼: Key,Source,Note,ko,en,zh-tw,ja
-const fs = require('fs');
+// ko 만 / en K·M / zh-tw 萬(zh-cn 万은 자동) / ja 万. Source(원문) 칸도 ko와 같이 바꾼다.
 const P = 'RootDesk/MyDesk/Localization/GameText.csv';
 const NEW = {
   MLUA_ACHIEVEMENTLOGIC_004: ['몬스터 1만 마리 처치', 'Defeat 10K monsters', '擊敗1萬隻怪物', 'モンスターを1万体討伐'],
@@ -11,29 +10,18 @@ const NEW = {
   MLUA_ACHIEVEMENTLOGIC_118: ['골드 누적 10만 사용', 'Spend a total of 100K Gold', '累計使用10萬金幣', 'ゴールドを累計10万使用'],
   MLUA_ACHIEVEMENTLOGIC_120: ['골드 누적 100만 사용', 'Spend a total of 1M Gold', '累計使用100萬金幣', 'ゴールドを累計100万使用'],
 };
-function parse(l) {
-  const o = []; let c = '', q = false;
-  for (let i = 0; i < l.length; i++) {
-    const ch = l[i];
-    if (q) { if (ch === '"' && l[i + 1] === '"') { c += '"'; i++; } else if (ch === '"') q = false; else c += ch; }
-    else if (ch === '"') q = true; else if (ch === ',') { o.push(c); c = ''; } else c += ch;
-  }
-  o.push(c); return o;
-}
-const cell = (v) => (/[",\r\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v);
-const s = fs.readFileSync(P, 'utf8');
-const eol = s.includes('\r\n') ? '\r\n' : '\n';
-const lines = s.split(eol);
+// 칸 위치는 헤더에서 찾고, zh-cn은 zh-tw에서 다시 변환한다(locale_lib.cjs)
+const L = require('./locale_lib.cjs');
+const { head, rows, bom } = L.readCsv(P);
+const col = (n) => { const i = head.indexOf(n); if (i < 0) throw new Error('no column ' + n); return i; };
 let n = 0;
-for (let i = 0; i < lines.length; i++) {
-  const key = lines[i].split(',')[0].replace(/^﻿/, '');
-  if (!NEW[key]) continue;
-  const r = parse(lines[i]);
-  const [ko, en, tw, ja] = NEW[key];
-  r[1] = ko; r[3] = ko; r[4] = en; r[5] = tw; r[6] = ja;
-  lines[i] = r.map(cell).join(',');
+for (const r of rows) {
+  if (!NEW[r[0]]) continue;
+  const [ko, en, tw, ja] = NEW[r[0]];
+  r[col('Source')] = ko; r[col('ko')] = ko; r[col('en')] = en; r[col('zh-tw')] = tw; r[col('ja')] = ja;
+  L.syncDerived(head, r);
   n++;
 }
 if (n !== Object.keys(NEW).length) throw new Error('matched ' + n);
-fs.writeFileSync(P, lines.join(eol), 'utf8');
+L.writeCsv(P, head, rows, bom);
 console.log('updated', n);

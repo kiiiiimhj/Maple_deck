@@ -1,7 +1,7 @@
 // 번역 누락 전수조사 (2026-10-05, 읽기 전용).
 //   node .builder-work/full_loc_audit.cjs [--verbose]
 // ① 코드/.ui가 참조하는 키가 GameText.csv에 없음
-// ② 참조 키의 ko/en/zh-tw/ja 빈칸, 또는 외국어 칸에 한글이 남음
+// ② 참조 키의 언어 칸(locale_lib LANGS) 빈칸, 또는 외국어 칸에 한글이 남음
 // ③ .ui: 한글 텍스트가 키로 안 바뀜 / 키인데 IsLocalizationKey=false(화면에 키 노출)
 // ④ .mlua: 주석·log·비교식 밖의 한글 리터럴 (화면에 그대로 나갈 수 있는 후보)
 // ⑤ .map/.model: 한글 텍스트
@@ -28,7 +28,7 @@ function parseCsv(text) {
 }
 const csv = parseCsv(fs.readFileSync('RootDesk/MyDesk/Localization/GameText.csv', 'utf8').replace(/^﻿/, ''));
 const head = csv[0];
-const LANGS = ['ko', 'en', 'zh-tw', 'ja'];
+const LANGS = require('./locale_lib.cjs').LANGS;
 const ci = Object.fromEntries(LANGS.map((l) => [l, head.indexOf(l)]));
 const table = new Map();
 const sourceToKey = new Map();
@@ -144,10 +144,9 @@ for (const [k, where] of used) {
   if (!r) { missing.push(`${k}  <- ${where}`); continue; }
   const empty = LANGS.filter((l) => ci[l] < 0 || !(r[ci[l]] || '').trim());
   if (empty.length) partial.push(`${k} 빈칸[${empty.join(',')}] ko=${JSON.stringify((r[ci.ko] || '').slice(0, 40))}  <- ${where}`);
-  for (const l of ['en', 'zh-tw', 'ja']) {
+  for (const l of LANGS.filter((x) => x !== 'ko')) {
     const v = r[ci[l]] || '';
-    if (l !== 'ja' && HANGUL.test(v)) hangulLeft.push(`${k} [${l}] ${JSON.stringify(v.slice(0, 50))}`);
-    else if (l === 'ja' && HANGUL.test(v)) hangulLeft.push(`${k} [ja] ${JSON.stringify(v.slice(0, 50))}`);
+    if (HANGUL.test(v)) hangulLeft.push(`${k} [${l}] ${JSON.stringify(v.slice(0, 50))}`);
     if (v && v === r[ci.ko] && HANGUL.test(v)) sameAsKo.push(`${k} [${l}]`);
   }
 }

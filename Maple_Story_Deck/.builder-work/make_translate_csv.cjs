@@ -35,10 +35,15 @@ function cell(v) {
   return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
 }
 
-const rows = parseCsv(fs.readFileSync(SRC, "utf8").replace(/^﻿/, ""));
+const L = require("./locale_lib.cjs");
+const SRC_RAW = fs.readFileSync(SRC, "utf8");
+const SRC_BOM = SRC_RAW.charCodeAt(0) === 0xfeff;
+const rows = parseCsv(SRC_RAW.replace(/^﻿/, ""));
 const head = rows.shift();
 const iK = head.indexOf("Key"), iS = head.indexOf("Source"), iN = head.indexOf("Note");
-const LANGS = head.slice(3);   // ko, en, zh-TW, ja ...
+const LANGS = head.slice(3);   // ko, en, zh-tw, zh-cn, ja ...
+// 번역가에게 주는 칸 = 사람이 쓰는 칸만. zh-cn은 zh-tw에서 자동 변환되므로 빼고, import 때 다시 만든다.
+const HUMAN = LANGS.filter((l) => l !== "ko" && !(l in L.DERIVED));
 
 // ── 실제로 쓰이는 키 수집 ─────────────────────────────────────────────────
 function collectUsed() {
@@ -70,10 +75,10 @@ if (MODE === "export") {
   // 보기 좋게: 화면 영역(키 접두어) → 키 순으로 정렬
   keep.sort((a, b) => (a[iK] < b[iK] ? -1 : a[iK] > b[iK] ? 1 : 0));
 
-  const outHead = ["Key", "한국어원문", "위치(Note)"].concat(LANGS.filter((l) => l !== "ko"));
+  const outHead = ["Key", "한국어원문", "위치(Note)"].concat(HUMAN);
   const lines = [outHead.map(cell).join(",")];
   for (const r of keep) {
-    const langs = LANGS.filter((l) => l !== "ko").map((l) => r[head.indexOf(l)] || "");
+    const langs = HUMAN.map((l) => r[head.indexOf(l)] || "");
     lines.push([r[iK], r[iS], r[iN]].concat(langs).map(cell).join(","));
   }
   fs.mkdirSync(OUT_DIR, { recursive: true });
@@ -94,15 +99,15 @@ if (MODE === "export") {
   for (const r of rows) {
     const t = byKey.get(r[iK]);
     if (!t) continue;
-    for (const lang of LANGS) {
-      if (lang === "ko") continue;
+    for (const lang of HUMAN) {
       const ti = th.indexOf(lang);
       if (ti < 0) continue;
       const v = t[ti];
       if (v && v !== "" && v !== r[head.indexOf(lang)]) { r[head.indexOf(lang)] = v; n++; }
     }
+    L.syncDerived(head, r); // zh-tw가 바뀌었으면 zh-cn도 다시 변환
   }
-  fs.writeFileSync(SRC, [head].concat(rows).map((r) => r.map(cell).join(",")).join("\r\n") + "\r\n", "utf8");
+  L.writeCsv(SRC, head, rows, SRC_BOM);
   console.log(`번역 ${n}칸을 ${SRC} 로 병합했다. (refresh 필요)`);
 } else {
   console.error("export 또는 import 를 지정할 것");

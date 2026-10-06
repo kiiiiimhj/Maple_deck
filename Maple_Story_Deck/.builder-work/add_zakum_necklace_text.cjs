@@ -1,6 +1,5 @@
 // 2026-09-23: 자쿰 레이드 / 목걸이 라인 번역 행을 GameText.csv에 추가(ko/en/zh-tw/ja).
-// 컬럼: Key,Source,Note,ko,en,zh-tw,ja — 기존 줄바꿈(CRLF)·BOM 유지, 이미 있는 키는 건너뛴다
-const fs = require('fs');
+// 칸 순서는 GameText.csv 헤더에서 찾는다 — 기존 줄바꿈(CRLF)·BOM 유지, 이미 있는 키는 건너뛴다
 const P = 'RootDesk/MyDesk/Localization/GameText.csv';
 const WT = 'RootDesk/MyDesk/Inventory/Core/Logic/WeaponTierDataLogic.mlua';
 const rows = [
@@ -27,15 +26,6 @@ const rows = [
   // 레이드 보상표 헤더(자쿰일 때 "반지" 대신)
   ['MLUA_RAIDUI_005', 'RootDesk/MyDesk/Raid/RaidUI.mlua (보상표 헤더, 자쿰)', '목걸이', 'Necklace', '項鍊', 'ネックレス'],
 ];
-const cell = (v) => (/[",\r\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v);
-let s = fs.readFileSync(P, 'utf8');
-const eol = s.includes('\r\n') ? '\r\n' : '\n';
-if (!s.endsWith(eol)) s += eol;
-let added = 0;
-for (const [key, note, ko, en, tw, ja] of rows) {
-  if (s.includes(eol + key + ',')) { console.log('skip', key); continue; }
-  s += [key, ko, note, ko, en, tw, ja].map(cell).join(',') + eol;
-  added++;
-}
-fs.writeFileSync(P, s, 'utf8');
-console.log('added', added);
+// 칸 순서는 헤더에서 찾고, zh-cn은 zh-tw에서 자동 변환한다(locale_lib.cjs)
+const r = require('./locale_lib.cjs').addRows(P, rows.map(([key, note, ko, en, tw, ja]) => ({ key, note, ko, en, 'zh-tw': tw, ja })));
+console.log('added', r.added, 'skip', r.skipped);

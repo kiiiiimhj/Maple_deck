@@ -1,6 +1,5 @@
 // 2026-09-23: 레이드 업적 5 + 재화 사용 업적 5 번역 행(MLUA_ACHIEVEMENTLOGIC_101~120)을 GameText.csv에 추가.
-// 컬럼: Key,Source,Note,ko,en,zh-tw,ja — 기존 줄바꿈(CRLF)·BOM 유지, 이미 있는 키는 건너뛴다
-const fs = require('fs');
+// 칸 순서는 GameText.csv 헤더에서 찾는다 — 기존 줄바꿈(CRLF)·BOM 유지, 이미 있는 키는 건너뛴다
 const P = 'RootDesk/MyDesk/Localization/GameText.csv';
 const NOTE = 'RootDesk/MyDesk/Achievement/AchievementLogic.mlua';
 const rows = [
@@ -25,16 +24,6 @@ const rows = [
   ['119', '골드 큰손', 'Gold Big Spender', '金幣大戶', 'ゴールドの大口'],
   ['120', '골드 누적 1,000,000 사용', 'Spend a total of 1,000,000 Gold', '累計使用1,000,000金幣', 'ゴールドを累計1,000,000使用'],
 ];
-const cell = (v) => (/[",\r\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v);
-let s = fs.readFileSync(P, 'utf8');
-const eol = s.includes('\r\n') ? '\r\n' : '\n';
-if (!s.endsWith(eol)) s += eol;
-let added = 0;
-for (const [n, ko, en, tw, ja] of rows) {
-  const key = 'MLUA_ACHIEVEMENTLOGIC_' + n;
-  if (s.includes(eol + key + ',')) { console.log('skip', key); continue; }
-  s += [key, ko, NOTE, ko, en, tw, ja].map(cell).join(',') + eol;
-  added++;
-}
-fs.writeFileSync(P, s, 'utf8');
-console.log('added', added);
+// 칸 순서는 헤더에서 찾고, zh-cn은 zh-tw에서 자동 변환한다(locale_lib.cjs)
+const r = require('./locale_lib.cjs').addRows(P, rows.map(([n, ko, en, tw, ja]) => ({ key: 'MLUA_ACHIEVEMENTLOGIC_' + n, note: NOTE, ko, en, 'zh-tw': tw, ja })));
+console.log('added', r.added, 'skip', r.skipped);
