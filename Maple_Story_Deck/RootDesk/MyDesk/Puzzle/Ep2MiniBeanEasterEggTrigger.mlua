@@ -31,19 +31,38 @@ script Ep2MiniBeanEasterEggTrigger extends Component
 		self:RequestTouch()
 	end
 
+	-- 눌림(패딩) 연출 — 에피4 맵5 두 번 누르는 이스터에그(Ep4ObjectPressFx)와 같은 모양으로 바꿨다(유저 지정 2026-10-06, 예전엔 좌우 흔들기).
+	-- 살짝 아래로 눌리며 납작해졌다 돌아온다. 연타해도 원래 높이·크기가 누적해서 바뀌지 않게 연출이 없을 때만 원래 값을 잡는다.
+	-- X는 건드리지 않는다(Map04 NPC처럼 평소에 좌우로 걷는 오브젝트도 있어서)
+	property number PressDuration = 0.24
+	property number PressDownOffset = 0.10
+	property number _pressRestY = 0
+	property Vector3 _pressRestScale = Vector3(1, 1, 1)
+
 	@ExecSpace("ClientOnly")
 	method void PlayShake()
+		local target = self.Entity
+		if not isvalid(target) then return end
+		local transform = target.TransformComponent
 		if self._shakeTween ~= nil then
 			self._shakeTween:Stop()
 			self._shakeTween = nil
+		else
+			self._pressRestY = transform.Position.y
+			self._pressRestScale = Vector3(transform.Scale.x, transform.Scale.y, transform.Scale.z)
 		end
-		local transform = self.Entity.TransformComponent
-		self._shakeTween = _TweenLogic:PlayTween(0.0, 1.0, self.ShakeDuration, EaseType.Linear, function(t)
-			if not isvalid(self) or not isvalid(self.Entity) then return end
-			local angle = self.ShakeAngle * math.sin(t * math.pi * 3) * (1.0 - t)
-			transform.ZRotation = angle
+		transform.ZRotation = 0
+		local restY = self._pressRestY
+		local s = self._pressRestScale
+		self._shakeTween = _TweenLogic:PlayTween(0.0, 1.0, self.PressDuration, EaseType.Linear, function(t)
+			if not isvalid(self) or not isvalid(target) then return end
+			local k = math.sin(t * math.pi)
+			local pos = transform.Position
+			transform.Position = Vector3(pos.x, restY - self.PressDownOffset * k, pos.z)
+			transform.Scale = Vector3(s.x * (1 + 0.06 * k), s.y * (1 - 0.10 * k), s.z)
 			if t >= 1.0 then
-				transform.ZRotation = 0
+				transform.Position = Vector3(transform.Position.x, restY, pos.z)
+				transform.Scale = s
 				self._shakeTween = nil
 			end
 		end)
