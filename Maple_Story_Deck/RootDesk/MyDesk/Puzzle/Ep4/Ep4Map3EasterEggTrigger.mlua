@@ -9,7 +9,40 @@ script Ep4Map3EasterEggTrigger extends Component
 	method void OnTouched(TouchEvent event)
 		if _GameManager.GameOver or not _GameManager.GameStarted or _GameManager:IsGamePaused() then return end
 		if _TitleUI.titleGroup.Enable or _CardManager:IsMonsterUnderTouch(event.TouchPoint) then return end
+		self:PlayPress()
 		self:RequestTouch()
+	end
+	-- 눌림(패딩) 연출 — 에피4 맵5 두 번 누르기 이스터에그(Ep4ObjectPressFx)와 같은 모양(유저 지정 2026-10-06, 예전엔 반응 없음).
+	-- 연타해도 원래 높이·크기가 누적해서 바뀌지 않게 연출이 없을 때만 원래 값을 잡는다
+	property any _pressTween = nil
+	property number PressDuration = 0.24
+	property number PressDownOffset = 0.10
+	property number _pressRestY = 0
+	property Vector3 _pressRestScale = Vector3(1, 1, 1)
+	@ExecSpace("ClientOnly")
+	method void PlayPress()
+		local transform = self.Entity.TransformComponent
+		if self._pressTween ~= nil then
+			self._pressTween:Stop()
+			self._pressTween = nil
+		else
+			self._pressRestY = transform.Position.y
+			self._pressRestScale = Vector3(transform.Scale.x, transform.Scale.y, transform.Scale.z)
+		end
+		local restY = self._pressRestY
+		local s = self._pressRestScale
+		self._pressTween = _TweenLogic:PlayTween(0.0, 1.0, self.PressDuration, EaseType.Linear, function(t)
+			if not isvalid(self) or not isvalid(self.Entity) then return end
+			local k = math.sin(t * math.pi)
+			local pos = transform.Position
+			transform.Position = Vector3(pos.x, restY - self.PressDownOffset * k, pos.z)
+			transform.Scale = Vector3(s.x * (1 + 0.06 * k), s.y * (1 - 0.10 * k), s.z)
+			if t >= 1.0 then
+				transform.Position = Vector3(transform.Position.x, restY, pos.z)
+				transform.Scale = s
+				self._pressTween = nil
+			end
+		end)
 	end
 	@ExecSpace("Server")
 	method void RequestTouch()
@@ -17,5 +50,6 @@ script Ep4Map3EasterEggTrigger extends Component
 	end
 	method void OnEndPlay()
 		if self:IsClient() and self._touchHandler~=nil then self.Entity:DisconnectEvent(TouchEvent,self._touchHandler) end
+		if self:IsClient() and self._pressTween~=nil then self._pressTween:Stop() self._pressTween=nil end
 	end
 end
