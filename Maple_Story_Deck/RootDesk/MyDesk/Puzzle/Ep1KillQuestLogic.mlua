@@ -1,0 +1,231 @@
+@Logic
+script Ep1KillQuestLogic extends Logic
+
+	-- 에피1 몬스터 처치 퀘스트 2개(유저 지정 2026-10-07). 에피4 맵4 슈피겔만 처치 퀘스트(Ep4Map4EasterEggLogic.ShowKillQuest)와
+	-- 같은 말풍선(몬스터 그림 + "X남은수")을 쓰고, 보상은 다른 에피1 잡템 퀘스트(Map22CollectLogic)와 같다.
+	--   1) map17 object-2047_5(존20) — 존21 object-2737을 두 번 눌러 부르는 외계인(뉴그레이 화이트) 7마리를 전부 잡기.
+	--      외계인은 한 판에 한 번만 나오므로 의뢰를 받기 전에 잡은 것도 센다.
+	--   2) map18 object-3684_20(존25) — map18(존23~26) 몬스터 중 무작위 1종을 30마리 잡기(의뢰 받은 뒤부터 센다).
+	-- 흐름: 처음 누르면 의뢰 말풍선만 → 다 잡으면 토스트 → 다시 누르면 보상(하얀 포션 + 보유 스킬 1개 강화 + 덤) + 하트 말풍선.
+	-- "다시하기"/"새로 시작"은 GameManager.RestartGame()이 ResetForNewRun()으로 초기화.
+
+	@Sync property boolean AlienAccepted = false
+	@Sync property boolean AlienDone = false
+	@Sync property integer AlienKills = 0
+	@Sync property boolean Map18Accepted = false
+	@Sync property boolean Map18Done = false
+	@Sync property integer Map18Kills = 0
+
+	property string AlienObjectName = "object-2047_5"
+	property string Map18ObjectName = "object-3684_20"
+	property string AlienStandRUID = "d4ae577677034eaaa0b902e3c20edf15"
+	property integer AlienGoal = 7
+	property integer Map18Goal = 30
+	property integer Map18ZoneMin = 23
+	property integer Map18ZoneMax = 26
+	property string _map18Target = ""
+	property string _questUserId = ""
+
+	-- 말풍선 몬스터 그림 외곽(기준점 기준 px: 좌, 우, 아래, 위 — stand 전체 프레임 합, 2026-10-07 msw-search 실측)
+	property table MonsterBounds = {
+		["d4ae577677034eaaa0b902e3c20edf15"] = {-53, 56, -12, 140},  -- 뉴그레이 화이트(외계인)
+		["7349a1d60275453bafbabf329d6acff4"] = {-29, 39, 0, 80},     -- 반딧불 슬라임
+		["d6bb0e57b06d4b808c95c9264a416476"] = {-36, 50, 5, 79},     -- 페어리 슬라임
+		["c5d53f7c7ee84e318e397f0c444ce517"] = {-35, 38, 8, 90},     -- 워터 엘리먼트
+		["85144978dea044bda95d1736eef0ce30"] = {-35, 38, 8, 90},     -- 트리 엘리먼트
+		["2307464c9189441b9bd114d1581fe689"] = {-33, 35, 11, 82},    -- 미스틱 위습
+		["ce3a289db9c34a83ab99eda75157d01d"] = {-44, 32, 11, 69},    -- 하급 마법책
+	}
+	-- 말풍선 칸/글자 위치는 에피4 맵4 처치 퀘스트와 같은 값
+	property Vector2 QuestIconCenter = Vector2(0, 0.11)
+	property Vector2 QuestIconBoxSize = Vector2(0.82, 0.74)
+	property Vector3 QuestCountPosition = Vector3(0.36, -0.14, 0.0001)
+	property number BubbleShowDuration = 2.0
+
+	-- 교환 완료 하트 말풍선(Map22CollectLogic과 같은 값)
+	property string HeartBubbleModelId = "giftbubble"
+	property string HeartIconRUID = "7ecb5769578f4b05808afaad17ee83ac"
+	property Vector3 HeartIconPosition = Vector3(-0.4361, -0.2908, 0)
+	property Vector3 HeartIconScale = Vector3(5.788959, 5.78895855, 1)
+	property number HeartXOffset = -1.25
+	property number HeartYOffset = 1.25
+
+	property Entity _bubble = nil
+	property integer _bubbleSerial = 0
+
+	-- Ep1KillQuestTrigger.RequestTouch()가 터치된 오브젝트를 넘긴다(오브젝트 이름으로 어느 퀘스트인지 가린다)
+	@ExecSpace("ServerOnly")
+	method void OnObjectTouched(Entity obj, string userId)
+		if not isvalid(obj) then return end
+		if not _GameManager.GameStarted or _GameManager.GameOver then return end
+		self._questUserId = userId
+		if obj.Name == self.AlienObjectName then
+			self:TouchAlienQuest(obj)
+		elseif obj.Name == self.Map18ObjectName then
+			self:TouchMap18Quest(obj)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void TouchAlienQuest(Entity obj)
+		-- 외계인 7마리 처치 — 처음엔 의뢰 말풍선, 다 잡은 뒤 다시 누르면 보상
+		if self.AlienDone then return end
+		if not self.AlienAccepted then
+			self.AlienAccepted = true
+			self:ShowRequirement(obj, self.AlienStandRUID, self.AlienGoal - math.min(self.AlienGoal, self.AlienKills))
+			log("Ep1KillQuest: alien quest accepted (already killed " .. self.AlienKills .. ")")
+			return
+		end
+		if self.AlienKills < self.AlienGoal then
+			self:ShowRequirement(obj, self.AlienStandRUID, self.AlienGoal - self.AlienKills)
+			return
+		end
+		self.AlienDone = true
+		self:GrantReward(obj)
+		log("Ep1KillQuest: alien quest turned in")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void TouchMap18Quest(Entity obj)
+		-- map18 무작위 1종 30마리 처치 — 의뢰 받은 뒤부터 센다
+		if self.Map18Done then return end
+		if not self.Map18Accepted then
+			local pool = self:GetMap18Pool()
+			if #pool == 0 then return end
+			self._map18Target = pool[_UtilLogic:RandomIntegerRange(1, #pool)]
+			self.Map18Accepted = true
+			self.Map18Kills = 0
+			self:ShowRequirement(obj, self._map18Target, self.Map18Goal)
+			log("Ep1KillQuest: map18 quest accepted target=" .. self._map18Target)
+			return
+		end
+		if self.Map18Kills < self.Map18Goal then
+			self:ShowRequirement(obj, self._map18Target, self.Map18Goal - self.Map18Kills)
+			return
+		end
+		self.Map18Done = true
+		self:GrantReward(obj)
+		log("Ep1KillQuest: map18 quest turned in")
+	end
+
+	@ExecSpace("ServerOnly")
+	method table GetMap18Pool()
+		-- map18(존23~26) 몬스터 종류 — 그림 외곽이 등록된 것만
+		local pool = {}
+		local seen = {}
+		for z = self.Map18ZoneMin, self.Map18ZoneMax do
+			for species = 1, _GameManager:GetMapMonsterCount(z) do
+				local ruid = _GameManager:GetMapStandRUID(z, species)
+				if ruid ~= "" and not seen[ruid] and self.MonsterBounds[ruid] ~= nil then
+					seen[ruid] = true
+					table.insert(pool, ruid)
+				end
+			end
+		end
+		return pool
+	end
+
+	-- MonsterAI 사망 처리에서 호출(Ep4Map4EasterEggLogic.OnMonsterKilled 바로 옆) — 실제 사망만 센다
+	@ExecSpace("ServerOnly")
+	method void OnMonsterKilled(integer zone, string standRuid)
+		if not _GameManager.GameStarted or _GameManager.GameOver then return end
+		if standRuid == self.AlienStandRUID and not self.AlienDone and self.AlienKills < self.AlienGoal then
+			self.AlienKills = self.AlienKills + 1
+			if self.AlienAccepted and self.AlienKills >= self.AlienGoal then
+				_UIToast:ShowMessage("EP1_KILLQUEST_DONE", self._questUserId)
+			end
+			log("Ep1KillQuest: alien kill " .. self.AlienKills .. "/" .. self.AlienGoal)
+			return
+		end
+		if self.Map18Accepted and not self.Map18Done and self.Map18Kills < self.Map18Goal
+			and zone >= self.Map18ZoneMin and zone <= self.Map18ZoneMax and standRuid == self._map18Target then
+			self.Map18Kills = self.Map18Kills + 1
+			if self.Map18Kills >= self.Map18Goal then
+				_UIToast:ShowMessage("EP1_KILLQUEST_DONE", self._questUserId)
+				log("Ep1KillQuest: map18 goal reached")
+			end
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ShowRequirement(Entity obj, string icon, integer remaining)
+		-- 에피4 맵4 처치 퀘스트와 같은 말풍선(몬스터 그림 + "X남은수"), BubbleShowDuration 뒤 자동으로 지운다
+		self:ClearBubble()
+		local bounds = self.MonsterBounds[icon]
+		if bounds == nil then bounds = {-30, 30, 0, 60} end
+		local p = obj.TransformComponent.WorldPosition
+		_Ep2Map1GiftNpcLogic:SpawnBubble(obj.CurrentMap, Vector3(p.x - 0.765297, p.y + 0.9155867, p.z - 0.5), icon, "", false, 1, _Ep2Map1GiftNpcLogic.DefaultIconPosition, _Ep2Map1GiftNpcLogic.DefaultIconScale)
+		local bubble = _Ep2Map1GiftNpcLogic._activeBubble
+		self._bubble = bubble
+		if isvalid(bubble) then
+			_CollectBubbleLogic:ApplyForegroundDepth(bubble)
+			_CollectBubbleLogic:FitIcon(bubble, "Icon", icon, bounds[1], bounds[2], bounds[3], bounds[4], self.QuestIconCenter, self.QuestIconBoxSize, 0)
+			_CollectBubbleLogic:FillText(bubble, "Count", "X" .. remaining, self.QuestCountPosition, 2)
+			self:ScheduleBubbleDestroy(bubble)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void GrantReward(Entity obj)
+		-- 다른 에피1 잡템 퀘스트와 같은 보상: 하얀 포션 + 보유 스킬 1개 강화 + 덤
+		local worldPos = obj.TransformComponent.WorldPosition
+		local fall = _GameManager:GetGroundFallFor(obj, worldPos)
+		_GameManager:ApplyPotionDrop(2, worldPos, fall.x, fall.y, 1.0)
+		local pool = _CardManager:BuildActiveUpgradePool()
+		if #pool > 0 then
+			_CardManager:GrantCardUpgradesFromPool(pool, worldPos, fall.x, fall.y, 1.0, 1, 0)
+		end
+		_EasterEggBonusLogic:RollBonus(worldPos, fall.x, fall.y)
+		_AchievementLogic:OnEasterEgg()
+		self:SpawnHeartBubble(obj.CurrentMap, Vector3(worldPos.x + self.HeartXOffset, worldPos.y + self.HeartYOffset, worldPos.z - 0.5))
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SpawnHeartBubble(Entity map, Vector3 pos)
+		-- 완료 하트 말풍선(GiftBubble)
+		self:ClearBubble()
+		local bubble = _SpawnService:SpawnByModelId(self.HeartBubbleModelId, "Ep1KillQuestHeart", pos, map)
+		if bubble == nil then return end
+		self._bubble = bubble
+		local icon = bubble:GetChildByName("Icon")
+		if icon ~= nil and icon.SpriteRendererComponent ~= nil then
+			icon.SpriteRendererComponent.SpriteRUID = self.HeartIconRUID
+			icon.TransformComponent.Position = self.HeartIconPosition
+			icon.TransformComponent.Scale = self.HeartIconScale
+			icon.Enable = true
+		end
+		local count = bubble:GetChildByName("Count")
+		if count ~= nil then count.Enable = false end
+		self:ScheduleBubbleDestroy(bubble)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ScheduleBubbleDestroy(Entity bubble)
+		-- BubbleShowDuration 뒤 자동으로 지운다
+		_TimerService:SetTimerOnce(function()
+			if isvalid(bubble) then bubble:Destroy() end
+			if self._bubble == bubble then self._bubble = nil end
+		end, self.BubbleShowDuration)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ClearBubble()
+		-- 떠 있는 말풍선을 지운다
+		if isvalid(self._bubble) then self._bubble:Destroy() end
+		self._bubble = nil
+	end
+
+	-- GameManager.RestartGame()이 호출 — 새 판에서 다시 도전, 목표 몬스터도 재추첨
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		self.AlienAccepted = false
+		self.AlienDone = false
+		self.AlienKills = 0
+		self.Map18Accepted = false
+		self.Map18Done = false
+		self.Map18Kills = 0
+		self._map18Target = ""
+		self:ClearBubble()
+	end
+
+end

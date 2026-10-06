@@ -187,6 +187,46 @@ script MonsterAI extends Component
 	-- 클라이언트 로컬 — 부착 이펙트 시리얼
 	property integer _headMarkSerial = 0
 
+	-- ── 상태이상 아이콘(유저 지정 2026-10-07, TickStatusIcons 참고) ─────────────────
+	@Sync
+	property string _statusIcons = ""
+	property number _statusIconTimer = 0
+	-- 스턴 중 이번 스턴이 속박(자체 연출 있는 ApplyStun(dur,false) — 아쿠아 트랩/리프 어택 등)인지
+	property boolean _stunIsBind = false
+	property string StatusIconFreezeRUID = "f4d1385df0b64f02aa4c077ddca549a0"
+	property string StatusIconPoisonRUID = "1760f9361db24284b4af3d6060969c09"
+	property string StatusIconBurnRUID = "7222862345114697a7e2628db5177122"
+	property string StatusIconAccuracyRUID = "b2eda12a0a274e029bc028485b3570d2"
+	property string StatusIconSlowRUID = "17e947b58428404ba116486be8eb9f38"
+	property string StatusIconStunRUID = "1651af6397a64f5583d0ecb302dc83f7"
+	property string StatusIconBindRUID = "99396b092c7843cf97b504c430e9f69b"
+	-- 배경 = 계정 에셋 흰 둥근 사각(64px, 9-slice 14px, 2026-10-07 업로드)을 검정 반투명으로 칠해 쓴다
+	-- (UI 빌더 기본 둥근 사각은 월드 스프라이트로 못 읽음 — 리소스 타입 None 실측)
+	property string StatusIconBgRUID = "4d2bc1dbaac346eaaafe7a91cd96b232"
+	property number StatusIconBgAlpha = 0.55
+	-- 판 밝기(0=검정, 1=흰색). 2026-10-07 유저 지정 "흰색 반투명으로 한번 바꿔봐" → 1
+	property number StatusIconBgTone = 1
+	-- 다 다가왔을 때 월드 크기(유닛): 배경 한 변 / 아이콘 긴 변 / 숫자 크기
+	-- 2026-10-07 유저 지정 "크기 1/3로" → "너무 작다, 50% 키워" — 처음 값(0.42/0.34/1.8/0.06)의 1/3 × 1.5 = 절반
+	property number StatusIconBoxSize = 0.21
+	property number StatusIconSize = 0.17
+	property number StatusIconCountFontSize = 0.9  -- TextRenderer FontSize 1 ≈ 0.1유닛 높이(실측)
+	-- 배경이 발 높이보다 이만큼 아래로 걸친다(월드 유닛, 다 다가왔을 때)
+	property number StatusIconDrop = 0.03
+	property number StatusIconCycleSeconds = 1.0
+	-- 몸 크기별 아이콘 배율(다 다가왔을 때 몸 높이, 월드 유닛): 이 이하면 SmallScale, FullBodyHeight 이상이면 1배
+	-- 실측(stand 첫 프레임 × 다가온 배율): 주니어 부기 ≈0.66 → 0.8배 / 곰인형 ≈0.84 → 약 0.86배 / 스톤골렘 ≈1.5 → 1배
+	property number StatusIconSmallBodyHeight = 0.7
+	property number StatusIconFullBodyHeight = 1.2
+	property number StatusIconSmallScale = 0.8
+	-- 클라이언트 로컬
+	property table _statusIconList = {}
+	property integer _statusIconIndex = 1
+	property number _statusIconCycleTimer = 0
+	property Entity _statusIconBg = nil
+	property Entity _statusIconImg = nil
+	property Entity _statusIconText = nil
+
 	-- ── 포이즌 미스트 표식(베노아 카드226, 유저 지정 2026-10-03) ─────────────────
 	-- "몹 머리 위에 표식이 있다가 죽으면 독무 발동". 서버가 표식 대미지/타이머를 들고, 클라 표시는 머리 위 표식과 같은
 	-- 방식(종류 문자열 @Sync → 클라가 stand 원본 크기로 머리 꼭대기를 계산해 부착)이다. 문자열 끝의 일련번호는
@@ -930,6 +970,8 @@ script MonsterAI extends Component
 	property integer FreezeStack = 0
 
 	property Entity _freezeIndicator = nil
+	-- 옛 빙결 스택 숫자(몸 오른쪽 아래 파란 숫자). 상태이상 아이콘으로 대체돼 기본 꺼짐
+	property boolean UseLegacyFreezeIndicator = false
 
 	property boolean _freezeSlowed = false
 
@@ -2965,6 +3007,239 @@ script MonsterAI extends Component
 		self._headMarkSerial = 0
 	end
 
+	-- ── 상태이상 아이콘(유저 지정 2026-10-07) ─────────────────────────────────────────
+	-- 몬스터 아래 좌측에 검정 반투명 둥근 사각형 + 상태 아이콘. 여러 개면 번갈아 보여주고, 스택 있는 것(빙결)은
+	-- 우하단에 흰 숫자(검은 외곽선). 서버가 상태를 "기준배율|stand RUID|종류:스택,종류" 문자열 하나로 @Sync하고,
+	-- 클라가 머리 위 표식과 같은 방식(stand 원본 크기·피벗)으로 위치를 잡아 몬스터에 붙인다.
+	@ExecSpace("ServerOnly")
+	method void TickStatusIcons(number delta)
+		-- 서버 — 0.2초마다 상태를 다시 묶어 바뀌었을 때만 동기화한다(중독/화상은 끝나는 시각 기준이라 폴링)
+		if self._dead then
+			if self._statusIcons ~= "" then self._statusIcons = "" end
+			return
+		end
+		self._statusIconTimer = self._statusIconTimer - delta
+		if self._statusIconTimer > 0 then return end
+		self._statusIconTimer = 0.2
+		local list = {}
+		if self.FreezeStack > 0 then
+			table.insert(list, "freeze:" .. tostring(self.FreezeStack))
+		elseif self._isHardFrozen then
+			table.insert(list, "freeze")
+		end
+		if self._isStunned then
+			if self._stunIsBind then table.insert(list, "bind") else table.insert(list, "stun") end
+		end
+		-- 빙결 스택이 걸어 둔 감속은 빙결 아이콘으로 충분하다 — 실제 슬로우 타이머가 돌 때만 슬로우 아이콘
+		if self._isSlowed and self._slowTimerId ~= 0 then table.insert(list, "slow") end
+		local now = _UtilLogic.ElapsedSeconds
+		if now < self._poisonedUntil then table.insert(list, "poison") end
+		if now < self._burnedUntil then table.insert(list, "burn") end
+		if self._accuracyDebuffPercent > 0 then table.insert(list, "accuracy") end
+		local value = ""
+		if #list > 0 then
+			local reach = self._reachedScaleThreshold
+			if self._isFlying then reach = 1.0 end
+			local ref = self._scaleMultiplier * reach
+			if ref <= 0 then ref = 1.0 end
+			value = string.format("%.4f", ref) .. "|" .. self._standRUID .. "|" .. table.concat(list, ",")
+		end
+		if value ~= self._statusIcons then self._statusIcons = value end
+	end
+
+	@ExecSpace("ClientOnly")
+	method string GetStatusIconRUID(string kind)
+		-- 상태 종류 → 아이콘 RUID(유저 지정)
+		if kind == "freeze" then return self.StatusIconFreezeRUID end
+		if kind == "poison" then return self.StatusIconPoisonRUID end
+		if kind == "burn" then return self.StatusIconBurnRUID end
+		if kind == "accuracy" then return self.StatusIconAccuracyRUID end
+		if kind == "slow" then return self.StatusIconSlowRUID end
+		if kind == "stun" then return self.StatusIconStunRUID end
+		if kind == "bind" then return self.StatusIconBindRUID end
+		return ""
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ApplyStatusIconsVisual()
+		-- 클라 — 동기화된 문자열을 풀어 목록을 갱신하고, 없으면 아이콘을 치운다
+		local parts = {}
+		for part in string.gmatch(self._statusIcons, "[^|]+") do table.insert(parts, part) end
+		if #parts < 3 or not isvalid(self.Entity) then
+			self:DestroyStatusIcon()
+			self._statusIconList = {}
+			return
+		end
+		local ref = tonumber(parts[1])
+		if ref == nil or ref <= 0 then ref = 1.0 end
+		local list = {}
+		for item in string.gmatch(parts[3], "[^,]+") do
+			local kind, count = string.match(item, "^(%w+):(%d+)$")
+			if kind == nil then kind = item count = "0" end
+			table.insert(list, { kind = kind, count = tonumber(count) or 0 })
+		end
+		-- 지금 보던 종류가 목록에 남아 있으면 그 자리를 유지한다(스택 숫자만 바뀌었을 때 순서가 튀지 않게)
+		local curKind = ""
+		local old = self._statusIconList
+		if old ~= nil and old[self._statusIconIndex] ~= nil then curKind = old[self._statusIconIndex].kind end
+		self._statusIconList = list
+		self._statusIconIndex = 1
+		for i = 1, #list do
+			if list[i].kind == curKind then self._statusIconIndex = i end
+		end
+		if not self:EnsureStatusIcon(ref, parts[2]) then return end
+		self:ShowStatusIcon()
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean EnsureStatusIcon(number ref, string stand)
+		-- 클라 — 배경/아이콘/숫자 엔티티를 몬스터 자식으로 만들고 위치를 맞춘다(클라 로컬 엔티티)
+		-- ⚠ GetSpriteMetrics는 처음 읽을 때 리소스 로딩을 기다린다(…AndWait). 그 사이 몬스터가 죽어 아이콘이 지워지면
+		-- 뒤에서 nil 인덱싱 에러(LEA-2007)가 났다(유저 리포트 10/07) → 기다리는 호출을 먼저 끝내고, 엔티티는 그 뒤에 다룬다
+		local body = _CardManager:GetSpriteMetrics(stand)
+		local pm = _CardManager:GetSpriteMetrics(self.StatusIconBgRUID)
+		if not isvalid(self.Entity) or self._statusIcons == "" then return false end
+		if not isvalid(self._statusIconBg) then
+			-- _statusIconBg = 빈 루트(위치·1/ref 배율만 담당). 그 아래 둥근 사각 판 / 아이콘 / 숫자
+			local root = _SpawnService:SpawnByModelId("persistenteffect", "StatusIconRoot", Vector3(0, 0, 0), self.Entity)
+			if not isvalid(root) then return false end
+			local plate = _SpawnService:SpawnByModelId("persistenteffect", "StatusIconBg", Vector3(0, 0, 0), root)
+			local img = _SpawnService:SpawnByModelId("persistenteffect", "StatusIcon", Vector3(0, 0, -0.01), root)
+			local txt = _SpawnService:SpawnByModelId("stackindicator-model-id", "StatusIconCount", Vector3(0, 0, 0), root)
+			self._statusIconBg = root
+			self._statusIconImg = img
+			self._statusIconText = txt
+			local layer = "MapLayer5"
+			local order = 0
+			local renderer = self.Entity.SpriteRendererComponent
+			if renderer ~= nil then
+				layer = renderer.SortingLayer
+				order = renderer.OrderInLayer
+			end
+			local box = self.StatusIconBoxSize
+			root.SpriteRendererComponent.SpriteRUID = ""
+			if isvalid(plate) then
+				-- 9-slice(Sliced)로 0.42 크기를 그리면 모서리가 커서 거의 원이 된다(실측) → 원본 64px 판을 통째로 축소(Simple)
+				local r = plate.SpriteRendererComponent
+				r.SpriteRUID = self.StatusIconBgRUID
+				r.DrawMode = SpriteDrawMode.Simple
+				r.Color = Color(self.StatusIconBgTone, self.StatusIconBgTone, self.StatusIconBgTone, self.StatusIconBgAlpha)
+				r.SortingLayer = layer
+				r.OrderInLayer = order + 7
+				local ps = box / 0.64
+				if pm.w > 0 then ps = box / pm.w end
+				plate.TransformComponent.Scale = Vector3(ps, ps, 1)
+			end
+			if isvalid(img) then
+				img.SpriteRendererComponent.SortingLayer = layer
+				img.SpriteRendererComponent.OrderInLayer = order + 8
+			end
+			if isvalid(txt) then
+				local t = txt.TextRendererComponent
+				t.Font = "Maple"
+				t.FontSize = self.StatusIconCountFontSize
+				t.FontColor = Color(1, 1, 1, 1)
+				t.OutlineColor = Color(0, 0, 0, 1)
+				t.OutlineWidth = 0.3
+				t.FaceDilate = 0.3
+				-- 글자 상자 기본 폭이 10유닛이라 오른쪽 정렬이면 숫자가 멀리 밀려난다 → 가운데 정렬 + 작은 상자로 우하단에 놓는다
+				t.HorizontalAlignment = TextHorizontalAlignmentOption.Center
+				t.RectSize = Vector2(0.3, 0.3)
+				t.SortingLayer = layer
+				t.OrderInLayer = order + 9
+				txt.TransformComponent.Scale = Vector3(1, 1, 1)
+				txt.TransformComponent.Position = Vector3(box * 0.36, -box * 0.3, -0.02)
+				-- 모델 기본 글자 "0"이 스택 없는 상태에서 보이지 않게 일단 끈다(ShowStatusIcon이 스택 있을 때만 켠다)
+				txt.Enable = false
+			end
+		end
+		-- 몬스터 엔티티 로컬(= 원본 스프라이트 유닛). 부착이라 몬스터가 다가오며 커지면 같이 커진다 → 1/ref로 나눠
+		-- 다 다가왔을 때 StatusIconBoxSize 월드 크기가 되게 한다. 몸 왼쪽 끝·발 높이 기준
+		-- 2026-10-07 유저 지정: 아래 좌측 → 아래 **우측**(몸 오른쪽 끝 안쪽)
+		if not isvalid(self._statusIconBg) then return false end
+		local right = 0.4
+		local bottom = 0
+		local sizeFactor = 1
+		if body.w > 0 then
+			right = (1 - body.px) * body.w
+			bottom = -body.py * body.h
+			-- 작은 몬스터(주니어 부기 등)는 아이콘도 작게(유저 지정 2026-10-07 "지금 크기가 맥스, 작은 몬스터는 20% 작게").
+			-- 다 다가왔을 때 몸 높이(월드) 기준: SmallBodyHeight 이하 → SmallScale, FullBodyHeight 이상 → 1, 사이는 비례
+			local worldH = body.h * ref
+			local t = (worldH - self.StatusIconSmallBodyHeight) / math.max(0.01, self.StatusIconFullBodyHeight - self.StatusIconSmallBodyHeight)
+			t = math.max(0, math.min(1, t))
+			sizeFactor = self.StatusIconSmallScale + (1 - self.StatusIconSmallScale) * t
+		end
+		local box = self.StatusIconBoxSize * sizeFactor
+		local x = right - (box * 0.5) / ref
+		local y = bottom + (box * 0.5 - self.StatusIconDrop * sizeFactor) / ref
+		self._statusIconBg.TransformComponent.Position = Vector3(x, y, -0.01)
+		self._statusIconBg.TransformComponent.Scale = Vector3(sizeFactor / ref, sizeFactor / ref, 1)
+		return true
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ShowStatusIcon()
+		-- 클라 — 목록에서 지금 순번의 아이콘/숫자를 보여준다
+		local list = self._statusIconList
+		if list == nil or #list == 0 or not isvalid(self._statusIconBg) then return end
+		if self._statusIconIndex < 1 or self._statusIconIndex > #list then self._statusIconIndex = 1 end
+		local cur = list[self._statusIconIndex]
+		local ruid = self:GetStatusIconRUID(cur.kind)
+		-- 크기 조회가 로딩을 기다리는 동안 아이콘이 지워질 수 있어 조회를 먼저 하고 그다음에 유효성을 본다(LEA-2007 리포트)
+		local m = _CardManager:GetSpriteMetrics(ruid)
+		if isvalid(self._statusIconImg) then
+			local s = 1
+			local ox = 0
+			local oy = 0
+			if m.w > 0 and m.h > 0 then
+				s = self.StatusIconSize / math.max(m.w, m.h)
+				ox = -(0.5 - m.px) * m.w * s
+				oy = -(0.5 - m.py) * m.h * s
+			end
+			self._statusIconImg.SpriteRendererComponent.SpriteRUID = ruid
+			self._statusIconImg.TransformComponent.Scale = Vector3(s, s, 1)
+			self._statusIconImg.TransformComponent.Position = Vector3(ox, oy, -0.01)
+		end
+		if isvalid(self._statusIconText) then
+			if cur.count > 0 then
+				self._statusIconText.TextRendererComponent.Text = tostring(cur.count)
+				self._statusIconText.Enable = true
+			else
+				self._statusIconText.Enable = false
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void UpdateStatusIconCycle(number delta)
+		-- 클라 — 상태가 2개 이상이면 StatusIconCycleSeconds마다 다음 아이콘으로 넘긴다
+		-- 상태가 전부 풀려 ""가 된 동기화가 안 들어오는 경우가 있었다(실측: 스턴/속박 만료 뒤 빈 틀 + 기본 글자 "0" 잔존) → 매 프레임 확인해 치운다
+		if self._statusIcons == "" then
+			if isvalid(self._statusIconBg) then
+				self:DestroyStatusIcon()
+				self._statusIconList = {}
+			end
+			return
+		end
+		local list = self._statusIconList
+		if list == nil or #list < 2 then return end
+		self._statusIconCycleTimer = self._statusIconCycleTimer + delta
+		if self._statusIconCycleTimer < self.StatusIconCycleSeconds then return end
+		self._statusIconCycleTimer = 0
+		self._statusIconIndex = self._statusIconIndex % #list + 1
+		self:ShowStatusIcon()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void DestroyStatusIcon()
+		-- 클라 — 아이콘 엔티티 정리(배경을 지우면 자식 아이콘/숫자도 같이 지워진다)
+		if isvalid(self._statusIconBg) then self._statusIconBg:Destroy() end
+		self._statusIconBg = nil
+		self._statusIconImg = nil
+		self._statusIconText = nil
+	end
+
 	-- 서버 — 포이즌 미스트(카드226) 표식을 붙인다(이미 있으면 대미지·남은 시간 갱신). duration 동안 안 죽으면 저절로 사라진다
 	@ExecSpace("ServerOnly")
 	method void ApplyPoisonMistMark(number damage, number duration)
@@ -3161,6 +3436,11 @@ script MonsterAI extends Component
 			self:ApplyPoisonMistMarkVisual()
 			return
 		end
+		-- 상태이상 아이콘 — 사망 때 비워지므로 _dead 가드보다 위
+		if name == "_statusIcons" then
+			self:ApplyStatusIconsVisual()
+			return
+		end
 		-- 포이즌 트랩 넝쿨 — 표식과 같은 이유로 _dead 가드보다 위
 		if name == "_poisonTrapVine" then
 			self:ApplyPoisonTrapVineVisual()
@@ -3201,8 +3481,13 @@ script MonsterAI extends Component
 	end
 
 	method void OnUpdate(number delta)
-		if self:IsClient() then self:UpdateBossHealthBar(delta) return end
+		if self:IsClient() then
+			self:UpdateBossHealthBar(delta)
+			self:UpdateStatusIconCycle(delta)
+			return
+		end
 		self:UpdateBodyAttackMotion(delta)
+		self:TickStatusIcons(delta)
 		if self._isBoss then
 			if self.BossHealthCurrent~=self.CurrentHp then self.BossHealthCurrent=self.CurrentHp end
 			if self.BossHealthMaximum~=self.MaxHp then self.BossHealthMaximum=self.MaxHp end
@@ -4715,6 +5000,8 @@ script MonsterAI extends Component
 	method void ApplyStun(number duration, boolean showIndicator)
 		-- 유물 시몬수의자(2번) — 상태이상 지속시간 증가
 		duration = duration * _RelicInventory:GetAilmentDurationMult()
+		-- 상태이상 아이콘용 — 별 연출 없는 스턴(자체 연출 있음)은 속박으로 표시. 가장 최근에 건 쪽을 따른다
+		self._stunIsBind = not showIndicator
 		-- 잠깐 완전히 멈췄다가 원래 속도로 돌아온다. 중복 적용 시 타이머만 갱신
 		if not self._isStunned then
 			self._stunSavedSpeed = self.ApproachSpeed
@@ -4864,7 +5151,8 @@ script MonsterAI extends Component
 		-- map(=CurrentMap)은 맵 루트라 로컬 Position이 아니라 WorldPosition을 써야 존 오프셋과 맞는다
 		local pos = self.Entity.TransformComponent.WorldPosition
 		local iPos = Vector3(pos.x + 0.45, pos.y - 0.40, pos.z - 0.05)
-		if self.FreezeStack <= 0 then
+		-- 2026-10-07: 빙결 스택은 상태이상 아이콘 숫자로 보여준다 → 옛 파란 숫자 표시는 끈다(남아 있으면 지우기만)
+		if self.FreezeStack <= 0 or not self.UseLegacyFreezeIndicator then
 			if isvalid(self._freezeIndicator) then
 				self._freezeIndicator:Destroy()
 				self._freezeIndicator = nil
@@ -5365,6 +5653,8 @@ script MonsterAI extends Component
 		-- 인게임 HUD 처치 수 — 보상 경로(일반/루돌프/보스)와 무관하게 사망 1회당 1
 		_GameManager:AddKillCount()
 		_Ep4Map4EasterEggLogic:OnMonsterKilled(self._spawnZoneIndex,self._standRUID)
+		-- 에피1 처치 퀘스트(map17 외계인 7마리 / map18 30마리, 2026-10-07)
+		_Ep1KillQuestLogic:OnMonsterKilled(self._spawnZoneIndex,self._standRUID)
 		-- 업적: 처치 수/엘리트/비행/종류별(종류는 잡템 이름으로 분류 — 2페이즈 진화체는 진화 후 잡템)
 		local achLoot = ""
 		if self._phase2Revived then achLoot = _GameManager:GetMonsterLootItemIdPhase2(self._spawnZoneIndex, self._speciesIdx) end

@@ -1,0 +1,74 @@
+@Component
+script Ep1KillQuestTrigger extends Component
+
+	-- 에피1 처치 퀘스트 오브젝트(map17 object-2047_5 / map18 object-3684_20) — 누르면 Ep1KillQuestLogic이
+	-- 오브젝트 이름으로 어느 퀘스트인지 가려 말풍선/보상을 처리한다(유저 지정 2026-10-07). Map22CollectTrigger와 같은 구조
+	property any _touchHandler = nil
+	property any _shakeTween = nil
+
+	method void OnBeginPlay()
+		-- 클라: 터치 연결
+		if self:IsClient() then
+			self._touchHandler = self.Entity:ConnectEvent(TouchEvent, self.OnTouched)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnTouched(TouchEvent event)
+		-- 몬스터가 겹쳐 있거나 게임오버/로비 화면이면 무시(다른 이스터에그 트리거와 동일)
+		if _CardManager:IsMonsterUnderTouch(event.TouchPoint) then return end
+		if _GameManager.GameOver then return end
+		if _TitleUI.titleGroup.Enable then return end
+		self:PlayShake()
+		self:RequestTouch()
+	end
+
+	-- 눌림(패딩) 연출 — Map22CollectTrigger와 같다(살짝 아래로 눌리며 납작해졌다 돌아온다)
+	property number PressDuration = 0.24
+	property number PressDownOffset = 0.10
+	property number _pressRestY = 0
+	property Vector3 _pressRestScale = Vector3(1, 1, 1)
+
+	@ExecSpace("ClientOnly")
+	method void PlayShake()
+		local target = self.Entity
+		if not isvalid(target) then return end
+		local transform = target.TransformComponent
+		if self._shakeTween ~= nil then
+			self._shakeTween:Stop()
+			self._shakeTween = nil
+		else
+			self._pressRestY = transform.Position.y
+			self._pressRestScale = Vector3(transform.Scale.x, transform.Scale.y, transform.Scale.z)
+		end
+		transform.ZRotation = 0
+		local restY = self._pressRestY
+		local s = self._pressRestScale
+		self._shakeTween = _TweenLogic:PlayTween(0.0, 1.0, self.PressDuration, EaseType.Linear, function(t)
+			if not isvalid(self) or not isvalid(target) then return end
+			local k = math.sin(t * math.pi)
+			local pos = transform.Position
+			transform.Position = Vector3(pos.x, restY - self.PressDownOffset * k, pos.z)
+			transform.Scale = Vector3(s.x * (1 + 0.06 * k), s.y * (1 - 0.10 * k), s.z)
+			if t >= 1.0 then
+				transform.Position = Vector3(transform.Position.x, restY, pos.z)
+				transform.Scale = s
+				self._shakeTween = nil
+			end
+		end)
+	end
+
+	@ExecSpace("Server")
+	method void RequestTouch()
+		-- 엔티티와 누른 유저를 서버 Logic에 넘긴다
+		_Ep1KillQuestLogic:OnObjectTouched(self.Entity, senderUserId)
+	end
+
+	method void OnEndPlay()
+		-- 터치 연결 해제
+		if self:IsClient() and self._touchHandler ~= nil then
+			self.Entity:DisconnectEvent(TouchEvent, self._touchHandler)
+		end
+	end
+
+end

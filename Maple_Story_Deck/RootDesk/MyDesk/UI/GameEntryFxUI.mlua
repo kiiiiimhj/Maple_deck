@@ -30,12 +30,26 @@ script GameEntryFxUI extends Logic
 	property boolean _cameraActive = false
 	-- 모바일 화면 맞춤 결과(눈꺼풀 띠 위치·크기) — FitToMobileScreen이 채운다
 	property any _mobileMatte = nil
+	-- "기절했다 눈 뜨는" 시야(유저 지정 2026-10-07): 흰 안개(Haze) + 가장자리 어둡게(Vignette).
+	-- 로딩이 걷힐 때부터 깔려 있다가, 눈꺼풀 띠가 완전히 닫힌 순간 꺼져서 띠가 열리면 시야가 맑다.
+	-- 돌아서기 연출이 없는 캐릭터는 시점이 다가오는 동안 서서히 걷힌다.
+	property boolean WakeVisionEnabled = true
+	property number HazeAlpha = 0.38
+	property number VignetteAlpha = 0.95
+	property any _haze = nil
+	property any _vignette = nil
+	-- ShowWakeVision 뒤 연출 재생 전까지(로딩이 걷히는 동안) 로딩 덮임 정도를 따라가는 중인지
+	property boolean _wakePending = false
 
 	@ExecSpace("ClientOnly")
 	method void OnBeginPlay()
 		self._render = {}
 		if isvalid(self.effectRoot) and isvalid(self.silhouette) then
 			local shade = self.effectRoot:GetChildByName("Shade")
+			local haze = self.effectRoot:GetChildByName("Haze")
+			if isvalid(haze) then self._haze = haze.CanvasGroupComponent end
+			local vignette = self.effectRoot:GetChildByName("Vignette")
+			if isvalid(vignette) then self._vignette = vignette.CanvasGroupComponent end
 			if isvalid(shade) then
 				self._render = {
 					mainTransform = self.silhouette.UITransformComponent,
@@ -179,7 +193,7 @@ script GameEntryFxUI extends Logic
 		local H = rt.RectSize.y
 		local r = _MobileScreenFitLogic:BuildCoverRect(rt, W, H, Vector2(0, 0))
 		-- 막 두 개(stretch, 가운데 pivot): 화면 사각형까지 오프셋으로 넓힌다
-		for _, name in ipairs({"Shade", "InputBlocker"}) do
+		for _, name in ipairs({"Shade", "InputBlocker", "Haze", "Vignette"}) do
 			local e = self.effectRoot:GetChildByName(name)
 			if isvalid(e) then
 				e.UITransformComponent.OffsetMin = Vector2(r.x0 + W / 2, r.y0 + H / 2)
@@ -204,9 +218,39 @@ script GameEntryFxUI extends Logic
 	end
 
 	@ExecSpace("ClientOnly")
+	method void ShowWakeVision()
+		-- 로딩 화면이 완전히 덮인 순간(LoadingUI.PlayEntry) 미리 깔아 둔다 — 로딩이 걷히는 동안에도 이미 뿌옇게 보이도록.
+		-- 곧이어 PlayWithCompletion이 Stop→재생으로 이어받는다(실패하면 Stop이 같이 지운다)
+		if not self.WakeVisionEnabled or not isvalid(self.effectRoot) then return end
+		self.effectRoot.Enable = true
+		self:FitToMobileScreen()
+		-- 입장 연출 그룹(17)이 로딩 그룹(16)보다 위라 그대로 깔면 로딩 그림까지 뿌옇다(유저 리포트 10/07) →
+		-- 로딩이 걷히는 만큼만 짙어지게 OnUpdate에서 따라간다
+		self._wakePending = true
+		self:ApplyWakeVision(1 - _LoadingUI:GetCoverAlpha(), 0)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ApplyWakeVision(number strength, number elapsed)
+		-- strength 1 = 깨어나기 직전(가장 뿌옇다), 0 = 정상 시야. 안개는 시간이 갈수록 살짝 옅어진다(초점이 잡히는 느낌)
+		local k = math.max(0, math.min(1, strength))
+		if not self.WakeVisionEnabled then k = 0 end
+		local fog = 1 - 0.35 * self:Ease(elapsed / 1.2)
+		if self._haze ~= nil then self._haze.GroupAlpha = self.HazeAlpha * fog * k end
+		if self._vignette ~= nil then self._vignette.GroupAlpha = self.VignetteAlpha * k end
+	end
+
+	@ExecSpace("ClientOnly")
 	method void RenderFrame(number elapsed)
 		local r = self._render
 		if r.mainAlpha == nil then return end
+		-- 돌아서기 연출: 눈꺼풀 띠가 완전히 닫힌 뒤(1.28~1.36초) 꺼진다 → 띠가 열릴 땐 맑은 시야. 아니면 0.5~1.1초에 서서히 걷힘
+		local t0 = math.max(0, elapsed)
+		if self._turnEntry then
+			self:ApplyWakeVision(1 - self:Ease((t0 - 1.28) / 0.08), t0)
+		else
+			self:ApplyWakeVision(1 - self:Ease((t0 - 0.5) / 0.6), t0)
+		end
 		if self._turnEntry then self:RenderTurnFrame(elapsed); return end
 		local t = math.max(0, elapsed)
 		local h = self._height
@@ -302,6 +346,10 @@ script GameEntryFxUI extends Logic
 
 	@ExecSpace("ClientOnly")
 	method void OnUpdate(number delta)
+		if self._wakePending and not self._running then
+			self:ApplyWakeVision(1 - _LoadingUI:GetCoverAlpha(), 0)
+			return
+		end
 		if not self._running then return end
 		if not self.PresentationEnabled or not isvalid(self.effectRoot) then self:Finish(); return end
 		self._elapsed = self._elapsed + delta
@@ -335,6 +383,9 @@ script GameEntryFxUI extends Logic
 		self._onFinished = nil
 		self._running = false
 		self._elapsed = 0
+		self._wakePending = false
+		if self._haze ~= nil then self._haze.GroupAlpha = 0 end
+		if self._vignette ~= nil then self._vignette.GroupAlpha = 0 end
 		if isvalid(self.effectRoot) then self.effectRoot.Enable = false end
 	end
 
