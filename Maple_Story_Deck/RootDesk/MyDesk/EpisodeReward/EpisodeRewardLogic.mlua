@@ -36,10 +36,12 @@ script EpisodeRewardLogic extends Logic
 	property integer MaxTierSeconds = 900
 	-- 다음 에피소드가 열리는 생존 시간(초) — IsEpisodeUnlocked 참고
 	property integer UnlockSeconds = 600
+	-- EP3 이후(EP3에서 버텨 EP4를 여는 경우부터) 해금 시간 — GetUnlockSeconds 참고
+	property integer UnlockSecondsLate = 900
 	-- ⚠ 테스트용 ON(2026-09-28 유저 지정 "맵 다 열어줘") — 기록과 무관하게 모든 에피소드 입장 허용. 저장은 안 건드린다. 출시 전 false
 	property boolean TestUnlockAllEpisodes = false
 	-- 루디브리엄 이스터에그 테스트용. Maker 플레이에서만 입장을 허용한다.
-	property boolean TestUnlockLudibrium = false
+	property boolean TestUnlockLudibrium = true
 	-- 엘라스 산맥(EP3) 테스트용(2026-10-05 유저 지정 "엘라스산맥 맵 해금"). Maker 플레이에서만 입장 허용, 기록은 안 건드린다.
 	property boolean TestUnlockElNath = false
 	property string StorageKey = "EpisodeReward"
@@ -56,9 +58,9 @@ script EpisodeRewardLogic extends Logic
 	end
 
 	method integer GetSlotMinutes(integer index)
-		-- 칸의 생존 시간(분). 기본 5/10/15분, EP1만 3/6/10분(유저 지정 2026-09-29 — 첫 에피소드는 더 빨리 받게)
+		-- 칸의 생존 시간(분). EP1·EP2는 3/6/10분, EP3부터 5/10/15분(유저 지정 2026-10-06 — 이전엔 EP1만 3/6/10)
 		local tier = (index - 1) % 3 + 1
-		if self:GetSlotEpisode(index) == 1 then
+		if self:GetSlotEpisode(index) <= 2 then
 			if tier == 1 then return 3 end
 			if tier == 2 then return 6 end
 			return 10
@@ -167,12 +169,19 @@ script EpisodeRewardLogic extends Logic
 		if episode == 3 and self.TestUnlockElNath and Environment:IsMakerPlay() then return true end
 		if episode <= 1 then return true end
 		if self.TestUnlockAllEpisodes then return true end
-		return self:GetBest(episode - 1) >= self.UnlockSeconds
+		return self:GetBest(episode - 1) >= self:GetUnlockSeconds(episode)
 	end
 
-	method string GetUnlockHint(string prevName)
+	method integer GetUnlockSeconds(integer episode)
+		-- 이 에피소드를 열려면 이전 에피소드에서 버텨야 하는 시간(초). EP1·EP2에서 10분 → EP2·EP3 해금,
+		-- EP3부터는 15분 → EP4 이후 해금(유저 지정 2026-10-06 "맵해금도 1~2는 10분 나머지는 15분")
+		if episode - 1 <= 2 then return self.UnlockSeconds end
+		return self.UnlockSecondsLate
+	end
+
+	method string GetUnlockHint(string prevName, integer episode)
 		-- 잠긴 월드 사진 위에 띄울 안내 문구
-		return _LocText:Resolve("FMT_EPISODEREWARDLOGIC_002|" .. prevName .. "|" .. tostring(self.UnlockSeconds // 60))
+		return _LocText:Resolve("FMT_EPISODEREWARDLOGIC_002|" .. prevName .. "|" .. tostring(self:GetUnlockSeconds(episode) // 60))
 	end
 
 	method boolean IsReached(integer index)

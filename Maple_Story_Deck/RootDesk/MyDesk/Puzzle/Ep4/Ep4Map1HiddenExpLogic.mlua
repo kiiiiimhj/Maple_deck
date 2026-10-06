@@ -27,7 +27,21 @@ script Ep4Map1HiddenExpLogic extends Logic
 		if not inside then self.Active=false self._returnPending=false return end
 		if not _GameManager.GameStarted or _GameManager.GameOver or _GameManager:IsGamePaused() then return end
 		if self._returnPending or self.Consumed then
-			if not _MapManager._moveLocked then _MapManager:MoveToMap(_MapManager.CurrentMapIndex,136) end
+			if not _MapManager._moveLocked then
+				local wasPending=self._returnPending
+				_MapManager:MoveToMap(_MapManager.CurrentMapIndex,136)
+				-- 시간 종료 안내는 136으로 이동해 화면이 다시 보일 때 띄운다(유저 지정 2026-10-06). 이동이 실제로
+				-- 시작됐을 때(_moveLocked가 켜짐)만, 한 번만 예약한다
+				if wasPending and _MapManager._moveLocked and not self._T.timeUpToastQueued then
+					self._T.timeUpToastQueued=true
+					_TimerService:SetTimerOnce(function()
+						if not isvalid(self) then return end
+						self._T.timeUpToastQueued=false
+						_UIToast:ShowMessage("EP4M1_HIDDEN_TIME_UP")
+						log("Ep4HiddenExp: time-up toast after return, zone=" .. _MapManager.CurrentMapIndex)
+					end,_MapTransitionLogic.CoverDuration+_MapTransitionLogic.CameraSettleDelay)
+				end
+			end
 			return
 		end
 		if not self.Active then log("Ep4HiddenExp: 60 second timer resumed") end
@@ -35,7 +49,6 @@ script Ep4Map1HiddenExpLogic extends Logic
 		self.RemainingSeconds=math.ceil(self._remaining)
 		if self._remaining<=0 then
 			self.Active=false self.Consumed=true self._returnPending=true
-			_UIToast:ShowMessage("EP4M1_HIDDEN_TIME_UP")
 			log("Ep4HiddenExp: 60 seconds consumed, returning to136")
 		end
 	end
@@ -44,5 +57,6 @@ script Ep4Map1HiddenExpLogic extends Logic
 	method void ResetForNewRun()
 		-- 새 게임과 다시하기에서는 다시 1분, 이어하기에서는 남은 시간을 유지한다.
 		self.Active=false self.RemainingSeconds=0 self._remaining=self.Duration self.Consumed=false self._returnPending=false
+		self._T.timeUpToastQueued=false
 	end
 end

@@ -257,9 +257,11 @@ script Ep4Map1EasterEggLogic extends Logic
 			if #loot>0 then _GameManager:GrantLootItemDrop(p,f.x,f.y,loot[_UtilLogic:RandomIntegerRange(1,#loot)],1) end
 		end
 		-- 포탈은 보상과 별도 추첨: 매 기부 10%, 여섯 번째는 확정. 이미 열렸으면 유지한다.
-		if self.DonationCount==#self._costs or _UtilLogic:RandomDouble()<0.1 then self:RevealPortal() end
+		-- 이번 기부로 포탈이 열리면 감사 문구 없이 포탈 안내만 띄운다(유저 지정 2026-10-06) — 토스트는 한 줄이라
+		-- 둘을 같이 띄우면 한쪽이 덮인다. 이미 열린 뒤의 기부나 포탈이 안 열린 기부는 감사 문구만.
+		local opensPortal=(not self.PortalActive) and (self.DonationCount==#self._costs or _UtilLogic:RandomDouble()<0.1)
+		if opensPortal then self:RevealPortal() else _UIToast:ShowMessage("EP4_DONATE_THANKS",userId) end
 		_AchievementLogic:OnEasterEgg()
-		_UIToast:ShowMessage("EP4_DONATE_THANKS",userId)
 		self._busy=false
 		log("Ep4Egg: donated step=" .. self.DonationCount .. " cost=" .. cost .. " skills=" .. self.DonationSkillRewards .. " portal=" .. tostring(self.PortalActive))
 	end
@@ -275,7 +277,12 @@ script Ep4Map1EasterEggLogic extends Logic
 		if _MapManager._moveLocked then return end
 		if _Ep4Map1HiddenExpLogic.Consumed then _UIToast:ShowMessage("EP4M1_HIDDEN_TIME_UP",userId) return end
 		_MapManager:MoveToMap(_MapManager.CurrentMapIndex,184)
-		_UIToast:ShowMessage("EP4M1_HIDDEN_EXP",userId)
+		-- 입장 안내는 경험치방 화면이 다시 보일 때 띄운다(화면이 덮이는 동안 뜨면 못 본다 — 유저 리포트 2026-10-06)
+		_TimerService:SetTimerOnce(function()
+			if not isvalid(self) then return end
+			_UIToast:ShowMessage("EP4M1_HIDDEN_EXP",userId)
+			log("Ep4Egg: hidden exp entry toast shown, zone=" .. _MapManager.CurrentMapIndex)
+		end,_MapTransitionLogic.CoverDuration+_MapTransitionLogic.CameraSettleDelay)
 		log("Ep4Egg: donation portal entering ep4_map1_ester1 zone1 exp=2x")
 	end
 
@@ -287,7 +294,7 @@ script Ep4Map1EasterEggLogic extends Logic
 		local portal=_EntityService:GetEntityByPath("/maps/ep4_map1/esteregg_5")
 		if isvalid(portal) then portal.Enable=true end
 		_UIToast:ShowMessage("EP4_PORTAL_OPEN")
-		log("Ep4Egg: donation portal revealed")
+		log("Ep4Egg: donation portal revealed (portal-open toast shown)")
 	end
 
 	@ExecSpace("ServerOnly")

@@ -2151,7 +2151,7 @@ script MonsterSpawner extends Logic
 				local runWidth = run.xMax - run.xMin
 				local isAerial = run.y > baselineY + self.AerialHeightThreshold
 				local isExcluded = mapIndex == 15 and self:IsExcludedZone15Foothold(run.ownerId)
-				if isAerial and run.y <= maxRunY and runWidth >= self.MinFlatRunWidth and not isExcluded and not self:IsRunOccupied(map, run) then
+				if isAerial and run.y <= maxRunY and runWidth >= self.MinFlatRunWidth and not isExcluded and not run.noSpawn and not self:IsRunOccupied(map, run) then
 					local margin = math.min(self.EdgeMarginAerial, runWidth * 0.3)
 					local xMin = math.max(run.xMin + margin, safeMin)
 					local xMax = math.min(run.xMax - margin, safeMax)
@@ -2170,7 +2170,7 @@ script MonsterSpawner extends Logic
 			local run = runs[i]
 			local runWidth = run.xMax - run.xMin
 			local isExcluded = mapIndex == 15 and self:IsExcludedZone15Foothold(run.ownerId)
-			if runWidth >= self.MinFlatRunWidth and not isExcluded and run.y <= maxRunY then
+			if runWidth >= self.MinFlatRunWidth and not isExcluded and not run.noSpawn and run.y <= maxRunY then
 				local isAerial = run.y > baselineY + self.AerialHeightThreshold
 				local margin = math.min(isAerial and self.EdgeMarginAerial or self.EdgeMarginGround, runWidth * 0.3)
 				local xMin = math.max(run.xMin + margin, safeMin)
@@ -2252,8 +2252,31 @@ script MonsterSpawner extends Logic
 		if footholdComp == nil then return {} end
 		
 		local runs = self:GetFlatRuns(footholdComp)
+		self:MarkBalloonRuns(rootMap, runs)
 		self._flatRunsCache[mapIndex] = runs
 		return runs
+	end
+
+	-- ep4_map3의 풍선(balloon_N) 그림 바로 밑에는 폭 0.66짜리 발판이 하나씩 붙어 있다(풍선 위치 +0.21, 22개 전부).
+	-- 그림은 풍선과 줄뿐이라 지상 몬스터가 거기 서면 줄에 매달려 공중에 떠 보인다(유저 리포트 2026-10-06
+	-- "ep4맵 공중에 몬스터 떠있는 경우") → 그 구간에 noSpawn 표시를 해서 스폰 후보에서만 뺀다.
+	@ExecSpace("ServerOnly")
+	method void MarkBalloonRuns(Entity rootMap, table runs)
+		if rootMap == nil or rootMap.Name ~= "ep4_map3" then return end
+		local marked = 0
+		for _, child in pairs(rootMap.Children) do
+			if string.match(child.Name, "^balloon_%d+$") then
+				local p = child.TransformComponent.WorldPosition
+				for i = 1, #runs do
+					local run = runs[i]
+					if run.xMax - run.xMin < 1.0 and p.x >= run.xMin - 0.1 and p.x <= run.xMax + 0.1 and math.abs(run.y - (p.y + 0.21)) <= 0.15 then
+						if not run.noSpawn then marked = marked + 1 end
+						run.noSpawn = true
+					end
+				end
+			end
+		end
+		log("MonsterSpawner: balloon footholds excluded from spawn = " .. marked)
 	end
 
 	-- FootholdComponent가 가진 발판 전체를 한 번 훑어서, 이어진 평평한 구간(run)별로 { y, xMin, xMax }를
