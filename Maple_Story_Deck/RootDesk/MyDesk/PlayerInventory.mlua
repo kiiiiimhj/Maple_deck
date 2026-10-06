@@ -11,6 +11,11 @@ script PlayerInventory extends Logic
 	-- itemId별 "처음 획득한 순번" — 인벤토리 UI가 획득한 순서대로 슬롯을 채우는 데 쓴다
 	property integer _nextOrderIndex = 1
 
+	-- 잡템 퀘스트 이스터에그 "다 모았다" 알림(유저 지정 2026-10-06) — 수락한(말풍선을 한 번 본) 퀘스트만 등록된다.
+	-- key = 퀘스트 이름, 값 = { items = 목표 잡템 id 목록, goal = 종류당 개수, notified = 이미 알렸는지 }.
+	-- AddItem이 목표 잡템이 들어올 때마다 확인해 전부 채운 순간 한 번만 토스트. 런 단위(ConvertAllToCoins·각 퀘스트 ResetForNewRun에서 비움)
+	property table _questWatch = {}
+
 	@ExecSpace("ServerOnly")
 	method void AddItem(string itemId, integer amount)
 		-- 가방에 아이템을 지급한다. 존재하지 않던 itemId면 0에서부터 시작한다
@@ -18,6 +23,41 @@ script PlayerInventory extends Logic
 		local current = self:GetItemCount(itemId)
 		self.ItemCounts[itemId] = current + amount
 		log("Inventory: " .. itemId .. " +" .. amount .. " -> " .. tostring(self.ItemCounts[itemId]))
+		for key, w in pairs(self._questWatch) do
+			for _, id in ipairs(w.items) do
+				if id == itemId then
+					self:CheckQuestWatch(key)
+					break
+				end
+			end
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void WatchQuestItems(string key, table items, integer goal)
+		-- 퀘스트 말풍선을 누를 때마다 부른다(이미 등록돼 있으면 그대로). 수락 시점에 이미 다 갖고 있으면 바로 알린다
+		if self._questWatch[key] == nil then
+			self._questWatch[key] = { items = items, goal = goal, notified = false }
+		end
+		self:CheckQuestWatch(key)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void CheckQuestWatch(string key)
+		-- 목표 잡템을 전부 goal개 이상 갖게 된 순간 한 번만 "다 모았다" 토스트
+		local w = self._questWatch[key]
+		if w == nil or w.notified then return end
+		for _, id in ipairs(w.items) do
+			if self:GetItemCount(id) < w.goal then return end
+		end
+		w.notified = true
+		_UIToast:ShowMessage("QUEST_ITEMS_READY")
+		log("Inventory: quest " .. key .. " items ready")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ClearQuestWatch(string key)
+		self._questWatch[key] = nil
 	end
 
 	-- 잡템을 소모한다(교환/제작 등) — amount보다 적게 가지고 있으면 아무 일도 하지 않고 false를 돌려준다.
@@ -463,6 +503,7 @@ script PlayerInventory extends Logic
 			end
 		end
 		self._nextOrderIndex = 1
+		self._questWatch = {}
 		if totalValue > 0 then
 			-- ⚠ AddGold(런 골드+누적 코인)가 아니라 누적 코인에만 넣는다 — 이 환전은 RestartGame이 런 골드를 0으로
 			-- 만든 **직후**에 불려서, AddGold를 쓰면 새 판이 지난 판 잡템 값만큼의 골드를 들고 시작했다
