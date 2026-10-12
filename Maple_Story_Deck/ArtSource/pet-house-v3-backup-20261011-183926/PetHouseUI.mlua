@@ -1,0 +1,802 @@
+@Logic
+script PetHouseUI extends Logic
+	property Entity Overlay = "3589b646-4850-48c1-8f9e-bbecf83b9821"
+	property Entity PetPanel = "952ecae3-adfd-4f23-a672-9b86a41a3727"
+	property Entity PetDisplay = "f2612fb7-46eb-4daa-92ab-4d004558d159"
+	property Entity PetButton = "6e2b4852-6a87-43e8-8f46-1398ee7425eb"
+	property Entity CloseButton = "3bf346e8-283c-4111-b7d3-e6a84948138c"
+	property Entity TitleGroup = "4109795c-8f3d-41f1-9403-fefcec8fbb3e"
+	property boolean PetMode = false
+	property table Handlers = {}
+	property any WalkScene = nil
+	property table WalkLayers = {}
+	property any WalkSmile = nil
+	property integer WalkFrame = 0
+	property table WalkFrameRUIDs = {"78dc1ea7912b4ebfa8c012270add2f2c","3ed892481c6c49dab6850fc559009fe7","e715bfb4737c4a21b260713e43cdbba8","766a28fa03db48688ecbcf55d5265843"}
+	property any WalkNotice = nil
+	property any WalkReward = nil
+	property any WalkPlan = nil
+	property integer WalkPhase = -1
+	property boolean WalkReady = false
+	property integer WalkPlanToken = 0
+	property table FeedingRUIDs = {"fb961eaed68149c8ab6835ba0888c762","cf7a9eeab77d473f96f48b36912f5c8d"}
+	property boolean FeedingReady = false
+	property integer FeedingFrame = 0
+	property number NextRefresh = 0
+	property number MotionUntil = 0
+	property number MotionStart = 0
+	property string Motion = ""
+	property string IdleRUID = ""
+	property number PortraitPixelScale = 6.3888888889
+	property table GaugeValues = {}
+	property table GaugeTargets = {}
+	property number ShownAffinity = 0
+	property integer InjectionPhase = -1
+	property integer ShownRevision = -1
+	property string PendingAction = ""
+	property number WaitingUntil = 0
+	property string EnabledButtonRUID = "4384a214dae64683a7c0f92392c3ad87"
+	property string DisabledButtonRUID = "929c7f14f3ef4d77a644f41c5f9a2bfd"
+	property string UnequipButtonRUID = "f6b09cf25a7d457380be0174bd253286"
+	property string EnabledArrowRUID = "280fd26304f7442fb742555a7a674fc9"
+	property string DisabledArrowRUID = "0c25f4ba834745aba5ec24fe38d0bc1e"
+	property integer SelectedPetIndex = 1
+	property boolean GrowthWasVisible = false
+	property number GrowthRevealStart = 0
+
+	@ExecSpace("ClientOnly")
+	method void BindClick(Entity entity, any callback)
+		-- Every global UI subscription is paired with cleanup on editor reload.
+		if not isvalid(entity) then return end
+		local handle = entity:ConnectEvent(ButtonClickEvent, callback)
+		table.insert(self.Handlers, {entity=entity, handle=handle})
+	end
+
+	@ExecSpace("ClientOnly")
+	method void BuyEgg()
+		-- Only a configured, registered product may open the native cash checkout.
+		if not _PetLogic.ClientReady or self:GetDisplayedPet().id~="5002617" then return end
+		if _PetLogic.ClientPet.Owned then return end
+		if _PetLogic.PetEggProductId == "" or _PetLogic.PetEggPrice <= 0 then
+			_UIToast:ShowMessage("PET_SHOP_PENDING") return
+		end
+		_WorldShopService:PromptPurchase(_PetLogic.PetEggProductId)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetText(string name, string text)
+		-- Dynamic copy always belongs to the panel's own text child.
+		self.PetPanel:GetChildByName(name).TextGUIRendererComponent.Text = text
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetButton(string name, boolean enabled, string key)
+		-- Unavailable actions use the same gray treatment as the game's reward buttons.
+		local button = self.PetPanel:GetChildByName(name)
+		button.ButtonComponent.Enable = enabled
+		local ruid=enabled and self.EnabledButtonRUID or self.DisabledButtonRUID
+		if name=="equip" and enabled and key=="PET_HOUSE_REST_TOGETHER" then ruid=self.UnequipButtonRUID end
+		button.SpriteGUIRendererComponent.ImageRUID = DataRef(ruid)
+		button.SpriteGUIRendererComponent.Color = Color(1,1,1,1)
+		if key ~= "" then button:GetChildByName("Label").TextGUIRendererComponent.Text = _LocalizationService:GetText(key) end
+	end
+
+	@ExecSpace("ClientOnly")
+	method table GetDisplayedPet()
+		local entries=_PetLogic:GetPetCatalog()
+		self.SelectedPetIndex=math.max(1,math.min(#entries,self.SelectedPetIndex))
+		return entries[self.SelectedPetIndex]
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshNavigation(boolean busy)
+		local count=#_PetLogic:GetPetCatalog()
+		for _,spec in ipairs({{"PrevPet",-1},{"NextPet",1}}) do
+			local button=self.PetPanel:GetChildByName(spec[1])
+			local target=self.SelectedPetIndex+spec[2]
+			local enabled=not busy and target>=1 and target<=count
+			button.ButtonComponent.Enable=enabled
+			button.SpriteGUIRendererComponent.ImageRUID=DataRef(enabled and self.EnabledArrowRUID or self.DisabledArrowRUID)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void MovePet(integer direction)
+		if not self.PetMode or (direction~=-1 and direction~=1) then return end
+		if _UtilLogic.ElapsedSeconds<math.max(self.MotionUntil,self.WaitingUntil) then return end
+		local entries=_PetLogic:GetPetCatalog()
+		local nextIndex=self.SelectedPetIndex+direction
+		if nextIndex<1 or nextIndex>#entries then return end
+		self.SelectedPetIndex=nextIndex self.IdleRUID=""
+		self.GaugeValues={} self.GaugeTargets={} self.ShownAffinity=0 self.GrowthWasVisible=false
+		self:Refresh()
+		log("[VRF] PET-HOUSE selection="..entries[nextIndex].id)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetGrowthAvailable(boolean available)
+		local button=self.PetPanel:GetChildByName("rank")
+		button.Enable=available
+		if available and not self.GrowthWasVisible then
+			self.GrowthRevealStart=_UtilLogic.ElapsedSeconds
+			log("[VRF] PET-HOUSE growth button revealed")
+		end
+		self.GrowthWasVisible=available
+		self:AnimateGrowth()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void AnimateGrowth()
+		local button=self.PetPanel:GetChildByName("rank")
+		if not button.Enable then button.UITransformComponent.UIScale=Vector3(1,1,1) return end
+		local elapsed=math.max(0,_UtilLogic.ElapsedSeconds-self.GrowthRevealStart)
+		local scale=1
+		if elapsed<0.45 then
+			local p=elapsed/0.45-1
+			local bounce=1+2.70158*p*p*p+1.70158*p*p
+			scale=0.86+0.14*bounce
+		else scale=1+math.sin((elapsed-0.45)*4)*0.018 end
+		button.UITransformComponent.UIScale=Vector3(scale,scale,1)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Refresh()
+		-- Paint the last server snapshot; loading never enables a purchase or care action.
+		local ready = _PetLogic.ClientReady
+		local entry=self:GetDisplayedPet()
+		local pet=entry.progress or PetProgress()
+		ready=entry.ready and pet~=nil
+		local owned=ready and pet.Owned
+		local name=_LocalizationService:GetText(entry.nameKey)
+		self.PetDisplay:GetChildByName("Name").TextGUIRendererComponent.Text = _LocalizationService:GetTextFormat("PET_HOUSE_NAME_FORMAT",owned and pet.Level or 1,name)
+		self.PetDisplay:GetChildByName("State").TextGUIRendererComponent.Text = _LocalizationService:GetText(owned and "PET_OWNED" or "PET_PREVIEW")
+		local portrait = self.PetDisplay:GetChildByName("Portrait").SpriteGUIRendererComponent
+		portrait.Color = Color(1,1,1,owned and 1 or 0.55)
+		self.PetPanel:GetChildByName("test").Enable = Environment:IsMakerPlay() and ready and not owned and entry.id=="5002617"
+		self.PetPanel:GetChildByName("buy").Enable = not owned
+		self.PetPanel:GetChildByName("equip").Enable = owned
+		self.PetPanel:GetChildByName("rank").Enable = owned
+		for _, child in ipairs({"StoneCaption", "StoneIcon", "StoneCount"}) do
+			self.PetPanel:GetChildByName(child).Enable = owned
+		end
+		local maxLevel = owned and _PetLogic:GetMaxLevel(pet.Rank) or 10
+		local level = owned and pet.Level or 1
+		local xp = owned and pet.XP or 0
+		local need = _PetLogic:GetXPNeeded(level)
+		local bonus = owned and _PetLogic:GetDamagePercent(level, pet.Rank) or 3
+		self:SetText("Level", _LocalizationService:GetTextFormat("PET_LEVEL_FORMAT", level, maxLevel))
+		self:SetText("Bonus", _LocalizationService:GetTextFormat("PET_HOUSE_DAMAGE_FORMAT", string.format("%.2f", bonus)))
+		self:SetText("XP", _LocalizationService:GetTextFormat("PET_XP_FORMAT", xp, need))
+		self:SetText("Energy", tostring(ready and pet.Energy or 0) .. " / 1000")
+		self:SetText("FullValue", tostring(owned and pet.Fullness or 0) .. "%")
+		self:SetText("CleanValue", tostring(owned and pet.Cleanliness or 0) .. "%")
+		self:SetText("MoodValue", tostring(owned and pet.Mood or 0) .. "%")
+		self:SetText("StoneCount", tostring(ready and pet.Stones or 0))
+		local fill = self.PetPanel:GetChildByName("EnergyBar"):GetChildByName("Fill")
+		fill.Enable = ready and pet.Energy > 0
+		fill.UITransformComponent.RectSize = Vector2(500 * (ready and pet.Energy or 0) / 1000, 12)
+		local busy = _UtilLogic.ElapsedSeconds < math.max(self.MotionUntil, self.WaitingUntil)
+		local canGrow = owned and not busy
+		for _,action in ipairs({"feed","wash","walk","inject"}) do
+			local choice = _PetLogic:GetCareConfig(action)
+			local block = owned and _PetLogic:GetCareBlockReason(pet,action) or "PET_NO_PET"
+			local loaded = (action ~= "feed" or self.FeedingReady) and (action ~= "walk" or self.WalkReady)
+			local keys = {feed="PET_FEED",wash="PET_WASH",walk="PET_WALK",inject="PET_INJECT"}
+			self:SetButton(action,canGrow and loaded and block=="" and pet.Energy>=choice.energy,keys[action])
+			local button = self.PetPanel:GetChildByName(action)
+			button:GetChildByName("Cost").TextGUIRendererComponent.Text = _LocalizationService:GetTextFormat("PET_ENERGY_CHANGE",-choice.energy)
+			button:GetChildByName("Effect").TextGUIRendererComponent.Text = block ~= "" and _LocalizationService:GetText(block) or _LocalizationService:GetTextFormat("PET_CARE_EFFECT",_LocalizationService:GetText(choice.label),choice.gain,choice.fatigue)
+		end
+		local sleepBlock = owned and _PetLogic:GetCareBlockReason(pet,"sleep") or "PET_NO_PET"
+		self:SetButton("sleep",canGrow and sleepBlock=="","PET_SLEEP")
+		self.PetPanel:GetChildByName("sleep"):GetChildByName("Cost").TextGUIRendererComponent.Text = _LocalizationService:GetTextFormat("PET_ENERGY_CHANGE","+"..tostring(_PetLogic.SleepEnergyRecovery))
+		self.PetPanel:GetChildByName("sleep"):GetChildByName("Effect").TextGUIRendererComponent.Text = sleepBlock ~= "" and _LocalizationService:GetText(sleepBlock) or _LocalizationService:GetTextFormat("PET_SLEEP_EFFECT",_PetLogic.SleepFatigueRecovery)
+		self:RefreshNeeds(owned,pet)
+		self:RefreshAffinity(owned,pet,busy)
+		self:SetButton("equip", owned and not busy, pet.Equipped and "PET_HOUSE_REST_TOGETHER" or "PET_HOUSE_JOIN")
+		self:RefreshNavigation(busy)
+		local cost = _PetLogic.RankCosts[pet.Rank + 1]
+		local growthReady=owned and not busy and level>=maxLevel and cost~=nil and pet.Stones>=cost
+		self:SetButton("rank",growthReady,"PET_HOUSE_GROW")
+		self.PetPanel:GetChildByName("rank"):GetChildByName("Count").TextGUIRendererComponent.Text="x"..tostring(cost or 0)
+		self:SetGrowthAvailable(growthReady)
+		if owned and level>=maxLevel then
+			self:SetText("XP",_LocalizationService:GetText(cost==nil and "PET_MAX_RANK" or (growthReady and "PET_HOUSE_GROW_READY" or "PET_HOUSE_GROW_WAIT")))
+		end
+		local buy = self.PetPanel:GetChildByName("buy")
+		self:SetButton("buy", ready and entry.id=="5002617" and _PetLogic.PetEggProductId ~= "" and _PetLogic.PetEggPrice > 0, _PetLogic.PetEggProductId == "" and "PET_COMING_SOON" or "PET_BUY_EGG")
+		if _PetLogic.PetEggProductId ~= "" and _PetLogic.PetEggPrice > 0 then
+			buy:GetChildByName("Label").TextGUIRendererComponent.Text = _LocalizationService:GetTextFormat("PET_BUY_PRICE", _PetLogic.PetEggPrice)
+		end
+		local stateKey = ready and "PET_PREVIEW" or "PET_LOADING"
+		if owned then stateKey = _PetLogic.ClientTest and "PET_TEST_MODE" or (pet.Equipped and "PET_EQUIPPED" or "PET_OWNED") end
+		self:SetText("Status", _LocalizationService:GetText(stateKey))
+		self.PetDisplay:GetChildByName("State").TextGUIRendererComponent.Text = _LocalizationService:GetText(stateKey)
+		if self.Motion == "walk" then self:SetWalking(true,_UtilLogic.ElapsedSeconds-self.MotionStart) end
+		self.ShownRevision = _PetLogic.ClientRevision
+		if self.MotionUntil == 0 then self:PlayIdle() end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshNeeds(boolean owned, any pet)
+		local meters = self.PetDisplay:GetChildByName("CareMeters")
+		meters.Enable = owned
+		if not owned then self.GaugeValues={} self.GaugeTargets={} return end
+		for _,spec in ipairs({{"Fullness","PET_FULLNESS"},{"Cleanliness","PET_CLEANLINESS"},{"Mood","PET_MOOD"},{"Fatigue","PET_FATIGUE"},{"Health","PET_HEALTH"}}) do
+			local name=spec[1] local value=math.max(0,math.min(100,pet[name] or 0))
+			self.GaugeTargets[name]=value
+			if self.GaugeValues[name] == nil then self.GaugeValues[name]=value end
+			local gauge=meters:GetChildByName(name)
+			gauge:GetChildByName("Label").TextGUIRendererComponent.Text = _LocalizationService:GetTextFormat("PET_NEED_VALUE",_LocalizationService:GetText(spec[2]),value)
+		end
+		self:AnimateNeeds(0)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void AnimateNeeds(number delta)
+		local meters = self.PetDisplay:GetChildByName("CareMeters")
+		if not meters.Enable then return end
+		for _,name in ipairs({"Fullness","Cleanliness","Mood","Fatigue","Health"}) do
+			local value = self.GaugeValues[name] or 0 local target = self.GaugeTargets[name] or 0
+			value = value + (target-value)*math.min(1,delta*10)
+			if math.abs(target-value)<0.05 then value=target end
+			self.GaugeValues[name]=value
+			local fill=meters:GetChildByName(name):GetChildByName("Track"):GetChildByName("Fill")
+			fill.Enable=value>0
+			fill.UITransformComponent.RectSize=Vector2(190*value/100,8)
+			if name=="Fatigue" then fill.SpriteGUIRendererComponent.Color = target>=80 and Color(1,0.37,0.28,1) or Color(0.79,0.57,0.87,1) end
+		end
+	end
+
+
+	@ExecSpace("ClientOnly")
+	method void RefreshAffinity(boolean owned, any pet, boolean busy)
+		local dial=self.PetDisplay:GetChildByName("AffinityDial")
+		dial.Enable=owned
+		if not owned then self.ShownAffinity=0 return end
+		local value=pet.Affinity or 0
+		dial:GetChildByName("Caption").TextGUIRendererComponent.Text=_LocalizationService:GetText("PET_AFFINITY")
+		dial:GetChildByName("Value").TextGUIRendererComponent.Text=tostring(value).." / 100"
+		dial:GetChildByName("Hint").TextGUIRendererComponent.Text=_LocalizationService:GetText("PET_HEART_DAILY_HINT")
+		for tier=1,3 do
+			local reward=dial:GetChildByName("Reward"..tostring(tier))
+			local claimed=_PetLogic:IsHeartClaimed(pet,tier)
+			local unlocked=value>=_PetLogic.HeartThresholds[tier]
+			local claim=reward:GetChildByName("Claim")
+			reward:GetChildByName("Icon").Enable=not unlocked and not claimed
+			reward:GetChildByName("Count").Enable=not unlocked and not claimed
+			claim.Enable=unlocked or claimed
+			claim.ButtonComponent.Enable=unlocked and not claimed and not busy
+			claim.SpriteGUIRendererComponent.ImageRUID=DataRef((busy or claimed) and self.DisabledButtonRUID or self.EnabledButtonRUID)
+			claim.SpriteGUIRendererComponent.Color=Color(1,1,1,1)
+			claim:GetChildByName("Label").TextGUIRendererComponent.Text=_LocalizationService:GetText(claimed and "PET_HEART_COMPLETE" or "PET_HEART_CLAIM")
+			reward:GetChildByName("Threshold").TextGUIRendererComponent.Text=tostring(_PetLogic.HeartThresholds[tier])
+		end
+		self:AnimateAffinity(0)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void AnimateAffinity(number delta)
+		local dial=self.PetDisplay:GetChildByName("AffinityDial")
+		if not dial.Enable then return end
+		local pet=self:GetDisplayedPet().progress
+		local target=math.max(0,math.min(100,pet~=nil and pet.Affinity or 0))
+		self.ShownAffinity=self.ShownAffinity+(target-self.ShownAffinity)*math.min(1,delta*6)
+		if math.abs(target-self.ShownAffinity)<0.05 then self.ShownAffinity=target end
+		local fill=dial:GetChildByName("Fill")
+		fill.Enable=self.ShownAffinity>0
+		fill.UITransformComponent.RectSize=Vector2(21,268.3333333333*self.ShownAffinity/100)
+		local pulse=target>=100 and (1+math.sin(_UtilLogic.ElapsedSeconds*4)*0.015) or 1
+		dial:GetChildByName("Frame").UITransformComponent.UIScale=Vector3(pulse,pulse,1)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetInjection(boolean active, number elapsed)
+		local fx=self.PetDisplay:GetChildByName("Injection") fx.Enable=active
+		if not active then self.InjectionPhase=-1 return end
+		local portrait=self.PetDisplay:GetChildByName("Portrait")
+		local phase=elapsed<1.2 and 0 or (elapsed<2.5 and 1 or 2)
+		if phase~=self.InjectionPhase then
+			self.InjectionPhase=phase
+			self:PlayPortrait(_PetLogic.Motions[phase==0 and "what" or (phase==1 and "cry" or "love")])
+		end
+		local approach=math.min(1,elapsed/1.2) approach=approach*approach*(3-2*approach)
+		local retreat=math.max(0,math.min(1,(elapsed-2.2)/0.7))
+		local syringe=fx:GetChildByName("Syringe")
+		syringe.UITransformComponent.anchoredPosition=Vector2(250-105*approach+85*retreat,-32)
+		syringe.UITransformComponent.UIRotation=Vector3(0,0,90+math.sin(elapsed*5)*2)
+		syringe.SpriteGUIRendererComponent.Color=Color(1,1,1,math.min(1,elapsed/0.25)*(1-retreat))
+		local flinch=phase==1 and math.sin(elapsed*27)*math.max(0,1-(elapsed-1.2)/1.3) or 0
+		portrait.UITransformComponent.anchoredPosition=Vector2(flinch*3,-150-math.abs(flinch)*2)
+		for i=1,6 do
+			local particle=fx:GetChildByName("Recovery"..i)
+			local age=elapsed-2.4-i*0.11
+			particle.Enable=age>=0 and age<2.2
+			if particle.Enable then
+				particle.UITransformComponent.anchoredPosition=Vector2(math.sin(i*13)*80,-65+age*75)
+				particle.TextGUIRendererComponent.FontColor=Color(0.54,1,0.69,math.sin(age/2.2*math.pi)*0.85)
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayIdle()
+		-- Needs affect expression, never take away the pet's earned combat bonus.
+		local pose = "stand"
+		local entry=self:GetDisplayedPet()
+		local pet=entry.progress
+		if pet ~= nil and pet.Owned then
+			if (pet.Fatigue or 0) >= 80 then pose = "rest"
+			elseif pet.Fullness < 30 then pose = "hungry"
+			elseif pet.Mood < 30 then pose = "cry"
+			elseif pet.Cleanliness < 30 then pose = "angry" end
+		end
+		local ruid = entry.motions[pose] or entry.stand
+		if self.IdleRUID == ruid then return end
+		self.IdleRUID = ruid
+		local image = self.PetDisplay:GetChildByName("Portrait").SpriteGUIRendererComponent
+		image.FlipX = false
+		self.PetDisplay:GetChildByName("Portrait").UITransformComponent.anchoredPosition = Vector2(0, -150)
+		self:PlayPortrait(ruid)
+	end
+
+
+	@ExecSpace("ClientOnly")
+	method void InitializeArtwork()
+		-- Keep the original pet clips; retire every generated overlay, including cached UI children.
+		local icon = self.PetButton:GetChildByName("Icon")
+		icon.UITransformComponent.RectSize = Vector2(112,112 * 28 / 36)
+		icon.UITransformComponent.anchoredPosition = Vector2(0,13)
+		icon.SpriteGUIRendererComponent.PreserveSprite = PreserveSpriteType.None
+		icon.SpriteGUIRendererComponent.LocalScale = Vector2(1,1)
+		icon.SpriteGUIRendererComponent.LocalPosition = Vector2(0,0)
+		local food = self.PetDisplay:GetChildByName("Food")
+		food.Enable = false
+		local bowl = food:GetChildByName("Bowl")
+		if isvalid(bowl) then bowl.Enable = false end
+		for i = 1, 16 do
+			local pose = food:GetChildByName("Pose" .. i)
+			if isvalid(pose) then pose.Enable = false end
+			local bite = food:GetChildByName("Bite" .. i)
+			if isvalid(bite) then bite.Enable = false end
+		end
+		log("[VRF] PET-HOUSE original pixel clips only; generated feeding overlays disabled")
+	end
+
+
+	@ExecSpace("ClientOnly")
+	method Entity WalkLayer(Entity parent, string name, string ruid, number width, number height, number x, number y)
+		-- Scenery shares a clipped UI viewport; it never touches the actual combat map.
+		local layer = _SpawnService:SpawnByEntity(self.PetDisplay:GetChildByName("Portrait"), name, Vector3(0,0,0), parent, false)
+		local transform = layer.UITransformComponent
+		transform.Pivot = Vector2(0.5,0.5)
+		transform.AnchorsMin = Vector2(0.5,0.5) transform.AnchorsMax = Vector2(0.5,0.5)
+		transform.UIScale = Vector3(1,1,1) transform.UIRotation = Vector3(0,0,0)
+		transform.RectSize = Vector2(width,height) transform.anchoredPosition = Vector2(x,y)
+		local image = layer.SpriteGUIRendererComponent
+		image.PreserveSprite = PreserveSpriteType.None image.LocalScale = Vector2(1,1) image.LocalPosition = Vector2(0,0)
+		image.Color = Color(1,1,1,1) image.FlipX = false image.FlipY = false
+		image.RaycastTarget = false image.DropShadow = false image.Type = ImageType.Simple
+		image.ImageRUID = DataRef(ruid) layer.Enable = true
+		self.WalkLayers[name] = layer
+		return layer
+	end
+
+	@ExecSpace("ClientOnly")
+	method Entity WalkText(Entity parent, string name, string text, number size, number width, number height, number x, number y)
+		local label = _SpawnService:SpawnByEntity(self.PetDisplay:GetChildByName("State"), name, Vector3(0,0,0), parent, false)
+		label.UITransformComponent.RectSize = Vector2(width,height)
+		label.UITransformComponent.anchoredPosition = Vector2(x,y)
+		label.UITransformComponent.UIScale = Vector3(1,1,1)
+		local font = label.TextGUIRendererComponent
+		font.Text = text font.BestFit = false font.SizeFit = false font.FontSize = size
+		font.Font = "Default" font.FontColor = Color(1,1,1,1) font.OutlineColor = Color(0.22,0.12,0.04,1) font.OutlineWidth = 0.08
+		label.Enable = true
+		return label
+	end
+
+	@ExecSpace("ClientOnly")
+	method void InitializeWalkArtwork()
+		-- Original scenery is created once and stays inside the room's existing frame.
+		if isvalid(self.WalkScene) then return end
+		local assets = {"e3e03ac4cb1949159da1b584b9abc905","21060937b6994299a949dc3c6ee5bd14","690ef048f033410b9e1984d90012941b","a9144c7f9fb04f9281c0f1df560db3e1","27104f25e3784ba6be376ee17b200451","22f1f95ae4f04565a8d11498320dc8c9","690ef048f033410b9e1984d90012941b","ad2c2661bbeb467f970dba4b0da4fec6","cbb2e71011a543ef862053f86bcfc847"}
+		local scene = self:WalkLayer(self.PetDisplay,"WalkScene",assets[1],1440,420,0,0)
+		scene.SpriteGUIRendererComponent.Enable = false
+		local mask = scene:AddComponent(MaskComponent)
+		mask.Shape = MaskShape.Rect
+		mask.Softness = Vector2Int(6,6)
+		self.WalkScene = scene
+		_UILogic:SetSiblingIndex(scene.UITransformComponent,1)
+		-- Only the blue bottom of this original backdrop is visible through the viewport.
+		self:WalkLayer(scene,"Sky",assets[1],1640,1857,0,718.5)
+		self:WalkLayer(scene,"Clouds",assets[2],1500,372,0,85)
+		self:WalkLayer(scene,"VillageGround",assets[3],1640,416,0,-2)
+		self:WalkLayer(scene,"VillageHouses",assets[4],400,291,-510,20.5)
+		self:WalkLayer(scene,"VillageHouse",assets[5],275,270,510,10)
+		self:WalkLayer(scene,"Forest",assets[6],1700,943,0,140)
+		self:WalkLayer(scene,"ForestGround",assets[7],1640,416,0,-2)
+		self:WalkLayer(scene,"Snow",assets[8],1640,812,0,170)
+		self:WalkLayer(scene,"Bush",assets[9],225,36,475,-145)
+		for _,spec in ipairs({{"Clouds",assets[2],1500,372,85},{"VillageGround",assets[3],1640,416,-2},{"Forest",assets[6],1700,943,140},{"ForestGround",assets[7],1640,416,-2},{"Snow",assets[8],1640,812,170}}) do
+		 local copy = self:WalkLayer(scene,spec[1].."Next",spec[2],spec[3],spec[4],spec[3],spec[5])
+		 copy.SpriteGUIRendererComponent.FlipX = true
+		end
+		self:WalkLayer(scene,"VillageHousesNext",assets[4],400,291,1130,20.5)
+		self:WalkLayer(scene,"VillageHouseNext",assets[5],275,270,2150,10)
+		-- Both repeated ground pieces precede every house: the next floor cannot cover a foundation.
+		for index,name in ipairs({"Sky","Clouds","CloudsNext","Forest","ForestNext","VillageGround","VillageGroundNext","ForestGround","ForestGroundNext","Snow","SnowNext","VillageHouses","VillageHouse","VillageHousesNext","VillageHouseNext","Bush"}) do
+		 _UILogic:SetSiblingIndex(self.WalkLayers[name].UITransformComponent,index)
+		end
+		for i=1,7 do
+		 local dust = self:WalkText(scene,"Dirt"..i,"●",14,24,24,0,0)
+		 dust.TextGUIRendererComponent.FontColor = Color(0.58,0.36,0.14,1)
+		 self.WalkLayers["Dirt"..i] = dust dust.Enable = false
+		end
+		local notice = self:WalkText(self.PetDisplay,"WalkNotice","●",98,110,110,0,0)
+		self:WalkText(notice,"Tail","▼",26,36,32,0,-35)
+		local mark = self:WalkText(notice,"Mark","!",52,50,65,0,4)
+		mark.TextGUIRendererComponent.FontColor = Color(1,0.3,0.1,1)
+		self.WalkNotice = notice notice.Enable = false
+		notice.UITransformComponent.UIScale = Vector3(0.7,0.7,1)
+		self.WalkReward = self:WalkLayer(self.PetDisplay,"WalkReward","52df3f22bb014921a232021a48a1279b",72,72,0,0)
+		self.WalkReward.Enable = false
+		-- Crop only the original cheerful mouth; legs and blinking stay in the original walking frames.
+		local scale = self.PortraitPixelScale
+		local face = self:WalkLayer(self.PetDisplay:GetChildByName("Portrait"),"WalkSmile","f35d99c3cf044988b4f7672cfe170cdb",5*scale,4*scale,6.5*scale,-4*scale)
+		face.SpriteGUIRendererComponent.Enable = false
+		local faceMask = face:AddComponent(MaskComponent)
+		faceMask.Shape = MaskShape.Rect faceMask.Softness = Vector2Int(0,0)
+		local smile = self:WalkLayer(face,"Mouth","f35d99c3cf044988b4f7672cfe170cdb",36*scale,36*scale,-6.5*scale,4*scale)
+		smile.SpriteGUIRendererComponent.FlipX = true
+		self.WalkSmile = face face.Enable = false
+		for _,ruid in ipairs(self.WalkFrameRUIDs) do table.insert(assets,ruid) end
+		table.insert(assets,"f35d99c3cf044988b4f7672cfe170cdb")
+		scene.Enable = false
+		self.WalkReady = false
+		_ResourceService:PreloadAsync(assets,function(results)
+		 self.WalkReady = true
+		 for _,result in pairs(results) do if result ~= PreloadResultStatus.Success then self.WalkReady = false end end
+		 log("[VRF] PET-WALK scenery ready="..tostring(self.WalkReady))
+		 if self.PetMode then self:Refresh() end
+		end)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetWalkPlan(integer token, integer route, boolean found, string icon, string message)
+		-- Only a server reply supplies a discovery; duplicate plans cannot reveal loot twice.
+		if token <= self.WalkPlanToken then return end
+		self.WalkPlanToken = token
+		self.WalkPlan = {route=math.max(1,math.min(3,route)),found=found,icon=icon,message=message,revealed=false}
+		if not self.PetMode then self:ShowWalkLoot() end
+		log("[VRF] PET-WALK plan route="..route.." found="..tostring(found))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ShowWalkLoot()
+		local plan = self.WalkPlan
+		if plan == nil or not plan.found or plan.revealed then return end
+		plan.revealed = true
+		if plan.message ~= "" then _UIToast:ShowMessage(plan.message) end
+		log("[VRF] PET-WALK discovery revealed")
+	end
+
+
+	@ExecSpace("ClientOnly")
+	method number WalkTravel(number elapsed, boolean found)
+		-- Integrate eased walking speed: scenery pauses from surprise through the happy find.
+		local t = math.max(0,math.min(12,elapsed))
+		local speed = 125 local ramp = 0.4
+		local function forward(seconds)
+		 if seconds<=0 then return 0 end
+		 if seconds<ramp then
+		  local u=seconds/ramp
+		  return speed*ramp*(u*u*u-u*u*u*u/2)
+		 end
+		 return speed*(seconds-ramp/2)
+		end
+		local distance = forward(t)
+		if found and t>=3.2 then
+		 local u=math.min(1,(t-3.2)/ramp)
+		 distance=forward(3.2)+speed*ramp*(u-u*u*u+u*u*u*u/2)
+		 if t>7.6 then distance=distance+forward(t-7.6) end
+		end
+		if t>11.6 then
+		 local u=(t-11.6)/ramp
+		 distance=distance-speed*ramp*(u*u*u-u*u*u*u/2)
+		end
+		return distance
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ScrollWalkLayer(string name, boolean active, number distance, number speedRatio, number width, number y)
+		-- The reflected neighbor joins the same edge; two copies cover the entire twelve-second walk.
+		local layer=self.WalkLayers[name] local nextLayer=self.WalkLayers[name.."Next"]
+		layer.Enable=active nextLayer.Enable=active
+		layer.UITransformComponent.anchoredPosition=Vector2(-distance*speedRatio,y)
+		nextLayer.UITransformComponent.anchoredPosition=Vector2(width-distance*speedRatio,y)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetWalking(boolean active, number elapsed)
+		if not isvalid(self.WalkScene) then return end
+		self.WalkScene.Enable=active
+		self.WalkNotice.Enable=false self.WalkReward.Enable=false
+		if not active then
+		 self.WalkPhase=-1 self.WalkFrame=0
+		 if isvalid(self.WalkSmile) then self.WalkSmile.Enable=false end
+		 for i=1,7 do self.WalkLayers["Dirt"..i].Enable=false end
+		 return
+		end
+		local plan=self.WalkPlan or {route=1,found=false}
+		local route=plan.route local found=plan.found
+		local t=math.max(0,math.min(12,elapsed))
+		local distance=self:WalkTravel(t,found)
+		self:ScrollWalkLayer("Clouds",route~=2,distance,0.18,1500,85)
+		self:ScrollWalkLayer("VillageGround",route==1,distance,1,1640,-2)
+		self:ScrollWalkLayer("Forest",route==2,distance,0.36,1700,140)
+		self:ScrollWalkLayer("ForestGround",route==2,distance,1,1640,-2)
+		self:ScrollWalkLayer("Snow",route==3,distance,1,1640,170)
+		for _,spec in ipairs({{"VillageHouses",-510,20.5},{"VillageHouse",510,10},{"VillageHousesNext",1130,20.5},{"VillageHouseNext",2150,10}}) do
+		 local layer=self.WalkLayers[spec[1]] layer.Enable=route==1
+		 layer.UITransformComponent.anchoredPosition=Vector2(spec[2]-distance,spec[3])
+		end
+		local noticing=found and t>=3.6 and t<4.2
+		local digging=found and t>=4.2 and t<6.8
+		local celebrating=found and t>=6.8 and t<7.6
+		local jump=0
+		for _,start in ipairs(found and {0.75,2.3,6.95,8.2,10.1} or {0.75,2.3,8.2,10.1}) do
+		 local p=(t-start)/0.65
+		 if p>0 and p<1 then jump=math.max(jump,4*42*p*(1-p)) end
+		end
+		local phase=noticing and 1 or (digging and 2 or ((celebrating or jump>0) and 3 or 0))
+		local portrait=self.PetDisplay:GetChildByName("Portrait")
+		if phase~=self.WalkPhase then
+		 self.WalkPhase=phase
+		 log("[VRF] PET-WALK-SCROLL phase="..phase.." distance="..distance)
+		end
+		-- Keep one walking sequence through takeoff and landing; never switch to the flower pose.
+		local frame = math.floor((digging and (t-4.2)*1.55 or t)/0.15)%4+1
+		if noticing or celebrating or jump>0 then frame=1 end
+		if frame~=self.WalkFrame then
+		 self.WalkFrame=frame
+		 portrait.SpriteGUIRendererComponent.ImageRUID=DataRef(self.WalkFrameRUIDs[frame])
+		end
+		local scale=self.PortraitPixelScale
+		portrait.SpriteGUIRendererComponent.PreserveSprite=PreserveSpriteType.None
+		portrait.SpriteGUIRendererComponent.LocalScale=Vector2(1,1)
+		portrait.SpriteGUIRendererComponent.LocalPosition=Vector2(0,0)
+		portrait.UITransformComponent.RectSize=Vector2(36*scale,36*scale)
+		self.WalkSmile.Enable=true
+		-- Alternate walk frames lift the head exactly one source pixel.
+		self.WalkSmile.UITransformComponent.anchoredPosition=Vector2(6.5*scale,(-4+(frame%2==0 and 1 or 0))*scale)
+		local walking=not noticing and not digging and not celebrating
+		local bob=walking and math.sin(t*math.pi*5)^2*2 or 0
+		local nod=digging and math.sin((t-4.2)*math.pi*4)^2*5 or 0
+		-- Guri always faces right and stays at the centre; only scenery travels to the left.
+		portrait.SpriteGUIRendererComponent.FlipX=true
+		portrait.UITransformComponent.anchoredPosition=Vector2(0,-150+18*scale+jump+bob-nod)
+		portrait.UITransformComponent.UIRotation=Vector3(0,0,digging and math.sin((t-4.2)*math.pi*4)*3 or 0)
+		local bush=self.WalkLayers.Bush
+		bush.Enable=found
+		bush.UITransformComponent.anchoredPosition=Vector2(475-distance+(digging and math.sin(t*32)*3 or 0),-145)
+		for i=1,7 do
+		 local dust=self.WalkLayers["Dirt"..i]
+		 dust.Enable=digging and t>4.8
+		 if dust.Enable then
+		  local p=((t-4.8)*1.7+i/7)%1
+		  dust.UITransformComponent.anchoredPosition=Vector2(45+(i%2==0 and 1 or -1)*p*(28+i*5),-143+math.sin(p*math.pi)*(18+i*3))
+		  dust.TextGUIRendererComponent.FontColor=route==3 and Color(0.92,0.97,1,1-p) or Color(0.58,0.36,0.14,1-p)
+		 end
+		end
+		self.WalkNotice.Enable=noticing or (digging and t<4.85)
+		self.WalkNotice.UITransformComponent.anchoredPosition=Vector2(172,83+math.sin(t*8)*3)
+		if found and t>=6.8 then self:ShowWalkLoot() end
+		if found and plan.icon~="" and t>=6.8 and t<8.65 then
+		 local p=(t-6.8)/1.85
+		 self.WalkReward.Enable=true
+		 self.WalkReward.SpriteGUIRendererComponent.ImageRUID=DataRef(plan.icon)
+		 self.WalkReward.SpriteGUIRendererComponent.Color=Color(1,1,1,math.min(1,p/0.12,(1-p)/0.22))
+		 self.WalkReward.UITransformComponent.anchoredPosition=Vector2(55,-70+145*math.sin(p*math.pi/2))
+		end
+		local key=route==1 and "PET_WALK_HENESYS" or (route==2 and "PET_WALK_FOREST" or "PET_WALK_SNOW")
+		if noticing or digging then key="PET_WALK_SEARCHING" end
+		self.PetDisplay:GetChildByName("State").TextGUIRendererComponent.Text=_LocalizationService:GetText(key)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+	 self:InitializeArtwork()
+	 self:InitializeWalkArtwork()
+	 _ResourceService:PreloadAsync({self.EnabledButtonRUID,self.DisabledButtonRUID,self.UnequipButtonRUID,self.EnabledArrowRUID,self.DisabledArrowRUID,"b239798f5a8d4129ae1c086e7069f7fc"},function(results)
+	  local ready=true
+	  for _,result in pairs(results) do if result~=PreloadResultStatus.Success then ready=false end end
+	  log("[VRF] PET-HOUSE control artwork preload ready="..tostring(ready))
+	  if self.PetMode then self:Refresh() end
+	 end)
+	 self.FeedingReady = false
+	 _ResourceService:PreloadAsync(self.FeedingRUIDs, function(results)
+	  self.FeedingReady = true
+	  for _, result in pairs(results) do
+	   if result ~= PreloadResultStatus.Success then self.FeedingReady = false end
+	  end
+	  log("[VRF] PET-HOUSE feeding preload ready=" .. tostring(self.FeedingReady))
+	  if self.PetMode then self:Refresh() end
+	 end)
+	 self:BindClick(self.PetButton, function() self:Open() end)
+	 self:BindClick(self.CloseButton, function() self:Close() end)
+	 for _, action in ipairs({"feed", "wash", "walk", "sleep", "inject", "equip", "rank", "test"}) do
+	  local name = action
+	  self:BindClick(self.PetPanel:GetChildByName(name), function() self:RequestCare(name) end)
+	 end
+	 for tier=1,3 do
+	  local action="heart"..tostring(tier)
+	  self:BindClick(self.PetDisplay:GetChildByName("AffinityDial"):GetChildByName("Reward"..tostring(tier)):GetChildByName("Claim"),function() self:RequestCare(action) end)
+	 end
+	 self:BindClick(self.PetPanel:GetChildByName("buy"), function() self:BuyEgg() end)
+	 self:BindClick(self.PetPanel:GetChildByName("PrevPet"),function() self:MovePet(-1) end)
+	 self:BindClick(self.PetPanel:GetChildByName("NextPet"),function() self:MovePet(1) end)
+	 self.PetPanel:GetChildByName("AbilityCaption").TextGUIRendererComponent.Text=_LocalizationService:GetText("PET_HOUSE_ABILITY")
+	 local labels = {EnergyCaption="PET_ENERGY", NeedsFull="PET_FULLNESS", NeedsClean="PET_CLEANLINESS", NeedsMood="PET_MOOD", StoneCaption="PET_STONES", test="PET_TEST_HATCH"}
+	 for name, key in pairs(labels) do
+	  local entity = self.PetPanel:GetChildByName(name)
+	  if entity.TextGUIRendererComponent ~= nil then entity.TextGUIRendererComponent.Text = _LocalizationService:GetText(key)
+	  else entity:GetChildByName("Label").TextGUIRendererComponent.Text = _LocalizationService:GetText(key) end
+	 end
+	 self.PetPanel.Parent:GetChildByName("Title"):GetChildByName("Label").TextGUIRendererComponent.Text = _LocalizationService:GetText("PET_HOUSE")
+	 self.PetButton:GetChildByName("Label").TextGUIRendererComponent.Text = _LocalizationService:GetText("PET_TAB")
+	 self:Close()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Open()
+	 if not isvalid(self.TitleGroup) or not self.TitleGroup.Enable or not self.TitleGroup:GetChildByName("BattlePanel").Enable then return end
+	 if _GameManager.GameStarted and not _GameManager.GameOver then return end
+	 self.PetMode = true self.Overlay.Enable = true
+	 self.NextRefresh = _UtilLogic.ElapsedSeconds + 15
+	 self.IdleRUID = "" self.GrowthWasVisible=false self:Refresh() _PetLogic:RequestState()
+	 log("[VRF] PET-HOUSE opened from lobby")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Close()
+	 if self.Motion == "walk" then self:ShowWalkLoot() end
+	 self:SetWalking(false,0)
+	 self.PetDisplay:GetChildByName("Portrait").UITransformComponent.UIRotation = Vector3(0,0,0)
+	 self.PetMode = false self.Overlay.Enable = false
+	 self.MotionUntil = 0 self.WaitingUntil = 0 self.PendingAction = "" self.Motion = "" self.IdleRUID = ""
+	 self.GrowthWasVisible=false self.PetPanel:GetChildByName("rank").UITransformComponent.UIScale=Vector3(1,1,1)
+	 self.PetDisplay:GetChildByName("Portrait").UITransformComponent.anchoredPosition = Vector2(0, -150)
+	 self:SetWater(false, 0) self:SetFeedingMotion(false, 0) self:SetInjection(false,0)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RequestCare(string action)
+	 if not self.PetMode or _UtilLogic.ElapsedSeconds < math.max(self.MotionUntil, self.WaitingUntil) then return end
+	 if action == "feed" and not self.FeedingReady then return end
+	 if action == "walk" and not self.WalkReady then return end
+	 if not _PetLogic.ClientReady or self:GetDisplayedPet().id~="5002617" then return end
+	 if action=="rank" and not self.PetPanel:GetChildByName("rank").ButtonComponent.Enable then return end
+	 if action == "test" then
+	  if not Environment:IsMakerPlay() or _PetLogic.ClientPet.Owned then return end
+	 elseif not _PetLogic.ClientPet.Owned then return end
+	 local blocked = _PetLogic:GetCareBlockReason(_PetLogic.ClientPet,action)
+	 if blocked ~= "" then _UIToast:ShowMessage(blocked) return end
+	 self.PendingAction = action self.WaitingUntil = _UtilLogic.ElapsedSeconds + 4
+	 self:Refresh() _PetLogic:RequestAction(action)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnPetChanged(string motion)
+	 if not self.PetMode or self:GetDisplayedPet().id~="5002617" then return end
+	 local expected = {feed="eat", wash="chat", walk="move", sleep="sleep", equip="love", rank="love", test="love", inject="inject", heart1="gift", heart2="gift", heart3="gift"}
+	 local action = self.PendingAction
+	 if motion ~= "" then
+	  self.PendingAction = "" self.WaitingUntil = 0
+	  if expected[action] == motion and _PetLogic.Motions[motion] ~= nil then
+	   self.Motion = action self.MotionStart = _UtilLogic.ElapsedSeconds
+	   local duration = _PetLogic:GetCareDuration(action)
+	   self.MotionUntil = self.MotionStart + duration self.IdleRUID = ""
+	   local image = self.PetDisplay:GetChildByName("Portrait").SpriteGUIRendererComponent
+	   if action == "feed" then
+			self.FeedingFrame = 0
+			self:PlayPortrait(self.FeedingRUIDs[1])
+		  else self:PlayPortrait(_PetLogic.Motions[motion]) end
+	   self:SetInjection(action == "inject",0)
+	   self:SetFeedingMotion(action == "feed", 0)
+	   self:SetWalking(action == "walk",0)
+	   log("[VRF] PET-HOUSE care " .. action)
+	  end
+	 end
+	 self:Refresh()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayPortrait(string ruid)
+	 -- Native pixel scale stays fixed: sleep/chat canvases include extra space and must not shrink the body.
+	 local image = self.PetDisplay:GetChildByName("Portrait").SpriteGUIRendererComponent
+	 image.PreserveSprite = PreserveSpriteType.NativeSize
+	 image.LocalScale = Vector2(self.PortraitPixelScale, self.PortraitPixelScale)
+	 image.PlayRate = 1
+	 image.AnimClipPlayType = SpriteAnimClipPlayType.Loop
+	 image.ImageRUID = DataRef(ruid)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetFeedingMotion(boolean active, number elapsed)
+		-- Play original eating sprites directly: the source animation clip fails to load in Maker.
+		local portrait = self.PetDisplay:GetChildByName("Portrait")
+		self.PetDisplay:GetChildByName("Food").Enable = false
+		if not active then self.FeedingFrame = 0 return end
+		local frame = math.floor(math.max(0, elapsed) / 0.15) % #self.FeedingRUIDs + 1
+		if self.FeedingFrame ~= frame then
+			self.FeedingFrame = frame
+			portrait.SpriteGUIRendererComponent.ImageRUID = DataRef(self.FeedingRUIDs[frame])
+		end
+		local progress = math.max(0, math.min(3.8, elapsed))
+		local envelope = math.min(1, progress / 0.24, (3.8 - progress) / 0.3)
+		envelope = envelope * envelope * (3 - 2 * envelope)
+		local nod = math.sin(progress * math.pi * 2.5)
+		portrait.UITransformComponent.anchoredPosition = Vector2(0, -150 - 3.5 * envelope * nod * nod)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetWater(boolean active, number elapsed)
+	 local water = self.PetDisplay:GetChildByName("Water")
+	 water.Enable = active
+	 if not active then return end
+	 local fade = math.min(1, elapsed / 0.3, math.max(0, (4.5 - elapsed) / 0.5))
+	 local jet = water:GetChildByName("Jet")
+	 jet.SpriteGUIRendererComponent.Color = Color(1,1,1,0.52 * fade)
+	 jet.UITransformComponent.UIScale = Vector3(1 + math.sin(elapsed * 18) * 0.035, 1, 1)
+	 local splash = water:GetChildByName("Splash")
+	 splash.SpriteGUIRendererComponent.Color = Color(1,1,1,0.8 * fade)
+	 splash.UITransformComponent.UIScale = Vector3(1 + math.sin(elapsed * 15) * 0.08, 1 + math.cos(elapsed * 12) * 0.06, 1)
+	 for i = 1, 12 do
+	  local drop = water:GetChildByName("Drop" .. i)
+	  local phase = (elapsed * 1.7 + i / 12) % 1
+	  local x = math.sin(i * 17) * 62
+	  drop.UITransformComponent.anchoredPosition = Vector2(x, 125 - phase * 270)
+	  drop.SpriteGUIRendererComponent.Color = Color(0.7,0.95,1,fade * (0.45 + math.sin(phase * math.pi) * 0.5))
+	 end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUpdate(number delta)
+	 if not self.PetMode then return end
+	 self:AnimateNeeds(delta)
+	 self:AnimateAffinity(delta)
+	 self:AnimateGrowth()
+	 if not self.TitleGroup.Enable or not self.TitleGroup:GetChildByName("BattlePanel").Enable or (_GameManager.GameStarted and not _GameManager.GameOver) then self:Close() return end
+	 local now = _UtilLogic.ElapsedSeconds
+	 if now >= self.NextRefresh then self.NextRefresh = now + 15 _PetLogic:RequestState() end
+	 if self.WaitingUntil > 0 and now >= self.WaitingUntil then self.WaitingUntil = 0 self.PendingAction = "" self:Refresh() end
+	 if self.MotionUntil > 0 then
+	  local elapsed = now - self.MotionStart
+	  local portrait = self.PetDisplay:GetChildByName("Portrait")
+	  if self.Motion == "walk" then self:SetWalking(true,elapsed)
+	  else portrait.UITransformComponent.anchoredPosition = Vector2(0,-150) end
+	  self:SetWater(self.Motion == "wash", elapsed)
+	  self:SetInjection(self.Motion == "inject",elapsed)
+	  self:SetFeedingMotion(self.Motion == "feed", elapsed)
+	  if now >= self.MotionUntil then
+	   self:SetWalking(false,0) portrait.UITransformComponent.UIRotation = Vector3(0,0,0)
+	   self.MotionUntil = 0 self.Motion = "" self:SetInjection(false,0) self:SetWater(false, 0) self:SetFeedingMotion(false, 0) self:PlayIdle() self:Refresh()
+	  end
+	 end
+	 if self.ShownRevision ~= _PetLogic.ClientRevision then self:Refresh() end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+	 self:Close()
+	 for _, binding in ipairs(self.Handlers) do
+	  if isvalid(binding.entity) then binding.entity:DisconnectEvent(ButtonClickEvent, binding.handle) end
+	 end
+	 self.Handlers = {}
+	 if isvalid(self.WalkScene) then self.WalkScene:Destroy() end
+	 if isvalid(self.WalkNotice) then self.WalkNotice:Destroy() end
+	 if isvalid(self.WalkReward) then self.WalkReward:Destroy() end
+	 if isvalid(self.WalkSmile) then self.WalkSmile:Destroy() end
+	 self.WalkScene = nil self.WalkNotice = nil self.WalkReward = nil self.WalkSmile = nil self.WalkLayers = {}
+	end
+end

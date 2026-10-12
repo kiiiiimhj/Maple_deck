@@ -2,6 +2,7 @@
 script PlayerDBManager extends Component
 
 	property integer TimerId = 0
+	property boolean SavingBatch = false
 
 	property boolean IsLoadAttempted = false
 
@@ -10,25 +11,43 @@ script PlayerDBManager extends Component
 
 	@ExecSpace("ServerOnly")
 	method void SaveToDB(boolean isLeaving)
+		-- Serialize batches so an old asynchronous snapshot cannot overwrite a newer pet purchase.
 		if not self.IsLoadSuccess then
 			return
 		end
 		
+		if self.SavingBatch then
+			if not isLeaving then return end
+			while self.SavingBatch do wait(0.05) end
+		end
+		self.SavingBatch = true
 		local saveData = {}
+		local petGenerations = {}
 		-------------------------------------------------------------------
 		local playerEntity = self.Entity
 		playerEntity.PlayerJob:SaveToDB(saveData)
 		playerEntity.PkgPlayerInventory:SaveToDB(saveData)
 		playerEntity.PlayerRanking:SaveToDB(saveData)
+		_PetLogic:SaveFor(playerEntity, saveData, petGenerations)
 		-------------------------------------------------------------------
 		
 		local profileCode = self.Entity.PlayerComponent.ProfileCode
 		local ds = _DataStorageService:GetUserDataStorage(profileCode)
 		if isLeaving == true then
-			ds:BatchSetAndWait(saveData)
+			local errorCode, values = ds:BatchSetAndWait(saveData)
+			self.SavingBatch = false
+			if errorCode == 0 then
+				local confirmed = {}
+				for _, key in ipairs(values) do table.insert(confirmed, key) end
+				_PetLogic:ConfirmSaveFor(playerEntity, confirmed, petGenerations)
+			end
 		else
 			local callback = function(errorCode, values)
+				self.SavingBatch = false
 				if errorCode == 0 then
+					local confirmed = {}
+					for _, key in ipairs(values) do table.insert(confirmed, key) end
+					_PetLogic:ConfirmSaveFor(playerEntity, confirmed, petGenerations)
 					return
 				end
 				
@@ -50,6 +69,7 @@ script PlayerDBManager extends Component
 		playerEntity.PlayerJob:LoadFromDB(loadKey)
 		playerEntity.PkgPlayerInventory:LoadFromDB(loadKey)
 		playerEntity.PlayerRanking:LoadFromDB(loadKey)
+		_PetLogic:CollectLoadKeys(loadKey)
 		-------------------------------------------------------------------
 		
 		local returnCode, itemPages = ds:BatchGetAndWait(loadKey)
@@ -96,6 +116,7 @@ script PlayerDBManager extends Component
 			return false
 		end
 
+		if not _PetLogic:LoadFor(playerEntity, datas) then return false end
 		return true
 	end
 
@@ -135,6 +156,28 @@ script PlayerDBManager extends Component
 			_TimerService:ClearTimer(self.TimerId)
 			self:SaveToDB(true)
 		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean SavePetPurchaseAndWait()
+		-- Confirm the single pet save before the native purchase callback accepts payment.
+		if not self.IsLoadSuccess then return false end
+		while self.SavingBatch do wait(0.05) end
+		self.SavingBatch = true
+		local saveData = {} local generations = {}
+		_PetLogic:SaveFor(self.Entity, saveData, generations)
+		if next(saveData) == nil then self.SavingBatch = false return true end
+		local ds = _DataStorageService:GetUserDataStorage(self.Entity.PlayerComponent.ProfileCode)
+		local code, keys = ds:BatchSetAndWait(saveData)
+		self.SavingBatch = false
+		if code ~= 0 then return false end
+		local confirmed = {}
+		for _, key in ipairs(keys) do table.insert(confirmed, key) end
+		_PetLogic:ConfirmSaveFor(self.Entity, confirmed, generations)
+		for _, key in ipairs(confirmed) do
+			if key == _PetLogic.StorageKey then return true end
+		end
+		return false
 	end
 
 end

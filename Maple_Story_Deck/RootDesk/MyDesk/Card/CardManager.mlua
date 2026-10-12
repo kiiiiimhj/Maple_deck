@@ -14932,6 +14932,9 @@ script CardManager extends Logic
 	property SpriteGUIRendererComponent critPotionFill = "5a49410f-96bf-49c3-be05-ede3d234dac3"
 	property Entity powerPotionBuff = "ff6b8444-8532-48ed-8c19-362de76fdbbe"
 	property SpriteGUIRendererComponent powerPotionFill = "74c06dfe-74f8-4de4-87b3-1dc3980f6241"
+	-- 4=경험치(2026-10-08 추가)
+	property Entity expPotionBuff = "52dc739b-0baf-4b01-b777-2f73dd55d96d"
+	property SpriteGUIRendererComponent expPotionFill = "0c6aa0ea-13a9-4b02-8f36-77d396c91d6e"
 
 	-- 활성 버프 순서 추적 (획득 순으로 왼쪽부터)
 	property any _activeBuffOrder = nil
@@ -14985,7 +14988,7 @@ script CardManager extends Logic
 	-- 2026-09-30 테스트용으로 켰다가 2026-10-01 스킬 테스트 끝나 다시 false
 	-- 2026-10-03 베노아 테스트용으로 다시 true — ⚠ 출시 전 false
 	-- 2026-10-07 테스트용으로 다시 true(유저 지정 "치트기능 풀어") — ⚠ 출시 전 false
-	property boolean DebugMode = false
+	property boolean DebugMode = true
 	property any _debugKeyHandler = nil
 
 	-- 서버 전용 타이머 (슬롯별)
@@ -19377,7 +19380,7 @@ script CardManager extends Logic
 		if self:IsBasicAttackCard(cardIdx) then
 			relicMult = _RelicInventory:GetBasicAtkMult()
 		end
-		return base * self:GetMeditationMult() * self:GetSkillInvDamageMult(cardIdx) * self:GetRapidFireMult() * self:GetWarriorMasteryMult() * self:GetPhysicalTrainingMult() * self:GetThiefCunningMult() * self:GetHighWisdomMult() * _GearEffectLogic:GetDamageMult() * relicMult * self:GetFinalSkillBonusMult(cardIdx)
+		return base * self:GetMeditationMult() * self:GetSkillInvDamageMult(cardIdx) * self:GetRapidFireMult() * self:GetWarriorMasteryMult() * self:GetPhysicalTrainingMult() * self:GetThiefCunningMult() * self:GetHighWisdomMult() * _GearEffectLogic:GetDamageMult() * relicMult * self:GetFinalSkillBonusMult(cardIdx) * _PetLogic:GetRunDamageMult()
 	end
 
 	-- 2026-08-03: 몬스터 체력을 플레이어 화력에 비례시키던 GetBasicAttackCardIdx/GetStrongestActiveDamage는
@@ -21237,7 +21240,7 @@ script CardManager extends Logic
 			base = base * (1.0 - self:GetMagicAccelReduction())
 		end
 		-- 장비 쿨타임 감소(활 유니크 상시 + 투구 레어 50마리 처치 해금)
-		local gearCooldownReduction = _GearEffectLogic:GetCooldownReduction()
+		local gearCooldownReduction = math.min(0.9, _GearEffectLogic:GetCooldownReduction() + (not self:IsBasicAttackCard(cardIdx) and _PetLogic:GetRunCooldownReduction() or 0))
 		if gearCooldownReduction > 0 then
 			base = base * (1.0 - gearCooldownReduction)
 		end
@@ -21290,7 +21293,7 @@ script CardManager extends Logic
 	method boolean RollCrit(integer cardIdx)
 		-- 크리티컬 포션(BuffPotionLogic) 효과 중에는 무조건 크리티컬
 		if _BuffPotionLogic:IsCritForced() then return true end
-		local chance = self:GetMagicCriticalChance() + self:GetSkillInvCardCritBonus(cardIdx) + self:GetPiercingWillChance()
+		local chance = self:GetMagicCriticalChance() + self:GetSkillInvCardCritBonus(cardIdx) + self:GetPiercingWillChance() + _PetLogic:GetRunCritChanceBonus()
 			+ _CardRegistry:GetChance(161, self.ChanceAttackLevel) + _CardRegistry:GetChance(181, self.CriticalEdgeLevel)
 			-- 린 자벨린 마스터리(210) — 쉐이드 크리티컬 엣지(181)와 동일하게 가산
 			+ _CardRegistry:GetChance(210, self.JavelinMasteryLevel)
@@ -21541,6 +21544,8 @@ script CardManager extends Logic
 					elseif e.key == KeyboardKey.N then
 						-- 떠 있는 보스를 빈사(HP=1)로 — 분열 연출만 반복해서 보고 싶을 때
 						_MonsterSpawner:CheatRequestWeakenBoss()
+					elseif e.key == KeyboardKey.U then
+						if Environment:IsMakerPlay() then _PetLogic:CheatRequestNextPetSkill() end
 					elseif e.key == KeyboardKey.Y then
 						-- Maker preview: cycle the 26 updated ranged monsters in the current zone.
 						if Environment:IsMakerPlay() then _MonsterProjectileFx:CheatRequestNextRanged() end
@@ -22245,6 +22250,7 @@ script CardManager extends Logic
 		elseif panel == self.vampirePotionBuff then return "potion_vampire"
 		elseif panel == self.critPotionBuff then return "potion_crit"
 		elseif panel == self.powerPotionBuff then return "potion_power"
+		elseif panel == self.expPotionBuff then return "potion_exp"
 		end
 		return ""
 	end
@@ -22287,6 +22293,7 @@ script CardManager extends Logic
 		elseif buffName == "potion_vampire" then return self.vampirePotionBuff
 		elseif buffName == "potion_crit" then return self.critPotionBuff
 		elseif buffName == "potion_power" then return self.powerPotionBuff
+		elseif buffName == "potion_exp" then return self.expPotionBuff
 		end
 		return nil
 	end
@@ -22332,6 +22339,7 @@ script CardManager extends Logic
 		self:HideBuffIcon(self.vampirePotionBuff, self.vampirePotionFill)
 		self:HideBuffIcon(self.critPotionBuff, self.critPotionFill)
 		self:HideBuffIcon(self.powerPotionBuff, self.powerPotionFill)
+		self:HideBuffIcon(self.expPotionBuff, self.expPotionFill)
 	end
 
 	@ExecSpace("ClientOnly")
@@ -22340,6 +22348,7 @@ script CardManager extends Logic
 		if potionType == 1 then self:ShowBuffIcon(self.vampirePotionBuff, self.vampirePotionFill, duration)
 		elseif potionType == 2 then self:ShowBuffIcon(self.critPotionBuff, self.critPotionFill, duration)
 		elseif potionType == 3 then self:ShowBuffIcon(self.powerPotionBuff, self.powerPotionFill, duration)
+		elseif potionType == 4 then self:ShowBuffIcon(self.expPotionBuff, self.expPotionFill, duration)
 		end
 	end
 
@@ -22349,6 +22358,7 @@ script CardManager extends Logic
 		if potionType == 1 then self:HideBuffIcon(self.vampirePotionBuff, self.vampirePotionFill)
 		elseif potionType == 2 then self:HideBuffIcon(self.critPotionBuff, self.critPotionFill)
 		elseif potionType == 3 then self:HideBuffIcon(self.powerPotionBuff, self.powerPotionFill)
+		elseif potionType == 4 then self:HideBuffIcon(self.expPotionBuff, self.expPotionFill)
 		end
 	end
 
@@ -23426,18 +23436,24 @@ script CardManager extends Logic
 		-- 예전 코드는 그 모서리 y를 그대로 툴팁 중심 y로 써서 카드 중앙보다 ChoiceCardHeight/2(82.5px)
 		-- 만큼 아래로 쏠렸고, x도 -207이라 카드 왼쪽 변을 53px 파고들어 겹쳤다.
 		-- 이제 y는 카드 중앙에 맞추고, x는 카드 왼쪽 변 바깥으로 ChoiceTooltipGap만큼 띄워 완전히 분리한다.
-		local basePos = self:GetChoiceUIPosition(choiceIndex)
-		local cardLeftX = basePos.x - self.ChoiceCardWidth
-		local tx = math.max(-740, math.min(740, cardLeftX - self.ChoiceTooltipGap - self.TooltipPanelWidth / 2))
+		-- 2026-10-12 유저 리포트(갤노트9 "썬더볼트 설명이 카드 옆이 아니라 더 왼쪽에 떨어져 나온다") —
+		-- GetChoiceUIPosition은 1920 폭 고정값이라 화면이 더 넓은 기기에선 카드(우측 앵커)가 오른쪽으로 밀린 만큼
+		-- 툴팁만 왼쪽에 남았다. 실제 캔버스 크기로 계산하는 GetChoiceCenterUI(같은 우하단 모서리 기준)를 쓴다.
+		local basePos = self:GetChoiceCenterUI(choiceIndex)
 		-- 패널이 360까지 커졌으므로 카드 중앙에 그대로 맞추면 화면 위/아래로 잘릴 수 있다.
 		-- 화면 높이 안에 패널 절반이 들어오도록 y를 마지막에 한 번 더 가둔다.
 		-- ⚠ 화면 높이는 1080 고정이 아니다 — 아이폰은 안전영역 캔버스라 1027이다(2026-09-26 해상도 점검).
 		-- 그래서 툴팁이 붙은 부모(HUD 루트) 실제 높이를 쓴다
 		local halfH = 540
+		local halfW = 960
 		local tooltipParent = self.tooltipPanel.Parent
 		if isvalid(tooltipParent) and tooltipParent.UITransformComponent ~= nil and tooltipParent.UITransformComponent.RectSize.y > 100 then
 			halfH = tooltipParent.UITransformComponent.RectSize.y / 2
+			halfW = tooltipParent.UITransformComponent.RectSize.x / 2
 		end
+		local cardLeftX = basePos.x - self.ChoiceCardWidth
+		local txLimit = halfW - 220
+		local tx = math.max(-txLimit, math.min(txLimit, cardLeftX - self.ChoiceTooltipGap - self.TooltipPanelWidth / 2))
 		local tyLimit = halfH - (self.TooltipChoicePanelHeight / 2)
 		local ty = math.max(-tyLimit, math.min(tyLimit, basePos.y + self.ChoiceCardHeight / 2))
 		local tf = self.tooltipPanel:GetComponent(UITransformComponent)
@@ -25476,7 +25492,7 @@ script CardManager extends Logic
 	-- 매직크리티컬 기본 확률 + 고정 20%(레벨 무관) — 에너지볼트의 EnergyBoltCritBonus와 동일한 가산 방식
 	@ExecSpace("ServerOnly")
 	method boolean RollChainLightningCrit()
-		local chance = self:GetMagicCriticalChance() + 0.20
+		local chance = self:GetMagicCriticalChance() + 0.20 + _PetLogic:GetRunCritChanceBonus()
 		if self:GetSkillInvLevel(19) >= 9 then chance = chance + 0.10 end
 		return _UtilLogic:RandomDouble() < chance
 	end
@@ -26256,7 +26272,7 @@ script CardManager extends Logic
 	@ExecSpace("ServerOnly")
 	method boolean RollEnergyBoltCrit()
 		-- MagicCritical 기본 확률 + Lv3 치명타 보너스 + SkillInventory 에너지볼트 Lv9 보너스(+5%)
-		local chance = self:GetMagicCriticalChance()
+		local chance = self:GetMagicCriticalChance() + _PetLogic:GetRunCritChanceBonus()
 		chance = chance + self.EnergyBoltCritBonus
 		if self:GetSkillInvLevel(9) >= 9 then chance = chance + 0.05 end
 		if chance <= 0 then return false end

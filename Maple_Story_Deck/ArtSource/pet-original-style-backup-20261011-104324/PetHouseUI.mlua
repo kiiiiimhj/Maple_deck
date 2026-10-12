@@ -1,0 +1,316 @@
+@Logic
+script PetHouseUI extends Logic
+	property Entity Overlay = "3589b646-4850-48c1-8f9e-bbecf83b9821"
+	property Entity PetPanel = "952ecae3-adfd-4f23-a672-9b86a41a3727"
+	property Entity PetDisplay = "f2612fb7-46eb-4daa-92ab-4d004558d159"
+	property Entity PetButton = "6e2b4852-6a87-43e8-8f46-1398ee7425eb"
+	property Entity CloseButton = "3bf346e8-283c-4111-b7d3-e6a84948138c"
+	property Entity TitleGroup = "4109795c-8f3d-41f1-9403-fefcec8fbb3e"
+	property boolean PetMode = false
+	property table Handlers = {}
+	property table FeedingRUIDs = {"06b3d404f2f1492999456a76d97303f0"}
+	property boolean FeedingReady = false
+	property number NextRefresh = 0
+	property number MotionUntil = 0
+	property number MotionStart = 0
+	property string Motion = ""
+	property string IdleRUID = ""
+	property number PortraitPixelScale = 6.3888888889
+	property integer ShownRevision = -1
+	property string PendingAction = ""
+	property number WaitingUntil = 0
+	property string EnabledButtonRUID = "e2553674fb1c44a1836b7b56ce27f2b4"
+	property string DisabledButtonRUID = "4f1615f13e5d4239b79c459a776aebf1"
+
+	@ExecSpace("ClientOnly")
+	method void BindClick(Entity entity, any callback)
+		-- Every global UI subscription is paired with cleanup on editor reload.
+		if not isvalid(entity) then return end
+		local handle = entity:ConnectEvent(ButtonClickEvent, callback)
+		table.insert(self.Handlers, {entity=entity, handle=handle})
+	end
+
+	@ExecSpace("ClientOnly")
+	method void BuyEgg()
+		-- Only a configured, registered product may open the native cash checkout.
+		if not _PetLogic.ClientReady then return end
+		if _PetLogic.ClientPet.Owned then return end
+		if _PetLogic.PetEggProductId == "" or _PetLogic.PetEggPrice <= 0 then
+			_UIToast:ShowMessage("PET_SHOP_PENDING") return
+		end
+		_WorldShopService:PromptPurchase(_PetLogic.PetEggProductId)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetText(string name, string text)
+		-- Dynamic copy always belongs to the panel's own text child.
+		self.PetPanel:GetChildByName(name).TextGUIRendererComponent.Text = text
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetButton(string name, boolean enabled, string key)
+		-- Unavailable actions use the same gray treatment as the game's reward buttons.
+		local button = self.PetPanel:GetChildByName(name)
+		button.ButtonComponent.Enable = enabled
+		button.SpriteGUIRendererComponent.ImageRUID = DataRef(enabled and self.EnabledButtonRUID or self.DisabledButtonRUID)
+		button.SpriteGUIRendererComponent.Color = Color(1,1,1,1)
+		if key ~= "" then button:GetChildByName("Label").TextGUIRendererComponent.Text = _LocalizationService:GetText(key) end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Refresh()
+		-- Paint the last server snapshot; loading never enables a purchase or care action.
+		local ready = _PetLogic.ClientReady
+		local pet = _PetLogic.ClientPet
+		local owned = ready and pet.Owned
+		local name = _LocalizationService:GetText(_PetLogic.PetNameKey)
+		self.PetDisplay:GetChildByName("Name").TextGUIRendererComponent.Text = name
+		self.PetDisplay:GetChildByName("State").TextGUIRendererComponent.Text = _LocalizationService:GetText(owned and "PET_OWNED" or "PET_PREVIEW")
+		local portrait = self.PetDisplay:GetChildByName("Portrait").SpriteGUIRendererComponent
+		portrait.Color = Color(1,1,1,owned and 1 or 0.55)
+		self.PetPanel:GetChildByName("test").Enable = Environment:IsMakerPlay() and ready and not owned
+		self.PetPanel:GetChildByName("buy").Enable = not owned
+		self.PetPanel:GetChildByName("equip").Enable = owned
+		self.PetPanel:GetChildByName("rank").Enable = owned
+		for _, child in ipairs({"StoneCaption", "StoneIcon", "StoneCount", "RankHint"}) do
+			self.PetPanel:GetChildByName(child).Enable = owned
+		end
+		local maxLevel = owned and _PetLogic:GetMaxLevel(pet.Rank) or 10
+		local level = owned and pet.Level or 1
+		local xp = owned and pet.XP or 0
+		local need = _PetLogic:GetXPNeeded(level)
+		local bonus = owned and _PetLogic:GetDamagePercent(level, pet.Rank) or 3
+		self:SetText("Level", _LocalizationService:GetTextFormat("PET_LEVEL_FORMAT", level, maxLevel))
+		self:SetText("Bonus", _LocalizationService:GetTextFormat("PET_BONUS_FORMAT", string.format("%.2f", bonus)))
+		self:SetText("XP", _LocalizationService:GetTextFormat("PET_XP_FORMAT", xp, need))
+		self:SetText("Energy", tostring(ready and pet.Energy or 0) .. " / 1000")
+		self:SetText("FullValue", tostring(owned and pet.Fullness or 0) .. "%")
+		self:SetText("CleanValue", tostring(owned and pet.Cleanliness or 0) .. "%")
+		self:SetText("MoodValue", tostring(owned and pet.Mood or 0) .. "%")
+		self:SetText("StoneCount", tostring(ready and pet.Stones or 0))
+		local fill = self.PetPanel:GetChildByName("EnergyBar"):GetChildByName("Fill")
+		fill.Enable = ready and pet.Energy > 0
+		fill.UITransformComponent.RectSize = Vector2(500 * (ready and pet.Energy or 0) / 1000, 12)
+		local busy = _UtilLogic.ElapsedSeconds < math.max(self.MotionUntil, self.WaitingUntil)
+		local canGrow = owned and not busy
+		self:SetButton("feed", canGrow and self.FeedingReady and pet.Energy >= 80, "PET_FEED")
+		self:SetButton("wash", canGrow and pet.Energy >= 120, "PET_WASH")
+		self:SetButton("walk", canGrow and pet.Energy >= 160, "PET_WALK")
+		self:SetButton("sleep", owned and not busy and pet.Energy < 1000 and _DateTimeLogic:GetTimeElapsedWithoutOffset() >= pet.SleepUntil, "PET_SLEEP")
+		self:SetButton("equip", owned and not busy, owned and pet.Equipped and "PET_UNEQUIP" or "PET_EQUIP")
+		local cost = owned and _PetLogic.RankCosts[pet.Rank + 1] or 10
+		self:SetButton("rank", owned and not busy and level >= maxLevel and cost ~= nil and pet.Stones >= cost, "PET_RANK")
+		self:SetText("RankHint", cost ~= nil and _LocalizationService:GetTextFormat("PET_RANK_FORMAT", maxLevel, cost) or _LocalizationService:GetText("PET_MAX_RANK"))
+		local buy = self.PetPanel:GetChildByName("buy")
+		self:SetButton("buy", ready and _PetLogic.PetEggProductId ~= "" and _PetLogic.PetEggPrice > 0, _PetLogic.PetEggProductId == "" and "PET_COMING_SOON" or "PET_BUY_EGG")
+		if _PetLogic.PetEggProductId ~= "" and _PetLogic.PetEggPrice > 0 then
+			buy:GetChildByName("Label").TextGUIRendererComponent.Text = _LocalizationService:GetTextFormat("PET_BUY_PRICE", _PetLogic.PetEggPrice)
+		end
+		local stateKey = ready and "PET_PREVIEW" or "PET_LOADING"
+		if owned then stateKey = _PetLogic.ClientTest and "PET_TEST_MODE" or (pet.Equipped and "PET_EQUIPPED" or "PET_OWNED") end
+		self:SetText("Status", _LocalizationService:GetText(stateKey))
+		self.PetDisplay:GetChildByName("State").TextGUIRendererComponent.Text = _LocalizationService:GetText(stateKey)
+		self.ShownRevision = _PetLogic.ClientRevision
+		if self.MotionUntil == 0 then self:PlayIdle() end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayIdle()
+		-- Needs affect expression, never take away the pet's earned combat bonus.
+		local pose = "stand"
+		local pet = _PetLogic.ClientPet
+		if pet ~= nil and pet.Owned then
+			if pet.Fullness < 30 then pose = "hungry"
+			elseif pet.Mood < 30 then pose = "cry"
+			elseif pet.Cleanliness < 30 then pose = "angry" end
+		end
+		local ruid = _PetLogic.Motions[pose]
+		if self.IdleRUID == ruid then return end
+		self.IdleRUID = ruid
+		local image = self.PetDisplay:GetChildByName("Portrait").SpriteGUIRendererComponent
+		image.FlipX = false
+		self.PetDisplay:GetChildByName("Portrait").UITransformComponent.anchoredPosition = Vector2(0, -150)
+		self:PlayPortrait(ruid)
+	end
+
+
+	@ExecSpace("ClientOnly")
+	method void InitializeArtwork()
+		-- Keep the original pet clips; retire every generated overlay, including cached UI children.
+		local icon = self.PetButton:GetChildByName("Icon")
+		icon.UITransformComponent.RectSize = Vector2(112,112 * 28 / 36)
+		icon.UITransformComponent.anchoredPosition = Vector2(0,13)
+		icon.SpriteGUIRendererComponent.PreserveSprite = PreserveSpriteType.None
+		icon.SpriteGUIRendererComponent.LocalScale = Vector2(1,1)
+		icon.SpriteGUIRendererComponent.LocalPosition = Vector2(0,0)
+		local food = self.PetDisplay:GetChildByName("Food")
+		food.Enable = false
+		local bowl = food:GetChildByName("Bowl")
+		if isvalid(bowl) then bowl.Enable = false end
+		for i = 1, 16 do
+			local pose = food:GetChildByName("Pose" .. i)
+			if isvalid(pose) then pose.Enable = false end
+			local bite = food:GetChildByName("Bite" .. i)
+			if isvalid(bite) then bite.Enable = false end
+		end
+		log("[VRF] PET-HOUSE original pixel clips only; generated feeding overlays disabled")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+	 self:InitializeArtwork()
+	 self.FeedingReady = false
+	 _ResourceService:PreloadAsync(self.FeedingRUIDs, function(results)
+	  self.FeedingReady = true
+	  for _, result in pairs(results) do
+	   if result ~= PreloadResultStatus.Success then self.FeedingReady = false end
+	  end
+	  log("[VRF] PET-HOUSE feeding preload ready=" .. tostring(self.FeedingReady))
+	  if self.PetMode then self:Refresh() end
+	 end)
+	 self:BindClick(self.PetButton, function() self:Open() end)
+	 self:BindClick(self.CloseButton, function() self:Close() end)
+	 for _, action in ipairs({"feed", "wash", "walk", "sleep", "equip", "rank", "test"}) do
+	  local name = action
+	  self:BindClick(self.PetPanel:GetChildByName(name), function() self:RequestCare(name) end)
+	 end
+	 self:BindClick(self.PetPanel:GetChildByName("buy"), function() self:BuyEgg() end)
+	 local labels = {EnergyCaption="PET_ENERGY", NeedsFull="PET_FULLNESS", NeedsClean="PET_CLEANLINESS", NeedsMood="PET_MOOD", StoneCaption="PET_STONES", test="PET_TEST_HATCH"}
+	 for name, key in pairs(labels) do
+	  local entity = self.PetPanel:GetChildByName(name)
+	  if entity.TextGUIRendererComponent ~= nil then entity.TextGUIRendererComponent.Text = _LocalizationService:GetText(key)
+	  else entity:GetChildByName("Label").TextGUIRendererComponent.Text = _LocalizationService:GetText(key) end
+	 end
+	 self.PetPanel.Parent:GetChildByName("Title"):GetChildByName("Label").TextGUIRendererComponent.Text = _LocalizationService:GetText("PET_HOUSE")
+	 self.PetButton:GetChildByName("Label").TextGUIRendererComponent.Text = _LocalizationService:GetText("PET_TAB")
+	 self:Close()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Open()
+	 if not isvalid(self.TitleGroup) or not self.TitleGroup.Enable or not self.TitleGroup:GetChildByName("BattlePanel").Enable then return end
+	 if _GameManager.GameStarted and not _GameManager.GameOver then return end
+	 self.PetMode = true self.Overlay.Enable = true
+	 self.NextRefresh = _UtilLogic.ElapsedSeconds + 15
+	 self.IdleRUID = "" self:Refresh() _PetLogic:RequestState()
+	 log("[VRF] PET-HOUSE opened from lobby")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Close()
+	 self.PetMode = false self.Overlay.Enable = false
+	 self.MotionUntil = 0 self.WaitingUntil = 0 self.PendingAction = "" self.Motion = "" self.IdleRUID = ""
+	 self.PetDisplay:GetChildByName("Portrait").UITransformComponent.anchoredPosition = Vector2(0, -150)
+	 self:SetWater(false, 0) self:SetFeedingMotion(false, 0)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RequestCare(string action)
+	 if not self.PetMode or _UtilLogic.ElapsedSeconds < math.max(self.MotionUntil, self.WaitingUntil) then return end
+	 if action == "feed" and not self.FeedingReady then return end
+	 self.PendingAction = action self.WaitingUntil = _UtilLogic.ElapsedSeconds + 4
+	 self:Refresh() _PetLogic:RequestAction(action)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnPetChanged(string motion)
+	 if not self.PetMode then return end
+	 local expected = {feed="eat", wash="chat", walk="move", sleep="sleep", equip="love", rank="love", test="love"}
+	 local action = self.PendingAction
+	 if motion ~= "" then
+	  self.PendingAction = "" self.WaitingUntil = 0
+	  if expected[action] == motion and _PetLogic.Motions[motion] ~= nil then
+	   self.Motion = action self.MotionStart = _UtilLogic.ElapsedSeconds
+	   local duration = action == "walk" and 6 or (action == "wash" and 4.5 or (action == "feed" and 3.8 or 2.8))
+	   self.MotionUntil = self.MotionStart + duration self.IdleRUID = ""
+	   local image = self.PetDisplay:GetChildByName("Portrait").SpriteGUIRendererComponent
+	   self:PlayPortrait(_PetLogic.Motions[motion])
+	   self:SetFeedingMotion(action == "feed", 0)
+	   log("[VRF] PET-HOUSE care " .. action)
+	  end
+	 end
+	 self:Refresh()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayPortrait(string ruid)
+	 -- Native pixel scale stays fixed: sleep/chat canvases include extra space and must not shrink the body.
+	 local image = self.PetDisplay:GetChildByName("Portrait").SpriteGUIRendererComponent
+	 image.PreserveSprite = PreserveSpriteType.NativeSize
+	 image.LocalScale = Vector2(self.PortraitPixelScale, self.PortraitPixelScale)
+	 image.PlayRate = 1
+	 image.AnimClipPlayType = SpriteAnimClipPlayType.Loop
+	 image.ImageRUID = DataRef(ruid)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetFeedingMotion(boolean active, number elapsed)
+		-- Animate the native eating sprite continuously without crossfades, tinting or size changes.
+		local portrait = self.PetDisplay:GetChildByName("Portrait")
+		self.PetDisplay:GetChildByName("Food").Enable = false
+		if not active then return end
+		local progress = math.max(0, math.min(3.8, elapsed))
+		local envelope = math.min(1, progress / 0.24, (3.8 - progress) / 0.3)
+		envelope = envelope * envelope * (3 - 2 * envelope)
+		local nod = math.sin(progress * math.pi * 2.5)
+		portrait.UITransformComponent.anchoredPosition = Vector2(0, -150 - 3.5 * envelope * nod * nod)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetWater(boolean active, number elapsed)
+	 local water = self.PetDisplay:GetChildByName("Water")
+	 water.Enable = active
+	 if not active then return end
+	 local fade = math.min(1, elapsed / 0.3, math.max(0, (4.5 - elapsed) / 0.5))
+	 local jet = water:GetChildByName("Jet")
+	 jet.SpriteGUIRendererComponent.Color = Color(1,1,1,0.52 * fade)
+	 jet.UITransformComponent.UIScale = Vector3(1 + math.sin(elapsed * 18) * 0.035, 1, 1)
+	 local splash = water:GetChildByName("Splash")
+	 splash.SpriteGUIRendererComponent.Color = Color(1,1,1,0.8 * fade)
+	 splash.UITransformComponent.UIScale = Vector3(1 + math.sin(elapsed * 15) * 0.08, 1 + math.cos(elapsed * 12) * 0.06, 1)
+	 for i = 1, 12 do
+	  local drop = water:GetChildByName("Drop" .. i)
+	  local phase = (elapsed * 1.7 + i / 12) % 1
+	  local x = math.sin(i * 17) * 62
+	  drop.UITransformComponent.anchoredPosition = Vector2(x, 125 - phase * 270)
+	  drop.SpriteGUIRendererComponent.Color = Color(0.7,0.95,1,fade * (0.45 + math.sin(phase * math.pi) * 0.5))
+	 end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUpdate(number delta)
+	 if not self.PetMode then return end
+	 if not self.TitleGroup.Enable or not self.TitleGroup:GetChildByName("BattlePanel").Enable or (_GameManager.GameStarted and not _GameManager.GameOver) then self:Close() return end
+	 local now = _UtilLogic.ElapsedSeconds
+	 if now >= self.NextRefresh then self.NextRefresh = now + 15 _PetLogic:RequestState() end
+	 if self.WaitingUntil > 0 and now >= self.WaitingUntil then self.WaitingUntil = 0 self.PendingAction = "" self:Refresh() end
+	 if self.MotionUntil > 0 then
+	  local elapsed = now - self.MotionStart
+	  local portrait = self.PetDisplay:GetChildByName("Portrait")
+	  local x = 0
+	  if self.Motion == "walk" then
+	   -- Constant speed with small eased turns: centre -> left -> right -> centre.
+	   if elapsed < 1.5 then x = -280 * elapsed
+	   elseif elapsed < 4.5 then x = -420 + 280 * (elapsed - 1.5)
+	   else x = 420 - 280 * (elapsed - 4.5) end
+	   portrait.SpriteGUIRendererComponent.FlipX = elapsed >= 1.5 and elapsed < 4.5
+	  end
+	  portrait.UITransformComponent.anchoredPosition = Vector2(x, -150)
+	  self:SetWater(self.Motion == "wash", elapsed)
+	  self:SetFeedingMotion(self.Motion == "feed", elapsed)
+	  if now >= self.MotionUntil then
+	   self.MotionUntil = 0 self.Motion = "" self:SetWater(false, 0) self:SetFeedingMotion(false, 0) self:PlayIdle() self:Refresh()
+	  end
+	 end
+	 if self.ShownRevision ~= _PetLogic.ClientRevision then self:Refresh() end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+	 self:Close()
+	 for _, binding in ipairs(self.Handlers) do
+	  if isvalid(binding.entity) then binding.entity:DisconnectEvent(ButtonClickEvent, binding.handle) end
+	 end
+	 self.Handlers = {}
+	end
+end

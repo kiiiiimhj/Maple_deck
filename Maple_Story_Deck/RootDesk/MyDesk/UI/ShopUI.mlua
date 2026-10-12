@@ -56,6 +56,19 @@ script ShopUI extends Logic
 	property Color SkinLockedLabelColor = Color(0.62, 0.62, 0.68, 1)
 	property table _skinHandlers = {}
 
+	-- 대미지 스킨 구매 확인창. 게임 종료 확인창(OptionGroup/ConfirmPanel)을 그대로 본떴다.
+	-- ShopPanel 안에 두면 뒤 형제인 하단 탭바/재화 배지/우측 버튼이 위에 그려지고 눌리므로 TitleGroup 맨 끝(최상단)에 둔다.
+	-- 딤을 같이 켜서 확인창 바깥 클릭을 막는다. 딤은 모바일에서 MobileScreenFitLogic.GetDimmerPaths 로 화면 끝까지 넓힌다
+	property Entity buyConfirmPanel = "76bf2785-050a-4339-b44c-e5c6ed4f497a"
+	property Entity buyConfirmDimmer = "15521fac-eff0-4f26-85b9-053fcaa3c701"
+	property TextGUIRendererComponent buyConfirmMessage = "48159e23-d12f-49a6-8dc0-2b9a4b9d03bd"
+	property TextGUIRendererComponent buyConfirmSubMessage = "dd6dad9d-afc7-4ca8-aa56-2f707a19f16d"
+	property ButtonComponent btnBuyYes = "4991ff05-79f8-4ca8-b062-eab0dcd3e50e"
+	property ButtonComponent btnBuyNo = "a52c2c64-76d3-4d86-9c70-d9103b3a94ee"
+	property string _pendingSkinKey = ""
+	property any _buyYesHandler = nil
+	property any _buyNoHandler = nil
+
 	property any _prevHandler = nil
 	property any _nextHandler = nil
 	property any _scrollTween = nil
@@ -81,6 +94,10 @@ script ShopUI extends Logic
 
 		self._tabDiamondHandler = self.tabDiamond.Entity:ConnectEvent(ButtonClickEvent, function() self:SelectTab("diamond") end)
 		self._tabSkinHandler = self.tabSkin.Entity:ConnectEvent(ButtonClickEvent, function() self:SelectTab("skin") end)
+
+		self._buyYesHandler = self.btnBuyYes.Entity:ConnectEvent(ButtonClickEvent, function() self:OnSkinBuyConfirmed() end)
+		self._buyNoHandler = self.btnBuyNo.Entity:ConnectEvent(ButtonClickEvent, function() self:CloseSkinBuyConfirm() end)
+		self:CloseSkinBuyConfirm()
 
 		self.noticeBanner.Enable = false
 		self:ApplyProducts()
@@ -171,7 +188,36 @@ script ShopUI extends Logic
 			return
 		end
 
-		_DamageSkinLogic:RequestBuy(entry.key)
+		self:OpenSkinBuyConfirm(entry)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OpenSkinBuyConfirm(table entry)
+		-- 바로 사지 않고 "구매할까요? 예/아니오"를 먼저 띄운다. 예를 눌러야 RequestBuy 로 넘어간다
+		self._pendingSkinKey = entry.key
+		self.buyConfirmMessage.Text = _LocalizationService:GetText("MLUA_SHOPUI_006")
+		self.buyConfirmSubMessage.Text = _LocalizationService:GetTextFormat("FMT_SHOPUI_002", self:LocalizeProductText(entry.name), tostring(entry.price))
+		self.buyConfirmDimmer:SetEnable(true)
+		self.buyConfirmPanel:SetEnable(true)
+		log("ShopUI: skin buy confirm open key=" .. entry.key)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void CloseSkinBuyConfirm()
+		-- 아니오/탭 전환 시 확인창을 닫고 대기 중인 스킨을 비운다
+		self._pendingSkinKey = ""
+		self.buyConfirmPanel:SetEnable(false)
+		self.buyConfirmDimmer:SetEnable(false)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnSkinBuyConfirmed()
+		-- 예: 확인창을 닫고 서버에 구매 요청(다이아 부족 등은 서버가 NotifyPurchaseFailed 로 알려준다)
+		local key = self._pendingSkinKey
+		self:CloseSkinBuyConfirm()
+		if key == "" then return end
+		log("ShopUI: skin buy confirmed key=" .. key)
+		_DamageSkinLogic:RequestBuy(key)
 	end
 
 	@ExecSpace("Multicast")
@@ -186,6 +232,7 @@ script ShopUI extends Logic
 	method void SelectTab(string tabName)
 		-- 다이아 탭은 기존 상품 스크롤(ScrollArea + 하단 스크롤바)을, 스킨 탭은 SkinPanel을 보여준다
 		self._currentTab = tabName
+		self:CloseSkinBuyConfirm()
 		local isDiamond = (tabName == "diamond")
 		self.scrollTouchArea.Enable = isDiamond
 		self.scrollBar.Entity.Enable = isDiamond
@@ -607,6 +654,8 @@ script ShopUI extends Logic
 			if isvalid(rec.entity) then rec.entity:DisconnectEvent(ButtonClickEvent, rec.eventHandler) end
 		end
 		self._skinHandlers = {}
+		if self._buyYesHandler then self.btnBuyYes.Entity:DisconnectEvent(ButtonClickEvent, self._buyYesHandler) end
+		if self._buyNoHandler then self.btnBuyNo.Entity:DisconnectEvent(ButtonClickEvent, self._buyNoHandler) end
 	end
 
 end

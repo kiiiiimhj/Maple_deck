@@ -1,0 +1,471 @@
+@Logic
+script PetLogic extends Logic
+
+	-- One native species. Registered cash product ID/price are supplied by the creator.
+	property string PetEggProductId = ""
+	property integer PetEggPrice = 0
+	property string PetNameKey = "PET_NAME_5002617"
+	property string StorageKey = "Pets.v1.5002617"
+	property integer StoneItemId = 520001
+	property string StoneIcon = "b239798f5a8d4129ae1c086e7069f7fc"
+	property integer EnergyTickMilliseconds = 30000
+	property integer MinimumRunSeconds = 120
+	property integer ScorePerStone = 500
+	property integer MaxRunStones = 6
+	property table RankCosts = {10, 30, 60}
+	property table RankDamage = {3, 5, 8, 12}
+	property table Motions = {
+		angry="9c3e363aba58415c897c070af04a5565", chat="22cf6770344b47f5927e72e05d08ee20",
+		cry="20c09185ea004aa4843a243baa8de1dd", dung="3e209a3eb5e148e6823fc68c0ce1ee1e",
+		eat="06b3d404f2f1492999456a76d97303f0", hungry="b99f41390c144c3797c2468050bd7a3b",
+		icon="85f54bc06d7442a59151f11dd7ffd8e5", love="fdf3f8a07d9c4dc0abecd9cf721d13cd",
+		move="b0e82d7569d64d20bd9e28ae08f8ba0f", rest="3caba02c991244deb6f6d366f3b27a3f",
+		sit="f4379bd3baee43e4871d0c8df9a019ef", sleep="1df8735ad1b44e39a76399cacbc4a51c",
+		stand="7080e8b5b625496d8c753df1239824a4", stand1="9f524b17d8bf43f9b8ca32b57aa7b4b9",
+		what="eca6925ea9ef4e26aa1d5685f32c1640", inject="eca6925ea9ef4e26aa1d5685f32c1640", gift="fdf3f8a07d9c4dc0abecd9cf721d13cd"
+	}
+	property integer SleepFatigueRecovery = 60
+	property integer SleepEnergyRecovery = 100
+	property number SleepDuration = 6
+	property integer HeartScrollItemId = 510001
+	property integer WalkDuration = 12
+	property number WalkFindChance = 0.3
+	property table States = {}
+	property any ClientPet = nil
+	property boolean ClientReady = false
+	property boolean ClientTest = false
+	property integer ClientRevision = 0
+	property string RunUserId = ""
+	property integer RunPaidStones = 0
+	property integer RunToken = 0
+	@Sync
+	property number RunDamageMultiplier = 1
+	@Sync
+	property integer RunStoneTotal = 0
+	@Sync
+	property integer RunStoneNew = 0
+
+	method table GetCareConfig(string action)
+		-- UI and server share every gain, cost and duration.
+		if action == "feed" then return {affinity=8,energy=80,xp=16,need="Fullness",gain=35,fatigue=5,motion="eat",duration=3.8,label="PET_FULLNESS",full="PET_FULLNESS_FULL"} end
+		if action == "wash" then return {affinity=10,energy=120,xp=24,need="Cleanliness",gain=40,fatigue=10,motion="chat",duration=4.5,label="PET_CLEANLINESS",full="PET_CLEANLINESS_FULL"} end
+		if action == "walk" then return {affinity=12,energy=160,xp=32,need="Mood",gain=30,fatigue=25,motion="move",duration=self.WalkDuration,label="PET_MOOD",full="PET_MOOD_FULL"} end
+		if action == "inject" then return {affinity=10,energy=100,xp=16,need="Health",gain=40,fatigue=5,motion="inject",duration=5.5,label="PET_HEALTH",full="PET_HEALTH_FULL"} end
+		return nil
+	end
+
+	method string GetCareBlockReason(any pet, string action)
+		-- Maximum needs cannot be farmed for XP or treasure, even through a direct RPC.
+		local fatigue = pet.Fatigue or 0
+		if action == "sleep" then return fatigue<=0 and "PET_NOT_TIRED" or "" end
+		if action == "heart" then return (pet.Affinity or 0)<100 and "PET_HEART_NOT_READY" or "" end
+		local choice = self:GetCareConfig(action)
+		if choice == nil then return "" end
+		if fatigue >= 100 then return "PET_TOO_TIRED" end
+		if (pet[choice.need] or (action=="inject" and 100 or 0)) >= 100 then return choice.full end
+		return ""
+	end
+
+	method number GetCareDuration(string action)
+		if action == "sleep" then return self.SleepDuration end
+		if action == "heart" then return 2.8 end
+		local choice = self:GetCareConfig(action)
+		return choice ~= nil and choice.duration or 2.8
+	end
+
+	method integer GetMaxLevel(integer rank)
+		-- Rank extends the cap without discarding the current level.
+		return (math.max(0, math.min(3, rank)) + 1) * 10
+	end
+
+	method integer GetXPNeeded(integer level)
+		-- A steady care curve; spending stones never purchases care XP.
+		return 40 + level * 12
+	end
+
+	method number GetDamagePercent(integer level, integer rank)
+		-- The supplied species has only damage as its innate combat stat.
+		local r = math.max(0, math.min(3, rank))
+		return self.RankDamage[r + 1] + math.max(0, level - r * 10 - 1) * 0.15
+	end
+
+	method number GetRunDamageMult()
+		-- Snapshot at actual run start, so lobby care cannot alter an ongoing battle.
+		return self.RunDamageMultiplier
+	end
+
+	@ExecSpace("ClientOnly")
+	method number GetLobbyDamageMult()
+		-- Inventory stats reflect the currently equipped pet.
+		local pet = self.ClientPet
+		if pet == nil or not pet.Owned or not pet.Equipped then return 1 end
+		return 1 + self:GetDamagePercent(pet.Level, pet.Rank) / 100
+	end
+
+	method integer CalculateRunStones(integer score, number seconds)
+		-- Diminishing score conversion plus active survival time; six per run maximum.
+		if score < self.ScorePerStone or seconds < self.MinimumRunSeconds then return 0 end
+		local survival = 1
+		if seconds >= 600 then survival = 1.5
+		elseif seconds >= 300 then survival = 1.2 end
+		return math.min(self.MaxRunStones, math.floor(math.sqrt(score / self.ScorePerStone) * survival))
+	end
+
+	@ExecSpace("ServerOnly")
+	method void CollectLoadKeys(table loadKeys)
+		-- Join the existing player batch rather than issuing a separate login read.
+		table.insert(loadKeys, self.StorageKey)
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean LoadFor(Entity player, table loadedData)
+		-- A failed or future-version load stays closed to purchases, care and saving.
+		local pet = PetProgress()
+		local item = loadedData[self.StorageKey]
+		if item ~= nil and item.Value ~= nil and item.Value ~= "" then
+			local ok, data = pcall(function() return _HttpService:JSONDecode(item.Value) end)
+			if not ok or type(data) ~= "table" or not pet:Deserialize(data) then
+				log_error("PetLogic: invalid saved pet data; load aborted")
+				return false
+			end
+		end
+		local now = _DateTimeLogic:GetTimeElapsedWithoutOffset()
+		if pet.EnergyAt == 0 then pet.EnergyAt = now end
+		if pet.NeedsAt == 0 then pet.NeedsAt = now end
+		local id = player.PlayerComponent.UserId
+		self.States[id] = {pet=pet, dirty=false, generation=0, test=false, lastRequest=-100}
+		self:Recover(self.States[id], now)
+		self:PushState(id, "", "")
+		return true
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SaveFor(Entity player, table saveData, table generations)
+		-- Stamp this particular save; unconfirmed writes never clear dirty state.
+		local record = self.States[player.PlayerComponent.UserId]
+		if record == nil or not record.dirty or record.test then return end
+		saveData[self.StorageKey] = _HttpService:JSONEncode(record.pet:Serialize())
+		generations[self.StorageKey] = record.generation
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ConfirmSaveFor(Entity player, table succeeded, table generations)
+		-- Ignore partial failures and changes that raced the asynchronous save.
+		if not isvalid(player) then return end
+		local record = self.States[player.PlayerComponent.UserId]
+		if record == nil or record.test or generations[self.StorageKey] ~= record.generation then return end
+		for _, key in ipairs(succeeded or {}) do
+			if key == self.StorageKey then record.dirty = false return end
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void MarkDirty(table record)
+		-- All persisted mutations advance their generation before a batch save.
+		record.dirty = true
+		record.generation = record.generation + 1
+	end
+
+	@ExecSpace("ServerOnly")
+	method void Recover(table record, integer now)
+		-- Calculate elapsed recovery only on access. Fatigue never decreases here or on login.
+		local pet = record.pet
+		if not pet.Owned then return end
+		local steps = math.floor(math.max(0, now - pet.EnergyAt) / self.EnergyTickMilliseconds)
+		local needSteps = math.floor(math.max(0, now - pet.NeedsAt) / 1800000)
+		if steps > 0 then
+			local before = pet.Energy
+			pet.Energy = math.min(1000, pet.Energy + steps)
+			pet.EnergyAt = pet.EnergyAt + steps * self.EnergyTickMilliseconds
+			if pet.Energy ~= before then self:MarkDirty(record) end
+		end
+		if needSteps > 0 then
+			-- Count neglected intervals analytically, including offline time, without a per-tick loop.
+			local firstHungry = math.floor(math.max(0,pet.Fullness-30)/3)+1
+			local firstDirty = math.floor(math.max(0,pet.Cleanliness-30)/2)+1
+			local badSteps = math.max(0,needSteps-math.min(firstHungry,firstDirty)+1)
+			pet.Affinity = math.max(0,(pet.Affinity or 0)-badSteps*5)
+			pet.Health = math.max(0,(pet.Health or 100)-badSteps*4)
+			pet.Fullness = math.max(0, pet.Fullness - needSteps * 3)
+			pet.Cleanliness = math.max(0, pet.Cleanliness - needSteps * 2)
+			pet.Mood = math.max(0, pet.Mood - needSteps * 2)
+			pet.NeedsAt = pet.NeedsAt + needSteps * 1800000
+			self:MarkDirty(record)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void PushState(string userId, string motion, string message)
+		-- Target the account that owns the pet, including replies to care requests.
+		local record = self.States[userId]
+		if record == nil then return end
+		self:ReceiveState(_HttpService:JSONEncode(record.pet:Serialize()), record.test, motion, message, userId)
+	end
+
+	@ExecSpace("Client")
+	method void ReceiveState(string json, boolean test, string motion, string message)
+		-- The client holds only its own display snapshot; it never grants rewards.
+		local pet = PetProgress()
+		if not pet:Deserialize(_HttpService:JSONDecode(json)) then return end
+		self.ClientPet = pet
+		self.ClientReady = true
+		self.ClientTest = test
+		self.ClientRevision = self.ClientRevision + 1
+		_PetUI:OnPetChanged(motion)
+		if message ~= "" then _UIToast:ShowMessage(message) end
+	end
+
+	@ExecSpace("Server")
+	method void RequestState()
+		-- senderUserId is supplied by the engine, never accepted from the client.
+		local record = self.States[senderUserId]
+		if record == nil then return end
+		local now = _DateTimeLogic:GetTimeElapsedWithoutOffset()
+		if now - (record.lastRefresh or 0) < 1000 then return end
+		record.lastRefresh = now
+		self:Recover(record, now)
+		self:PushState(senderUserId, "", "")
+	end
+
+	@ExecSpace("Server")
+	method void RequestAction(string action)
+		-- Validate ownership, lobby, energy, cooldown and rank on the server.
+		local userId = senderUserId
+		local record = self.States[userId]
+		if record == nil then return end
+		if action == "test" then
+			if not Environment:IsMakerPlay() or record.pet.Owned then return end
+			local preview = PetProgress()
+			preview:Deserialize(record.pet:Serialize())
+			preview.Owned = true preview.Equipped = true preview.Stones = 100
+			preview.Fullness = 50 preview.Cleanliness = 50 preview.Mood = 50 preview.Fatigue = 0
+			preview.Health = 60 preview.Affinity = 0 preview.AffinityStage = 0
+			preview.EnergyAt = _DateTimeLogic:GetTimeElapsedWithoutOffset()
+			preview.NeedsAt = preview.EnergyAt
+			self.States[userId] = {pet=preview, dirty=false, generation=0, test=true, lastRequest=-100}
+			self:PushState(userId, "love", "PET_TEST_NOTICE")
+			return
+		end
+		local pet = record.pet
+		if not pet.Owned then self:PushState(userId, "what", "PET_NO_PET") return end
+		if _GameManager.GameStarted and not _GameManager.GameOver then
+			self:PushState(userId, "", "PET_BATTLE_LOCKED") return
+		end
+		local now = _DateTimeLogic:GetTimeElapsedWithoutOffset()
+		if now < (record.busyUntil or 0) or now - record.lastRequest < 2800 then return end
+		record.lastRequest = now
+		self:Recover(record, now)
+		if action == "heart" then self:ClaimHeartReward(userId,record,now) return end
+		if action == "equip" then
+			pet.Equipped = not pet.Equipped
+			self:MarkDirty(record) self:PushState(userId, "love", "") return
+		end
+		if action == "rank" then
+			local cost = self.RankCosts[pet.Rank + 1]
+			if cost == nil or pet.Level < self:GetMaxLevel(pet.Rank) then
+				self:PushState(userId, "what", "PET_RANK_LEVEL") return
+			end
+			if pet.Stones < cost then self:PushState(userId, "what", "PET_STONES_SHORT") return end
+			pet.Stones = pet.Stones - cost pet.Rank = pet.Rank + 1
+			self:MarkDirty(record) self:PushState(userId, "love", "PET_RANK_DONE") return
+		end
+		local blocked = self:GetCareBlockReason(pet,action)
+		if blocked ~= "" then self:PushState(userId,"what",blocked) return end
+		if action == "sleep" then
+			-- Energy still recharges with time; only actual sleep removes fatigue.
+			record.busyUntil = now + self.SleepDuration*1000
+			pet.Fatigue = math.max(0,pet.Fatigue-self.SleepFatigueRecovery)
+			pet.Energy = math.min(1000,pet.Energy+self.SleepEnergyRecovery)
+			pet.SleepUntil = 0
+			self:AddCareAffinity(pet,6)
+			self:MarkDirty(record) self:PushState(userId,"sleep","PET_REST_DONE") return
+		end
+		local choice = self:GetCareConfig(action)
+		if choice == nil then return end
+		if pet.Energy < choice.energy then self:PushState(userId,"hungry","PET_ENERGY_SHORT") return end
+		if action == "walk" and not record.test then
+			local player = _UserService:GetUserEntityByUserId(userId)
+			if not isvalid(player) or not player.PlayerDBManager.IsLoadSuccess or not _AttendanceLogic:IsRequestOwner(userId) or _GameManager._diamondStorage == nil then
+				self:PushState(userId,"what","PET_LOADING") return
+			end
+		end
+		record.busyUntil = now + choice.duration*1000
+		pet.Energy = pet.Energy - choice.energy
+		pet.EnergyAt = now
+		pet[choice.need] = math.min(100,pet[choice.need]+choice.gain)
+		pet.Fatigue = math.min(100,(pet.Fatigue or 0)+choice.fatigue)
+		if action == "walk" then
+			pet.Fullness = math.max(0,pet.Fullness-15)
+			pet.Cleanliness = math.max(0,pet.Cleanliness-20)
+		end
+		self:AddCareAffinity(pet,choice.affinity or 0)
+		pet.XP = pet.XP + choice.xp
+		local levelBefore = pet.Level
+		while pet.Level < self:GetMaxLevel(pet.Rank) and pet.XP >= self:GetXPNeeded(pet.Level) do
+			pet.XP = pet.XP - self:GetXPNeeded(pet.Level) pet.Level = pet.Level + 1
+		end
+		if pet.Level >= self:GetMaxLevel(pet.Rank) then pet.XP = 0 end
+		self:MarkDirty(record)
+		local message = ""
+		if pet.Level > levelBefore then message = "PET_LEVEL_DONE" end
+		if action == "walk" then self:BeginWalk(userId,record,now) end
+		self:PushState(userId, choice.motion, message)
+		if action == "walk" and not record.test then _GameManager:PersistRewardNow(userId) end
+	end
+
+
+
+	method void AddCareAffinity(any pet, integer amount)
+		-- Recovery must address hunger/dirt first; poor care cannot farm affection rewards.
+		if pet.Fullness>=30 and pet.Cleanliness>=30 and (pet.Health or 100)>=30 then
+			pet.Affinity=math.min(100,(pet.Affinity or 0)+amount)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ClaimHeartReward(string userId, table record, integer now)
+		local pet=record.pet
+		if (pet.Affinity or 0)<100 then self:PushState(userId,"what","PET_HEART_NOT_READY") return end
+		local player=nil
+		if not record.test then
+			player=_UserService:GetUserEntityByUserId(userId)
+			if not isvalid(player) or not player.PlayerDBManager.IsLoadSuccess or not _AttendanceLogic:IsRequestOwner(userId) or _GameManager._diamondStorage==nil then
+				self:PushState(userId,"what","PET_LOADING") return
+			end
+		end
+		-- Reserve before inventory/save calls that may yield. Failed delivery retains the full heart.
+		if record.claimingHeart then return end
+		record.claimingHeart=true record.busyUntil=now+2800
+		local tier=pet.AffinityStage or 0
+		if tier==1 and not record.test then
+			local param=ItemCreateParamStruct() param:Set(self.HeartScrollItemId,5,0) param.IsIgnoreInvenCapacity=false
+			local code=_ItemFactoryLogic:TryAddItem(userId,param,ItemCreateResultStruct())
+			if code~=_ErrorCodeEnum.Success then
+				record.claimingHeart=false self:PushState(userId,"what","UI_MONTHLY_ATTENDANCE_INVENTORY_FULL") return
+			end
+		elseif tier==2 and not record.test then _GameManager:AddDiamond(100)
+		elseif tier==0 then pet.Stones=pet.Stones+3 end
+		pet.Affinity=0 pet.AffinityStage=(tier+1)%3
+		self:MarkDirty(record)
+		self:PushState(userId,"gift",record.test and "PET_HEART_TEST" or ("PET_HEART_REWARD_"..tostring(tier+1)))
+		if not record.test then _GameManager:PersistRewardNow(userId) end
+		record.claimingHeart=false
+		log("[VRF] PET-HEART claimed tier="..tostring(tier+1).." preview="..tostring(record.test))
+	end
+
+	@ExecSpace("ServerOnly")
+	method table RollWalkLoot()
+		-- One roll per server-approved walk; 70/20/10 are conditional on finding treasure.
+		local roll = _UtilLogic:RandomIntegerRange(1,100)
+		if roll <= 70 then
+		 local id = 510000 + _UtilLogic:RandomIntegerRange(1,5)
+		 local data = _ItemDataLogic:GetData(id)
+		 return {kind="scroll",itemId=id,amount=1,icon=data.RUID,message="PET_WALK_LOOT_SCROLL"}
+		elseif roll <= 90 then
+		 local amount = _UtilLogic:RandomIntegerRange(5,10)
+		 return {kind="diamond",amount=amount,icon="81462aeb825b4660991cef05651271cf",message="PET_WALK_LOOT_DIAMOND|"..amount}
+		end
+		local skill = _UtilLogic:RandomIntegerRange(0,1)==1
+		return {kind="ticket",skill=skill,amount=1,icon=skill and "38f5f4b9b8a342bf931b71298d60bb84" or "3fccc38bffbd45b68cd1fc049809de54",message=skill and "PET_WALK_LOOT_SKILL" or "PET_WALK_LOOT_RELIC"}
+	end
+
+	@ExecSpace("ServerOnly")
+	method void BeginWalk(string userId, table record, integer now)
+		-- Reserve the entire walk before any yielding grant/save; closing the UI cannot reroll it.
+		record.busyUntil = now + self.WalkDuration*1000
+		record.walkToken = (record.walkToken or 0)+1
+		record.walkRoute = (record.walkRoute or 0)%3+1
+		local found = _UtilLogic:RandomDouble()<self.WalkFindChance
+		local icon = "" local message = ""
+		if found then
+		 local reward = self:RollWalkLoot()
+		 icon = reward.icon message = reward.message
+		 -- Preview pets show the encounter without altering the real account wallet.
+		 if record.test then message="PET_WALK_TEST_FIND"
+		 elseif reward.kind=="scroll" then
+		  local param = ItemCreateParamStruct() param:Set(reward.itemId,1,0)
+		  param.IsIgnoreInvenCapacity = false
+		  local code = _ItemFactoryLogic:TryAddItem(userId,param,ItemCreateResultStruct())
+		  if code~=_ErrorCodeEnum.Success then icon="" message="UI_MONTHLY_ATTENDANCE_INVENTORY_FULL" end
+		 elseif reward.kind=="diamond" then _GameManager:AddDiamond(reward.amount)
+		 else _AttendanceLogic:AddFreePulls(1,reward.skill) end
+		 log("[VRF] PET-WALK reward kind="..reward.kind.." amount="..reward.amount.." preview="..tostring(record.test))
+		end
+		-- Grant before announcing the animation so closing/disconnecting never discards earned loot.
+		self:ReceiveWalkPlan(record.walkToken,record.walkRoute,found,icon,message,userId)
+		log("[VRF] PET-WALK approved route="..record.walkRoute.." found="..tostring(found))
+	end
+
+	@ExecSpace("Client")
+	method void ReceiveWalkPlan(integer token, integer route, boolean found, string icon, string message)
+		_PetHouseUI:SetWalkPlan(token,route,found,icon,message)
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean GrantPurchasedPet(string userId)
+		-- Only the existing shop purchase callback may invoke this durable grant.
+		local player = _UserService:GetUserEntityByUserId(userId)
+		local record = self.States[userId]
+		if not isvalid(player) or record == nil or record.test or not player.PlayerDBManager.IsLoadSuccess then return false end
+		local pet = record.pet
+		if not pet.Owned then
+			pet.Owned = true pet.Equipped = true
+			pet.EnergyAt = _DateTimeLogic:GetTimeElapsedWithoutOffset() pet.NeedsAt = pet.EnergyAt
+			self:MarkDirty(record)
+		end
+		if record.dirty and not player.PlayerDBManager:SavePetPurchaseAndWait() then return false end
+		self:PushState(userId, "love", "PET_HATCH_DONE")
+		return true
+	end
+
+	@ExecSpace("ServerOnly")
+	method void InitForRun(string userId)
+		-- Continue preserves this snapshot; a genuine restart clears the reward watermark.
+		self.RunToken = self.RunToken + 1
+		self.RunUserId = userId self.RunPaidStones = 0 self.RunStoneTotal = 0 self.RunStoneNew = 0
+		self.RunDamageMultiplier = 1
+		local record = self.States[userId]
+		if record ~= nil and record.pet.Owned and record.pet.Equipped then
+			self.RunDamageMultiplier = 1 + self:GetDamagePercent(record.pet.Level, record.pet.Rank) / 100
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SettleRun(integer score, number seconds)
+		-- Pay only the increase over this run's highest credited total, even after continue.
+		local record = self.States[self.RunUserId]
+		if record == nil then return end
+		local total = self:CalculateRunStones(score, seconds)
+		local delta = math.max(0, total - self.RunPaidStones)
+		self.RunStoneTotal = math.max(total, self.RunPaidStones)
+		self.RunStoneNew = delta
+		if delta <= 0 then return end
+		self.RunPaidStones = self.RunPaidStones + delta
+		record.pet.Stones = record.pet.Stones + delta
+		self:MarkDirty(record) self:PushState(self.RunUserId, "", "")
+		local player = _UserService:GetUserEntityByUserId(self.RunUserId)
+		if isvalid(player) then player.PlayerDBManager:SaveToDB(false) end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SettleGameOver()
+		-- Reconcile late loot once without letting an old timer pay into a new run.
+		self:SettleRun(_GameManager:CalcRunScore(), _GameManager.RunElapsedSec)
+		local token = self.RunToken
+		_TimerService:SetTimerOnce(function()
+			if token == self.RunToken and _GameManager.GameOver then
+				self:SettleRun(_GameManager:CalcRunScore(), _GameManager.RunElapsedSec)
+			end
+		end, 1)
+	end
+
+	@ExecSpace("ClientOnly")
+	method ItemStruct GetStoneInventoryItem()
+		-- Read-only currency slot: account stones share the pet save and cannot be sold or discarded.
+		if not self.ClientReady or self.ClientPet.Stones <= 0 then return nil end
+		local item = ItemStruct()
+		item.GUID = "pet-evolution-stone" item.ItemId = self.StoneItemId item.Count = self.ClientPet.Stones
+		return item
+	end
+
+end

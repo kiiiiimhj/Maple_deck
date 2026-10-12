@@ -1,5 +1,9 @@
 @Component
 script MonsterAI extends Component
+	@Sync property boolean CharmActive = false
+	property number CharmFallGravity = 16
+	property number CharmFallMaxSpeed = 8
+	@Sync property integer CharmZone = 0
 	@Sync property integer PapulatusPhase = 0
 	@Sync property number BossHealthCurrent = 0
 	@Sync property number BossHealthMaximum = 0
@@ -652,8 +656,10 @@ script MonsterAI extends Component
 	property number DepthOverlayMaxAlpha = 0.5
 
 	-- UpdateDepth 전송 절감(2026-09-22 폰 렉 점검) — 깊이(Z)/그림자 알파가 이만큼 이상 변했을 때만 다시 보낸다.
-	-- 이펙트는 몬스터보다 EffectDepthEpsilon(0.2) 앞에 놓이므로 0.02 오차로는 순서가 안 바뀐다. 0 = 매 프레임 전송(예전 동작)
-	property number DepthSyncThreshold = 0.02
+	-- 이펙트는 몬스터보다 EffectDepthEpsilon(0.2) 앞에 놓이므로 작은 오차로는 순서가 안 바뀐다. 0 = 매 프레임 전송(예전 동작)
+	-- 깊이(Z)는 2026-10-10부터 "변화량"이 아니라 모든 몬스터 공통 시계(초) 간격으로 같이 보낸다(UpdateDepth 주석 참고)
+	property number DepthSyncInterval = 0.1
+	property integer _depthSyncSlot = -1
 	property number OverlayAlphaSyncThreshold = 0.02
 
 	property SpriteRendererComponent _depthOverlayRenderer = nil
@@ -896,6 +902,8 @@ script MonsterAI extends Component
 	-- 돌진 도착 첫 타(유저 지정 2026-10-01: "황소처럼 뛰어온 채로 들이박기") — true면 다음 OnReachPlayer가
 	-- 제자리 홉 대신 달리던 자세 그대로 앞으로 확 커지는 들이받기를 쓴다. 첫 타 한 번만 쓰고 끈다
 	property boolean _chargeRamPending = false
+	-- 돌진 도착 첫 타 대미지 보너스/짧은 무적(GameManager.OnMonsterReached의 isChargeFirstHit) — 첫 공격 한 번만 쓰고 끈다
+	property boolean _chargeFirstHitPending = false
 
 	property number ChargeRamBoost = 0.4  -- 들이받기 순간 추가 스케일(일반 공격 들이받기 0.25보다 크게)
 
@@ -1045,6 +1053,52 @@ script MonsterAI extends Component
 	-- 맵 전체를 매번 훑었다 — container=nil 공유맵(map3/4)에서 몬스터 100마리 이상까지 실측, 맵이동 한 번에
 	-- 1.3초까지 걸렸었다). 재초기화로 다시 불려도 레지스트리는 집합이라 중복 등록 걱정 없다. 짝은
 	-- OnEndPlay의 UnregisterZoneMonster.
+	-- 몰려오기 웨이브(MonsterSpawner.SpawnSwarmWave) 전용 — InitializeStats 직전에 세워두면 그 1회만 적용되고 바로 0으로 돌아간다.
+	-- _swarmAppearanceZone: 존7+ 풀에서 외형/종 성질을 이 존 풀로 읽는다(존을 따라온 몬스터가 원래 존 몬스터 모습을 유지).
+	--   위치·발판·비행 중심 같은 물리 판정은 그대로 실제 zoneIndex 기준이다.
+	-- _swarmLowZoneSpecies: 존1~6(종이 웨이브/공용 풀에서 무작위로 정해지는 구간)에서 종을 이 번호로 고정한다.
+	property integer _swarmAppearanceZone = 0
+	property integer _swarmLowZoneSpecies = 0
+	-- 몰려오기 웨이브 돌격(2026-10-10 유저 선택 "C"): 등장 직후 _swarmRushTimer 초 동안 접근 속도 ×_swarmRushMult
+	property number _swarmRushTimer = 0
+	property number _swarmRushMult = 1
+	property boolean _inSwarmFlock = false  -- 몰려오기 공중 군집 멤버(JoinSwarmFlock)
+	property number SwarmChargeWindupRatio = 0.5  -- 몰려오기 돌진형: 떨기 시간 배율
+	property number SwarmChargeDashBoost = 1.5  -- 몰려오기 돌진형: 대시 속도 추가 배율
+
+	-- 몰려오기 돌격 시작 — 스폰 직후 MonsterSpawner.SpawnSwarmMember가 지상형에만 부른다.
+	@ExecSpace("ServerOnly")
+	method void StartSwarmRush(number duration, number mult)
+		-- 돌진형은 "떨기 → 대시(×ChargeDashSpeedMultiplier)" 구조라 일반 돌격(×mult)을 그대로 얹으면 대시와 곱해져 너무 빠르다.
+		-- 유저 지정 "돌진하는 애들도 더 빨리 돌진" → 떨기를 SwarmChargeWindupRatio로 줄이고, 대시 내내 ×SwarmChargeDashBoost.
+		-- (스케일 접근 로직은 떨기 동안 실행되지 않으므로 이 배율은 대시가 시작돼야 적용된다)
+		if self._isCharge and not self._chargeDashActive then
+			self._chargeWindupTimer = self._chargeWindupTimer * self.SwarmChargeWindupRatio
+			self._swarmRushTimer = 999
+			self._swarmRushMult = self.SwarmChargeDashBoost
+			return
+		end
+		self._swarmRushTimer = duration
+		self._swarmRushMult = mult
+	end
+
+	-- 몰려오기 공중 웨이브 군집 비행 — 무리 전원이 같은 위상/속도/경과시간을 써서 대형을 유지한 채 함께 움직인다.
+	-- 좌우 자리는 스폰 위치(=_flyCenterX)가 정하고, 위아래 자리는 offsetY로 비행 기준 높이를 띄운다.
+	@ExecSpace("ServerOnly")
+	method void JoinSwarmFlock(number phaseX, number phaseY, number multX, number multY, number flyTime, number offsetY)
+		self._flyPhaseX = phaseX
+		self._flyPhaseY = phaseY
+		-- 존1~3 웨이브 비행종은 InitializeStats가 WaveFlyingSpeedFactor로 속도를 따로 낮춰두므로 그 배율은 유지한다
+		-- (같은 무리는 전원 같은 존이라 배율도 같아서 박자가 안 어긋난다)
+		local factor = 1
+		if self._spawnZoneIndex < 4 then factor = self.WaveFlyingSpeedFactor end
+		self._flySpeedMultX = multX * factor
+		self._flySpeedMultY = multY * factor
+		self._flyTime = flyTime
+		self._flyBaseY = (self.FlyingWanderMinY + self.FlyingWanderMaxY) * 0.5 + offsetY
+		self._inSwarmFlock = true
+	end
+
 	method void SetSpawnZone(integer zoneIndex)
 		self._spawnZoneIndex = zoneIndex
 		_MonsterSpawner:RegisterZoneMonster(zoneIndex, self)
@@ -1148,6 +1202,15 @@ script MonsterAI extends Component
 		-- 방패 구슬(게이트키퍼)도 재사용 엔티티에 남으면 그 몸의 다음 몬스터가 공격을 막아버린다
 		self:ClearShieldOrbs()
 		self._shieldCount = 0
+		-- 몰려오기 웨이브 지정값은 이번 1회만 쓴다(재사용 엔티티에 남으면 다음 몬스터 외형이 틀어진다)
+		local swarmAppearanceZone = self._swarmAppearanceZone
+		local swarmLowZoneSpecies = self._swarmLowZoneSpecies
+		self._swarmAppearanceZone = 0
+		self._swarmLowZoneSpecies = 0
+		self._swarmRushTimer = 0
+		self._swarmRushMult = 1
+		self._inSwarmFlock = false
+		self._chargeFirstHitPending = false
 		self:SetSpawnZone(zoneIndex)
 		self._isBoss = isBoss
 		self._reachedScaleThreshold = 1.5
@@ -1201,6 +1264,7 @@ script MonsterAI extends Component
 			-- 맵7~9 전용 몬스터 풀: 맵마다 별도 구성(고스텀프/보어류 등)에서 무작위로 외형을 고른다.
 			-- 맵10(보너스 스테이지)은 별도 풀이 없고 맵9 몬스터 풀을 그대로 재사용한다(평소 웨이브 폴백 시).
 			local appearanceZone = zoneIndex
+			if swarmAppearanceZone > 0 then appearanceZone = swarmAppearanceZone end
 			if appearanceZone == 10 then appearanceZone = 9 end
 			-- ep2_map2_hidden(존1~4=mapIndex85~88) — MonsterSpawner.ResolveAppearanceZone과 동일한
 			-- 별칭 매핑을 여기도 복제한다(이 메서드는 그 헬퍼를 안 거치고 직접 계산하는 별도 경로라
@@ -1433,6 +1497,7 @@ script MonsterAI extends Component
 		elseif zoneIndex >= 4 then
 			-- 맵4~6 전용 몬스터 풀: 스폰마다 1~4 중 무작위로 외형을 고른다 (보스도 이 풀에서 고름 — 별도 존 보스는 없음)
 			local speciesIdx = _UtilLogic:RandomIntegerRange(1, _GameManager:GetZoneMonsterCount())
+			if swarmLowZoneSpecies > 0 then speciesIdx = swarmLowZoneSpecies end
 			self._speciesIdx = speciesIdx
 			self._standRUID = _GameManager:GetZoneStandRUID(speciesIdx)
 			self._bookKey = self._standRUID
@@ -1461,6 +1526,7 @@ script MonsterAI extends Component
 			elseif wave > 10 then
 				speciesIdx = _UtilLogic:RandomIntegerRange(1, 9)
 			end
+			if not isBoss and swarmLowZoneSpecies > 0 then speciesIdx = swarmLowZoneSpecies end
 			self._speciesIdx = speciesIdx
 			self._standRUID = _GameManager:GetWaveStandRUID(speciesIdx)
 			self._bookKey = self._standRUID
@@ -3515,10 +3581,12 @@ script MonsterAI extends Component
 	method void OnUpdate(number delta)
 		if self:IsClient() then
 			self:UpdateBossHealthBar(delta)
+			self:UpdateCharmHeart(delta)
 			self:UpdateStatusIconCycle(delta)
 			self:UpdateIdleFrameClamp()
 			return
 		end
+		if self.CharmActive and (self._dead or _GameManager.GameOver or self._paused or self._spawnZoneIndex~=_MapManager.CurrentMapIndex) then self:ClearCharm(not self._dead) end
 		self:UpdateBodyAttackMotion(delta)
 		self:TickStatusIcons(delta)
 		if self._isBoss then
@@ -3531,8 +3599,13 @@ script MonsterAI extends Component
 		-- 첫 플레이 튜토리얼의 카드 선택 단계 — 존과 무관하게 모든 몬스터가 그 자리에 멈춘다.
 		-- _paused(존 이탈용)와 달리 _neverPauses 몬스터도 예외 없이 멈춘다
 		if _GameManager:IsGamePaused() then return end
-		if self._isPushingBack then return end
 		if self._paused then return end
+		-- A charm can expire while a ground monster is falling through an aerial tile.
+		if not self.CharmActive and self._T.charmFalling==true and not self._isFlying then
+			self:FinishCharmFall(delta) self:UpdateComboOrbPositions(delta) return
+		end
+		if self.CharmActive then self:UpdateCharm(delta) self:UpdateComboOrbPositions(delta) return end
+		if self._isPushingBack then return end
 		-- HP 임계 변신 중(엘리쟈)엔 이동/공격/지그재그/대시를 전부 멈춘다 — 유저 지정 "아이들 상태로
 		-- 변하고 변신". 대미지 차단은 TakeDamage 계열 5곳에서 따로 막는다.
 		if self._transformLocked then return end
@@ -3649,7 +3722,13 @@ script MonsterAI extends Component
 		
 		-- 스케일 증가 (카메라 접근 연출) — 스턴/완전빙결 중에는 전진 자체가 멈춰야 한다
 		if not self._isStunned and not self._isHardFrozen then
-			self._currentScale = self._currentScale + self.ApproachSpeed * delta
+			-- 몰려오기 웨이브 등장 직후 돌격(StartSwarmRush) 동안만 빨라진다
+			local rushMult = 1
+			if self._swarmRushTimer > 0 then
+				self._swarmRushTimer = self._swarmRushTimer - delta
+				rushMult = self._swarmRushMult
+			end
+			self._currentScale = self._currentScale + self.ApproachSpeed * rushMult * delta
 		end
 		
 		-- 닌자/재규어 지그재그: 전진(스케일)과 독립적으로 X만 사인파로 좌우 흔들되, 중심(_zigzagBaseX)에서
@@ -3685,6 +3764,8 @@ script MonsterAI extends Component
 			-- 이미 MonsterSprite가 stand였으므로 그대로 다시 대입해도 무해하다.
 			-- 돌진 도착(공격 모션 없는 종)은 멈춰 서서 홉하면 "멈췄다 공격"으로 보인다(유저 지적 2026-10-01) —
 			-- 달리던 자세 그대로 들이받고(OnReachPlayer의 _chargeRamPending 분기), 들이받기가 끝난 뒤 stand로 바꾼다
+			-- 돌진해서 도착한 첫 타는 대미지 +1, 그 뒤 피격 무적 0.6초(유저 지정 2026-10-10) — 공격 모션 유무와 무관하게 모든 돌진형
+			self._chargeFirstHitPending = self._isCharge and self._chargeDashActive
 			if self._isCharge and self._chargeDashActive and self._attackRUID == "" then
 				self._chargeRamPending = true
 				_TimerService:SetTimerOnce(function()
@@ -4097,6 +4178,8 @@ script MonsterAI extends Component
 	-- (쿨타임 소환 DoBossSummon과 같은 타이밍 규칙).
 	@ExecSpace("ServerOnly")
 	method void DoAttackVariantSummon()
+		if self.CharmActive then return end
+		local charmRevision=self._T.charmRevision or 0
 		-- 지금 슬롯의 summonCount만큼 부하를 부른다
 		if self._attackVariants == nil then return end
 		local v = self._attackVariants[self._attackVariantIndex]
@@ -4116,7 +4199,7 @@ script MonsterAI extends Component
 		local delay = self._attackDuration * 0.5
 		if delay <= 0 then delay = 0.1 end
 		_TimerService:SetTimerOnce(function()
-			if not isvalid(self) or not isvalid(self.Entity) or self._dead then return end
+			if not isvalid(self) or not isvalid(self.Entity) or self._dead or self.CharmActive or charmRevision~=(self._T.charmRevision or 0) then return end
 			_MonsterSpawner:SpawnBossMinions(zone, pos, count)
 		end, delay)
 		log("MonsterAI: attack-variant summon queued (count=" .. count .. ")")
@@ -4414,6 +4497,8 @@ script MonsterAI extends Component
 		-- 공중 몬스터(사인파 기반 UpdateFlying)를 막지 못해서 별도로 체크한다. 완전빙결도 동일하다.
 		if self._isStunned or self._isHardFrozen then return end
 		-- Let a short dive own its transform; keep the regular attack cooldown running.
+		-- 몰려오기 군집 멤버는 급강하 중에도 비행 시계를 계속 흘려야 끝나고 대형 박자에 그대로 합류한다(안 그러면 그 개체만 뒤처진다)
+		if self._T.attackBodyMotion ~= nil and self._inSwarmFlock then self._flyTime = self._flyTime + delta end
 		if self._T.attackBodyMotion==nil then
 		self._flyTime = self._flyTime + delta
 		local x = self._flyCenterX + math.sin(self._flyTime * self.FlySpeedX * self._flySpeedMultX + self._flyPhaseX) * self.FlyRangeX
@@ -4497,12 +4582,25 @@ script MonsterAI extends Component
 		-- 스케일이 작을수록(멀리 있을수록) Z를 크게 해서 뒤로 깔리고,
 		-- 스케일이 커질수록(가까이 다가올수록) Z를 작게 해서 앞으로 나오게 한다
 		-- ⚠ 성능(2026-09-22, 폰 렉 점검): Position/Color는 @Sync라 쓸 때마다 폰으로 전송된다. 다가오는 몬스터마다
-		--   매 프레임 보내던 걸, 값이 기준치 이상 변했을 때만 보낸다(DepthSyncThreshold / OverlayAlphaSyncThreshold).
-		--   도달 순간(최종 깊이)은 항상 정확히 보낸다. 기준치를 0으로 두면 예전처럼 매 프레임 보낸다.
+		--   매 프레임 보내던 걸 줄인다 — 깊이는 DepthSyncInterval(아래), 그림자 알파는 OverlayAlphaSyncThreshold.
+		-- ⚠ 겹친 몬스터 앞뒤 깜빡임(2026-10-10 유저 "겹쳐 나올 때 뎁스가 왔다갔다"): "각자 0.02 이상 변하면 전송"은
+		--   몬스터마다 보내는 순간이 달라서, 화면엔 서로 다른 시점의 Z가 섞여 보였다 — 깊이가 비슷한 두 마리는
+		--   한쪽이 보낼 때마다 앞뒤가 뒤집혔다. 그래서 Z는 **모든 몬스터 공통 시계**(DepthSyncInterval 칸이 바뀌는
+		--   서버 프레임)에 다 같이 정확한 값으로 보낸다. 화면의 Z가 전부 같은 순간 값이라 순서가 실제와 같고,
+		--   전송 횟수는 칸 간격으로 묶여 예전과 비슷하다. 도달 순간(최종 깊이)은 항상 바로 보낸다. 0 = 매 프레임.
+		--   (같은 칸 안에서 반올림하는 방식도 시험했는데, 속도가 조금 다른 몬스터끼리 칸마다 뒤집혀서 버렸다)
 		local reached = self._currentScale >= self._reachedScaleThreshold
 		local pos = self.Entity.TransformComponent.Position
 		local depth = 1.5 - self._currentScale - self._depthTieBreak
-		if reached or math.abs(depth - pos.z) >= self.DepthSyncThreshold then
+		local sendNow = reached or self.DepthSyncInterval <= 0
+		if not sendNow then
+			local slot = math.floor(_UtilLogic.ServerElapsedSeconds / self.DepthSyncInterval)
+			if slot ~= self._depthSyncSlot then
+				self._depthSyncSlot = slot
+				sendNow = true
+			end
+		end
+		if sendNow and math.abs(depth - pos.z) > 0.0001 then
 			self.Entity.TransformComponent.Position = Vector3(pos.x, pos.y, depth)
 		end
 
@@ -4824,7 +4922,7 @@ script MonsterAI extends Component
 		-- 방패 구슬(에피4 게이트키퍼)이 남아 있으면 이 타격은 통째로 무효 — 구슬 1개만 사라진다
 		if self:ConsumeBossShield() then return end
 		self._lastHitWasCrit = true
-		damage = damage * (1.0 + _CardManager:GetCriticalShotBonus() + _CardManager:GetKarmaBonus() + _CardManager:GetSpiritJavelinBonus() + _CardManager:GetElementalAdeptBonus() + _RelicInventory:GetCritDamageBonus())
+		damage = damage * (1.0 + _CardManager:GetCriticalShotBonus() + _CardManager:GetKarmaBonus() + _CardManager:GetSpiritJavelinBonus() + _CardManager:GetElementalAdeptBonus() + _RelicInventory:GetCritDamageBonus() + _PetLogic:GetRunCritDamageBonus())
 		-- 장비 치명타 피해 보너스(자마다르 에픽 상시 / 레전더리 확률 버프) — 모든 크리티컬이
 		-- 이 두 진입점(TakeDamageCrit / TakeDamageCritWithOffset)만 거치므로 개별 스킬의
 		-- `damage * 2` 호출부를 전부 건드릴 필요가 없다
@@ -4881,7 +4979,7 @@ script MonsterAI extends Component
 		self._lastHitWasCrit = true
 		-- 크리티컬 샷(카드111, 실피드 전용 패시브) + 카르마(카드182, 쉐이드 전용 패시브) 보너스 —
 		-- 모든 크리티컬 대미지에 추가 배율 적용(같은 런에서 둘 다 활성일 수 없어 가산해도 안전)
-		damage = damage * (1.0 + _CardManager:GetCriticalShotBonus() + _CardManager:GetKarmaBonus() + _CardManager:GetSpiritJavelinBonus() + _CardManager:GetElementalAdeptBonus() + _RelicInventory:GetCritDamageBonus())
+		damage = damage * (1.0 + _CardManager:GetCriticalShotBonus() + _CardManager:GetKarmaBonus() + _CardManager:GetSpiritJavelinBonus() + _CardManager:GetElementalAdeptBonus() + _RelicInventory:GetCritDamageBonus() + _PetLogic:GetRunCritDamageBonus())
 		-- 장비 치명타 피해 보너스(자마다르 에픽 상시 / 레전더리 확률 버프) — 모든 크리티컬이
 		-- 이 두 진입점(TakeDamageCrit / TakeDamageCritWithOffset)만 거치므로 개별 스킬의
 		-- `damage * 2` 호출부를 전부 건드릴 필요가 없다
@@ -4941,7 +5039,7 @@ script MonsterAI extends Component
 		-- 방패 구슬(에피4 게이트키퍼)이 남아 있으면 이 타격은 통째로 무효 — 구슬 1개만 사라진다
 		if self:ConsumeBossShield() then return end
 		-- 크리티컬 샷(카드111)/카르마(카드182) 보너스 — 크리티컬 경로에서만 추가 배율 적용
-		if isCrit then damage = damage * (1.0 + _CardManager:GetCriticalShotBonus() + _CardManager:GetKarmaBonus() + _CardManager:GetSpiritJavelinBonus() + _CardManager:GetElementalAdeptBonus() + _RelicInventory:GetCritDamageBonus()) end
+		if isCrit then damage = damage * (1.0 + _CardManager:GetCriticalShotBonus() + _CardManager:GetKarmaBonus() + _CardManager:GetSpiritJavelinBonus() + _CardManager:GetElementalAdeptBonus() + _RelicInventory:GetCritDamageBonus() + _PetLogic:GetRunCritDamageBonus()) end
 		-- DPS 미터 집계(미니 무어는 전투 대상이 아니라 제외)
 		if not self._isMiniMoore then
 			_DpsMeterLogic:RecordDamage(dpsSource, damage)
@@ -5816,7 +5914,7 @@ script MonsterAI extends Component
 			_GameManager:TryDropFreezeItem(self.Entity.TransformComponent.WorldPosition, fallHeight, groundWorldY, dropScale)
 			_GameManager:TryDropScarecrowItem(self.Entity.TransformComponent.WorldPosition, fallHeight, groundWorldY, dropScale)
 			_GameManager:TryDropBounceKnockbackItem(self.Entity.TransformComponent.WorldPosition, fallHeight, groundWorldY, dropScale)
-			-- 필드 버프 포션 3종(흡혈/크리티컬/파워, 각 0.2%) — BuffPotionLogic
+			-- 필드 버프 포션 3종(흡혈 0.05% / 크리티컬·파워 각 0.1%) — BuffPotionLogic
 			_BuffPotionLogic:TryDropBuffPotion(self.Entity.TransformComponent.WorldPosition, fallHeight, groundWorldY, dropScale)
 		end
 		-- 다이아 5% 드롭(유저 지정 2026-09-18) — 보스/엘리트 처치에서만. 12시간 100개 상한은 DiamondDropLogic이 관리한다
@@ -6353,12 +6451,18 @@ script MonsterAI extends Component
 
 	@ExecSpace("ServerOnly")
 	method void OnReachPlayer()
+		if self.CharmActive or self._dead then return end
+		local charmRevision=self._T.charmRevision or 0
 		-- 무리 공격 중복 제거(_isSwarmMember 주석 참고) — 유저 지정: "공격모션은 전체가 다 해야함,
 		-- 데미지만 1번" — 그래서 데미지 판정(미스 굴림 포함)만 이 플래그로 막고, 아래 연출 블록은
 		-- 무리원 전체가 항상(선점 실패해도) 실행한다. TryClaimGroupAttack이 false를 반환해도 함수
 		-- 전체를 리턴하지 않고 isGroupWinner만 꺼둔 채로 계속 진행한다.
 		local isGroupWinner = true
 		local ep1Projectile=self._spawnZoneIndex>=1 and self._spawnZoneIndex<=39 and self._isRangedInk and (self._standRUID=="abbd76a6010149e780fbee0b2c5acb7e" or self._standRUID=="c86800e208dc4de4a8cf71b51778a2fb")
+        local variantIsSummon=false
+        local baseProfile=_MonsterProjectileFx:GetProfile(self._standRUID)
+        local projectileCycleAdvanced=baseProfile~=nil and baseProfile.variants~=nil
+        if projectileCycleAdvanced then variantIsSummon=self:AdvanceAttackVariant() end
 		local monsterProjectile=_MonsterProjectileFx:Supports(self)
 		local projectileDamage=0
 		if self._isSwarmMember then
@@ -6428,8 +6532,8 @@ script MonsterAI extends Component
 					-- "스케일이 0.6까지 도달했을때 대미지 들어오도록"). 다른 종(근접/비행/먹물)은 기존처럼 즉시.
 					local hitDelay = self._attackDuration * 0.5 + self.SlashEffectDuration
 					_TimerService:SetTimerOnce(function()
-						if not isvalid(self) or self._dead then return end
-						_GameManager:OnMonsterReached(dmgMultiplier, self._isSwarmMember or self._ignoresHitImmune or self._isBoss or (self._isElite and not self._isEp1BossSplit), self._isBoss, attackerWorldPos, false)
+						if not isvalid(self) or self._dead or self.CharmActive or charmRevision~=(self._T.charmRevision or 0) then return end
+						_GameManager:OnMonsterReached(dmgMultiplier, self._isSwarmMember or self._ignoresHitImmune or self._isBoss or (self._isElite and not self._isEp1BossSplit), self._isBoss, attackerWorldPos, false, false)
 					end, hitDelay)
 				else
 					-- 무리 공격(_isSwarmMember)은 TryClaimGroupAttack으로 이미 무리 내부에서 1회로 제한해뒀는데,
@@ -6440,9 +6544,9 @@ script MonsterAI extends Component
 					-- _ignoresHitImmune(Tired Knight)도 동일한 경로로 무적 프레임을 무시한다.
 					-- 돌진 도착 첫 타면 피격 연출이 화면을 뒤로 밀리게 한다(_chargeRamPending은 이 함수 끝에서 꺼진다)
 					if self:UsesBodyAttackMotion() then
-						self:QueueBodyAttackContact(dmgMultiplier,self._isSwarmMember or self._ignoresHitImmune or (self._isElite and not self._isEp1BossSplit),attackerWorldPos)
+						self:QueueBodyAttackContact(dmgMultiplier,self._isSwarmMember or self._ignoresHitImmune or (self._isElite and not self._isEp1BossSplit),attackerWorldPos,self._chargeFirstHitPending)
 					else
-						_GameManager:OnMonsterReached(dmgMultiplier, self._isSwarmMember or self._ignoresHitImmune or self._isBoss or (self._isElite and not self._isEp1BossSplit), self._isBoss, attackerWorldPos, self._chargeRamPending)
+						_GameManager:OnMonsterReached(dmgMultiplier, self._isSwarmMember or self._ignoresHitImmune or self._isBoss or (self._isElite and not self._isEp1BossSplit), self._isBoss, attackerWorldPos, self._chargeRamPending, self._chargeFirstHitPending)
 					end
 				end
 			end
@@ -6458,15 +6562,17 @@ script MonsterAI extends Component
 		-- 뛰었다 착지하는 홉 모션을 공유한다(원래 존14/15 이블아이/커즈아이 전용이었던 걸 전 몬스터로 확장).
 		-- 공격 슬롯 순환(에피3 하이레프 리더/익스트림 빅풋) — 실제 재생 **직전에** 다음 슬롯으로 넘긴다.
 		-- 슬롯이 없는 종은 아무것도 안 하고 false를 돌려주므로 기존 동작 그대로다.
-		local variantIsSummon = self:AdvanceAttackVariant()
+		if not projectileCycleAdvanced then variantIsSummon=self:AdvanceAttackVariant() end
 		if monsterProjectile then
-            local profile=_MonsterProjectileFx:GetProfile(self._standRUID)
+            local profile=_MonsterProjectileFx:GetAttackProfile(self._standRUID,self._attackRUID)
 			if self._attackRUID~="" and profile.releaseFrame==nil then
 				self:PlayAttackAnimation(self._attackRUID,self.MonsterSprite,self._attackDuration,self._attackSoundRUID)
 				self:FlashHideDepthOverlay(self._attackDuration)
             elseif self._attackRUID=="" then self:PlaySquirtAnimation()
             else self:FlashHideDepthOverlay(self._attackDuration) end
-			_MonsterProjectileFx:QueueAttack(self,projectileDamage,self._isSwarmMember or self._ignoresHitImmune)
+			_MonsterProjectileFx:QueueAttack(self,projectileDamage,self._isSwarmMember or self._ignoresHitImmune or self._isBoss or (self._isElite and not self._isEp1BossSplit))
+            if variantIsSummon then self:DoAttackVariantSummon() end
+            self:PlaySelfAttackEffect()
 		elseif ep1Projectile then
 			self:PlayAttackAnimation(self._attackRUID,self.MonsterSprite,self._attackDuration,self._attackSoundRUID)
 			self:FlashHideDepthOverlay(self._attackDuration)
@@ -6535,6 +6641,7 @@ script MonsterAI extends Component
 			self:PlayLungeAnimation(0.25, self.AttackHopHeight)
 		end
 		self._chargeRamPending = false
+		self._chargeFirstHitPending = false
 
 		-- ── 에피2 보스 엘리쟈 전용 ────────────────────────────────────────────────
 		-- (1) 공격할 때마다 공속이 빨라진다(유저 지정: 5%씩, 최대 60%). 피격 성장(ApplyBossHitGrowth)과
@@ -6600,10 +6707,10 @@ script MonsterAI extends Component
 	-- Y를 안 건드리는 연출에는 이 공용 홉을 별도로 얹어야 한다.
 	@ExecSpace("ServerOnly")
 	method void PlayAttackHop()
-		if self._dead then return end
+		if self._dead or self.CharmActive then return end
 		local baseY = self.Entity.TransformComponent.Position.y
 		_TweenLogic:PlayTween(0.0, 1.0, 0.18, EaseType.QuadEaseOut, function(t)
-			if not isvalid(self) or not isvalid(self.Entity) then return end
+			if not isvalid(self) or not isvalid(self.Entity) or self.CharmActive then return end
 			local pos = self.Entity.TransformComponent.Position
 			self.Entity.TransformComponent.Position = Vector3(pos.x, baseY + self.AttackHopHeight * math.sin(t * math.pi), pos.z)
 		end)
@@ -6929,6 +7036,8 @@ script MonsterAI extends Component
 	-- 모션 절반 지점(= "손을 뻗는" 시점)에 부하를 부른다. 실제 소환 연출/스폰은 MonsterSpawner가 맡는다.
 	@ExecSpace("ServerOnly")
 	method void DoBossSummon()
+		if self.CharmActive then return end
+		local charmRevision=self._T.charmRevision or 0
 		-- attack2 모션 + 전용 사운드를 재생하고, 모션 중간에 부하 소환을 예약한다
 		if self._dead then return end
 		if self._summonCount <= 0 then return end
@@ -6945,7 +7054,7 @@ script MonsterAI extends Component
 		if delay <= 0 then delay = 0.1 end
 		local count = self._summonCount
 		_TimerService:SetTimerOnce(function()
-			if not isvalid(self) or not isvalid(self.Entity) or self._dead then return end
+			if not isvalid(self) or not isvalid(self.Entity) or self._dead or self.CharmActive or charmRevision~=(self._T.charmRevision or 0) then return end
 			_MonsterSpawner:SpawnBossMinions(zone, pos, count)
 		end, delay)
 		log("MonsterAI: boss summon triggered (count=" .. count .. ", next in " .. self._summonCooldown .. "s)")
@@ -7029,10 +7138,10 @@ script MonsterAI extends Component
     end
 
     @ExecSpace("ServerOnly")
-    method void QueueBodyAttackContact(number damage, boolean ignoreImmune, Vector2 attacker)
+    method void QueueBodyAttackContact(number damage, boolean ignoreImmune, Vector2 attacker, boolean chargeFirstHit)
         if self._T.bodyAttackContacts==nil then self._T.bodyAttackContacts={} end
         table.insert(self._T.bodyAttackContacts,{age=0,delay=self._isFlying and .28 or .18,damage=damage,
-            ignore=ignoreImmune,attacker=attacker,life=self.ProjectileLifeRevision,zone=self._spawnZoneIndex})
+            ignore=ignoreImmune,attacker=attacker,life=self.ProjectileLifeRevision,zone=self._spawnZoneIndex,chargeFirst=chargeFirstHit})
     end
 
     @ExecSpace("ServerOnly")
@@ -7049,6 +7158,7 @@ script MonsterAI extends Component
         if self._isPushingBack or self._transformLocked or self._openingSummonLock or self._isLevitating then
             self:CancelBodyAttackMotion(false) return
         end
+        if self.CharmActive then self:CancelBodyAttackMotion(true) return end
         if _GameManager:IsGamePaused() or self._paused or self._isStunned or self._isHardFrozen then return end
         if motion~=nil then
             motion.age=motion.age+math.max(0,delta)
@@ -7084,7 +7194,7 @@ script MonsterAI extends Component
                     contact.age=contact.age+math.max(0,delta)
                     if contact.age>=contact.delay then
                         table.remove(contacts,i)
-                        _GameManager:OnMonsterReached(contact.damage,contact.ignore,false,contact.attacker,false)
+                        _GameManager:OnMonsterReached(contact.damage,contact.ignore,false,contact.attacker,false,contact.chargeFirst==true)
                     end
                 end
             end
@@ -7094,13 +7204,13 @@ script MonsterAI extends Component
 
 	@ExecSpace("ServerOnly")
 	method void PlayLungeAnimation(number lungeBoost, number hopHeight)
-		if self._dead then return end
+		if self._dead or self.CharmActive then return end
 		if self:UsesBodyAttackMotion() then self:StartBodyAttackMotion(hopHeight) return end
 		local mult = self._scaleMultiplier
 		local baseScale = self._currentScale
 		local baseY = self.Entity.TransformComponent.Position.y
 		_TweenLogic:PlayTween(0.0, 1.0, 0.18, EaseType.QuadEaseOut, function(t)
-			if not isvalid(self) or not isvalid(self.Entity) then return end
+			if not isvalid(self) or not isvalid(self.Entity) or self.CharmActive then return end
 			local s = baseScale + lungeBoost * math.sin(t * math.pi)
 			self.Entity.TransformComponent.Scale = Vector3(s * mult, s * mult, 1.0)
 			if hopHeight > 0 then
@@ -7113,6 +7223,7 @@ script MonsterAI extends Component
 	method void OnEndPlay()
 		if self:IsServer() then self:CancelBodyAttackMotion(false) end
 		if self:IsClient() then
+			if isvalid(self._T.charmHeart) then self._T.charmHeart:Destroy() end self._T.charmHeart=nil
 			if isvalid(self._T.bossHpBar) then self._T.bossHpBar:Destroy() end
 			self._T.bossHpBar=nil return
 		end
@@ -7194,6 +7305,7 @@ script MonsterAI extends Component
 
 	@ExecSpace("ServerOnly")
 	method void StartPapulatusAttack()
+		if self.CharmActive then return end
 		-- 파풀 원본 공격을 순환하고 모션의 타격 시점에만 실제 피해를 적용한다.
 		if self._papAttacks==nil or #self._papAttacks==0 then return end
 		self._papAttackIndex=self._papAttackIndex%#self._papAttacks+1
@@ -7211,13 +7323,13 @@ script MonsterAI extends Component
 		local revision=self._papActionRevision local run=_Ep4PapulatusLogic.RunRevision
 		_TimerService:SetTimerOnce(function()
 			if not isvalid(self) or not isvalid(self.Entity) or self._dead or self._papActionRevision~=revision or _Ep4PapulatusLogic.RunRevision~=run then return end
-			if _MapManager.CurrentMapIndex~=self._spawnZoneIndex or _MapManager.AwayOnSideMap or self._paused or _GameManager.GameOver or _GameManager:IsGamePaused() then return end
+			if self.CharmActive or _MapManager.CurrentMapIndex~=self._spawnZoneIndex or _MapManager.AwayOnSideMap or self._paused or _GameManager.GameOver or _GameManager:IsGamePaused() then return end
 			local missed=self._accuracyDebuffPercent>0 and _UtilLogic:RandomDouble()<self._accuracyDebuffPercent*0.5
 			for _,chance in ipairs({_CardManager:GetDarkSightEvadeChance(),_CardManager:GetRadicalDarknessEvadeChance(),_CardManager:GetConcentrationEvadeChance()}) do
 				if not missed and chance>0 and _UtilLogic:RandomDouble()<chance then missed=true end
 			end
 			local pos=self.Entity.TransformComponent.WorldPosition
-			if not missed then _GameManager:OnMonsterReached(_GameManager.BossAttackMultiplier,true,true,Vector2(pos.x,pos.y),false) end
+			if not missed then _GameManager:OnMonsterReached(_GameManager.BossAttackMultiplier,true,true,Vector2(pos.x,pos.y),false,false) end
 			if attack.alarm==true then self:PlayPapulatusAlarm("af89c3a931334b2197915cad660fb495") end
 			log("Ep4Papulatus: attack phase=" .. self.PapulatusPhase .. " slot=" .. self._papAttackIndex)
 		end,attack.dur*0.5)
@@ -7281,4 +7393,152 @@ script MonsterAI extends Component
 		end end
 	end
 
+
+	@ExecSpace("ServerOnly")
+	method boolean ApplyCharm(number duration, Vector3 attractPoint)
+		if self._dead or self._neverAttacks or self._transformLocked or self._openingSummonLock or duration<=0 then return false end
+		self:CancelBodyAttackMotion(true)
+		if self._isBoss or self._isElite then duration=duration*0.5 end
+		if not self.CharmActive then
+			self._T.charmOriginX=self.Entity.TransformComponent.Position.x
+			self._T.charmOriginY=self.Entity.TransformComponent.Position.y
+			self._T.charmFallVelocity=self._T.charmFallVelocity or 0
+			self._T.charmFlip=self.Entity.SpriteRendererComponent.FlipX
+			self._T.charmRestoreSprite=self.MonsterSprite
+		end
+		self._T.charmRevision=(self._T.charmRevision or 0)+1
+		self.ProjectileLifeRevision=self.ProjectileLifeRevision+1
+		self._papActionRevision=self._papActionRevision+1
+		self._T.charmRemaining=duration self._T.charmAge=0
+		self._T.charmAnchor=attractPoint
+		self.CharmZone=self._spawnZoneIndex self.CharmActive=true
+		self.MonsterSprite=self._moveRUID~="" and self._moveRUID or self._standRUID
+		self:SyncDepthOverlaySprite() self:PresentCharm(self.MonsterSprite)
+		log("[VRF] PET-CHARM applied entity="..self.Entity.Name.." duration="..duration)
+		return true
+	end
+
+	@ExecSpace("ServerOnly")
+	method void UpdateCharm(number delta)
+		if not self.CharmActive then return end
+		self._T.charmRemaining=math.max(0,(self._T.charmRemaining or 0)-delta)
+		self._T.charmAge=(self._T.charmAge or 0)+delta
+		if self._T.charmRemaining<=0 then self:ClearCharm(true) return end
+		if self._isStunned or self._isHardFrozen or self._isPushingBack or self._isLevitating then return end
+		local p=self.Entity.TransformComponent.Position local anchor=self._T.charmAnchor
+		if anchor==nil then return end
+		-- Root-map monsters may have no parent transform. Derive the offset from both positions.
+		local world=self.Entity.TransformComponent.WorldPosition
+		local parent=Vector3(world.x-p.x,world.y-p.y,world.z-p.z)
+		local target=anchor.x-parent.x local dx=target-p.x
+		local step=math.min(math.max(0,math.abs(dx)-0.16),_PetLogic.PetCharmMoveSpeed*math.max(0,delta))
+		local x=p.x+(dx>=0 and step or -step) local y=p.y
+		local bounds=_MonsterSpawner:GetZoneXBounds(self._spawnZoneIndex)
+		if bounds~=nil then
+			if bounds.minX~=nil then x=math.max(x,bounds.minX-parent.x+0.2) end
+			if bounds.maxX~=nil then x=math.min(x,bounds.maxX-parent.x-0.2) end
+		end
+		if self._isFlying then
+			local dy=anchor.y+0.8-parent.y-y local sy=math.min(math.abs(dy),_PetLogic.PetCharmMoveSpeed*math.max(0,delta)*0.65)
+			y=y+(dy>=0 and sy or -sy)
+		else
+			y=self:StepCharmGround(delta,x+parent.x,y+parent.y)-parent.y
+		end
+		self.Entity.TransformComponent.Position=Vector3(x,y,p.z)
+		if step>0.0001 then self.Entity.SpriteRendererComponent.FlipX=dx>0 end
+		local overlay=self:GetDepthOverlayRenderer() if overlay~=nil then overlay.FlipX=self.Entity.SpriteRendererComponent.FlipX end
+	end
+
+	@ExecSpace("ServerOnly")
+	method number StepCharmGround(number delta, number worldX, number worldY)
+		local map=self.Entity.CurrentMap
+		local foothold=isvalid(map) and map:GetComponent("FootholdComponent") or nil
+		if foothold==nil then return worldY end
+		-- Charm lets ground monsters drop through aerial tiles toward the bottom floor.
+		-- Read the actual lowest tile at their moving X, rather than pinning Y to the pet.
+		local hit=foothold:Raycast(Vector2(worldX,-100),Vector2(0,1),200)
+		local ground=nil
+		if hit~=nil and not hit:IsVertical() then ground=hit:GetYByX(worldX) end
+		if ground~=nil and ground~=ground then ground=nil end
+		if ground~=nil and worldY<=ground+0.04 then
+			self._T.charmFalling=false self._T.charmFallVelocity=0
+			return ground
+		end
+		if self._T.charmFalling~=true then
+			self._T.charmFalling=true self._T.charmFallVelocity=0
+			log("[VRF] PET-CHARM fall entity="..self.Entity.Name.." fromY="..worldY)
+		end
+		local dt=math.max(0,delta)
+		local velocity=math.min(self.CharmFallMaxSpeed,(self._T.charmFallVelocity or 0)+self.CharmFallGravity*dt)
+		self._T.charmFallVelocity=velocity
+		local y=worldY-velocity*dt
+		if ground~=nil and y<=ground then
+			y=ground self._T.charmFalling=false self._T.charmFallVelocity=0
+			log("[VRF] PET-CHARM landed entity="..self.Entity.Name.." groundY="..ground)
+		end
+		return y
+	end
+
+	@ExecSpace("ServerOnly")
+	method void FinishCharmFall(number delta)
+		if self._isFlying or self._isLevitating or self._isPushingBack then return end
+		local tf=self.Entity.TransformComponent local p=tf.Position local world=tf.WorldPosition
+		local y=self:StepCharmGround(delta,world.x,world.y)-(world.y-p.y)
+		local dy=y-p.y
+		tf.Position=Vector3(p.x,y,p.z)
+		-- Movement patterns must resume from the landing height, even after charm has ended.
+		self._chargeSpawnY=self._chargeSpawnY+dy self._wanderY=self._wanderY+dy
+		if self._T.charmFalling~=true then self._attackTimer=math.max(self._attackTimer,0.25) end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ClearCharm(boolean restore)
+		if not self.CharmActive then return end
+		self.CharmActive=false self._T.charmRemaining=0 self._T.charmAnchor=nil
+		if restore and not self._dead and isvalid(self.Entity) then
+			-- Retain the gathered position and rebase periodic movement to prevent a snap back.
+			local p=self.Entity.TransformComponent.Position
+			local dx=p.x-(self._T.charmOriginX or p.x) local dy=p.y-(self._T.charmOriginY or p.y)
+			self._wanderY=self._wanderY+dy
+			self._flyCenterX=self._flyCenterX+dx self._flyBaseY=self._flyBaseY+dy
+			self._zigzagBaseX=self._zigzagBaseX+dx
+			self._chargeSpawnX=self._chargeSpawnX+dx self._chargeSpawnY=self._chargeSpawnY+dy
+			if self.PapulatusPhase==2 then self._papClock=0 self._papFlightStart=p end
+			self.Entity.SpriteRendererComponent.FlipX=self._T.charmFlip==true
+			self.MonsterSprite=self._T.charmRestoreSprite or self._standRUID
+			self:SyncDepthOverlaySprite()
+			self._attackTimer=math.max(self._attackTimer,0.25)
+		end
+	end
+
+	@ExecSpace("Multicast")
+	method void PresentCharm(string ruid)
+		if self:IsServer() or self._dead then return end
+		self._transientSpriteGeneration=self._transientSpriteGeneration+1
+		self._isPlayingTransientSprite=false self._isPlayingAttackSprite=false
+		self:ApplyBodySprite(ruid)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void UpdateCharmHeart(number delta)
+		local visible=self.CharmActive and not self._dead and not _GameManager.GameOver and self.CharmZone==_MapManager.CurrentMapIndex and not _MapManager.AwayOnSideMap
+		if not visible then
+			if isvalid(self._T.charmHeart) then self._T.charmHeart:Destroy() end self._T.charmHeart=nil return
+		end
+		if not isvalid(self._T.charmHeart) then
+			self._T.charmHeart=_PetLogic:SpawnPetSkillSprite(_PetLogic.PetCharmHeartRUID,self.Entity.CurrentMap,140)
+		end
+		local heart=self._T.charmHeart if not isvalid(heart) then return end
+		local body=_CardManager:GetSpriteMetrics(self.MonsterSprite)
+		local tf=self.Entity.TransformComponent local p=tf.WorldPosition local s=math.abs(tf.Scale.x)
+		local px=self.Entity.SpriteRendererComponent.FlipX and (1-body.px) or body.px
+		local left=-px*math.max(0.01,body.w)*s
+		local top=(1-body.py)*math.max(0.01,body.h)*s
+		local screen=_UILogic:WorldToScreenPosition(Vector2(p.x,p.y))
+		local a=_UILogic:ScreenToWorldPosition(screen) local b=_UILogic:ScreenToWorldPosition(Vector2(screen.x+1,screen.y))
+		local width=math.abs(b.x-a.x)*math.max(20,math.min(30,_UILogic.ScreenHeight*0.035))
+		_PetLogic:PlacePetSkillSprite(heart,Vector3(p.x+left-width*0.2,p.y+top+width*0.2,p.z-0.2),width,0,1)
+	end
+
 end
+-- 2026-10-10 OnMonsterReached 인자 추가(isChargeFirstHit) 후 재컴파일

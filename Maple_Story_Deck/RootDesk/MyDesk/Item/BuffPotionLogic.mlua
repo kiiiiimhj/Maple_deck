@@ -2,10 +2,11 @@
 script BuffPotionLogic extends Logic
 
 	-- 필드 버프 포션 3종(유저 지정 2026-09-18).
-	--   · 흡혈 포션   30초 — 몬스터를 때릴 때마다 체력 1 회복(타격당 고정, 유저 지정 2026-09-18)
+	--   · 흡혈 포션   20초(2026-10-08 30→20) — 몬스터를 때릴 때마다 체력 1 회복(타격당 고정, 유저 지정 2026-09-18)
 	--   · 크리티컬 포션 20초 — 크리티컬 확률 100%
 	--   · 파워 포션   30초 — 공격력 50% 증가
-	-- 일반 몬스터 처치 시 확률 드롭(허수아비/토네이도와 같은 0.2%씩, MonsterAI 드롭 체인에서 호출) → 톡 튀어나와 바닥에
+	--   · 경험치 포션 30초 — 킬 경험치 20% 증가(2026-10-08 추가, potionType 4)
+	-- 일반 몬스터 처치 시 확률 드롭(흡혈 0.05%, 크리티컬·파워 0.1% — 2026-10-08 0.2%에서 하향, MonsterAI 드롭 체인에서 호출) → 톡 튀어나와 바닥에
 	-- 안착 → 기본 공격 버튼으로 날아가 흡수되는 순간 효과 발동 + 토스트 메시지 + 하단 패시브 버프 줄에 시간제 아이콘.
 	-- 시간이 끝나면 아이콘이 사라지고 뒤쪽 아이콘이 앞으로 당겨진다(CardManager._activeBuffOrder/RepositionBuffIcons).
 	-- 같은 포션을 효과 중에 또 먹으면 남은 시간을 최대치로 갱신한다.
@@ -18,13 +19,20 @@ script BuffPotionLogic extends Logic
 	property SpriteGUIRendererComponent buffPotionFlyIcon = "55d2f161-2b1c-4f00-ba74-98b128501109"
 	property UITransformComponent attackButtonTransform = "b2027c74-dedb-4101-9810-408c08ddaaf9"
 
-	property number VampireDropChance = 0.002
-	property number CritDropChance = 0.002
-	property number PowerDropChance = 0.002
+	-- 각 0.1%(유저 지정 2026-10-08, 0.2% → 0.1% — "너무 잘 나온다"), 흡혈만 0.05%로 한 번 더 낮춤(같은 날)
+	property number VampireDropChance = 0.0005
+	property number CritDropChance = 0.001
+	property number PowerDropChance = 0.001
+	-- 경험치 포션(4번째, 유저 지정 2026-10-08) — 드롭률은 미지정이라 크리·파워와 같은 0.1%
+	property number ExpDropChance = 0.001
 
-	property number VampireDuration = 30
+	-- 흡혈 30초 → 20초(유저 지정 2026-10-08)
+	property number VampireDuration = 20
 	property number CritDuration = 20
 	property number PowerDuration = 30
+	property number ExpDuration = 30
+	-- 경험치 포션 중 킬 경험치 배율(+20%) — GameManager.GetExpPerKill이 곱한다
+	property number ExpGainMult = 1.2
 	-- 타격 1번당 회복량(유저 지정 2026-09-18: 대미지 1% → 고정 1)
 	property integer VampireHealPerHit = 1
 	property number PowerDamageMult = 1.5
@@ -32,6 +40,7 @@ script BuffPotionLogic extends Logic
 	property string VampireItemRUID = "3b2799d10a7a469592272e5c1b06fe2e"
 	property string CritItemRUID = "2a9b72895b2b4328a1d78924ea73344a"
 	property string PowerItemRUID = "ec4226424e164356a95ba65ad6ac62cc"
+	property string ExpItemRUID = "4f8b71bd154249338c92738ee75de87b"
 
 	-- 드롭 연출 타이밍(GameManager 포션 드롭과 같은 홉 길이 + 바닥 대기 + 비행)
 	property number GroundWaitSeconds = 0.5
@@ -45,6 +54,7 @@ script BuffPotionLogic extends Logic
 	property number _vampireLeft = 0
 	property number _critLeft = 0
 	property number _powerLeft = 0
+	property number _expLeft = 0
 
 	property boolean _flyActive = false
 
@@ -85,6 +95,8 @@ script BuffPotionLogic extends Logic
 			potionType = 2
 		elseif r < self.VampireDropChance + self.CritDropChance + self.PowerDropChance then
 			potionType = 3
+		elseif r < self.VampireDropChance + self.CritDropChance + self.PowerDropChance + self.ExpDropChance then
+			potionType = 4
 		end
 		if potionType == 0 then return end
 		self:ScheduleBuffPotion(potionType, worldPos, fallHeight, groundWorldY, dropScale)
@@ -121,6 +133,10 @@ script BuffPotionLogic extends Logic
 			duration = self.PowerDuration
 			self._powerLeft = duration
 			_UIToast:ShowMessage("MLUA_BUFFPOTIONLOGIC_003")
+		elseif potionType == 4 then
+			duration = self.ExpDuration
+			self._expLeft = duration
+			_UIToast:ShowMessage("MLUA_BUFFPOTIONLOGIC_004")
 		else
 			return
 		end
@@ -136,18 +152,20 @@ script BuffPotionLogic extends Logic
 		self._vampireLeft = 0
 		self._critLeft = 0
 		self._powerLeft = 0
+		self._expLeft = 0
 		self._healShowAcc = 0
-		for potionType = 1, 3 do self:NotifyPotionBuffOff(potionType) end
+		for potionType = 1, 4 do self:NotifyPotionBuffOff(potionType) end
 	end
 
 	@ExecSpace("ServerOnly")
 	method void OnUpdate(number delta)
 		-- 켜진 버프의 남은 시간을 줄인다 — 일시정지 중에는 멈춘다. 다 되면 효과·아이콘을 끈다
-		if self._vampireLeft <= 0 and self._critLeft <= 0 and self._powerLeft <= 0 then return end
+		if self._vampireLeft <= 0 and self._critLeft <= 0 and self._powerLeft <= 0 and self._expLeft <= 0 then return end
 		if _GameManager:IsGamePaused() then return end
 		self._vampireLeft = self:TickBuff(1, self._vampireLeft, delta)
 		self._critLeft = self:TickBuff(2, self._critLeft, delta)
 		self._powerLeft = self:TickBuff(3, self._powerLeft, delta)
+		self._expLeft = self:TickBuff(4, self._expLeft, delta)
 	end
 
 	@ExecSpace("ServerOnly")
@@ -164,6 +182,12 @@ script BuffPotionLogic extends Logic
 	method number GetDamageMult()
 		-- MonsterAI 피격 진입점에서 곱하는 공격력 배율(파워 포션 중 1.5)
 		if self._powerLeft > 0 then return self.PowerDamageMult end
+		return 1
+	end
+
+	method number GetExpMult()
+		-- GameManager.GetExpPerKill이 곱하는 킬 경험치 배율(경험치 포션 중 1.2)
+		if self._expLeft > 0 then return self.ExpGainMult end
 		return 1
 	end
 
@@ -257,6 +281,8 @@ script BuffPotionLogic extends Logic
 			icon.ImageRUID = self.VampireItemRUID
 		elseif potionType == 2 then
 			icon.ImageRUID = self.CritItemRUID
+		elseif potionType == 4 then
+			icon.ImageRUID = self.ExpItemRUID
 		else
 			icon.ImageRUID = self.PowerItemRUID
 		end

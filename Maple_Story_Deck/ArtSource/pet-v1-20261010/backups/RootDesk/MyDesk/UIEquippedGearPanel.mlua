@@ -1,0 +1,415 @@
+@Component
+script UIEquippedGearPanel extends Component
+
+	property CostumeManagerComponent CostumeManager = nil
+
+	property table SlotEntityByGearCategory = {}
+
+	property UIEquipPopup EquipPopup = nil
+
+	-- 6번째 칸은 원래 하의(Pants) 자물쇠였다가 2026-09-21 유저 지정으로 **반지 칸**이 됐다.
+	-- (레이드 보상 반지 라인 추가 — WeaponTierDataLogic.RingItemId). 잠금 안내는 더 이상 쓰지 않지만,
+	-- 다른 부위를 또 잠글 일이 생길 수 있어 ShowComingSoon 자체는 남겨뒀다.
+	property TextGUIRendererComponent comingSoonText = "b7c65400-72d5-4320-a29f-c50c0a8812ab"
+
+	-- .ui에 배치해 둔 토스트의 기준 위치. 연출이 매번 여기서 시작해 위로 떠오른다 —
+	-- (0,0)으로 리셋해버리면 .ui에서 잡은 배치가 무시되므로 시작할 때 한 번 기억해 둔다
+	property number _toastBaseY = 0
+
+	property boolean _toastBaseCaptured = false
+
+	-- 아바타 보기 모드 토글(장비 보기 ↔ 코디 보기, AvatarViewLogic)
+	property ButtonComponent viewToggleBtn = "d3f69b54-1a02-49e1-b062-baa9eed07d4e"
+
+	property TextGUIRendererComponent viewToggleLabel = "318cfd0b-3179-4da2-babf-e5b21cfc8510"
+
+	property any _viewToggleHandler = nil
+
+	-- 마지막 Update에서 계산한 장비 아바타 목록(토글 즉시 다시 입히는 데 쓴다)
+	property table _lastGearRuidByAvatarCategory = {}
+
+	-- ── 능력치 팝업(2026-09-23 유저 지정: 캐시 아이템 버튼과 대칭인 초록 버튼 → 아바타 영역 딤드 팝업) ──
+	property ButtonComponent statBtn = "0ca25758-114f-4c78-bbf5-922128bde153"
+
+	property Entity statPopup = "0f610577-b2cc-4de2-9f4b-e6bef764c78b"
+
+	property ButtonComponent statDimBtn = "4a323480-79ec-4bca-ba94-77e13e22cd50"
+
+	property ButtonComponent statCloseBtn = "123e3769-e211-49a6-83fb-e2a8931fb657"
+
+	property any _statHandlers = nil
+
+	-- 런 시작 최대 체력(GameManager.RestartGame의 PlayerMaxHp 초기값과 같아야 한다)
+	property integer StatBaseHp = 100
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		local playerInfo = self.Entity:GetChildByName("PlayerInfo")
+		local avatar = playerInfo:GetChildByName("UIAvatarEntity")
+		self.CostumeManager = avatar.CostumeManagerComponent
+
+		-- 유저 지적: 아바타 아래 이름표가 하드코딩된 "닉네임" placeholder 그대로 나가고 있었다 —
+		-- GameManager.InitPlayerNameUI(HUD 쪽 닉네임)와 동일하게 실제 유저 닉네임으로 교체한다.
+		local nameText = playerInfo:GetChildByName("NameBackground"):GetChildByName("Name")
+		local localPlayer = _UserService.LocalPlayer
+		if nameText ~= nil and localPlayer ~= nil and localPlayer.PlayerComponent ~= nil then
+			nameText.TextComponent.Text = localPlayer.PlayerComponent.Nickname
+		end
+
+		-- 유저 요청: 슬롯이 너무 많아서 실제로 쓰는 부위(무기/상체/하체/모자/망토/장갑)만 남기고 나머지
+		-- (부무기/어깨/신발/눈/얼굴/펜던트/귀/귀장신구)는 UI에서 제거했다 — 해당 카테고리 아이템을
+		-- 장착해도 UI 슬롯엔 안 보이지만 아바타에는 그대로 반영된다(Update()의 CostumeManager 갱신은
+		-- 카테고리 전체를 계속 순회하므로 영향 없음). 상체/하체는 따로 보여달라는 요청으로 Longcoat(상체
+		-- 슬롯)와 별개로 Pants(하체 슬롯)를 추가했다 — 지금 있는 유일한 옷(Pensalir Battle Mail)은
+		-- Longcoat라 상체 슬롯에만 뜨고, 하체는 Pants 카테고리 아이템이 생기기 전까진 비어 있는다.
+		local equipmentGrid = self.Entity:GetChildByName("EquipInfoGrid")
+		self.SlotEntityByGearCategory = {
+			[_GearCategoryEnum.OneHandedWeapon] = equipmentGrid:GetChildByName("MainWeapon"),
+			[_GearCategoryEnum.Longcoat] = equipmentGrid:GetChildByName("Coat"),
+			-- 6번째 칸(.ui 엔티티 이름은 예전 "Pants" 그대로 — 이름만 남기고 용도는 반지다)
+			[_GearCategoryEnum.Ring] = equipmentGrid:GetChildByName("Pants"),
+			-- 7번째 칸 = 목걸이(2026-09-23, 자쿰 레이드 보상). 망토 칸 아래 4번째 줄
+			[_GearCategoryEnum.Pendant] = equipmentGrid:GetChildByName("Necklace"),
+			[_GearCategoryEnum.Cap] = equipmentGrid:GetChildByName("Cap"),
+			[_GearCategoryEnum.Glove] = equipmentGrid:GetChildByName("Glove"),
+			[_GearCategoryEnum.Cape] = equipmentGrid:GetChildByName("Cape"),
+		}
+		
+		for i, entity in pairs(self.SlotEntityByGearCategory) do
+			---@type Entity
+			local slotEntity = entity
+			slotEntity.UIEquippedGearGridCell.EquipPopup = self.EquipPopup
+		end
+
+		if isvalid(self.viewToggleBtn) then
+			self._viewToggleHandler = self.viewToggleBtn.Entity:ConnectEvent(ButtonClickEvent, function()
+				self:OnViewToggleClicked()
+			end)
+		end
+		self:RefreshViewToggleLabel()
+
+		-- 능력치 팝업: 초록 버튼으로 열고, 딤드(아바타 영역)나 X로 닫는다
+		self._statHandlers = {}
+		if isvalid(self.statPopup) then self.statPopup:SetEnable(false) end
+		local pairsToBind = {
+			{ self.statBtn, function() self:OpenStatPopup() end },
+			{ self.statDimBtn, function() self:CloseStatPopup() end },
+			{ self.statCloseBtn, function() self:CloseStatPopup() end },
+		}
+		for _, pair in ipairs(pairsToBind) do
+			if isvalid(pair[1]) then
+				table.insert(self._statHandlers, { pair[1], pair[1].Entity:ConnectEvent(ButtonClickEvent, pair[2]) })
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OpenStatPopup()
+		-- 지금 장착한 장비로 능력치를 다시 계산해 채운 뒤 연다
+		if not isvalid(self.statPopup) then return end
+		self:FillStatPopup()
+		self.statPopup:SetEnable(true)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void CloseStatPopup()
+		if isvalid(self.statPopup) then self.statPopup:SetEnable(false) end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void FillStatPopup()
+		-- 행 순서는 .ui의 Row0~Row8과 같다(이름은 .ui에 번역 키로 박혀 있고 여기선 값만 쓴다)
+		local s = self:ComputeGearStats()
+		local function pct(v)
+			if v <= 0 then return "-" end
+			local text = string.format("%.1f", v * 100)
+			text = string.gsub(text, "%.0$", "")
+			return "+" .. text .. "%"
+		end
+		local values = {
+			s.atk > 0 and ("+" .. tostring(s.atk)) or "-",
+			tostring(s.maxHp),
+			pct(s.atkPct),
+			pct(s.basicPct),
+			pct(s.critRate),
+			pct(s.critDmg),
+			pct(s.cooldown),
+			pct(s.dmgReduction),
+			pct(s.eliteBoss),
+		}
+		local window = self.statPopup:GetChildByName("Window")
+		if window == nil then return end
+		for i, v in ipairs(values) do
+			local row = window:GetChildByName("Row" .. tostring(i - 1))
+			local valueText = row ~= nil and row:GetChildByName("Value") or nil
+			if valueText ~= nil then valueText.TextGUIRendererComponent.Text = v end
+		end
+		log(string.format("UIEquippedGearPanel: stats atk=%d hp=%d atk%%=%.3f basic%%=%.3f crit=%.3f critDmg=%.3f cdr=%.3f red=%.3f elite=%.3f",
+			s.atk, s.maxHp, s.atkPct, s.basicPct, s.critRate, s.critDmg, s.cooldown, s.dmgReduction, s.eliteBoss))
+	end
+
+	@ExecSpace("ClientOnly")
+	method table ComputeGearStats()
+		-- GearEffectLogic.InitForRun + 상시 효과 계산(GetFlatAtk/GetDamageMult/…)과 같은 규칙을 **읽기 전용**으로 따라간다.
+		-- 처치 수·체력 조건·확률 발동 같은 전투 중 조건부 효과는 넣지 않는다(항상 켜진 수치만).
+		-- 2026-09-26 "해금된 등급 줄은 전부 적용": 지금 등급 이하 모든 줄이 켜지고 줄마다 그 등급의 수치를 쓴다.
+		-- ⚠ GearEffectLogic의 등급 효과 표를 바꾸면 여기도 같이 고칠 것
+		local result = { atk = 0, maxHp = self.StatBaseHp, atkPct = 0, basicPct = 0, critRate = 0, critDmg = 0,
+			cooldown = 0, dmgReduction = 0, eliteBoss = 0 }
+		local player = _UserService.LocalPlayer
+		if player == nil or player.PkgPlayerInventory == nil then return result end
+		local inventory = player.PkgPlayerInventory
+		local job = inventory:ResolveCurrentJob()
+		if job == nil then return result end
+		local tier = _WeaponTierDataLogic
+		local G = _GearGradeEnum
+
+		-- 부위별로 (아이템ID, 등급, GearStruct, 해금된 줄별 보너스)를 읽는다
+		local function read(category, requiredItemId)
+			local st = inventory:GetAttachedGearItemStruct(job, category)
+			if st == nil then return nil end
+			if requiredItemId ~= nil and st.ItemId ~= requiredItemId then return nil end
+			local gs = st:GetGearStruct()
+			if gs == nil then return nil end
+			-- 매직~지금 등급 줄의 수치(전투 GearEffectLogic.ReadGradeBonuses와 같은 헬퍼)
+			local byGrade = {}
+			for g = G.Magic, gs.Grade do
+				byGrade[g] = tier:GetGradeBonusPerMille(st.ItemId, gs, g) / 1000.0
+			end
+			return { itemId = st.ItemId, grade = gs.Grade, gs = gs, byGrade = byGrade,
+				level = _EnhanceScrollLogic:GetStatBonusForLevel(gs.Level) }
+		end
+
+		local weapon = read(_GearCategoryEnum.OneHandedWeapon, nil)
+		if weapon ~= nil and not tier:IsWeaponItem(weapon.itemId) then weapon = nil end
+		local suit = read(_GearCategoryEnum.Longcoat, nil)
+		if suit ~= nil and not tier:IsWeaponItem(suit.itemId) then suit = nil end
+		local helm = read(_GearCategoryEnum.Cap, tier.HelmItemId)
+		local glove = read(_GearCategoryEnum.Glove, tier.GloveItemId)
+		local cape = read(_GearCategoryEnum.Cape, tier.CapeItemId)
+		local ring = read(_GearCategoryEnum.Ring, tier.RingItemId)
+		local neck = read(_GearCategoryEnum.Pendant, tier.NecklaceItemId)
+
+		-- 그 줄이 해금됐으면 그 줄 수치, 아니면 0
+		local function line(part, grade)
+			if part == nil or part.grade < grade then return 0 end
+			local v = part.byGrade[grade]
+			if v == nil then return 0 end
+			return v
+		end
+		local function wLine(itemId, grade)
+			if weapon == nil or weapon.itemId ~= itemId then return 0 end
+			return line(weapon, grade)
+		end
+		-- 반지/목걸이 옵션(1 공격력% / 2 치명 확률 / 3 치명 피해 / 4 최대 체력% / 5 쿨감) — 해금된 줄 중 그 종류 합계
+		local function accStat(part, statType)
+			if part == nil then return 0 end
+			local sum = 0
+			for g = G.Magic, part.grade do
+				if tier:GetSkillVariantForGrade(part.gs, g) == statType then sum = sum + line(part, g) end
+			end
+			return sum
+		end
+
+		-- 공격력(고정 가산): 무기 + 투구 + 반지/목걸이(공격형) — 강화 레벨 보너스 포함
+		local hpAdd = 0
+		if weapon ~= nil then result.atk = result.atk + weapon.gs.Atk + weapon.level end
+		if helm ~= nil then result.atk = result.atk + helm.gs.Atk + helm.level end
+		-- ⚠ ipairs는 첫 nil에서 멈춘다(반지 미장착이면 목걸이까지 건너뛰었다) — 숫자 인덱스로 돈다
+		local accs = { ring, neck }
+		for i = 1, 2 do
+			local acc = accs[i]
+			if acc ~= nil then
+				if acc.gs.MainStatType == tier.RingMainStatHp then
+					hpAdd = hpAdd + acc.gs.Hp + acc.level
+				else
+					result.atk = result.atk + acc.gs.Atk + acc.level
+				end
+			end
+		end
+		-- 최대 체력: 갑옷·장갑·망토 HP(+강화) + 반지/목걸이(체력형) → 망토 유니크·반지/목걸이 옵션4 배율
+		local hpParts = { suit, glove, cape }
+		for i = 1, 3 do
+			local part = hpParts[i]
+			if part ~= nil and part.gs.Hp > 0 then hpAdd = hpAdd + part.gs.Hp + part.level end
+		end
+		local hpMult = (1.0 + line(cape, G.Unique)) * (1.0 + accStat(ring, 4)) * (1.0 + accStat(neck, 4))
+		result.maxHp = math.floor((self.StatBaseHp + hpAdd) * hpMult)
+
+		-- 공격력 %(줄마다 곱연산): 스태프·양손검 매직/에픽, 투구 매직/에픽, 망토 매직, 반지/목걸이 옵션1
+		local dmgMult = 1.0
+		for _, itemId in ipairs({ tier.WeaponItemId, tier.TwoHandSwordItemId }) do
+			dmgMult = dmgMult * (1.0 + wLine(itemId, G.Magic)) * (1.0 + wLine(itemId, G.Epic))
+		end
+		dmgMult = dmgMult * (1.0 + line(helm, G.Magic)) * (1.0 + line(helm, G.Epic))
+		dmgMult = dmgMult * (1.0 + line(cape, G.Magic))
+		dmgMult = dmgMult * (1.0 + accStat(ring, 1)) * (1.0 + accStat(neck, 1))
+		result.atkPct = dmgMult - 1.0
+
+		-- 기본 공격 피해 %: 활 매직/에픽, 장갑 매직
+		local basicMult = (1.0 + wLine(tier.BowItemId, G.Magic)) * (1.0 + wLine(tier.BowItemId, G.Epic)) * (1.0 + line(glove, G.Magic))
+		result.basicPct = basicMult - 1.0
+
+		-- 치명타 확률: 자마다르 매직/유니크 + 반지/목걸이 옵션2
+		result.critRate = wLine(tier.JamadarItemId, G.Magic) + wLine(tier.JamadarItemId, G.Unique) + accStat(ring, 2) + accStat(neck, 2)
+		-- 치명타 피해: 자마다르 에픽 + 반지/목걸이 옵션3
+		result.critDmg = wLine(tier.JamadarItemId, G.Epic) + accStat(ring, 3) + accStat(neck, 3)
+		-- 스킬 쿨타임 감소: 스태프·활 유니크 + 반지/목걸이 옵션5 (최대 90%)
+		result.cooldown = math.min(0.9, wLine(tier.WeaponItemId, G.Unique) + wLine(tier.BowItemId, G.Unique) + accStat(ring, 5) + accStat(neck, 5))
+		-- 받는 피해 감소: 양손검 유니크 + 슈트A 에픽 (최대 90%)
+		local suitAEpic = 0
+		if suit ~= nil and suit.itemId == tier.SuitAItemId then suitAEpic = line(suit, G.Epic) end
+		result.dmgReduction = math.min(0.9, wLine(tier.TwoHandSwordItemId, G.Unique) + suitAEpic)
+		-- 엘리트·보스 피해: 망토 에픽 × 레전더리(곱연산)
+		result.eliteBoss = (1.0 + line(cape, G.Epic)) * (1.0 + line(cape, G.Legendary)) - 1.0
+		return result
+	end
+
+	-- 준비 중 안내 — 공용 토스트(_UIToast)는 ToastGroup이 별도 UIGroup이라 이 장비창 위로
+	-- 못 올라온다(ShopUI 주석과 동일한 이유). 그래서 장비창 안의 전용 텍스트를 쓴다.
+	-- 연출은 상점 구매 토스트(ShadowShopUI.PlayPurchaseToast)와 같은 "떠오르며 사라짐"
+	@ExecSpace("ClientOnly")
+	method void ShowComingSoon()
+		local text = self.comingSoonText
+		if not isvalid(text) then
+			log_warning("UIEquippedGearPanel: comingSoonText 바인딩 없음")
+			return
+		end
+
+		local transform = text.Entity.UITransformComponent
+		-- 첫 표시 때 .ui의 배치값을 기준점으로 붙잡는다(연출이 좌표를 덮어쓰기 전에)
+		if not self._toastBaseCaptured then
+			self._toastBaseY = transform.anchoredPosition.y
+			self._toastBaseCaptured = true
+		end
+		local baseY = self._toastBaseY
+
+		text.Text = "Coming Soon!"
+		text.Entity:SetEnable(true)
+		text.FontColor = Color(1, 1, 1, 1)
+		transform.anchoredPosition = Vector2(0, baseY)
+
+		local duration = 0.9
+		local riseDistance = 80
+		_TweenLogic:PlayTween(0.0, 1.0, duration, EaseType.QuadEaseOut, function(t)
+			if not isvalid(text) then return end
+			text.Entity.UITransformComponent.anchoredPosition = Vector2(0, baseY + riseDistance * t)
+			text.FontColor = Color(1, 1, 1, 1.0 - t)
+		end)
+		_TimerService:SetTimerOnce(function()
+			if isvalid(text) then text.Entity:SetEnable(false) end
+		end, duration)
+
+		log("UIEquippedGearPanel: 하의 칸(잠김) 클릭 -> Coming Soon 표시")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		-- OnBeginPlay에서 건 클릭 핸들러를 반드시 되돌린다
+		if self._viewToggleHandler ~= nil and isvalid(self.viewToggleBtn) then
+			self.viewToggleBtn.Entity:DisconnectEvent(ButtonClickEvent, self._viewToggleHandler)
+			self._viewToggleHandler = nil
+		end
+		if self._statHandlers ~= nil then
+			for _, pair in ipairs(self._statHandlers) do
+				if isvalid(pair[1]) then pair[1].Entity:DisconnectEvent(ButtonClickEvent, pair[2]) end
+			end
+			self._statHandlers = nil
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Update(table gearGUIDByCategory)
+		if gearGUIDByCategory == nil then
+			gearGUIDByCategory = {}
+		end
+		
+		local playerInventory = _UserService.LocalPlayer.PkgPlayerInventory
+		
+		-- 아바타 슬롯은 "이번에 무엇을 입힐지"를 먼저 전부 모은 뒤 한 번에 반영한다. 인벤토리 슬롯
+		-- 카테고리와 아바타 카테고리가 1:1이 아니기 때문(활/양손검은 인벤토리상 OneHandedWeapon
+		-- 슬롯이지만 아바타상 TwoHandedWeapon) — 슬롯을 순회하며 즉시 SetEquip/Clear 하면 나중 순회가
+		-- 앞서 입힌 걸 빈 문자열로 덮어써서 아바타가 벗겨진다.
+		local avatarEquipByCategory = {}
+		
+		for i, gearEnum in ipairs(_GearCategoryEnum:GetEnums()) do
+			if gearEnum == _GearCategoryEnum.TwoHandedWeapon then
+				gearEnum = _GearCategoryEnum.OneHandedWeapon
+			end
+		
+			---@type Entity
+			local slotEntity = self.SlotEntityByGearCategory[gearEnum]
+			local gearGUID = gearGUIDByCategory[gearEnum]
+			---@type ItemStruct
+			local itemStruct = nil
+			if gearGUID then itemStruct = playerInventory.Items[gearGUID] end
+		
+			-- ⚠ 장착 목록(AttachedNormalGearItems)에 GUID는 남아있는데 실제 아이템이 사라진
+			-- "댕글링 장착"이 발생할 수 있다(아이템 강제 삭제/데이터 정리 후 실측 — 인벤을 여는 순간
+			-- LEA-2007 AttemptToIndex로 Update 전체가 죽어서 장착 슬롯과 아바타가 통째로 안 그려졌다).
+			-- GUID 유무가 아니라 실제 itemStruct 유무로 분기해서 이 경우 빈 슬롯으로 취급한다.
+			if itemStruct ~= nil then
+				if slotEntity ~= nil then slotEntity.UIEquippedGearGridCell:Set(itemStruct) end
+		
+				-- 장비 라인 아이템(WeaponTierDataLogic 관리 9종)은 등급에 따라 외형이 바뀌므로
+				-- ItemGearDataSet의 고정 AvatarRUID 컬럼(비어 있음)이 아니라 등급별 RUID를 써야 한다.
+				-- ⚠ SetEquip은 "thumbnail://" 접두사가 붙으면 조용히 미착용 처리되므로 GetAvatarRUID로
+				-- 접두사를 뗀 순수 Guid를 넘긴다(아바타에 아무것도 안 입혀지던 버그의 원인)
+				if _WeaponTierDataLogic:IsWeaponItem(itemStruct.ItemId) then
+					local gearStruct = itemStruct:GetGearStruct()
+					local grade = 0
+					if gearStruct ~= nil then grade = gearStruct.Grade end
+					local avatarGearEnum = _WeaponTierDataLogic:GetAvatarGearCategory(itemStruct.ItemId)
+					if avatarGearEnum ~= -1 then
+						avatarEquipByCategory[avatarGearEnum] = _WeaponTierDataLogic:GetAvatarRUID(itemStruct.ItemId, grade)
+					end
+				else
+					local gearData = itemStruct:GetGearData()
+					if gearData ~= nil then
+						avatarEquipByCategory[gearEnum] = gearData.AvatarRUID
+					end
+				end
+			else
+				if slotEntity ~= nil then slotEntity.UIEquippedGearGridCell:Clear() end
+			end
+		end
+		
+		-- 모아둔 결과를 아바타 카테고리 기준으로 바꿔서 한 번에 반영한다. 실제 입히기는
+		-- AvatarViewLogic이 보기 모드(장비 보기 / 코디 보기)에 맞춰 처리한다(뽑기·방치보상 캐릭터와 같은 규칙)
+		local gearRuidByAvatarCategory = {}
+		for i, gearEnum in ipairs(_GearCategoryEnum:GetEnums()) do
+			---@type MapleAvatarItemCategory
+			local avatarCategoryEnum = _GearCategoryEnum:ToAvatarCategory(gearEnum)
+			if avatarCategoryEnum ~= _GearCategoryEnum.None then
+				local ruid = avatarEquipByCategory[gearEnum]
+				if ruid ~= nil and ruid ~= "" then gearRuidByAvatarCategory[avatarCategoryEnum] = ruid end
+			end
+		end
+		self._lastGearRuidByAvatarCategory = gearRuidByAvatarCategory
+		_AvatarViewLogic:ApplyToCostume(self.CostumeManager, gearRuidByAvatarCategory)
+		self:RefreshViewToggleLabel()
+		-- 능력치 팝업이 열려 있으면 장착을 바꾼 즉시 수치도 다시 계산한다(유저 지정 2026-09-24 "장비 누르는 즉시 수치 변경")
+		if isvalid(self.statPopup) and self.statPopup.Enable then self:FillStatPopup() end
+	end
+
+	-- 장비창 아바타 위 [코디 보기 / 장비 보기] 토글
+	@ExecSpace("ClientOnly")
+	method void OnViewToggleClicked()
+		-- 모드를 바꾸고 마지막으로 계산한 장비 목록으로 아바타를 바로 다시 입힌다
+		_AvatarViewLogic:ToggleMode()
+		_AvatarViewLogic:ApplyToCostume(self.CostumeManager, self._lastGearRuidByAvatarCategory)
+		self:RefreshViewToggleLabel()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshViewToggleLabel()
+		-- 버튼 글자는 "누르면 바뀔 모드" — 장비 보기 중이면 "캐시 아이템"(유저 지정 2026-09-19)
+		if not isvalid(self.viewToggleLabel) then return end
+		if _AvatarViewLogic:IsGearMode() then
+			self.viewToggleLabel.Text = _LocalizationService:GetText("MLUA_UIEQUIPPEDGEARPANEL_003")
+		else
+			self.viewToggleLabel.Text = _LocalizationService:GetText("MLUA_UIEQUIPPEDGEARPANEL_004")
+		end
+	end
+
+end

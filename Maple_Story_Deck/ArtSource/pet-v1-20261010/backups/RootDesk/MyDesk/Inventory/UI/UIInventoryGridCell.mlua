@@ -1,0 +1,57 @@
+@Component
+script UIInventoryGridCell extends Component
+
+	property UIItemSlot ItemSlot = nil
+
+	-- 이 셀이 목록 맨 끝의 확장("+") 칸인지. GridView가 셀을 재활용하므로 UIInventoryGrid.OnRefresh가
+	-- 매번 다시 지정해준다
+	property boolean IsPlusSlot = false
+
+	-- 이 셀이 지금 그리고 있는 그리드 칸 번호(1부터). UIInventoryGrid.OnRefresh가 매번 지정 —
+	-- 이름 말풍선을 누른 칸 위에 띄울 때 행/열 계산에 쓴다
+	property integer GridIndex = 0
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		self.ItemSlot = self.Entity.UIItemSlot
+		self.ItemSlot.OnItemClickedFunc = function() self:OnItemClicked() end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnItemClicked()
+		local grid = self.Entity.Parent.UIInventoryGrid
+
+		-- 확장("+") 칸은 아이템이 없으므로 아래 nil 가드보다 먼저 처리해야 한다
+		if self.IsPlusSlot then
+			grid:OnPlusSlotClicked()
+			return
+		end
+
+		---@type ItemStruct
+		local itemStruct = self.ItemSlot.ItemStruct
+		if itemStruct == nil then
+			return
+		end
+
+		-- 판매 모드에서는 장비 정보/사용 팝업을 열지 않고 체크 선택만 토글한다
+		-- (유저 지정: 판매용 인벤토리를 새로 만들지 않고 기존 그리드에 체크 기능만 얹는다)
+		if grid.Inventory ~= nil and grid.Inventory.IsSellMode then
+			grid.Inventory:ToggleSellSelection(itemStruct)
+			return
+		end
+
+		local gearStruct = itemStruct:GetGearStruct()
+		if gearStruct then
+			grid:HideItemNameTooltip()
+			grid.EquipPopup:Open(true, itemStruct)
+		else
+			-- 비장비(강화 주문서 등): 예전엔 사용 팝업(UsePopup)을 열었지만 화면에 안 떠서 아무 반응이
+			-- 없었다 — 유저 지정(2026-09-19)으로 칸 위에 이름 말풍선만 띄운다
+			-- 이름은 번역을 거치는 GetDisplayName으로 가져온다(itemData.Name은 한국어 원문)
+			local itemName = itemStruct:GetDisplayName()
+			if itemName == nil then itemName = "" end
+			grid:ShowItemNameTooltip(self.Entity, itemName)
+		end
+	end
+
+end
