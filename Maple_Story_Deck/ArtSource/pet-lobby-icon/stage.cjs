@@ -1,0 +1,17 @@
+const fs=require('fs');
+const {UIBuilder}=require('G:/Maple_Story_Deck/.agents/skills/msw-ui-system/scripts/msw_ui_builder.cjs');
+const stage='work/pet-lobby-icon',out='outputs/pet-lobby-icon';
+const asset=JSON.parse(fs.readFileSync(out+'/applied-assets.json','utf8'))['pet-house-paw'];
+const b=UIBuilder.read(stage+'/TitleGroup.ui.before');
+const p='PetHouseButton/Icon';
+if(b.getComponent(p,'MOD.Core.SpriteGUIRendererComponent').ImageRUID.DataId!=='85f54bc06d7442a59151f11dd7ffd8e5')throw Error('Original icon changed');
+b.patchComponent(p,'MOD.Core.SpriteGUIRendererComponent',{ImageRUID:{DataId:asset.ruid},PreserveSprite:0});
+b.patch(p,{rect_size:[104,104],pos:[0,19]});
+b.write(stage+'/TitleGroup.ui',{strict:false});
+let s=fs.readFileSync(stage+'/PetHouseUI.mlua.before','utf8').replace(/\r\n/g,'\n');
+const old='icon.UITransformComponent.RectSize = Vector2(112,112 * 28 / 36)\n\t\ticon.UITransformComponent.anchoredPosition = Vector2(0,13)';
+if(s.split(old).length!==2)throw Error('Artwork initialization changed');
+s=s.replace(old,'icon.UITransformComponent.RectSize = Vector2(104,104)\n\t\ticon.UITransformComponent.anchoredPosition = Vector2(0,19)\n\t\ticon.SpriteGUIRendererComponent.ImageRUID = DataRef("'+asset.ruid+'")');
+fs.writeFileSync(stage+'/PetHouseUI.mlua',s);
+const plan=JSON.parse(fs.readFileSync(stage+'/plan.json','utf8'));plan.steps[0].status='completed';plan.steps[1].status='in_progress';fs.writeFileSync(stage+'/plan.json',JSON.stringify(plan,null,2));
+console.log('Staged static pet-house/paw icon and matching square proportions.');

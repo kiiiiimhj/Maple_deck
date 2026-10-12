@@ -1,5 +1,16 @@
 @Logic
 script PetHouseUI extends Logic
+	property Entity TutorialHelp = "dbca0ee3-1780-4ebc-a82b-2194319f4a73"
+	property Entity TutorialRoot = "bf3d9ae0-9c34-4c9e-97d1-81612dfa7fcf"
+	property Entity TutorialContent = "44554687-fafb-4c55-884c-69116e2d2f37"
+	property boolean PetTutorialOpen = false
+	property boolean PetTutorialReady = false
+	property integer PetTutorialRevealed = 0
+	property number PetTutorialTime = 0
+	property number PetTutorialScale = 1
+	property Vector2 PetTutorialCanvasSize = Vector2(0,0)
+	property table PetTutorialAges = {}
+	property table PetTutorialImages = {"760790003c9c430e8f27cf2f6ff55dcf","522678ea39cc4eaabe7666d23eb2039a","4c323d29462e489a8475e7e4c9139b02","84de1092778c4d92a25382f0dd38b192"}
 	property Entity Overlay = "3589b646-4850-48c1-8f9e-bbecf83b9821"
 	property Entity PetPanel = "952ecae3-adfd-4f23-a672-9b86a41a3727"
 	property Entity PetDisplay = "f2612fb7-46eb-4daa-92ab-4d004558d159"
@@ -56,6 +67,9 @@ script PetHouseUI extends Logic
 	property string CustomImageRUID = ""
 	property string CustomIdlePose = "stand"
 	property number IdleAnimationStart = 0
+	property any DuckyFoodBowl = nil
+	property boolean DuckyBowlReady = false
+	property string DuckyBowlRUID = "5dbbe59d2e5b4a288dca7c01c40db2e6"
 	property any SleepCushion = nil
 	property boolean SleepCushionReady = false
 	property string SleepCushionRUID = "172e6e36f588466693f4a7da94fe7ea4"
@@ -88,6 +102,7 @@ script PetHouseUI extends Logic
 
 	@ExecSpace("ClientOnly")
 	method void BuyEgg()
+		if self.PetTutorialOpen then return end
 		local entry=self:GetDisplayedPet() local pet=entry.progress
 		if not entry.ready or (pet~=nil and pet.Owned) then return end
 		if entry.productId=="" or entry.price<=0 then _UIToast:ShowMessage("PET_SHOP_PENDING") return end
@@ -134,6 +149,7 @@ script PetHouseUI extends Logic
 
 	@ExecSpace("ClientOnly")
 	method void OpenStatPopup()
+		if self.PetTutorialOpen then return end
 		if not self.PetMode or not isvalid(self.StatPopup) then return end
 		self:CancelStoneTooltip() self:FillStatPopup() self.StatPopup.Enable=true
 		_UILogic:SetSiblingIndex(self.StatPopup.UITransformComponent,100005)
@@ -187,6 +203,7 @@ script PetHouseUI extends Logic
 
 	@ExecSpace("ClientOnly")
 	method void MovePet(integer direction)
+		if self.PetTutorialOpen then return end
 		if not self.PetMode or (direction~=-1 and direction~=1) then return end
 		if _UtilLogic.ElapsedSeconds<math.max(self.MotionUntil,self.WaitingUntil) then return end
 		local entries=_PetLogic:GetPetCatalog()
@@ -269,7 +286,7 @@ script PetHouseUI extends Logic
 		for _,action in ipairs({"feed","wash","walk","inject"}) do
 			local choice = _PetLogic:GetCareConfig(action)
 			local block = owned and _PetLogic:GetCareBlockReason(pet,action) or "PET_NO_PET"
-			local loaded = (entry.frames==nil or _PetLogic.TtungttangReady) and (action ~= "feed" or entry.nativeWalk or (entry.frames~=nil and _PetLogic.TtungttangReady) or self.FeedingReady) and (action ~= "walk" or self.WalkReady) and ((action ~= "wash" and action ~= "inject") or self.CareBackdropReady)
+			local loaded = (entry.frames==nil or _PetLogic.TtungttangReady) and (action ~= "feed" or entry.nativeWalk or (entry.frames~=nil and _PetLogic.TtungttangReady) or self.FeedingReady) and (action ~= "walk" or self.WalkReady) and ((action ~= "wash" and action ~= "inject") or self.CareBackdropReady) and (entry.id~="5000498" or action~="feed" or self.DuckyBowlReady)
 			local keys = {feed="PET_FEED",wash="PET_WASH",walk="PET_WALK",inject="PET_INJECT"}
 			self:SetButton(action,canGrow and loaded and block=="" and pet.Energy>=choice.energy,keys[action])
 			local button = self.PetPanel:GetChildByName(action)
@@ -438,8 +455,9 @@ script PetHouseUI extends Logic
 	method void InitializeArtwork()
 		-- Keep the original pet clips; retire every generated overlay, including cached UI children.
 		local icon = self.PetButton:GetChildByName("Icon")
-		icon.UITransformComponent.RectSize = Vector2(112,112 * 28 / 36)
-		icon.UITransformComponent.anchoredPosition = Vector2(0,13)
+		icon.UITransformComponent.RectSize = Vector2(134,134)
+		icon.UITransformComponent.anchoredPosition = Vector2(0,0)
+		icon.SpriteGUIRendererComponent.ImageRUID = DataRef("5a92fc6b08a74049b46186bab0b049db")
 		icon.SpriteGUIRendererComponent.PreserveSprite = PreserveSpriteType.None
 		icon.SpriteGUIRendererComponent.LocalScale = Vector2(1,1)
 		icon.SpriteGUIRendererComponent.LocalPosition = Vector2(0,0)
@@ -866,7 +884,7 @@ script PetHouseUI extends Logic
 	@ExecSpace("ClientOnly")
 	method void UpdateStoneTooltip()
 		if self.StoneTouchId==-999 or not isvalid(self.StoneTooltip) then return end
-		if not self.PetMode or not self.StoneTouchArea.Enable then self:CancelStoneTooltip() return end
+		if not self.PetMode or self.PetTutorialOpen or not self.StoneTouchArea.Enable then self:CancelStoneTooltip() return end
 		if _UtilLogic.ElapsedSeconds-self.StoneHoldStart>=0.4 and not self.StoneTooltip.Enable then
 		 self.StoneTooltip.TextGUIRendererComponent.Text=_LocalizationService:GetText("PET_STONE_TOOLTIP")
 		 self.StoneTooltip.Enable=true
@@ -877,9 +895,11 @@ script PetHouseUI extends Logic
 	@ExecSpace("ClientOnly")
 	method void OnBeginPlay()
 	 self:InitializeArtwork()
+	 self:InitializeDuckyFoodBowl()
 	 self:InitializeActionScenery()
 	 self:InitializeWalkArtwork()
 	 self:InitializeGrowthDisplay()
+	 self:InitializePetTutorial()
 	 _ResourceService:PreloadAsync({self.EnabledButtonRUID,self.DisabledButtonRUID,self.UnequipButtonRUID,self.EnabledArrowRUID,self.DisabledArrowRUID,self.EnabledClaimRUID,self.DisabledClaimRUID,"b239798f5a8d4129ae1c086e7069f7fc"},function(results)
 	  local ready=true
 	  for _,result in pairs(results) do if result~=PreloadResultStatus.Success then ready=false end end
@@ -936,6 +956,7 @@ script PetHouseUI extends Logic
 
 	@ExecSpace("ClientOnly")
 	method void Close()
+	 self:ClosePetTutorial()
 	 self:CloseStatPopup()
 	 if self.Motion == "walk" then self:ShowWalkLoot() end
 	 self:SetWalking(false,0)
@@ -951,12 +972,14 @@ script PetHouseUI extends Logic
 
 	@ExecSpace("ClientOnly")
 	method void RequestCare(string action)
+		if self.PetTutorialOpen then return end
 		if not self.PetMode or _UtilLogic.ElapsedSeconds<math.max(self.MotionUntil,self.WaitingUntil) then return end
 		local entry=self:GetDisplayedPet() local pet=entry.progress
 		if not entry.ready or pet==nil then return end
 		if entry.frames~=nil and not _PetLogic.TtungttangReady then return end
 		if action=="sleep" and not self.SleepCushionReady then return end
 		if action=="feed" and entry.id=="5002617" and not self.FeedingReady then return end
+		if action=="feed" and entry.id=="5000498" and not self.DuckyBowlReady then return end
 		if action=="walk" and not self.WalkReady then return end
 		if (action=="wash" or action=="inject") and not self.CareBackdropReady then return end
 		if action=="rank" and not self.PetPanel:GetChildByName("rank").ButtonComponent.Enable then return end
@@ -1041,6 +1064,7 @@ script PetHouseUI extends Logic
 		-- Play original eating sprites directly: the source animation clip fails to load in Maker.
 		local portrait = self.PetDisplay:GetChildByName("Portrait")
 		self.PetDisplay:GetChildByName("Food").Enable = false
+		self:SetDuckyFoodBowl(active,elapsed)
 		if not active then self.FeedingFrame = 0 return end
 		if self:GetDisplayedPet().id~="5002617" then return end
 		local frame = math.floor(math.max(0, elapsed) / 0.15) % #self.FeedingRUIDs + 1
@@ -1078,6 +1102,7 @@ script PetHouseUI extends Logic
 
 	@ExecSpace("ClientOnly")
 	method void OnUpdate(number delta)
+	 self:TickPetTutorial(delta)
 	 if not self.PetMode then return end
 	 self:AnimateNeeds(delta)
 	 self:AnimateAffinity(delta)
@@ -1125,6 +1150,8 @@ script PetHouseUI extends Logic
 	 self.GrowthTrack=nil self.GrowthFill=nil self.StoneTouchArea=nil self.StoneTooltip=nil self.GrowthFraction=-1
 	 if isvalid(self.SleepCushion) then self.SleepCushion:Destroy() end
 	 self.SleepCushion=nil self.SleepCushionReady=false
+	 if isvalid(self.DuckyFoodBowl) then self.DuckyFoodBowl:Destroy() end
+	 self.DuckyFoodBowl=nil self.DuckyBowlReady=false
 	 if isvalid(self.ActivityScene) then self.ActivityScene:Destroy() end
 	 if isvalid(self.WalkNotice) then self.WalkNotice:Destroy() end
 	 if isvalid(self.WalkReward) then self.WalkReward:Destroy() end
@@ -1132,4 +1159,148 @@ script PetHouseUI extends Logic
 	 self.WalkScene = nil self.WalkNotice = nil self.WalkReward = nil self.WalkSmile = nil self.WalkLayers = {}
 	 self.ActivityScene=nil self.CareBackdrop=nil self.CareBackdropReady=false self.ShownBackdropRUID="" self.SceneAction=""
 	end
+
+	@ExecSpace("ClientOnly")
+	method void InitializeDuckyFoodBowl()
+		if isvalid(self.DuckyFoodBowl) then return end
+		local portrait=self.PetDisplay:GetChildByName("Portrait")
+		local bowl=self:WalkLayer(self.PetDisplay,"DuckyFoodBowl",self.DuckyBowlRUID,256,256,0,0)
+		bowl.Enable=false self.DuckyFoodBowl=bowl self.DuckyBowlReady=false
+		_UILogic:SetSiblingIndex(bowl.UITransformComponent,_UILogic:GetSiblingIndex(portrait.UITransformComponent)+1)
+		_ResourceService:PreloadAsync({self.DuckyBowlRUID},function(results)
+			if not isvalid(self) then return end
+			local ready=true for _,result in pairs(results) do if result~=PreloadResultStatus.Success then ready=false end end
+			self.DuckyBowlReady=ready
+			log("[VRF] DUCKY-BOWL pixel bowl ready="..tostring(ready))
+			if self.PetMode then self:Refresh() end
+		end)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetDuckyFoodBowl(boolean active, number elapsed)
+		local bowl=self.DuckyFoodBowl if not isvalid(bowl) then return end
+		bowl.Enable=active and self.DuckyBowlReady and self:GetDisplayedPet().id=="5000498"
+		if not bowl.Enable then return end
+		local scale=_PetLogic:GetCustomPixelScale(bowl,2)
+		local size=128*scale
+		bowl.UITransformComponent.RectSize=Vector2(size,size)
+		-- Original 128px art: bowl bounds (25,96)-(64,118); keep the base on the paw plane.
+		bowl.UITransformComponent.anchoredPosition=Vector2(-38+(64-44.5)*scale,self:GetPortraitY()+(118-64)*scale)
+		_PetLogic:AlignCustomPortrait(bowl,{frames={},canvas=128},2)
+		local duration=_PetLogic:GetCareDuration("feed")
+		local fade=math.max(0,math.min(1,elapsed/0.14,(duration-elapsed)/0.22))
+		fade=fade*fade*(3-2*fade)
+		bowl.SpriteGUIRendererComponent.Color=Color(1,1,1,fade)
+	end
+
+	@ExecSpace("ClientOnly")
+	method string GetPetTutorialText(string key)
+		-- Keep CSV rows portable; accept either literal or decoded line breaks.
+		return (string.gsub(_LocalizationService:GetText(key), "\\n", "\n"))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void InitializePetTutorial()
+		self.TutorialRoot.Enable=false self.PetTutorialOpen=false self.PetTutorialReady=false
+		self:BindClick(self.TutorialHelp,function() self:OpenPetTutorial() end)
+		self:BindClick(self.TutorialRoot:GetChildByName("Dim"),function() self:ClosePetTutorial() end)
+		local resources={} for _,ruid in ipairs(self.PetTutorialImages) do table.insert(resources,ruid) end
+		table.insert(resources,"52df3f22bb014921a232021a48a1279b")
+		table.insert(resources,"78d254b94ee54616ab1d6038e131ec8a")
+		table.insert(resources,"6643f10005754442948e6e60629b9359")
+		_ResourceService:PreloadAsync(resources,function(results)
+			if not isvalid(self.TutorialRoot) then return end
+			local ready=true for _,result in pairs(results) do if result~=PreloadResultStatus.Success then ready=false end end
+			self.PetTutorialReady=ready
+			log("[VRF] PET-TUTORIAL artwork ready="..tostring(ready))
+		end)
+		log("[VRF] PET-TUTORIAL help button and four stages initialized")
+	end
+
+	@ExecSpace("ClientOnly")
+	method any GetPetTutorialSequence(integer index)
+		if index<1 or index>7 then return nil end
+		if index%2==1 then return self.TutorialContent:GetChildByName("Step"..tostring(math.floor(index/2)+1)) end
+		return self.TutorialContent:GetChildByName("Arrow"..tostring(math.floor(index/2)))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void FitPetTutorial()
+		local canvas=self.TutorialRoot.Parent.UITransformComponent.RectSize
+		if canvas.x<=0 or canvas.y<=0 then return end
+		local w=canvas.x local h=canvas.y local cx=0 local cy=0
+		local sw=_UILogic.ScreenWidth local sh=_UILogic.ScreenHeight
+		if sw>0 and sh>0 then
+			local p0=_UILogic:ScreenToLocalUIPosition(Vector2(0,0),self.TutorialRoot.UITransformComponent)
+			local p1=_UILogic:ScreenToLocalUIPosition(Vector2(sw,sh),self.TutorialRoot.UITransformComponent)
+			if p0~=nil and p1~=nil then
+				local mw=math.abs(p1.x-p0.x) local mh=math.abs(p1.y-p0.y)
+				-- Clamp measurements during parent transitions instead of amplifying them.
+				if mw>canvas.x*0.5 and mw<canvas.x*2 and mh>canvas.y*0.5 and mh<canvas.y*2 then
+					w=math.min(w,mw) h=math.min(h,mh)
+					cx=(p0.x+p1.x)*0.5 cy=(p0.y+p1.y)*0.5
+				end
+			end
+		end
+		local scale=math.max(0.2,math.min(1,(w-80)/1520,(h-80)/1040))
+		self.PetTutorialScale=scale self.PetTutorialCanvasSize=Vector2(canvas.x,canvas.y)
+		self.TutorialContent.UITransformComponent.UIScale=Vector3(scale,scale,1)
+		self.TutorialContent.UITransformComponent.anchoredPosition=Vector2(cx,cy)
+		log(string.format("[VRF] PET-TUTORIAL fit %.0fx%.0f scale=%.3f",w,h,scale))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OpenPetTutorial()
+		if not self.PetMode or self.PetTutorialOpen or not isvalid(self.TutorialRoot) then return end
+		self:CloseStatPopup() self:CancelStoneTooltip()
+		self.PetTutorialOpen=true self.PetTutorialTime=0 self.PetTutorialRevealed=0 self.PetTutorialAges={}
+		self.TutorialContent:GetChildByName("Title").TextGUIRendererComponent.Text=self:GetPetTutorialText("PET_GUIDE_TITLE")
+		self.TutorialContent:GetChildByName("Hint").TextGUIRendererComponent.Text=self:GetPetTutorialText("PET_GUIDE_CLOSE")
+		for i=1,4 do self.TutorialContent:GetChildByName("Step"..i):GetChildByName("Label").TextGUIRendererComponent.Text=self:GetPetTutorialText("PET_GUIDE_STEP"..i) end
+		for i=1,7 do
+			local e=self:GetPetTutorialSequence(i) e.Enable=false
+			e.CanvasGroupComponent.GroupAlpha=0 e.UITransformComponent.UIScale=Vector3(0.85,0.85,1)
+		end
+		self.TutorialRoot.Enable=true
+		_UILogic:SetSiblingIndex(self.TutorialRoot.UITransformComponent,100005)
+		self:FitPetTutorial() self:RevealPetTutorialNext()
+		log("[VRF] PET-TUTORIAL opened from pet-house help")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RevealPetTutorialNext()
+		if self.PetTutorialRevealed>=7 then return end
+		self.PetTutorialRevealed=self.PetTutorialRevealed+1
+		local index=self.PetTutorialRevealed local e=self:GetPetTutorialSequence(index)
+		e.Enable=true self.PetTutorialAges[index]=0
+		log("[VRF] PET-TUTORIAL reveal="..index)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void TickPetTutorial(number delta)
+		if not self.PetTutorialOpen then return end
+		if not self.PetMode then self:ClosePetTutorial() return end
+		local canvas=self.TutorialRoot.Parent.UITransformComponent.RectSize
+		if canvas.x~=self.PetTutorialCanvasSize.x or canvas.y~=self.PetTutorialCanvasSize.y then self:FitPetTutorial() end
+		self.PetTutorialTime=self.PetTutorialTime+delta
+		-- Same order and interval as RaidTutorialUI; a low-FPS frame catches up cleanly.
+		while self.PetTutorialRevealed<7 and self.PetTutorialTime>=self.PetTutorialRevealed*0.55 do self:RevealPetTutorialNext() end
+		for i=1,self.PetTutorialRevealed do
+			local age=(self.PetTutorialAges[i] or 0)+delta self.PetTutorialAges[i]=age
+			local p=math.min(1,age/0.18) local eased=1-(1-p)*(1-p)
+			local e=self:GetPetTutorialSequence(i) local scale=0.85+0.15*eased
+			e.UITransformComponent.UIScale=Vector3(scale,scale,1)
+			e.CanvasGroupComponent.GroupAlpha=math.min(1,age/0.12)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ClosePetTutorial()
+		local wasOpen=self.PetTutorialOpen
+		self.PetTutorialOpen=false self.PetTutorialTime=0 self.PetTutorialRevealed=0 self.PetTutorialAges={}
+		if isvalid(self.TutorialRoot) then self.TutorialRoot.Enable=false end
+		if wasOpen then log("[VRF] PET-TUTORIAL closed; pet-house remains open") end
+	end
+
+
 end

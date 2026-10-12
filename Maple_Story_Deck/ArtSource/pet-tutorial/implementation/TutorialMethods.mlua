@@ -1,0 +1,109 @@
+	@ExecSpace("ClientOnly")
+	method string GetPetTutorialText(string key)
+		-- Keep CSV rows portable; accept either literal or decoded line breaks.
+		return (string.gsub(_LocalizationService:GetText(key), "\\n", "\n"))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void InitializePetTutorial()
+		self.TutorialRoot.Enable=false self.PetTutorialOpen=false self.PetTutorialReady=false
+		self:BindClick(self.TutorialHelp,function() self:OpenPetTutorial() end)
+		self:BindClick(self.TutorialRoot:GetChildByName("Dim"),function() self:ClosePetTutorial() end)
+		local resources={} for _,ruid in ipairs(self.PetTutorialImages) do table.insert(resources,ruid) end
+		table.insert(resources,"52df3f22bb014921a232021a48a1279b")
+		table.insert(resources,"78d254b94ee54616ab1d6038e131ec8a")
+		table.insert(resources,"730ae8fdc5724aa4859531b8e3968096")
+		_ResourceService:PreloadAsync(resources,function(results)
+			if not isvalid(self.TutorialRoot) then return end
+			local ready=true for _,result in pairs(results) do if result~=PreloadResultStatus.Success then ready=false end end
+			self.PetTutorialReady=ready
+			log("[VRF] PET-TUTORIAL artwork ready="..tostring(ready))
+		end)
+		log("[VRF] PET-TUTORIAL help button and four stages initialized")
+	end
+
+	@ExecSpace("ClientOnly")
+	method any GetPetTutorialSequence(integer index)
+		if index<1 or index>7 then return nil end
+		if index%2==1 then return self.TutorialContent:GetChildByName("Step"..tostring(math.floor(index/2)+1)) end
+		return self.TutorialContent:GetChildByName("Arrow"..tostring(math.floor(index/2)))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void FitPetTutorial()
+		local canvas=self.TutorialRoot.Parent.UITransformComponent.RectSize
+		if canvas.x<=0 or canvas.y<=0 then return end
+		local w=canvas.x local h=canvas.y local cx=0 local cy=0
+		local sw=_UILogic.ScreenWidth local sh=_UILogic.ScreenHeight
+		if sw>0 and sh>0 then
+			local p0=_UILogic:ScreenToLocalUIPosition(Vector2(0,0),self.TutorialRoot.UITransformComponent)
+			local p1=_UILogic:ScreenToLocalUIPosition(Vector2(sw,sh),self.TutorialRoot.UITransformComponent)
+			if p0~=nil and p1~=nil then
+				local mw=math.abs(p1.x-p0.x) local mh=math.abs(p1.y-p0.y)
+				-- Clamp measurements during parent transitions instead of amplifying them.
+				if mw>canvas.x*0.5 and mw<canvas.x*2 and mh>canvas.y*0.5 and mh<canvas.y*2 then
+					w=math.min(w,mw) h=math.min(h,mh)
+					cx=(p0.x+p1.x)*0.5 cy=(p0.y+p1.y)*0.5
+				end
+			end
+		end
+		local scale=math.max(0.2,math.min(1,(w-80)/1520,(h-80)/1040))
+		self.PetTutorialScale=scale self.PetTutorialCanvasSize=Vector2(canvas.x,canvas.y)
+		self.TutorialContent.UITransformComponent.UIScale=Vector3(scale,scale,1)
+		self.TutorialContent.UITransformComponent.anchoredPosition=Vector2(cx,cy)
+		log(string.format("[VRF] PET-TUTORIAL fit %.0fx%.0f scale=%.3f",w,h,scale))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OpenPetTutorial()
+		if not self.PetMode or self.PetTutorialOpen or not isvalid(self.TutorialRoot) then return end
+		self:CloseStatPopup() self:CancelStoneTooltip()
+		self.PetTutorialOpen=true self.PetTutorialTime=0 self.PetTutorialRevealed=0 self.PetTutorialAges={}
+		self.TutorialContent:GetChildByName("Title").TextGUIRendererComponent.Text=self:GetPetTutorialText("PET_GUIDE_TITLE")
+		self.TutorialContent:GetChildByName("Hint").TextGUIRendererComponent.Text=self:GetPetTutorialText("PET_GUIDE_CLOSE")
+		for i=1,4 do self.TutorialContent:GetChildByName("Step"..i):GetChildByName("Label").TextGUIRendererComponent.Text=self:GetPetTutorialText("PET_GUIDE_STEP"..i) end
+		for i=1,7 do
+			local e=self:GetPetTutorialSequence(i) e.Enable=false
+			e.CanvasGroupComponent.GroupAlpha=0 e.UITransformComponent.UIScale=Vector3(0.85,0.85,1)
+		end
+		self.TutorialRoot.Enable=true
+		_UILogic:SetSiblingIndex(self.TutorialRoot.UITransformComponent,100005)
+		self:FitPetTutorial() self:RevealPetTutorialNext()
+		log("[VRF] PET-TUTORIAL opened from pet-house help")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RevealPetTutorialNext()
+		if self.PetTutorialRevealed>=7 then return end
+		self.PetTutorialRevealed=self.PetTutorialRevealed+1
+		local index=self.PetTutorialRevealed local e=self:GetPetTutorialSequence(index)
+		e.Enable=true self.PetTutorialAges[index]=0
+		log("[VRF] PET-TUTORIAL reveal="..index)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void TickPetTutorial(number delta)
+		if not self.PetTutorialOpen then return end
+		if not self.PetMode then self:ClosePetTutorial() return end
+		local canvas=self.TutorialRoot.Parent.UITransformComponent.RectSize
+		if canvas.x~=self.PetTutorialCanvasSize.x or canvas.y~=self.PetTutorialCanvasSize.y then self:FitPetTutorial() end
+		self.PetTutorialTime=self.PetTutorialTime+delta
+		-- Same order and interval as RaidTutorialUI; a low-FPS frame catches up cleanly.
+		while self.PetTutorialRevealed<7 and self.PetTutorialTime>=self.PetTutorialRevealed*0.55 do self:RevealPetTutorialNext() end
+		for i=1,self.PetTutorialRevealed do
+			local age=(self.PetTutorialAges[i] or 0)+delta self.PetTutorialAges[i]=age
+			local p=math.min(1,age/0.18) local eased=1-(1-p)*(1-p)
+			local e=self:GetPetTutorialSequence(i) local scale=0.85+0.15*eased
+			e.UITransformComponent.UIScale=Vector3(scale,scale,1)
+			e.CanvasGroupComponent.GroupAlpha=math.min(1,age/0.12)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ClosePetTutorial()
+		local wasOpen=self.PetTutorialOpen
+		self.PetTutorialOpen=false self.PetTutorialTime=0 self.PetTutorialRevealed=0 self.PetTutorialAges={}
+		if isvalid(self.TutorialRoot) then self.TutorialRoot.Enable=false end
+		if wasOpen then log("[VRF] PET-TUTORIAL closed; pet-house remains open") end
+	end
+

@@ -8,7 +8,7 @@ script PetLogic extends Logic
 	property number PetCharmPresence = 2
 	property number PetCharmMoveSpeed = 1.0
 	property number PetCharmWidth = 1.45
-	property number PetRollDuration = 3
+	property number PetRollDuration = 4
 	property integer PetSkillCastSerial = 0
 	property string PetRollDustRUID = "98262e9a441d41abb19a6d519f74aec7"
 	property string PetCharmRoarRUID = "ed796fc066354151a20d9187193eb4f2"
@@ -38,6 +38,30 @@ script PetLogic extends Logic
 	property string PetCharmIconRUID = "56feb18e912d41008b1afc9f18d3e94d"
 	property string PetFoxIconRUID = "81bd08ccef124f09ac7a0270fd21b4c1"
 	property string PetFoxWaveRUID = "bf81dbc9d3204c12ad77bb858c99dc20"
+
+
+	property string TurtleEggProductId = ""
+	property integer TurtleEggPrice = 0
+	property boolean TurtleReady = false
+	property number PetTurtleDropTime = 0.42
+	property number PetTurtleShieldDuration = 3
+	property number PetTurtleWidth = 2.6
+	property string PetTurtleHitRUID = "43b0698875a348229caaf9221a8c8b3a"
+	property number PetTurtleHitDuration = 0.24
+	property number PetTurtleRecoilDuration = 0.18
+	property string PetTurtleShellRUID = "0580f8428ed64902adb48820c2b1c641"
+	property table TurtleRankHp = {5,8,12,18}
+	property table TurtleMotions = {
+		angry="d25152782c704517ac8d0c04905d3fa4",chat="c97fb8315ea9440c8f464953650edbf3",
+		cry="6384cd9d454a4a0ab22e11eb8fabd225",dung="edeb0970e9ce4b388030aa1a208aeafa",
+		eat="ef662acb5b2942e898fee063a0d0f2ba",hungry="0a1266f5c30e410797c1c09ef5edf8b5",
+		icon="7c5da2acaacf4e1db3fc639b79436506",love="8e29724cd92d4288be5608097fa4916d",
+		move="8f30c5c55e6e4154bfc8200d1ceb3186",rest="34f1dd005a404a139d9260b4b559d082",
+		roll="cd0e4d71db7041cabd8d0fe0fdac0951",sit="bbc594fe58ff4dafb8dfe20f512478a7",
+		sleep="c9b78e76d72b4ddaaaab815e0c3b87eb",stand="ca7fa1b76ac949d6b5008a6a906f195f",
+		stand1="5766dc81ccbb45e78437d2276541b880",what="3773ec3d2b954ac786cbd0ccbe99e342",
+		inject="3773ec3d2b954ac786cbd0ccbe99e342",gift="8e29724cd92d4288be5608097fa4916d"
+	}
 
 	-- Independent pet profiles; one equipped companion and one shared account wallet.
 	property string PetEggProductId = ""
@@ -120,6 +144,7 @@ script PetLogic extends Logic
 	method void OnBeginPlay()
 		self:PreloadPetSkillArtwork()
 		self:PreloadFoxArtwork()
+		self:PreloadTurtleArtwork()
 		self.TtungttangReady=false
 		local list={} local seen={}
 		for _,frames in pairs(self.TtungttangFrames) do
@@ -155,6 +180,7 @@ script PetLogic extends Logic
 	method table GetPetDefinition(string petId)
 		if petId=="5002617" then return {id=petId,nameKey=self.PetNameKey,stand=self.Motions.stand,motions=self.Motions,pixelScale=6.3888888889,productId=self.PetEggProductId,price=self.PetEggPrice,bonusKey="PET_HOUSE_DAMAGE_FORMAT"} end
 		if petId=="5000498" then return {id=petId,nameKey="PET_NAME_DUCKY",stand=self.FoxMotions.stand,motions=self.FoxMotions,pixelScale=4.2,inventoryPixelScale=3.8,productId=self.FoxEggProductId,price=self.FoxEggPrice,bonusKey="PET_HOUSE_COOLDOWN_FORMAT",nativeWalk=true} end
+		if petId=="landturtle" then return {id=petId,nameKey="PET_NAME_BUGI",stand=self.TurtleMotions.stand,motions=self.TurtleMotions,pixelScale=6,inventoryPixelScale=5.2,productId=self.TurtleEggProductId,price=self.TurtleEggPrice,bonusKey="PET_HOUSE_HP_FORMAT",nativeWalk=true} end
 		if petId~="ttungttang" then return nil end
 		local frames=self.TtungttangFrames
 		local function first(key) local list=frames[key] return list~=nil and list[1] or "" end
@@ -204,7 +230,7 @@ script PetLogic extends Logic
 	method table GetPetStatLines(string petId, any pet)
 		local level=pet~=nil and pet.Owned and pet.Level or 1
 		local rank=pet~=nil and pet.Owned and pet.Rank or 0
-		local kind=petId=="ttungttang" and 2 or (petId=="5000498" and 5 or 1)
+		local kind=petId=="ttungttang" and 2 or (petId=="5000498" and 5 or (petId=="landturtle" and 4 or 1))
 		local result={{kind=kind,level=1,unlocked=true,percent=self:GetBonusPercent(petId,level,rank)}}
 		for _,at in ipairs(self.StatUnlockLevels) do
 			local selected=pet~=nil and pet["Stat"..at] or 0
@@ -266,6 +292,10 @@ script PetLogic extends Logic
 	end
 
 	method number GetBonusPercent(string petId, integer level, integer rank)
+		if petId=="landturtle" then
+			local r=math.max(0,math.min(3,rank))
+			return self.TurtleRankHp[r+1]+math.max(0,level-r*10-1)*0.2
+		end
 		if petId=="5000498" then
 			local r=math.max(0,math.min(3,rank))
 			return self.FoxRankCooldown[r+1]+math.max(0,level-r*10-1)*0.05
@@ -284,7 +314,7 @@ script PetLogic extends Logic
 
 	method string GetPurchasedPetId(string productId)
 		if productId==nil or productId=="" then return "" end
-		for _,id in ipairs({"5002617","ttungttang","5000498"}) do
+		for _,id in ipairs({"5002617","ttungttang","5000498","landturtle"}) do
 			local entry=self:GetPetDefinition(id)
 			if entry.productId~="" and entry.productId==productId then return id end
 		end
@@ -292,21 +322,21 @@ script PetLogic extends Logic
 	end
 
 	method string GetPetMessageKey(string petId, string key)
-		if (petId~="ttungttang" and petId~="5000498") or key==nil or key=="" then return key end
+		if (petId~="ttungttang" and petId~="5000498" and petId~="landturtle") or key==nil or key=="" then return key end
 		local split=string.find(key,"|",1,true)
 		local base=split~=nil and string.sub(key,1,split-1) or key
 		local personalized={PET_PREVIEW=true,PET_COMING_SOON=true,PET_NO_PET=true,PET_TEST_NOTICE=true,PET_RANK_DONE=true,PET_LEVEL_DONE=true,PET_HATCH_DONE=true,PET_WALK_SEARCHING=true,PET_WALK_LOOT_SCROLL=true,PET_WALK_LOOT_DIAMOND=true,PET_WALK_LOOT_SKILL=true,PET_WALK_LOOT_RELIC=true,PET_WALK_TEST_FIND=true}
 		if not personalized[base] then return key end
-		return base..(petId=="5000498" and "_DUCKY" or "_TTUNGTTANG")..(split~=nil and string.sub(key,split) or "")
+		return base..(petId=="landturtle" and "_BUGI" or (petId=="5000498" and "_DUCKY" or "_TTUNGTTANG"))..(split~=nil and string.sub(key,split) or "")
 	end
 
 	@ExecSpace("ClientOnly")
 	method table GetPetCatalog()
 		local entries={}
-		for _,id in ipairs({"5002617","ttungttang","5000498"}) do
+		for _,id in ipairs({"5002617","ttungttang","5000498","landturtle"}) do
 			local entry=self:GetPetDefinition(id)
 			entry.progress=id=="5002617" and self.ClientPet or self.ClientPets[id]
-			entry.ready=self.ClientReady and (id~="5000498" or self.FoxReady)
+			entry.ready=self.ClientReady and (id~="5000498" or self.FoxReady) and (id~="landturtle" or self.TurtleReady)
 			table.insert(entries,entry)
 		end
 		return entries
@@ -384,11 +414,11 @@ script PetLogic extends Logic
 
 	method table ReadAccount(table data)
 		-- The old storage key is retained; v1 Guri data migrates without resetting progress.
-		local guri=PetProgress() local dog=PetProgress() local fox=PetProgress()
-		local pets={ ["5002617"]=guri,ttungttang=dog,["5000498"]=fox }
+		local guri=PetProgress() local dog=PetProgress() local fox=PetProgress() local turtle=PetProgress()
+		local pets={ ["5002617"]=guri,ttungttang=dog,["5000498"]=fox,landturtle=turtle }
 		local migrated=false
 		if data~=nil then
-			if data.version==2 or data.version==3 then
+			if data.version==2 or data.version==3 or data.version==4 then
 				if type(data.pets)~="table" then return nil end
 				for _,key in ipairs({"stones","heartDayKey","heartClaimedMask"}) do
 					local value=data[key]
@@ -406,8 +436,8 @@ script PetLogic extends Logic
 					end
 					if not pets[id]:Deserialize(profile) then return nil end
 				end
-				if data.pets["5002617"]==nil or data.pets.ttungttang==nil or (data.version==3 and data.pets["5000498"]==nil) then return nil end
-				if data.version==2 then migrated=true end
+				if data.pets["5002617"]==nil or data.pets.ttungttang==nil or (data.version>=3 and data.pets["5000498"]==nil) or (data.version==4 and data.pets.landturtle==nil) then return nil end
+				if data.version<4 then migrated=true end
 				local wallet=PetProgress()
 				if not wallet:Deserialize({version=1,Stones=data.stones,HeartDayKey=data.heartDayKey,HeartClaimedMask=data.heartClaimedMask}) then return nil end
 				guri.Stones=wallet.Stones guri.HeartDayKey=wallet.HeartDayKey guri.HeartClaimedMask=wallet.HeartClaimedMask
@@ -433,7 +463,7 @@ script PetLogic extends Logic
 			pets[id]=pet:Serialize()
 			if pet.Owned and pet.Equipped then equipped=id end
 		end
-		return {version=3,pets=pets,equippedId=equipped,stones=record.pet.Stones,heartDayKey=record.pet.HeartDayKey,heartClaimedMask=record.pet.HeartClaimedMask,focusId=record.responsePetId or ""}
+		return {version=4,pets=pets,equippedId=equipped,stones=record.pet.Stones,heartDayKey=record.pet.HeartDayKey,heartClaimedMask=record.pet.HeartClaimedMask,focusId=record.responsePetId or ""}
 	end
 
 	@ExecSpace("ServerOnly")
@@ -953,6 +983,16 @@ script PetLogic extends Logic
 				log("[VRF] PET-FOX roar stunned="..count.." duration="..self.PetFoxStunDuration)
 			end
 			if cast.age>=self.PetFoxRoarDuration then self._T.petSkillCast=nil end
+		elseif cast.id=="landturtle" then
+			if cast.age>=self.PetTurtleDropTime and not cast.roared then
+				cast.roared=true cast.absorbed=0
+				log("[VRF] PET-TURTLE landed shield="..self.PetTurtleShieldDuration.." zone="..cast.zone)
+			end
+			if cast.age>=self.PetTurtleDropTime+self.PetTurtleShieldDuration then
+				self:EndPetSkillVisual(cast.id,cast.zone,self.RunToken,cast.serial,self.RunUserId)
+				self._T.petSkillCast=nil
+				log("[VRF] PET-TURTLE shield ended age="..cast.age.." absorbed="..(cast.absorbed or 0))
+			end
 		else
 			local p=self:SamplePetRollRoute(cast.route,cast.age)
 			for _,m in ipairs(mobs) do
@@ -974,11 +1014,20 @@ script PetLogic extends Logic
 	method table GetPetSkillInfo(string petId)
 		local locale=string.lower(_LocalizationService.CurrentLocaleId or "ko") local language=string.sub(locale,1,2)
 		local texts={
-			ko={"데굴데굴","매혹","포효","60초마다 자동 발동","3초 동안 몬스터 사이를 굴러가며\n넉백시킵니다.","2초 동안 몬스터를 유인합니다.\n매혹: 일반 3초, 보스·엘리트 1.5초.\n모든 매혹이 풀리면 퇴장합니다.","여우 모양의 포효를 내뿜어\n화면의 몬스터를 2초간 기절시킵니다."},
-			en={"Roll Over","Charm","Roar","Auto-cast every 60s","Roll between enemies for 3s,\nknocking them back.","Lure enemies for 2s. Charm lasts 3s\n(1.5s for bosses/elites). Leaves when\nall affected enemies are free.","Unleash a fox-shaped roar to stun\nenemies on screen for 2s."},
-			ja={"ころころ","魅了","咆哮","60秒ごとに自動発動","3秒間、敵の間を転がって\nノックバックさせます。","2秒間、敵を引き寄せます。魅了は\n通常3秒、ボス・エリート1.5秒。\nすべての魅了解除で退場します。","キツネ形の咆哮を放ち、画面内の\n敵を2秒間気絶させます。"},
-			zh={"滚滚滚","魅惑","咆哮","每60秒自动施放","在敌人之间滚动并击退敌人，\n持续3秒。","引诱敌人2秒。魅惑持续3秒，\n首领和精英持续1.5秒。\n全部解除魅惑后离场。","释放狐狸形状的咆哮，\n使画面内的敌人眩晕2秒。"}
+			ko={"데굴데굴","매혹","포효","60초마다 자동 발동","4초 동안 몬스터 사이를 굴러가며\n넉백시킵니다.","2초 동안 몬스터를 유인합니다.\n매혹: 일반 3초, 보스·엘리트 1.5초.\n모든 매혹이 풀리면 퇴장합니다.","여우 모양의 포효를 내뿜어\n화면의 몬스터를 2초간 기절시킵니다."},
+			en={"Roll Over","Charm","Roar","Auto-cast every 60s","Roll between enemies for 4s,\nknocking them back.","Lure enemies for 2s. Charm lasts 3s\n(1.5s for bosses/elites). Leaves when\nall affected enemies are free.","Unleash a fox-shaped roar to stun\nenemies on screen for 2s."},
+			ja={"ころころ","魅了","咆哮","60秒ごとに自動発動","4秒間、敵の間を転がって\nノックバックさせます。","2秒間、敵を引き寄せます。魅了は\n通常3秒、ボス・エリート1.5秒。\nすべての魅了解除で退場します。","キツネ形の咆哮を放ち、画面内の\n敵を2秒間気絶させます。"},
+			zh={"滚滚滚","魅惑","咆哮","每60秒自动施放","在敌人之间滚动并击退敌人，\n持续4秒。","引诱敌人2秒。魅惑持续3秒，\n首领和精英持续1.5秒。\n全部解除魅惑后离场。","释放狐狸形状的咆哮，\n使画面内的敌人眩晕2秒。"}
 		}
+		if petId=="landturtle" then
+			local shellTexts={
+				ko={"껍질 방패","중앙에 껍질이 떨어져 3초 동안\n몬스터 공격을 대신 받아줍니다."},
+				en={"Shell Shield","A shell lands in the center and takes\nenemy attacks for you for 3s."},
+				ja={"甲羅の盾","中央に甲羅が落ち、3秒間\n敵の攻撃を代わりに受けます。"},
+				zh={"龟壳护盾","龟壳落在中央，替你承受\n怪物攻击，持续3秒。"}}
+			local t=shellTexts[language] or shellTexts.en
+			return {name=t[1],interval=(texts[language] or texts.en)[4],description=t[2],icon=self.PetTurtleShellRUID}
+		end
 		local t=texts[language] or texts.en local kind=petId=="ttungttang" and 2 or (petId=="5000498" and 3 or 1)
 		local icons={self.PetRollIconRUID,self.PetCharmIconRUID,self.PetFoxIconRUID}
 		return {name=t[kind],interval=t[4],description=t[4+kind],icon=icons[kind]}
@@ -987,10 +1036,19 @@ script PetLogic extends Logic
 	@ExecSpace("ClientOnly")
 	method void PreloadPetSkillArtwork()
 		self._T.petSkillArtReady=false
-		_ResourceService:PreloadAsync({self.PetCharmRoarRUID,self.PetCharmWaveRUID,self.PetCharmHeartRUID,self.PetRollRUID,self.PetRollDustRUID,self.PetRollIconRUID,self.PetCharmIconRUID,self.PetFoxIconRUID,self.PetFoxWaveRUID},function(results)
+		local assets={self.PetCharmRoarRUID,self.PetCharmWaveRUID,self.PetCharmHeartRUID,self.PetRollRUID,self.PetRollDustRUID,self.PetRollIconRUID,self.PetCharmIconRUID,self.PetFoxIconRUID,self.PetFoxWaveRUID,self.PetTurtleShellRUID,self.PetTurtleHitRUID}
+		_ResourceService:PreloadAsync(assets,function(results)
 			if not isvalid(self) then return end
 			local ready=true for _,r in pairs(results) do if r~=PreloadResultStatus.Success then ready=false end end
-			self._T.petSkillArtReady=ready log("[VRF] PET-SKILL artwork ready="..tostring(ready))
+			-- The image preload alone leaves the first geometry query yielding during a cast.
+			-- Warm dimensions/pivots now, while every effect is still absent from the map.
+			if ready then
+				for _,ruid in ipairs(assets) do
+					local metrics=_CardManager:GetSpriteMetrics(ruid)
+					if metrics.w<=0 or metrics.h<=0 then ready=false end
+				end
+			end
+			self._T.petSkillArtReady=ready log("[VRF] PET-SKILL artwork and geometry ready="..tostring(ready))
 		end)
 	end
 
@@ -999,7 +1057,10 @@ script PetLogic extends Logic
 		if not isvalid(map) or ruid=="" then return nil end
 		local fx=_SpawnService:SpawnByModelId("persistenteffect","PetSkill",Vector3.zero,map)
 		if not isvalid(fx) or fx.SpriteRendererComponent==nil then return nil end
-		local r=fx.SpriteRendererComponent r.SpriteRUID=ruid r.SortingLayer="UI" r.OrderInLayer=order
+		-- A cold resource query may yield; never expose the prefab's origin/scale/opacity.
+		fx.Enable=false
+		local r=fx.SpriteRendererComponent r.Color=Color(1,1,1,0)
+		r.SpriteRUID=ruid r.SortingLayer="UI" r.OrderInLayer=order
 		return fx
 	end
 
@@ -1007,9 +1068,15 @@ script PetLogic extends Logic
 	method void PlacePetSkillSprite(Entity fx, Vector3 pos, number width, number rotation, number alpha)
 		if not isvalid(fx) then return end
 		local metrics=_CardManager:GetSpriteMetrics(fx.SpriteRendererComponent.SpriteRUID)
-		local scale=width/math.max(0.01,metrics.w)
+		if metrics.w<=0 or metrics.h<=0 then
+			fx.Enable=false fx.SpriteRendererComponent.Color=Color(1,1,1,0) return
+		end
+		local scale=width/metrics.w
 		_MonsterProjectileFx:PlaceVisual(fx,metrics,pos,scale,rotation)
-		fx.SpriteRendererComponent.Color=Color(1,1,1,math.max(0,math.min(1,alpha)))
+		local opacity=math.max(0,math.min(1,alpha))
+		fx.SpriteRendererComponent.Color=Color(1,1,1,opacity)
+		-- Reveal last, after transform and alpha are both ready; hide inactive burst slots.
+		fx.Enable=opacity>0
 	end
 
 	@ExecSpace("Client")
@@ -1022,9 +1089,10 @@ script PetLogic extends Logic
 		local center=Vector3(point.x,point.y,0)
 		local unit=_UILogic:ScreenToWorldPosition(Vector2(_UILogic.ScreenWidth*0.5+1,_UILogic.ScreenHeight*0.50))
 		local pixel=math.abs(unit.x-center.x)
-		if petId=="ttungttang" or petId=="5000498" then center=anchor end
+		if petId=="ttungttang" or petId=="5000498" or petId=="landturtle" then center=anchor end
 		local bodyRUID=petId=="ttungttang" and self.PetCharmRoarRUID or self.PetRollRUID
 		if petId=="5000498" then local frames=self:GetPetFoxRoarFrames() bodyRUID=#frames>0 and frames[1].ruid or self.FoxMotions.stand end
+		if petId=="landturtle" then bodyRUID=self.PetTurtleShellRUID end
 		local fx=self:SpawnPetSkillSprite(bodyRUID,map,132)
 		local route={}
 		if petId=="5002617" then
@@ -1039,6 +1107,10 @@ script PetLogic extends Logic
 		end
 		if petId=="5000498" then
 			for i=1,3 do table.insert(self._T.petSkillVisual.waves,self:SpawnPetSkillSprite(self.PetFoxWaveRUID,map,130)) end
+		end
+		if petId=="landturtle" then
+			local frames=self:GetPetTurtleHitFrames()
+			if #frames>0 then self._T.petSkillVisual.hitFx=self:SpawnPetSkillSprite(frames[1].ruid,map,136) end
 		end
 		self:UpdatePetSkillVisual(0)
 		log("[VRF] PET-SKILL visual pet="..petId.." zone="..zone)
@@ -1087,6 +1159,8 @@ script PetLogic extends Logic
 				self:PlacePetSkillSprite(heart,hp,v.pixel*(28+index%3*6),0,envelope*0.90*fade)
 			end
 			if v.ending and v.endAge>=0.18 then self:ClearPetSkillVisual() end
+		elseif v.id=="landturtle" then
+			self:UpdatePetTurtleVisual(v,t)
 		elseif v.id=="5000498" then
 			self:UpdatePetFoxVisual(v,t)
 		else
@@ -1156,6 +1230,7 @@ script PetLogic extends Logic
 	method void ClearPetSkillVisual()
 		local v=self._T.petSkillVisual if v==nil then return end
 		if isvalid(v.body) then v.body:Destroy() end
+		if isvalid(v.hitFx) then v.hitFx:Destroy() end
 		for _,dust in ipairs(v.dusts) do if isvalid(dust.fx) then dust.fx:Destroy() end end
 		for _,list in ipairs({v.waves,v.hearts}) do for _,e in ipairs(list) do if isvalid(e) then e:Destroy() end end end
 		self._T.petSkillVisual=nil
@@ -1173,7 +1248,7 @@ script PetLogic extends Logic
 		if not Environment:IsMakerPlay() or not _CardManager.DebugMode then return end
 		if not _GameManager.GameStarted or _GameManager.GameOver or _MapManager.AwayOnSideMap or _GameManager.SafeAreaFrozen or _GameManager:IsGamePaused() then return end
 		self.RunUserId=_UserService.SenderUserId
-		local ids={"5002617","ttungttang","5000498"} local nextIndex=1
+		local ids={"5002617","ttungttang","5000498","landturtle"} local nextIndex=1
 		for i,id in ipairs(ids) do if id==self.RunPetId then nextIndex=i%#ids+1 break end end
 		self.RunPetId=ids[nextIndex]
 		self._T.petSkillCast=nil self._T.petSkillCooldown=3
@@ -1236,6 +1311,147 @@ script PetLogic extends Logic
 			self:PlacePetSkillSprite(wave,Vector3(p.x,p.y+0.98,p.z-0.1),0.9+8.5*q,0,alpha)
 		end
 		if t>=self.PetFoxRoarDuration then self:ClearPetSkillVisual() end
+	end
+
+
+	@ExecSpace("ClientOnly")
+	method void PreloadTurtleArtwork()
+		self.TurtleReady=false local list={} local seen={}
+		for _,ruid in pairs(self.TurtleMotions) do if not seen[ruid] then seen[ruid]=true table.insert(list,ruid) end end
+		_ResourceService:PreloadAsync(list,function(results)
+			if not isvalid(self) then return end
+			local ready=true for _,status in pairs(results) do if status~=PreloadResultStatus.Success then ready=false end end
+			local dustFrames=self:GetPetRollDustFrames()
+			if #dustFrames==0 then ready=false end
+			for _,f in ipairs(dustFrames) do _CardManager:GetSpriteMetrics(f.ruid) end
+			local hitFrames=self:GetPetTurtleHitFrames()
+			if #hitFrames==0 then ready=false end
+			self.TurtleReady=ready log("[VRF] PET-TURTLE original motions ready="..tostring(ready).." count="..#list)
+			if _PetHouseUI.PetMode then _PetHouseUI:Refresh() end
+		end)
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean AbsorbPetTurtleHit()
+		local c=self._T.petSkillCast
+		if c==nil or c.id~="landturtle" or c.zone~=_MapManager.CurrentMapIndex or _MapManager.AwayOnSideMap or not _GameManager.GameStarted or _GameManager.GameOver then return false end
+		if c.age<self.PetTurtleDropTime or c.age>=self.PetTurtleDropTime+self.PetTurtleShieldDuration then return false end
+		-- Paused attacks are blocked without accumulating flash or hit events.
+		if _GameManager:IsGamePaused() or _GameManager.SafeAreaFrozen then return true end
+		c.absorbed=(c.absorbed or 0)+1
+		self:PlayPetTurtleHit(c.zone,self.RunToken,c.serial,self.RunUserId)
+		if c.absorbed==1 then log("[VRF] PET-TURTLE intercepted monster attack serial="..c.serial) end
+		return true
+	end
+
+	@ExecSpace("Client")
+	method void PlayPetTurtleHit(integer zone, integer run, integer serial)
+		local v=self._T.petSkillVisual
+		if v==nil or v.id~="landturtle" or v.zone~=zone or v.run~=run or v.serial~=serial or v.ending then return end
+		if _GameManager:IsGamePaused() or _GameManager.SafeAreaFrozen then return end
+		v.hitAt=v.age
+		-- Coalesce bursts in a crowd: one actor and at most one recoil restart per 0.07s.
+		if v.recoilAt==nil or v.age-v.recoilAt>=0.07 then
+			v.recoilAt=v.age v.recoilDirection=(v.recoilDirection or -1)*-1
+		end
+		if v.sparkAt==nil or v.age-v.sparkAt>=0.04 then v.sparkAt=v.age end
+	end
+
+	@ExecSpace("ClientOnly")
+	method Vector3 GetPetTurtleTarget(integer zone)
+		local v=self._T.petSkillVisual
+		if v==nil or v.id~="landturtle" or v.zone~=zone or v.run~=self.RunToken or v.ending or not isvalid(v.body) or not _GameManager.GameStarted or _GameManager.GameOver or _MapManager.AwayOnSideMap then return nil end
+		if v.age<self.PetTurtleDropTime or v.age>=self.PetTurtleDropTime+self.PetTurtleShieldDuration then return nil end
+		return Vector3(v.center.x,v.center.y+self.PetTurtleWidth*(16/30)*0.65,v.center.z)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void UpdatePetTurtleVisual(table v, number t)
+		local p=v.center local width=self.PetTurtleWidth local ratio=16/30
+		local q=math.min(1,t/self.PetTurtleDropTime)
+		local offset=5*(1-q*q)
+		local landedAge=math.max(0,t-self.PetTurtleDropTime)
+		local squash=t>=self.PetTurtleDropTime and math.sin(math.min(1,landedAge/0.16)*math.pi)*0.08 or 0
+		local fade=math.min(1,t/0.06)*(v.ending and math.max(0,1-v.endAge/0.18) or 1)
+		local hitAge=v.recoilAt~=nil and math.max(0,t-v.recoilAt) or self.PetTurtleRecoilDuration
+		local recoil=math.max(0,1-hitAge/self.PetTurtleRecoilDuration)
+		local shake=(v.recoilDirection or 1)*0.055*math.cos(hitAge*55)*recoil*recoil
+		squash=squash+0.025*math.sin(math.min(1,hitAge/self.PetTurtleRecoilDuration)*math.pi)*recoil
+		self:PlacePetSkillSprite(v.body,Vector3(p.x+shake,p.y+width*ratio*0.5+offset,p.z),width,0,fade)
+		local transform=v.body.TransformComponent local scale=transform.Scale.x
+		transform.Scale=Vector3(scale*(1+squash),scale*(1-squash),1)
+		local flash=v.hitAt~=nil and math.max(0,1-(t-v.hitAt)/0.16) or 0
+		v.body.SpriteRendererComponent.Color=Color(1,1-flash*0.16,1-flash*0.35,fade)
+		if t>=self.PetTurtleDropTime and not v.landed then
+			v.landed=true
+			local camera=_CameraService:GetCurrentCameraComponent()
+			if camera~=nil then camera:ShakeCamera(0.18,0.18) end
+			_SoundOptionLogic:PlaySfx("b4b928d77bc3460b90c43f66e796dde9",0.5)
+			local frames=self:GetPetRollDustFrames()
+			for i=1,(#frames>0 and 8 or 0) do
+				local direction=i%2==0 and 1 or -1
+				local fx=self:SpawnPetSkillSprite(frames[1].ruid,v.map,131)
+				if isvalid(fx) then table.insert(v.dusts,{fx=fx,age=0,direction=direction,x=p.x+direction*0.8,y=p.y,spread=0.65+math.floor((i-1)/2)*0.3}) end
+			end
+			log("[VRF] PET-TURTLE impact shake=0.18 dust="..#v.dusts)
+		end
+		self:UpdatePetTurtleHitMarker(v,t,fade)
+		self:UpdatePetTurtleDust(v)
+		if v.ending and v.endAge>=0.18 then self:ClearPetSkillVisual() end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void UpdatePetTurtleDust(table v)
+		local age=math.max(0,v.age-self.PetTurtleDropTime) local frames=self:GetPetRollDustFrames()
+		for i=#v.dusts,1,-1 do
+			local dust=v.dusts[i]
+			if age>=0.60 or not isvalid(dust.fx) then
+				if isvalid(dust.fx) then dust.fx:Destroy() end table.remove(v.dusts,i)
+			else
+				local q=age/0.60 local frame=frames[math.min(#frames,math.floor(age/0.15)+1)]
+				dust.fx.SpriteRendererComponent.SpriteRUID=frame.ruid
+				local width=0.50+q*0.60
+				local pos=Vector3(dust.x+dust.direction*dust.spread*(1-(1-q)^2),dust.y+width*frame.ratio*0.5+math.sin(q*math.pi)*0.14,v.center.z-0.05)
+				local alpha=math.min(1,age/0.04)*(1-q)^2*0.46
+				self:PlacePetSkillSprite(dust.fx,pos,width,0,alpha)
+				dust.fx.SpriteRendererComponent.Color=Color(0.94,0.86,0.71,alpha)
+			end
+		end
+	end
+
+
+	@ExecSpace("ClientOnly")
+	method table GetPetTurtleHitFrames()
+		if self._T.turtleHitFrames~=nil then return self._T.turtleHitFrames end
+		local frames={} local clip=_ResourceService:LoadAnimationClipAndWait(self.PetTurtleHitRUID)
+		if clip~=nil and clip.Frames~=nil then
+			for i=1,clip.Frames.Count do
+				local sprite=clip.Frames[i].FrameSprite
+				if sprite~=nil then
+					local metrics=_CardManager:GetSpriteMetrics(sprite.RUID)
+					if metrics.w>0 and metrics.h>0 then table.insert(frames,{ruid=sprite.RUID,w=metrics.w}) end
+				end
+			end
+		end
+		self._T.turtleHitFrames=frames
+		log("[VRF] PET-TURTLE block hit frames="..#frames)
+		return frames
+	end
+
+	@ExecSpace("ClientOnly")
+	method void UpdatePetTurtleHitMarker(table v, number t, number fade)
+		local fx=v.hitFx if not isvalid(fx) then return end
+		local age=v.sparkAt~=nil and math.max(0,t-v.sparkAt) or self.PetTurtleHitDuration
+		if age>=self.PetTurtleHitDuration then fx.Enable=false fx.SpriteRendererComponent.Color=Color(1,1,1,0) return end
+		local frames=self:GetPetTurtleHitFrames() if #frames==0 then return end
+		local index=math.min(#frames,1+math.floor(age/self.PetTurtleHitDuration*#frames))
+		local frame=frames[index]
+		if fx.SpriteRendererComponent.SpriteRUID~=frame.ruid then fx.SpriteRendererComponent.SpriteRUID=frame.ruid end
+		fx.SpriteRendererComponent.PlayRate=0
+		local scale=0.82/math.max(0.01,frames[1].w)
+		local pos=Vector3(v.center.x,v.center.y+self.PetTurtleWidth*(16/30)*0.65,v.center.z-0.1)
+		local alpha=math.max(0,1-(age/self.PetTurtleHitDuration)^2)*fade
+		self:PlacePetSkillSprite(fx,pos,frame.w*scale,0,alpha)
 	end
 
 end
