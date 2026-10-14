@@ -1,0 +1,21 @@
+from pathlib import Path
+import json,hashlib,shutil,csv,io
+stage=Path('work/pet-oduck');out=Path('outputs/pet-oduck');archive=Path('G:/Maple_Story_Deck/ArtSource/pet-oduck')
+report=json.loads((out/'runtime-verification.json').read_text(encoding='utf-8'));assert report['status']=='passed'and report['testAccountRestored']and report['productionRuntimeErrors']==report['buildErrors']==0
+report.pop('skillPopupAndInventoryCompatible',None);report['skillPopupVerified']=True;report['inventoryUsesSharedPetCatalog']=True
+(out/'runtime-verification.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
+sources=json.loads((stage/'sources.json').read_text(encoding='utf-8'));preserved=json.loads((stage/'preserved-sources.json').read_text(encoding='utf-8'))
+for path,h in preserved.items():assert hashlib.sha256(Path(path).read_bytes()).hexdigest()==h,path+' changed'
+for name,info in sources.items():assert Path(info['path']).read_text(encoding='utf-8-sig')==(stage/name).read_text(encoding='utf-8'),name
+before=list(csv.DictReader(io.StringIO((stage/'GameText.csv.before').read_text(encoding='utf-8-sig'))));after=list(csv.DictReader(Path(sources['GameText.csv']['path']).open(encoding='utf-8-sig',newline='')));assert after[:len(before)]==before and len(after)==len(before)+15
+notes='''# 오덕 펫\n\n기존 네 펫 다음에 오덕(oduck)을 추가했습니다. 기존 더키(여우)와 별개입니다.\n기본 공격력은 레벨 1에서 1%, 일반 레벨업마다 0.05% 증가합니다. 승급 기본값은 1/1.5/2/3%입니다.\n추가 옵션의 종류·수치는 기존 펫 방식으로 레벨 3·6·9에 해금합니다.\n\n고유 스킬: 댄스 타임. 60초마다 자동 발동하며 30초간 대미지가 20% 증가합니다.\n캐릭터는 중앙의 가장 아래 타일에서 원본 춤 모션을 4초간 재생합니다.\n머리 위에 작은 원본 미러볼이 나타나고 함께 사라집니다. 대미지 버프는 연출 후에도 남습니다.\n일시정지와 안전지대에서는 버프/연출이 멈춥니다. 맵 이동 시 남은 버프는 유지하며 새 판·게임오버·U 펫 교체 때 초기화합니다.\n공격 배율은 기존 스킬 대미지 공통 계산에 곱하므로 기본 공격과 슬롯 스킬에 함께 적용됩니다.\n\n돌봄 모션은 원본 리소스를 사용합니다. 밥먹기·씻기·산책·주사 반응·잠자기를 실제 버튼으로 검증했습니다.\n기존 공통 방석·욕실·산책·병원 연출과 펫 장비/인벤토리 구조를 사용합니다.\n펫하우스의 마지막 선택지에서 볼 수 있으며 메이커 임시 부화로 테스트할 수 있습니다.\n기존 U 치트에 다섯 번째 펫으로 들어가며 3초 뒤 스킬을 사용합니다.\n캐시 상품 ID/가격은 다른 미등록 펫처럼 비워 두었습니다.\n\n저장 형식은 기존 저장 키를 유지하면서 V5로 확장합니다. V1/V2/V3/V4의 기존 성장·옵션·지갑·장착 데이터를 보존합니다.\n새 오덕 프로필은 미보유로 시작합니다. V5의 누락 프로필과 미래 버전은 거절해 저장 데이터 초기화를 방지합니다.\n\n실제 검증: 기존 저장 마이그레이션, 능력치/스킬 화면, 다섯 돌봄 버튼, 원본 애니메이션 반복,\n작은 미러볼의 머리 위 위치, 서버 바닥 좌표와 클라이언트 전달 좌표 일치, 대미지 1.2배,\n일시정지의 시간/프레임 정지, 30초 경계의 만료, 맵 이동/새 판 초기화, U 키의 약 3초 지연, 게임오버 초기화.\n임시 계정 기록은 원본으로 복구했습니다. 게임 코드 실행 및 빌드 오류는 0입니다.\n검증 코드의 클라이언트 전용 맵 조회 오류 1건은 서버 기준 좌표 비교로 수정했으며 검사 기록에 남겼습니다.\n\n적용: PetLogic.mlua, GameText.csv. 펫하우스 UI·기존 펫 UI/성장 구조 및 에너지 번개는 변경하지 않았습니다.\n리소스는 사용자 제공 원본을 사용하며 새 그림은 생성하지 않았습니다.\n'''
+(out/'change-notes.md').write_text(notes,encoding='utf-8')
+applied={name:{'path':v['path'],'sha256':hashlib.sha256(Path(v['path']).read_bytes()).hexdigest()}for name,v in sources.items()};(out/'applied-source-hashes.json').write_text(json.dumps(applied,ensure_ascii=False,indent=2),encoding='utf-8')
+plan=json.loads((stage/'plan.json').read_text(encoding='utf-8'))
+for step in plan['steps']:step['status']='completed'
+(stage/'plan.json').write_text(json.dumps(plan,ensure_ascii=False,indent=2),encoding='utf-8')
+archive.mkdir(parents=True,exist_ok=True)
+for file in out.iterdir():
+ if file.is_file():shutil.copy2(file,archive/file.name)
+shutil.copytree(stage,archive/'implementation',dirs_exist_ok=True)
+print('Oduck native assets, applied source, translated copy, screenshots and full verification archived. Existing pet UI and progress code preserved.',flush=True)

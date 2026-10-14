@@ -19,19 +19,19 @@
 
 ## 성장·승급
 
-성장 요구 경험치는 `40 + 현재 레벨 × 12`. 승급마다 레벨 상한이 10 → 20 → 30 → 40으로 늘어난다. 성장석 비용은 10 → 30 → 60개. 기본 장착 대미지 보너스는 3% → 5% → 8% → 12%, 해당 단계의 레벨마다 추가 0.15%. 전투 시작 시 보너스를 고정하고 이어하기에서는 유지한다.
+성장 요구 경험치는 `100 + 현재 레벨 × 30`(2026-10-13 유저 지정 2.5배, 이전 `40 + 레벨 × 12` — 승급 성장석 50/120/200을 모으는 속도에 맞춤). 승급마다 레벨 상한이 10 → 20 → 30 → 40으로 늘어난다. 성장석 비용은 50 → 120 → 200개(2026-10-13 유저 지정, 이전 10 → 30 → 60). 기본 장착 대미지 보너스는 3% → 5% → 8% → 12%, 해당 단계의 레벨마다 추가 0.15%. 전투 시작 시 보너스를 고정하고 이어하기에서는 유지한다.
 
 ## 성장석 보상
 
-점수 500 이상 + 실제 플레이 시간 2분 이상일 때부터 지급한다.
+2026-10-13부터 판 점수 정산(점수 500당·한 판 최대 6개)을 없애고 **몬스터 드롭**으로 바꿨다. 모든 맵에서 일반/엘리트/보스 구분 없이 처치마다 `StoneDropChance` = 0.05%(강화 주문서 한 부위와 같은 확률)로 1개를 굴린다(`PetLogic.TryDropStone`, 호출: MonsterAI 처치 드롭 지점). 주문서처럼 바닥에 떨어졌다가 가방으로 날아간 뒤 계정 잔액에 더해진다. 20분 판(약 6,000킬) 기준 평균 3개 안팎.
 
-`floor(sqrt(점수 / 500) × 생존 보너스)` · **한 판 최대 6개**.
-
-생존 보너스: 2분 1배, 5분 1.2배, 10분 1.5배. 예: 점수 2000일 때 2분이면 2개, 10분이면 3개. 게임이 멈춰 있던 시간은 기존 RunElapsedSec 계산에 따라 제외한다.
-
-게임오버에서 보상 수량이 올라가는 연출을 보여주고, 인벤토리 전체/기타에 표시한다. 이어하기는 같은 판으로 계산하여 이전 지급액보다 증가한 차액만 준다. 마지막 아이템 획득을 한 번 더 확인하되 이전 판 타이머가 새 판에 보상을 지급할 수 없게 한다.
+인벤토리 전체/기타에 표시하고, 게임오버 결과창 획득 아이템에 주문서 뒤 칸으로 나온다(`RunLootLogic.AddPetStone`, rank 5). 드롭분은 게임오버 정산(`SettleRun`) 때 저장한다. 옛 게임오버 성장석 줄(ScoreBox/PetStoneReward)과 관련 코드(`RunStoneTotal`/`RunStoneNew`)는 삭제했다.
 
 성장석은 계정 재화이며 인벤토리 용량을 쓰지 않고 판매/버리기할 수 없다. 수량과 승급 소모는 **같은 펫 저장 데이터**에 기록한다. 가상 ItemStruct는 표시 전용이며 일반 아이템 지급 API로 성장석을 지급하지 않는다.
+
+## 에너지 판 보상
+
+판 점수 100점당 에너지 1(`ScorePerEnergy`)을 그 판에 함께한 펫(판 시작 시 장착 펫)에게 준다. 최소 점수·시간 조건은 없다. 에너지 최대 1000을 넘는 양은 버려지며, 지급 전에 시간 회복분을 먼저 반영해 회복이 상한에 묻히지 않게 한다. 이어하기는 이전 지급액보다 늘어난 차액만 준다. 장착 펫이 없으면 지급하지 않는다. 게임오버 결과창 획득 아이템 맨 앞 칸에 펫하우스 에너지 게이지의 번개 아이콘과 "x실제 지급량"(상한 반영 후)으로 표시한다(`RunLootLogic.AddEnergy`, rank 0). 실제 지급량이 0이면 칸을 만들지 않는다.
 
 ## 저장·판매
 
@@ -60,7 +60,7 @@ PlayerDBManager의 기존 로그인 배치에 `Pets.v1.5002617`을 추가했다.
 ## 2026-10-11: 돌봄 게이지와 피로도
 
 - 머리 위 포만감, 청결, 기분, 피로도는 0~100 게이지로 표시한다. 상단의 중복 수치는 숨기고, 행동 버튼에는 에너지 비용과 돌봄 효과를 표시한다.
-- 먹이: 포만감 +35, 피로 +5, 에너지 -80. 목욕: 청결 +40, 피로 +10, 에너지 -120. 산책: 기분 +30, 포만감 -15, 청결 -20, 피로 +25, 에너지 -160.
+- 먹이: 포만감 +35, 피로 +10, 에너지 -80. 목욕: 청결 +40, 피로 +20, 에너지 -120. 산책: 기분 +30, 포만감 -15, 청결 -20, 피로 +25, 에너지 -160.
 - 해당 필요 수치가 100이면 그 행동은 회색으로 비활성화되며, 서버도 에너지/경험치/산책 보상 중복 획득을 차단한다. 피로가 100이면 먹이/목욕/산책을 할 수 없다.
 - 잠자기는 피로가 있을 때만 가능하고 6초 연출 동안 중복 요청을 차단한다. 피로 -60, 에너지 +100으로 적용한다. 이전 1시간 잠자기 제한은 피로도 방식으로 대체되었다. 에너지 최대치는 잠자기를 막지 않는다.
 - 에너지는 기존처럼 시간으로 회복하지만 피로도는 활동으로만 증가하며 잠자기로만 감소한다. 시간이 지나거나 재접속해도 피로가 줄지 않는다.
@@ -75,7 +75,7 @@ PlayerDBManager의 기존 로그인 배치에 `Pets.v1.5002617`을 추가했다.
 - 30분 주기 필요 수치 감소 후 배고픔 또는 청결이 30 미만이면 해당 주기마다 친밀도 -5, 건강 -4. 오프라인도 같은 경과 시간으로 계산하며 중복 계산하지 않는다.
 - 친밀도는 단계를 나누지 않는 0~100 수치이며 보상 수령으로 감소하지 않는다. 친밀도 30/60/100에서 성장석 3개/무기 강화 주문서 5장/다이아 100개를 각각 받을 수 있다. 각 보상은 계정별 한국 시간 자정 기준 하루 1회. 자정에는 수령 기록만 초기화하며 친밀도는 유지한다. 인벤토리 지급 실패 시 미수령 상태를 유지한다.
 - 온도계 오른쪽 세 구간에 원래 보상 아이콘과 오른쪽 아래 수량 x3/x5/x100을 표시한다. 구간에 도달하면 해당 아이콘이 초록 받기 버튼으로 교체되고, 수령 후 회색 완료 버튼으로 바뀐다. 단계 표시와 기존 하단 단일 받기 버튼을 제거했다. 진행도/친밀도 등 문구에는 반투명 검정 라운드 배경을 사용한다.
-- 주사: 건강 +40, 에너지 -100, 피로 +5, 성장 경험치 +16, 5.5초. 건강 최대치는 100, 이미 건강하면 비활성. 원본 구리 놀람→울음→사랑 모션과 원작 주사기 접근/움찔/회복 입자 연출을 사용한다.
+- 주사: 건강 +40, 에너지 -100, 피로 +15, 성장 경험치 +16, 5.5초. 건강 최대치는 100, 이미 건강하면 비활성. 원본 구리 놀람→울음→사랑 모션과 원작 주사기 접근/움찔/회복 입자 연출을 사용한다.
 - Health, Affinity, HeartDayKey, HeartClaimedMask는 기존 v1 펫 저장의 선택 필드다. 기존 계정은 건강 100, 친밀도 0, 당일 미수령에서 시작하며 다른 진행도는 유지한다. 보상은 서버에서만 지급하고 기존 계정 배치 저장을 사용한다. 임시 부화는 건강 60으로 주사 테스트가 가능하며 실제 아이템/다이아 지급 및 저장은 하지 않는다.
 
 
@@ -84,7 +84,7 @@ PlayerDBManager의 기존 로그인 배치에 `Pets.v1.5002617`을 추가했다.
 - Newly drawn rounded green/gray/red controls use nine-slice borders, with original care icons and pet clips unchanged.
 - Centered title, care board above pet, growth XP and level/name navigation below pet. Right-hand ability, evolution-stone balance, conditional growth and equipment controls.
 - Daily milestone quantities overlap the icon lower-right. Claims and complete buttons have dedicated 108 x 48 artwork, avoiding sliced-border seams on compact controls.
-- Growth is the existing rank action: visible only at the rank level cap, with enough stones, while idle. Entrance bounce plus a gentle pulse; costs remain 10/30/60. No growth currency or XP rules changed.
+- Growth is the existing rank action: visible only at the rank level cap, with enough stones, while idle. Entrance bounce plus a gentle pulse; costs were 10/30/60 at the time (now 50/120/200). No growth currency or XP rules changed.
 - Green Join Me equips; red Stay Home unequips. Pet arrows use catalog boundaries and never wrap. Guri is the only current catalog entry, so both arrows are gray. Future entries must supply their own progress and animations; unregistered profiles cannot mutate Guri.
 
 ## Pet House action scenery (2026-10-11)

@@ -22,13 +22,8 @@ script PetUI extends Logic
 	property string CustomImageRUID = ""
 	property Vector2 PortraitBasePosition = Vector2(0,-148)
 	property integer ShownRevision = -1
-	property integer ShownRunStones = -1
 	property string EnabledButtonRUID = "e2553674fb1c44a1836b7b56ce27f2b4"
 	property string DisabledButtonRUID = "6a34f87232c649cfaa6d770aae45e293"
-	property TextGUIRendererComponent GameOverStoneText = "4ea8d909-a9d4-4a02-aebb-7f5dc5d34730"
-	property Entity GameOverStoneRow = "20897860-df22-4096-b447-6329b0ea0333"
-	property number RewardAnimationStart = 0
-	property integer RewardAnimatedTotal = -1
 
 	@ExecSpace("ClientOnly")
 	method void BindClick(Entity entity, any callback)
@@ -58,6 +53,12 @@ script PetUI extends Logic
 	@ExecSpace("ClientOnly")
 	method void SetPetMode(boolean enabled)
 	 self.PetMode = enabled self.PetDisplay.Enable = enabled self.PetGearSlots.Enable = enabled
+	 -- 캐릭터 능력치 팝업(PlayerInfo/StatPopup)은 펫 화면 위에 남아 겹쳤다(2026-10-14 유저 리포트) — 펫으로 넘어가면 닫는다
+	 local statPopup = self.PlayerInfo:GetChildByName("StatPopup")
+	 if enabled and isvalid(statPopup) and statPopup.Enable then
+	  statPopup.Enable = false
+	  log("[VRF] PetUI: closed character stat popup on pet mode")
+	 end
 	 self.Avatar.Enable = not enabled self.Nameplate.Enable = not enabled self.GearSlots.Enable = not enabled
 	 -- Item lists and the character inventory data remain independent of pet equipment.
 	 self.InventoryPanel.Enable = true
@@ -120,7 +121,6 @@ script PetUI extends Logic
 	method void OnUpdate(number delta)
 		-- Poll only while visible; no storage or per-frame network requests.
 		local now = _UtilLogic.ElapsedSeconds
-		if not _GameManager.GameOver then self.RewardAnimatedTotal = -1 end
 		if self.PetMode and not self.InventoryRoot.Enable then self:SetPetMode(false) end
 		if self.PetMode and self.InventoryRoot.Enable then
 			if now >= self.NextRefresh then self.NextRefresh = now + 15 _PetLogic:RequestState() end
@@ -137,18 +137,6 @@ script PetUI extends Logic
 				self.PetDisplay:GetChildByName("Portrait").UITransformComponent.anchoredPosition=Vector2(self.PortraitBasePosition.x,self.PortraitBasePosition.y+entry.footOffset*scale)
 				_PetLogic:AlignCustomPortrait(self.PetDisplay:GetChildByName("Portrait"),entry,entry.inventoryPixelScale)
 			end
-		end
-		if _GameManager.GameOver and isvalid(self.GameOverStoneRow) and self.GameOverStoneRow.Parent.Enable then
-			local total = _PetLogic.RunStoneTotal
-			self.GameOverStoneRow.Enable = total > 0
-			if total ~= self.RewardAnimatedTotal then self.RewardAnimatedTotal = total self.RewardAnimationStart = now end
-			local t = math.min(1, (now - self.RewardAnimationStart) / 0.7)
-			local icon = self.GameOverStoneRow:GetChildByName("Icon")
-			icon.UITransformComponent.anchoredPosition = Vector2(-85 - (1 - t) * 170, -49 * (1 - t) + math.sin(t * math.pi) * 25)
-			local size = 0.7 + t * 0.3
-			icon.UITransformComponent.UIScale = Vector3(size, size, 1)
-			icon.SpriteGUIRendererComponent.Color = Color(1, 1, 1, 0.3 + t * 0.7)
-			self.GameOverStoneText.Text = _LocalizationService:GetTextFormat("PET_REWARD_FORMAT", math.floor(total * (1 - (1 - t) * (1 - t))))
 		end
 	end
 

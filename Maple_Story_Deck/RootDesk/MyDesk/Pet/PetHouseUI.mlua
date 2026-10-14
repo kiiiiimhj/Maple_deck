@@ -67,6 +67,10 @@ script PetHouseUI extends Logic
 	property string CustomImageRUID = ""
 	property string CustomIdlePose = "stand"
 	property number IdleAnimationStart = 0
+	property any OduckPoolBack = nil
+	property any OduckPoolFront = nil
+	property boolean OduckPoolReady = false
+	property string OduckPoolRUID = "dba02e54ed704cdcaf9a8e25bc9c0f1c"
 	property any DuckyFoodBowl = nil
 	property boolean DuckyBowlReady = false
 	property string DuckyBowlRUID = "5dbbe59d2e5b4a288dca7c01c40db2e6"
@@ -286,16 +290,21 @@ script PetHouseUI extends Logic
 		for _,action in ipairs({"feed","wash","walk","inject"}) do
 			local choice = _PetLogic:GetCareConfig(action)
 			local block = owned and _PetLogic:GetCareBlockReason(pet,action) or "PET_NO_PET"
-			local loaded = (entry.frames==nil or _PetLogic.TtungttangReady) and (action ~= "feed" or entry.nativeWalk or (entry.frames~=nil and _PetLogic.TtungttangReady) or self.FeedingReady) and (action ~= "walk" or self.WalkReady) and ((action ~= "wash" and action ~= "inject") or self.CareBackdropReady) and (entry.id~="5000498" or action~="feed" or self.DuckyBowlReady)
+			local loaded = (entry.frames==nil or _PetLogic.TtungttangReady) and (action ~= "feed" or entry.nativeWalk or (entry.frames~=nil and _PetLogic.TtungttangReady) or self.FeedingReady) and (action ~= "walk" or self.WalkReady) and ((action ~= "wash" and action ~= "inject") or self.CareBackdropReady) and (entry.id~="5000498" or action~="feed" or self.DuckyBowlReady) and (entry.id~="oduck" or action~="feed" or self.OduckPoolReady)
 			local keys = {feed="PET_FEED",wash="PET_WASH",walk="PET_WALK",inject="PET_INJECT"}
 			self:SetButton(action,canGrow and loaded and block=="" and pet.Energy>=choice.energy,keys[action])
 			local button = self.PetPanel:GetChildByName(action)
-			button:GetChildByName("Cost").TextGUIRendererComponent.Text = _LocalizationService:GetTextFormat("PET_ENERGY_CHANGE",-choice.energy)
+			-- Energy cost sits on the name line, e.g. "먹이(-100)".
+			local label = button:GetChildByName("Label").TextGUIRendererComponent
+			label.Text = label.Text .. "(-" .. tostring(choice.energy) .. ")"
+			button:GetChildByName("Cost").Enable = false
 			button:GetChildByName("Effect").TextGUIRendererComponent.Text = block ~= "" and _LocalizationService:GetText(_PetLogic:GetPetMessageKey(entry.id,block)) or _LocalizationService:GetTextFormat("PET_CARE_EFFECT",_LocalizationService:GetText(choice.label),choice.gain,choice.fatigue)
 		end
 		local sleepBlock = owned and _PetLogic:GetCareBlockReason(pet,"sleep") or "PET_NO_PET"
 		self:SetButton("sleep",canGrow and self.SleepCushionReady and (entry.frames==nil or _PetLogic.TtungttangReady) and sleepBlock=="","PET_SLEEP")
-		self.PetPanel:GetChildByName("sleep"):GetChildByName("Cost").TextGUIRendererComponent.Text = _LocalizationService:GetTextFormat("PET_ENERGY_CHANGE","+"..tostring(_PetLogic.SleepEnergyRecovery))
+		local sleepLabel = self.PetPanel:GetChildByName("sleep"):GetChildByName("Label").TextGUIRendererComponent
+		sleepLabel.Text = sleepLabel.Text .. "(+" .. tostring(_PetLogic.SleepEnergyRecovery) .. ")"
+		self.PetPanel:GetChildByName("sleep"):GetChildByName("Cost").Enable = false
 		self.PetPanel:GetChildByName("sleep"):GetChildByName("Effect").TextGUIRendererComponent.Text = sleepBlock ~= "" and _LocalizationService:GetText(sleepBlock) or _LocalizationService:GetTextFormat("PET_SLEEP_EFFECT",_PetLogic.SleepFatigueRecovery)
 		self:RefreshNeeds(owned,pet)
 		self:RefreshAffinity(owned,pet,busy)
@@ -896,6 +905,7 @@ script PetHouseUI extends Logic
 	method void OnBeginPlay()
 	 self:InitializeArtwork()
 	 self:InitializeDuckyFoodBowl()
+	 self:InitializeOduckFeedingPool()
 	 self:InitializeActionScenery()
 	 self:InitializeWalkArtwork()
 	 self:InitializeGrowthDisplay()
@@ -980,6 +990,7 @@ script PetHouseUI extends Logic
 		if action=="sleep" and not self.SleepCushionReady then return end
 		if action=="feed" and entry.id=="5002617" and not self.FeedingReady then return end
 		if action=="feed" and entry.id=="5000498" and not self.DuckyBowlReady then return end
+		if action=="feed" and entry.id=="oduck" and not self.OduckPoolReady then return end
 		if action=="walk" and not self.WalkReady then return end
 		if (action=="wash" or action=="inject") and not self.CareBackdropReady then return end
 		if action=="rank" and not self.PetPanel:GetChildByName("rank").ButtonComponent.Enable then return end
@@ -1065,6 +1076,7 @@ script PetHouseUI extends Logic
 		local portrait = self.PetDisplay:GetChildByName("Portrait")
 		self.PetDisplay:GetChildByName("Food").Enable = false
 		self:SetDuckyFoodBowl(active,elapsed)
+		self:SetOduckFeedingPool(active,elapsed)
 		if not active then self.FeedingFrame = 0 return end
 		if self:GetDisplayedPet().id~="5002617" then return end
 		local frame = math.floor(math.max(0, elapsed) / 0.15) % #self.FeedingRUIDs + 1
@@ -1152,12 +1164,58 @@ script PetHouseUI extends Logic
 	 self.SleepCushion=nil self.SleepCushionReady=false
 	 if isvalid(self.DuckyFoodBowl) then self.DuckyFoodBowl:Destroy() end
 	 self.DuckyFoodBowl=nil self.DuckyBowlReady=false
+	 if isvalid(self.OduckPoolBack) then self.OduckPoolBack:Destroy() end
+	 if isvalid(self.OduckPoolFront) then self.OduckPoolFront:Destroy() end
+	 self.OduckPoolBack=nil self.OduckPoolFront=nil self.OduckPoolReady=false
 	 if isvalid(self.ActivityScene) then self.ActivityScene:Destroy() end
 	 if isvalid(self.WalkNotice) then self.WalkNotice:Destroy() end
 	 if isvalid(self.WalkReward) then self.WalkReward:Destroy() end
 	 if isvalid(self.WalkSmile) then self.WalkSmile:Destroy() end
 	 self.WalkScene = nil self.WalkNotice = nil self.WalkReward = nil self.WalkSmile = nil self.WalkLayers = {}
 	 self.ActivityScene=nil self.CareBackdrop=nil self.CareBackdropReady=false self.ShownBackdropRUID="" self.SceneAction=""
+	end
+
+
+	@ExecSpace("ClientOnly")
+	method void InitializeOduckFeedingPool()
+		if isvalid(self.OduckPoolBack) and isvalid(self.OduckPoolFront) then return end
+		local portrait=self.PetDisplay:GetChildByName("Portrait")
+		local back=self:WalkLayer(self.PetDisplay,"OduckPoolBack",self.OduckPoolRUID,384,384,0,0)
+		local front=self:WalkLayer(self.PetDisplay,"OduckPoolFront",self.OduckPoolRUID,384,384,0,0)
+		back.Enable=false front.Enable=false
+		self.OduckPoolBack=back self.OduckPoolFront=front self.OduckPoolReady=false
+		_UILogic:SetSiblingIndex(back.UITransformComponent,_UILogic:GetSiblingIndex(portrait.UITransformComponent))
+		_UILogic:SetSiblingIndex(front.UITransformComponent,_UILogic:GetSiblingIndex(portrait.UITransformComponent)+1)
+		-- Reuse the exact pool texture for the near wall: crop its lower portion, never stretch it.
+		local image=front.SpriteGUIRendererComponent
+		image.Type=ImageType.Filled image.FillMethod=FillMethodType.Vertical image.FillOrigin=0 image.FillAmount=0.26
+		_ResourceService:PreloadAsync({self.OduckPoolRUID},function(results)
+			if not isvalid(self) or not isvalid(back) or not isvalid(front) then return end
+			local ready=true for _,result in pairs(results) do if result~=PreloadResultStatus.Success then ready=false end end
+			self.OduckPoolReady=ready
+			log("[VRF] PET-ODUCK round feeding pool ready="..tostring(ready))
+			if self.PetMode then self:Refresh() end
+		end)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetOduckFeedingPool(boolean active, number elapsed)
+		local back=self.OduckPoolBack local front=self.OduckPoolFront
+		if not isvalid(back) or not isvalid(front) then return end
+		local show=active and self.PetMode and self.OduckPoolReady and self:GetDisplayedPet().id=="oduck"
+		back.Enable=show front.Enable=show
+		if not show then return end
+		local size=128*_PetLogic:GetCustomPixelScale(back,3)
+		back.UITransformComponent.RectSize=Vector2(size,size)
+		back.UITransformComponent.anchoredPosition=Vector2(0,self:GetPortraitY()+size*0.28-55)
+		_PetLogic:AlignCustomPortrait(back,{frames={},canvas=128},3)
+		front.UITransformComponent.RectSize=back.UITransformComponent.RectSize
+		front.UITransformComponent.anchoredPosition=back.UITransformComponent.anchoredPosition
+		local duration=_PetLogic:GetCareDuration("feed")
+		local fade=math.max(0,math.min(1,elapsed/0.18,(duration-elapsed)/0.22))
+		fade=fade*fade*(3-2*fade)
+		back.SpriteGUIRendererComponent.Color=Color(1,1,1,fade)
+		front.SpriteGUIRendererComponent.Color=Color(1,1,1,fade)
 	end
 
 	@ExecSpace("ClientOnly")

@@ -1,0 +1,52 @@
+	@ExecSpace("ClientOnly")
+	method void PreloadOduckArtwork()
+		self.OduckReady=false local assets={} local seen={}
+		for _,ruid in pairs(self.OduckMotions) do if not seen[ruid] then seen[ruid]=true table.insert(assets,ruid) end end
+		table.insert(assets,self.PetDuckMirrorRUID)
+		_ResourceService:PreloadAsync(assets,function(results)
+			if not isvalid(self) then return end
+			local ready=true for _,status in pairs(results) do if status~=PreloadResultStatus.Success then ready=false end end
+			if ready then
+				for _,ruid in ipairs({self.OduckMotions.stand,self.OduckMotions.dance,self.PetDuckMirrorRUID}) do
+					local metrics=_CardManager:GetSpriteMetrics(ruid)
+					if metrics.w<=0 or metrics.h<=0 then ready=false end
+				end
+			end
+			self.OduckReady=ready log("[VRF] PET-ODUCK original motions and mirror ready="..tostring(ready))
+			if _PetHouseUI.PetMode then _PetHouseUI:Refresh() end
+		end)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetOduckBuff()
+		local active=self.PetDuckBuffActive
+		self.PetDuckBuffRemaining=0 self.PetDuckBuffActive=false
+		if active then log("[VRF] PET-ODUCK damage buff ended") end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void UpdateOduckBuff(number delta)
+		if not self.PetDuckBuffActive then return end
+		if not _GameManager.GameStarted or _GameManager.GameOver or self.RunPetId~="oduck" then self:ResetOduckBuff() return end
+		if _GameManager:IsGamePaused() or _GameManager.SafeAreaFrozen then return end
+		self.PetDuckBuffRemaining=math.max(0,self.PetDuckBuffRemaining-math.max(0,delta))
+		if self.PetDuckBuffRemaining<=0 then self:ResetOduckBuff() end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void UpdateOduckVisual(table v, number elapsed)
+		if not isvalid(v.body) then self:ClearPetSkillVisual() return end
+		local base=_CardManager:GetSpriteMetrics(self.OduckMotions.stand)
+		local metrics=_CardManager:GetSpriteMetrics(self.OduckMotions.dance)
+		if base.h<=0 or metrics.h<=0 then return end
+		local scale=self.PetDuckHeight/base.h
+		local fade=math.min(1,elapsed/0.18)*math.min(1,math.max(0,(self.PetDuckDanceDuration-elapsed)/0.30))
+		local p=v.center
+		-- Leave the native clip's frame offsets and pivots intact; no per-frame scale pulses.
+		local center=Vector3(p.x+(0.5-metrics.px)*metrics.w*scale,p.y+(0.5-metrics.py)*metrics.h*scale,p.z)
+		self:PlacePetSkillSprite(v.body,center,metrics.w*scale,0,fade)
+		local mirrorY=p.y+self.PetDuckHeight+0.45+math.sin(elapsed*3)*0.025
+		self:PlacePetSkillSprite(v.mirror,Vector3(p.x,mirrorY,p.z-0.05),0.75,0,fade*0.90)
+		if not v.soundPlayed then v.soundPlayed=true _SoundOptionLogic:PlaySfx("f46c0ff22aa84fd4b0e762ed7abbe1ed",0.45) end
+		if elapsed>=self.PetDuckDanceDuration then self:ClearPetSkillVisual() end
+	end

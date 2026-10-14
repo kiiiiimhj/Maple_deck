@@ -14926,6 +14926,8 @@ script CardManager extends Logic
 	property Entity elementalAdeptBuff = "8550cf47-2d58-4965-9650-2324b1fdbe7b"
 	property SpriteGUIRendererComponent elementalAdeptFill = "8de30c7d-5eaa-4783-b8e1-bf5611b91c5c"
 	-- 필드 버프 포션 3종(BuffPotionLogic, 2026-09-18) — 시간제 아이콘. 1=흡혈 2=크리티컬 3=파워
+	property any oduckBuff = nil
+	property any oduckBuffFill = nil
 	property Entity vampirePotionBuff = "912dac6b-4f48-4f6f-b3c8-fa320acb56f8"
 	property SpriteGUIRendererComponent vampirePotionFill = "6d54c943-baee-4da7-8ec1-8d10b9e76ccd"
 	property Entity critPotionBuff = "e41e761e-024c-4fc8-b7f3-ebd0a22198cf"
@@ -21578,7 +21580,7 @@ script CardManager extends Logic
 		if frozen and last > 0 and self._activeCooldowns ~= nil then
 			local frozenFor = now - last
 			for _, entry in ipairs(self._activeCooldowns) do
-				if paused or not entry.reversed then entry.startTime = entry.startTime + frozenFor end
+				if paused or not entry.reversed or entry.pauseInSafeArea then entry.startTime = entry.startTime + frozenFor end
 			end
 			return
 		end
@@ -22247,6 +22249,7 @@ script CardManager extends Logic
 		elseif panel == self.magicGuardBuff then return "magicguard"
 		elseif panel == self.highWisdomBuff then return "highwisdom"
 		elseif panel == self.elementalAdeptBuff then return "elementaladept"
+		elseif panel == self.oduckBuff then return "pet_oduck"
 		elseif panel == self.vampirePotionBuff then return "potion_vampire"
 		elseif panel == self.critPotionBuff then return "potion_crit"
 		elseif panel == self.powerPotionBuff then return "potion_power"
@@ -22290,6 +22293,7 @@ script CardManager extends Logic
 		elseif buffName == "magicguard" then return self.magicGuardBuff
 		elseif buffName == "highwisdom" then return self.highWisdomBuff
 		elseif buffName == "elementaladept" then return self.elementalAdeptBuff
+		elseif buffName == "pet_oduck" then return self.oduckBuff
 		elseif buffName == "potion_vampire" then return self.vampirePotionBuff
 		elseif buffName == "potion_crit" then return self.critPotionBuff
 		elseif buffName == "potion_power" then return self.powerPotionBuff
@@ -22336,10 +22340,44 @@ script CardManager extends Logic
 		self:HideBuffIcon(self.magicGuardBuff, self.magicGuardFill)
 		self:HideBuffIcon(self.highWisdomBuff, self.highWisdomFill)
 		self:HideBuffIcon(self.elementalAdeptBuff, self.elementalAdeptFill)
+		self:HideOduckBuffIcon()
 		self:HideBuffIcon(self.vampirePotionBuff, self.vampirePotionFill)
 		self:HideBuffIcon(self.critPotionBuff, self.critPotionFill)
 		self:HideBuffIcon(self.powerPotionBuff, self.powerPotionFill)
 		self:HideBuffIcon(self.expPotionBuff, self.expPotionFill)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ShowOduckBuffIcon(number duration)
+		if duration<=0 or not isvalid(self.vampirePotionBuff) then return end
+		if not isvalid(self.oduckBuff) then
+			local panel=_SpawnService:SpawnByEntity(self.vampirePotionBuff,"OduckDanceBuff",Vector3(0,0,0),self.vampirePotionBuff.Parent,false)
+			panel.Enable=false
+			-- SpawnByEntity copies the panel itself; create its two children explicitly.
+			local icon=_SpawnService:SpawnByEntity(self.vampirePotionBuff:GetChildByName("Icon"),"Icon",Vector3(0,0,0),panel,false)
+			local fill=_SpawnService:SpawnByEntity(self.vampirePotionBuff:GetChildByName("Fill"),"Fill",Vector3(0,0,0),panel,false)
+			for _,child in ipairs({icon,fill}) do
+				local t=child.UITransformComponent
+				t.AnchorsMin=Vector2(0,0) t.AnchorsMax=Vector2(1,1) t.Pivot=Vector2(0.5,0.5)
+				t.RectSize=Vector2(50,50) t.anchoredPosition=Vector2(0,0) t.UIScale=Vector3(1,1,1)
+			end
+			icon.SpriteGUIRendererComponent.ImageRUID=DataRef(_PetLogic.PetDuckIconRUID)
+			_UILogic:SetSiblingIndex(icon.UITransformComponent,0)
+			_UILogic:SetSiblingIndex(fill.UITransformComponent,1)
+			self.oduckBuff=panel self.oduckBuffFill=fill.SpriteGUIRendererComponent
+		end
+		-- Keep the potion HUD's size, placement, radial countdown and shared reflow.
+		self:ShowBuffIcon(self.oduckBuff,self.oduckBuffFill,duration)
+		for _,entry in ipairs(self._activeCooldowns) do
+			if entry.overlay==self.oduckBuffFill then entry.pauseInSafeArea=true end
+		end
+		log("[VRF] PET-ODUCK passive countdown shown duration="..duration)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void HideOduckBuffIcon()
+		if not isvalid(self.oduckBuff) then return end
+		self:HideBuffIcon(self.oduckBuff,self.oduckBuffFill)
 	end
 
 	@ExecSpace("ClientOnly")
@@ -33284,6 +33322,9 @@ script CardManager extends Logic
 
 	method void OnEndPlay()
 		if self:IsClient() then
+			self:HideOduckBuffIcon()
+			if isvalid(self.oduckBuff) then self.oduckBuff:Destroy() end
+			self.oduckBuff=nil self.oduckBuffFill=nil
 			if self._choiceClickHandler1 then self.choiceTouch1.Entity:DisconnectEvent(UITouchDownEvent, self._choiceClickHandler1) end
 			if self._choiceClickHandler2 then self.choiceTouch2.Entity:DisconnectEvent(UITouchDownEvent, self._choiceClickHandler2) end
 			if self._choiceClickHandler3 then self.choiceTouch3.Entity:DisconnectEvent(UITouchDownEvent, self._choiceClickHandler3) end
