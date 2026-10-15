@@ -50,7 +50,7 @@ PlayerDBManager의 기존 로그인 배치에 `Pets.v1.5002617`을 추가했다.
 
 - Lobby battle tab has a Pet button on the left navigation rail. It opens PetHouseGroup with the approved wide wooden room; closing or leaving the lobby ends all care animations.
 - Feeding, washing, walking, resting, equipping the pet, promotion and egg purchase entry are managed by PetHouseUI. Walking crosses the room floor; washing renders a falling stream, animated droplets and floor splashes only after the server confirms success.
-- Inventory keeps Guri's portrait and the original inventory list. PetGearSlots is a distinct three-slot visual placeholder, currently non-interactive and labelled Coming soon. It does not bind character gear, modify character equipment or create pet equipment items. Actual pet equipment and its separate persistence are future work.
+- PetGearSlots now equips Ttungttang-exclusive hat, clothes and necklace independently of character equipment. Click a possessed slot to equip/remove it; character inventory and equipment remain independent.
 - Existing ownership, growth, energy, evolution-stone reward and durable account storage rules are retained. Newly drawn evolution stone is shared by the inventory item, care screen and game-over reward.
 - Egg product remains unregistered; checkout is disabled until a real product ID and price are configured. Maker temporary hatch remains non-persistent.
 - Removed the recursive PushState battle guard; RequestAction still validates battle lock on the server, and state replies are delivered once.
@@ -116,3 +116,16 @@ PlayerDBManager의 기존 로그인 배치에 `Pets.v1.5002617`을 추가했다.
 - 장착한 펫의 효과는 새 게임/다시하기 시작 시 고정한다. 이어하기에서는 보너스를 유지한다. 일반 치명타 판정 및 전용 에너지볼트/체인라이트닝 판정에 뚱땅의 확률을 더하며, 구리의 대미지와 동시에 적용하지 않는다. 인벤토리는 함께하는 펫의 외형을 표시하고 기존 펫 장비 3칸은 그대로 독립적으로 유지한다.
 - 두 알 상품은 등록 전까지 구매할 수 없다. 메이커의 임시 부화는 선택한 펫만 부화하며 두 펫의 테스트 프로필과 공용 테스트 재화를 저장하지 않는다. 실제 다이아/아이템/뽑기권을 지급하지 않는다.
 - 신규 그림, 프레임, 생성 프롬프트 및 적용 자산 정보는 `ArtSource/pet-ttungttang`에 보관한다.
+
+
+## Ttungttang exclusive equipment — 2026-10-14
+
+- Starlight Beret / 별빛 베레모: critical damage +10 percentage points.
+- Walking Vest / 산책 조끼: attack ×1.05.
+- Heart Collar / 하트 목걸이: critical chance +5 percentage points.
+- Account schema v6 stores each pet's GearOwnedMask and GearEquippedMask. V1–V5 saves migrate without resetting pets or wallet; non-owned/equipped bits and equipment on another species are rejected.
+- `GrantPetGear(userId, mask)` is server-only (hat=1, clothes=2, necklace=4). Release acquisition is not configured yet. `RequestTestPetGear` is Maker-only and creates a non-persistent preview; it never grants live items or writes test progress.
+- Inventory → Pet → Try gear / 장비 시험 equips all three for Maker tests. Slot clicks then toggle each item. Ttungttang must be owned/equipped for this inventory view.
+- Existing PNG pet frames are preserved. Transparent 128×128 equipment layers have measured integer head anchors, foreground paw/fur masks, binary alpha and Point filtering. Inventory and house share the current pet frame and renderer flips. The combat charm jump uses warmed fixed-texture actors and an explicit server equipment snapshot; no independent animation clock.
+- Validation: actual slot and care-button events, save/JSON round trip, old-save migration, invalid ownership/type rejection, every 76 frame in both directions, and actual first/repeated U casts. Original account and temporary combat fixtures restored after testing.
+- Artwork, prompts, all pose previews and verification reports: `ArtSource/ttung-exclusive-gear/outputs`. Gear stats are snapshotted at run start alongside pet stats; unequipped/other pets receive no gear bonus.

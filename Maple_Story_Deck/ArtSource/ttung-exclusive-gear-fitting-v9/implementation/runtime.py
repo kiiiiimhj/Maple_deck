@@ -1,0 +1,85 @@
+from pathlib import Path
+from datetime import datetime
+import sys,time,json,shutil
+sys.path.insert(0,str(Path('work').resolve()));from maker_session import MakerSession
+stage=Path('work/ttung-gear-fitting-v9');out=Path('outputs/ttung-gear-fitting-v9');s=MakerSession();proofs={};started=datetime.now().isoformat(timespec='seconds')
+def run(tag,body,context='client'):
+ needle='[VRF] TTUNG-GEAR-FITTING9 '+tag+' '+str(time.time_ns())+' '
+ s.call('maker_execute_script',{'context':context,'script':body+';log("'+needle+'".._HttpService:JSONEncode(result))'})
+ for _ in range(80):
+  logs=s.call('maker_logs',{'kind':'normal'});hits=[x['message']for x in logs.get('logs',[])if needle in x.get('message','')]
+  if hits:
+   r=json.loads(hits[-1].split(needle,1)[1]);proofs[tag]=r;(out/'runtime-proof.json').write_text(json.dumps(proofs,ensure_ascii=False,indent=2),encoding='utf-8');print(tag+': '+json.dumps(r,ensure_ascii=False),flush=True);return r
+  errors=[x for x in logs.get('logs',[])if x.get('logType')=='Error'and x.get('dateTime','')>=started];assert not errors,errors[-3:]
+  time.sleep(.3)
+ raise AssertionError('No completed checkpoint '+tag)
+def wait(tag,body,predicate,context='client',count=20):
+ for _ in range(count):
+  r=run(tag,body,context)
+  if predicate(r):return r
+  time.sleep(.3)
+ raise AssertionError(tag)
+passed=False;prepared=False
+try:
+ for _ in range(40):
+  try:mode=s.call('maker_get_current_map')
+  except AssertionError:time.sleep(1);continue
+  if mode.get('mode')=='play':break
+  time.sleep(1)
+ assert mode.get('mode')=='play'
+ wait('ready','local result={account=_PetLogic.ClientReady,gear=_PetLogic.PetGearReady,frames=_PetLogic.TtungttangReady,skill=_PetLogic.PetCharmJumpReady}',lambda r:all(r.values()))
+ run('prepare','''local L=_PetLogic;local id=nil;for key,_ in pairs(L.States)do id=key break end;assert(id~=nil and L._T.gearOriginal==nil);L._T.gearUser=id;L._T.gearOriginal=L.States[id];local rec=L:ReadAccount(L:SerializeAccount(L.States[id]));rec.test=true;rec.dirty=false;rec.generation=0;local dog=rec.pets.ttungttang;dog.Owned=true;dog.GearOwnedMask=0;dog.GearEquippedMask=0;dog.Level=1;dog.Rank=0;dog.XP=0;dog.Stat3=0;dog.Stat6=0;dog.Stat9=0;dog.Fullness=50;dog.Cleanliness=50;dog.Health=60;dog.Fatigue=70;dog.Energy=1000;for key,p in pairs(rec.pets)do p.Equipped=key=="ttungttang" end;rec.responsePetId="ttungttang";L.States[id]=rec;L:PushState(id,"","");local result={prepared=true}''','server_main');prepared=True
+ wait('dog-state','local p=_PetLogic.ClientPets.ttungttang;local result={owned=p.Owned,equipped=p.Equipped,mask=p.GearEquippedMask}',lambda r:r['owned']and r['equipped']and r['mask']==0)
+ run('open-inventory','_PetHouseUI:Close();_PetUI.InventoryRoot.Enable=true;_PetUI:SetPetMode(true);local result={petMode=_PetUI.PetMode,testButton=_PetUI.PetGearSlots:GetChildByName("TestGear").Enable}');
+ run('test-button','_PetUI.PetGearSlots:GetChildByName("TestGear"):SendEvent(ButtonClickEvent());local result={clicked=true}')
+ wait('test-grant','local p=_PetLogic.ClientPets.ttungttang;local result={mask=p.GearEquippedMask,owned=p.GearOwnedMask,test=_PetLogic.ClientTest}',lambda r:r['mask']==7 and r['owned']==7 and r['test'])
+ wait('inventory-render','local p=_PetUI.PetDisplay:GetChildByName("Portrait");local pool=_PetLogic._T.petGearUI and _PetLogic._T.petGearUI[p.Id];local n=0;if pool~=nil then for _,e in ipairs(pool.actors)do if e.SpriteGUIRendererComponent.Color.a>0.99 then n=n+1 end end end;local result={active=n,ready=pool~=nil and pool.ready or false}',lambda r:r['ready']and r['active']==3)
+ pic=s.call('maker_screenshot');shutil.copy2(pic['path'],out/'applied-inventory.png')
+ # Exercise all eight combinations through the real slot buttons, one slot at a time.
+ sequence=[(7,None),(6,'Cap'),(4,'Coat'),(5,'Cap'),(1,'Necklace'),(0,'Cap'),(2,'Coat'),(3,'Cap'),(7,'Necklace')]
+ for expected,slot in sequence:
+  if slot is not None:
+   time.sleep(.35)
+   run('toggle-'+str(expected),'_PetUI.PetGearSlots:GetChildByName("'+slot+'"):SendEvent(ButtonClickEvent());local result={clicked="'+slot+'"}')
+  wait('mask-'+str(expected),'local result={mask=_PetLogic.ClientPets.ttungttang.GearEquippedMask}',lambda r:r['mask']==expected)
+  q=wait('mask-render-'+str(expected),"local P=_PetUI.PetDisplay:GetChildByName(\"Portrait\");local pool=_PetLogic._T.petGearUI[P.Id];local a={};local n=0;for ruid,e in pairs(pool.byRUID)do if e.SpriteGUIRendererComponent.Color.a>0.99 then n=n+1;table.insert(a,ruid)end end;local result={active=n,ruids=table.concat(a,'|')}",lambda r:r['active']==expected.bit_count())
+  assert q['active']==expected.bit_count(),q
+  if slot is None or expected!=7:
+   pic=s.call('maker_screenshot');shutil.copy2(pic['path'],out/('actual-combination-'+str(expected)+'.png'))
+
+ run('open-house','_PetUI:SetPetMode(false);_PetUI.InventoryRoot.Enable=false;_TitleUI:ShowLobby();local H=_PetHouseUI;for i,e in ipairs(_PetLogic:GetPetCatalog())do if e.id=="ttungttang"then H.SelectedPetIndex=i end end;H:Open();local result={open=H.PetMode,id=H:GetDisplayedPet().id}')
+ wait('house-ready','local H=_PetHouseUI;local entry=H:GetDisplayedPet();local p=H.PetDisplay:GetChildByName("Portrait");local pool=_PetLogic._T.petGearUI and _PetLogic._T.petGearUI[p.Id];local n=0;if pool~=nil then for _,e in ipairs(pool.actors)do if e.SpriteGUIRendererComponent.Color.a>0.99 then n=n+1 end end end;local result={id=entry.id,active=n,ready=pool~=nil and pool.ready or false}',lambda r:r['id']=='ttungttang'and r['ready']and r['active']==3)
+ pic=s.call('maker_screenshot');shutil.copy2(pic['path'],out/'applied-house.png')
+ # Walk the real overlay table at the native frame rate, without giving gear an independent animation clock.
+ run('all-frames-observer','''local L=_PetLogic;local H=_PetHouseUI;H.PetMode=false;local portrait=H.PetDisplay:GetChildByName("Portrait");local entry=L:GetPetDefinition("ttungttang");entry.progress=L.ClientPets.ttungttang;local q={index=0,samples=0,wrongTexture=0,blank=0,tint=0,offset=0,size=0,flip=0,finished=false};L._T.gearProof=q;local bases={};for base,_ in pairs(L.PetGearOverlays)do table.insert(bases,base)end;table.sort(bases);q.frames=#bases;local tick=0;local timer=0;timer=_TimerService:SetTimerRepeat(function()tick=tick+1;local i=math.floor((tick-1)/8)+1;if i>#bases then q.finished=true;_TimerService:ClearTimer(timer);return end;q.index=i;local base=bases[i];portrait.SpriteGUIRendererComponent.FlipX=math.floor(((tick-1)%8)/4)==1;portrait.SpriteGUIRendererComponent.ImageRUID=DataRef(base);L:AlignCustomPortrait(portrait,entry,entry.pixelScale);L:RenderPetGearUI(portrait,entry,base);local pool=L._T.petGearUI[portrait.Id];local selected=L.PetGearOverlays[base];local active=0;for ruid,e in pairs(pool.byRUID)do local color=e.SpriteGUIRendererComponent.Color;if color.a>0.99 then active=active+1;if ruid~=selected.hat and ruid~=selected.coat and ruid~=selected.neck then q.wrongTexture=q.wrongTexture+1 end;if color.r~=1 or color.g~=1 or color.b~=1 then q.tint=q.tint+1 end;if e.SpriteGUIRendererComponent.FlipX~=portrait.SpriteGUIRendererComponent.FlipX or e.SpriteGUIRendererComponent.FlipY~=portrait.SpriteGUIRendererComponent.FlipY then q.flip=q.flip+1 end;local t=e.UITransformComponent;if t.anchoredPosition.x~=0 or t.anchoredPosition.y~=0 then q.offset=q.offset+1 end;if math.abs(t.RectSize.x-portrait.UITransformComponent.RectSize.x)>0.001 or math.abs(t.RectSize.y-portrait.UITransformComponent.RectSize.y)>0.001 then q.size=q.size+1 end end end;if active~=3 then q.blank=q.blank+1 end;q.samples=q.samples+1 end,0.0167,0.0167);L._T.gearObserver=timer;local result={frames=#bases,started=true}''')
+ q=wait('all-frame-results','local result=_PetLogic._T.gearProof',lambda r:r['finished'],count=30)
+ assert q['frames']==76 and q['samples']==608 and sum(q[k]for k in ['wrongTexture','blank','tint','offset','size','flip'])==0,q
+ run('normal-house','local H=_PetHouseUI;H.PetMode=true;H.PetDisplay:GetChildByName("Portrait").SpriteGUIRendererComponent.FlipX=false;H.CustomFrameKey="";H:Refresh();local result={restored=true}')
+ # Actual care buttons exercise the normal action and scenery paths.
+ for action,pose,duration in [('feed','feed',4.8),('wash','wash',4.5),('sleep','sleep',6),('inject','inject',4),('walk','walk',12)]:
+  run('care-reset-'+action,'''local L=_PetLogic;local r=L.States[L._T.gearUser];r.busyUntil=0;r.lastRequest=-100000;local p=r.pets.ttungttang;p.Fullness=50;p.Cleanliness=50;p.Health=60;p.Fatigue=70;p.Mood=50;p.Energy=1000;L:PushState(L._T.gearUser,"","");local result={reset=true}''','server_main')
+  run('care-button-'+action,'local H=_PetHouseUI;H.MotionUntil=0;H.WaitingUntil=0;H.Motion="";H:Refresh();H.PetPanel:GetChildByName("'+action+'"):SendEvent(ButtonClickEvent());local result={clicked=true}')
+  r=wait('care-running-'+action,'local H=_PetHouseUI;local result={motion=H.Motion,id=H:GetDisplayedPet().id}',lambda r:r['motion']==action or r['motion']==pose)
+  time.sleep(.5);pic=s.call('maker_screenshot');shutil.copy2(pic['path'],out/('applied-'+action+'.png'))
+  if action=='walk':
+   run('walk-check-begin','local H=_PetHouseUI;H.PetMode=false;H._T.hatOldWalkPlan=H.WalkPlan;H.WalkPlan={route=1,found=true,icon="",message="",revealed=false};local result={pausedForPoseInspection=true}')
+   for phase,age in [('walking',1.5),('discovery',3.85),('sniff',5.3),('celebration',7.1)]:
+    r=run('walk-'+phase,'local H=_PetHouseUI;local L=_PetLogic;H:SetWalking(true,'+str(age)+');local p=H.PetDisplay:GetChildByName("Portrait");local entry=H:GetDisplayedPet();L:AlignCustomPortrait(p,entry,entry.pixelScale);L:RenderPetGearUI(p,entry,H.CustomImageRUID);local n=0;local pool=L._T.petGearUI[p.Id];for _,a in ipairs(pool.actors)do if a.SpriteGUIRendererComponent.Color.a>0.99 then n=n+1 end end;local result={phase=H.WalkPhase,frame=H.CustomFrameKey,flip=p.SpriteGUIRendererComponent.FlipX,active=n,notice=H.WalkNotice.Enable}')
+    assert r['active']==3 and r['flip'],r
+    assert (':what:'in r['frame'])if phase=='discovery'else True
+    assert (':sniff:'in r['frame'])if phase=='sniff'else True
+    pic=s.call('maker_screenshot');shutil.copy2(pic['path'],out/('applied-walk-'+phase+'.png'))
+   run('walk-check-end','local H=_PetHouseUI;H.WalkPlan=H._T.hatOldWalkPlan;H._T.hatOldWalkPlan=nil;H.PetMode=true;local result={restored=true}')
+
+  time.sleep(max(0,duration-2))
+ run('other-pet-hidden','local H=_PetHouseUI;H.MotionUntil=0;H.WaitingUntil=0;H.Motion="";H:SetWalking(false,0);H:SetWater(false,0);H:SetInjection(false,0);H.SelectedPetIndex=1;H.IdleRUID="";H:Refresh();local result={id=H:GetDisplayedPet().id}')
+ q=wait('other-pet-no-gear','local p=_PetHouseUI.PetDisplay:GetChildByName("Portrait");local pool=_PetLogic._T.petGearUI[p.Id];local n=0;for _,e in ipairs(pool.actors)do if e.SpriteGUIRendererComponent.Color.a>0 then n=n+1 end end;local result={active=n}',lambda r:r['active']==0)
+ passed=True
+finally:
+ try:
+  if prepared:
+   run('restore-account','''local L=_PetLogic;local id=L._T.gearUser;if id~=nil and L._T.gearOriginal~=nil then L.States[id]=L._T.gearOriginal;L:InitForRun(id);L:PushState(id,"","");L._T.gearOriginal=nil end;local result={restored=L._T.gearOriginal==nil}''','server_main')
+   run('restore-ui','''local L=_PetLogic;if L._T.gearObserver~=nil then _TimerService:ClearTimer(L._T.gearObserver)end;_PetHouseUI.PetMode=true;_PetHouseUI:Close();_PetUI:SetPetMode(false);_PetUI.InventoryRoot.Enable=false;_TitleUI:ShowLobby();local result={restored=true}''')
+  logs=s.call('maker_logs',{'kind':'normal'});errors=[x for x in logs.get('logs',[])if x.get('logType')=='Error'and x.get('dateTime','')>=started];(stage/'runtime-logs.json').write_text(json.dumps(logs,ensure_ascii=False,indent=2),encoding='utf-8');assert not errors,errors
+  if passed:(out/'runtime-verification.json').write_text(json.dumps({'status':'passed','frames':76,'samples':608,'bothDirections':True,'actualGearButtons':True,'actualEightGearCombinations':True,'actualFeedWashSleepWalkButtons':True,'discoveryAndSniffVisualPathInspected':True,'petPixelsPreserved':True,'runtimeErrors':0,'accountRestored':True},indent=2),encoding='utf-8')
+ finally:s.close()

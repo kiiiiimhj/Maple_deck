@@ -3,7 +3,7 @@ script AvatarViewLogic extends Logic
 
 	-- 게임 안 아바타(장비창 / 뽑기 캐릭터 / 방치보상 캐릭터)의 보기 모드(유저 지정 2026-09-19).
 	--   · "gear" (장비 보기, 기본값): 게임 장비만 입힌다. 외부(메이플월드 계정)에서 산 캐시 착장은
-	--     무시(UseCustomEquipOnly=true)하되, 헤어·얼굴·피부·귀는 유저 본인 것을 그대로 가져와 입힌다.
+	--     표시하지 않되, 헤어·얼굴·피부·귀는 계정 아바타에서 그대로 상속한다.
 	--   · "cash" (코디 보기): 계정 캐시 착장 그대로 보여준다(게임 장비는 입히지 않음).
 	-- 예전엔 장비 부위만 SetEquip하고 나머지를 ""로 둬서, 비어 있는 부위로 계정 캐시템이 새어 나왔다.
 	-- 저장: 유저별 UserDataStorage 키 "AvatarViewMode" — 토글 연타 대비로 dirty + 지연 flush.
@@ -86,25 +86,6 @@ script AvatarViewLogic extends Logic
 			gearByName[tostring(key)] = v
 		end
 
-		if not self:IsGearMode() then
-			-- 코디 보기: 커스텀을 전부 비우고 계정 착장을 그대로 쓴다
-			costume.UseCustomEquipOnly = false
-			for _, cat in ipairs(self:GetAllCostumeCategories()) do
-				costume:SetEquip(cat, "")
-			end
-			return
-		end
-
-		-- 장비 보기: 계정 착장은 끄고, 신체(헤어/얼굴/피부/귀)만 유저 본인 것을 복사해 온다.
-		-- 월드에 있는 로컬 플레이어의 CostumeManager.GetEquip은 계정 착장 실제 값을 돌려준다(2026-09-19 실측)
-		local bodyRuids = {}
-		local player = _UserService.LocalPlayer
-		if isvalid(player) and isvalid(player.CostumeManagerComponent) then
-			for _, cat in ipairs(self:GetBodyCategories()) do
-				local ruid = player.CostumeManagerComponent:GetEquip(cat)
-				if ruid ~= nil and ruid ~= "" then bodyRuids[tostring(cat)] = ruid end
-			end
-		end
 
 		-- 상의/하의 장비가 없으면 기본 옷(맨몸 방지). 한벌옷이 있으면 상·하의 둘 다 한벌옷이 덮는다
 		local longcoatName = tostring(MapleAvatarItemCategory.Longcoat)
@@ -120,15 +101,69 @@ script AvatarViewLogic extends Logic
 			end
 		end
 
-		costume.UseCustomEquipOnly = true
+		-- 계정 헤어 중에는 GetEquip으로 받은 RUID를 SetEquip에 다시 넣을 수 없는 종류가 있다.
+		-- (실측: d1fd3b8f...는 AvatarItem/Preload 성공이어도 SetEquip 시 LEA-3015, 머리가 사라짐.)
+		-- 신체를 재장착하지 않고 기본 아바타를 상속한다. 불필요한 계정 의상은 렌더 부위별로 숨긴다.
+		local gearMode = self:IsGearMode()
+		local visible = {}
+		for _, cat in ipairs(self:GetBodyCategories()) do visible[tostring(cat)] = true end
+		for name, ruid in pairs(gearByName) do
+			if ruid ~= nil and ruid ~= "" then visible[name] = true end
+		end
+		-- 한벌옷/양손무기는 아래 부위의 렌더 레이어도 함께 사용한다. 함께 숨기면 게임 장비까지 잘린다.
+		if visible[tostring(MapleAvatarItemCategory.Longcoat)] then
+			visible[coatName] = true
+			visible[pantsName] = true
+		end
+		if visible[tostring(MapleAvatarItemCategory.TwoHandedWeapon)] then
+			visible[tostring(MapleAvatarItemCategory.OneHandedWeapon)] = true
+			visible[tostring(MapleAvatarItemCategory.SubWeapon)] = true
+		end
+
+		-- 네이티브 아바타가 비동기로 다시 만들어질 때도 현재 보기 모드의 가시성을 재적용한다.
+		if self._T.avatarViews == nil then self._T.avatarViews = {} end
+		local key = costume.Entity.Id
+		local view = self._T.avatarViews[key]
+		if view == nil then
+			view = {}
+			self._T.avatarViews[key] = view
+			view.initHandler = costume.Entity:ConnectEvent(InitMapleCostumeEvent, function()
+				self:ApplyCostumeVisibility(costume)
+			end)
+			view.destroyHandler = costume.Entity:ConnectEvent(DestroyMapleCostumeEvent, function()
+				self._T.avatarViews[key] = nil
+			end)
+		end
+		view.gearMode = gearMode
+		view.visible = visible
+
+		costume.UseCustomEquipOnly = false
 		for _, cat in ipairs(self:GetAllCostumeCategories()) do
-			local name = tostring(cat)
-			local ruid = gearByName[name]
-			if ruid == nil or ruid == "" then ruid = bodyRuids[name] end
-			if ruid == nil then ruid = "" end
+			local ruid = ""
+			if gearMode then ruid = gearByName[tostring(cat)] or "" end
 			costume:SetEquip(cat, ruid)
 		end
-		log("AvatarViewLogic: applied gear view (gear slots=" .. tostring(self:CountKeys(gearByName)) .. ")")
+		self:ApplyCostumeVisibility(costume)
+		log("[VRF] AvatarViewLogic: applied " .. self:GetMode() .. " view, inherited body, gear slots=" .. tostring(self:CountKeys(gearByName)))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ApplyCostumeVisibility(CostumeManagerComponent costume)
+		if not isvalid(costume) or self._T.avatarViews == nil then return end
+		local view = self._T.avatarViews[costume.Entity.Id]
+		if view == nil then return end
+		local renderer = costume.Entity.AvatarGUIRendererComponent
+		if not isvalid(renderer) then renderer = costume.Entity.AvatarRendererComponent end
+		if not isvalid(renderer) then return end
+		-- 먼저 복원한 후 숨긴다. 코디 보기로 돌아가거나 장비를 교체하면 이전 투명도가 남지 않는다.
+		for _, cat in ipairs(self:GetAllCostumeCategories()) do
+			renderer:SetAvatarPartColor(cat, 1, 1, 1, 1)
+		end
+		if view.gearMode then
+			for _, cat in ipairs(self:GetAllCostumeCategories()) do
+				if not view.visible[tostring(cat)] then renderer:SetAvatarPartColor(cat, 1, 1, 1, 0) end
+			end
+		end
 	end
 
 	method integer CountKeys(table t)

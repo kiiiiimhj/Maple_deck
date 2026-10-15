@@ -1,0 +1,13 @@
+from pathlib import Path
+s=Path('work/ttung-charm-jump-v3/runtime.py').read_text(encoding='utf-8')
+s=s.replace("stage=Path('work/ttung-charm-jump-v3');out=Path('outputs/ttung-charm-jump-v3')","stage=Path('work/ttung-gear');out=Path('outputs/ttung-gear')")
+s=s.replace('TTUNG-JUMP-V3-CHECK','TTUNG-GEAR-MAP-CHECK').replace('runtime-proof.json','map-runtime-proof.json').replace('runtime-verification.json','map-runtime-verification.json').replace('runtime-logs.json','map-runtime-logs.json').replace("range(15)","range(80)")
+s=s.replace('rec.pets.ttungttang.Owned=true;','rec.pets.ttungttang.Owned=true;rec.pets.ttungttang.GearOwnedMask=7;rec.pets.ttungttang.GearEquippedMask=7;')
+s=s.replace('blank=0,overlap=0,disabled=0','blank=0,overlap=0,gearErrors=0,disabled=0')
+s=s.replace('q.seen[v.charmFrame]=true;', '''q.seen[v.charmFrame]=true;local expected=L.PetGearOverlays[L.PetCharmJumpRUIDs[v.charmFrame]];local gearActive=0;for ruid,actor in pairs(v.gearByRUID)do if actor.SpriteRendererComponent.Color.a>0.99 then gearActive=gearActive+1;local bodyPos=v.body.TransformComponent.WorldPosition;local gearPos=actor.TransformComponent.WorldPosition;if ruid~=expected.hat and ruid~=expected.coat and ruid~=expected.neck then q.gearErrors=q.gearErrors+1 end;if math.abs(bodyPos.x-gearPos.x)>0.00001 or math.abs(bodyPos.y-gearPos.y)>0.00001 then q.gearErrors=q.gearErrors+1 end end end;if gearActive~=3 or v.gearMask~=7 then q.gearErrors=q.gearErrors+1 end;''')
+s=s.replace('finished=q.finished,captured=q.captured','gearErrors=q.gearErrors,finished=q.finished,captured=q.captured')
+s=s.replace("assert r['blank']==r['overlap']", "assert r['gearErrors']==r['blank']==r['overlap']")
+s=s.replace("'runtimeErrors':0,'buildErrors':0", "'equipmentLayers':3,'equipmentFrameErrors':0,'equipmentAlignedToBody':True,'runtimeErrors':0,'buildErrors':0")
+s=s.replace("out/('cast-'", "out/('gear-cast-'")
+Path('work/ttung-gear/map_runtime.py').write_text(s,encoding='utf-8')
+print('Prepared actual U-key skill test with all three equipped layers.')

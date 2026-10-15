@@ -1,0 +1,174 @@
+@Logic
+script PetUI extends Logic
+
+	property Entity InventoryRoot = "f5cb1fa3-87bb-4968-8af4-4d682d6eb199"
+	property Entity PlayerInfo = "e2d32dd6-01fd-4cc1-bf70-dcebf8de21cc"
+	property Entity Avatar = "9e23bd26-5fce-459f-b1ed-73f70433bdf2"
+	property Entity Nameplate = "a5bd2179-28ec-440b-b991-1c9dc6202fc2"
+	property Entity GearSlots = "35ac4f43-9438-4a06-9406-b05a3410bcdc"
+	property Entity InventoryPanel = "df5b9734-3620-4c84-b76b-0afffac1eeab"
+	property Entity PetGearSlots = "a221f82d-9356-4098-96c5-d7c59c596aae"
+	property Entity PetDisplay = "c28a3729-4d48-49a2-9f69-41cf8f304d98"
+	property Entity PetButton = "517c1735-c1e8-42fc-94c2-9e99251bf987"
+	property boolean PetMode = false
+	property table Handlers = {}
+	property number NextRefresh = 0
+	property number MotionUntil = 0
+	property string Motion = ""
+	property string IdleRUID = ""
+	property string CustomIdlePose = "stand"
+	property number IdleAnimationStart = 0
+	property string CustomFrameKey = ""
+	property string CustomImageRUID = ""
+	property Vector2 PortraitBasePosition = Vector2(0,-148)
+	property integer ShownRevision = -1
+	property string EnabledButtonRUID = "e2553674fb1c44a1836b7b56ce27f2b4"
+	property string DisabledButtonRUID = "6a34f87232c649cfaa6d770aae45e293"
+
+	@ExecSpace("ClientOnly")
+	method void BindClick(Entity entity, any callback)
+		-- Every global UI subscription is paired with cleanup on editor reload.
+		if not isvalid(entity) then return end
+		local handle = entity:ConnectEvent(ButtonClickEvent, callback)
+		table.insert(self.Handlers, {entity=entity, handle=handle})
+	end
+
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+	 self.PortraitBasePosition=self.PetDisplay:GetChildByName("Portrait").UITransformComponent.anchoredPosition
+	 self:BindClick(self.PetButton, function() self:SetPetMode(not self.PetMode) end)
+	 self:BindClick(self.PlayerInfo:GetChildByName("StatButton"), function() self:SetPetMode(false) end)
+	 self:BindClick(self.PlayerInfo:GetChildByName("AvatarViewToggle"), function() self:SetPetMode(false) end)
+	 self.PetButton:GetChildByName("Label").TextGUIRendererComponent.Text = _LocalizationService:GetText("PET_TAB")
+	 self.PetGearSlots:GetChildByName("Heading").TextGUIRendererComponent.Text = _LocalizationService:GetText("PET_GEAR")
+	 self.PetGearSlots:GetChildByName("Hint").TextGUIRendererComponent.Text = _LocalizationService:GetText("PET_GEAR_PENDING")
+	 for _, slot in ipairs({"Cap", "Coat", "Necklace"}) do
+	  local keys = {Cap="PET_GEAR_HAT", Coat="PET_GEAR_CLOTHES", Necklace="PET_GEAR_NECKLACE"}
+	  self.PetGearSlots:GetChildByName(slot):GetChildByName("Label").TextGUIRendererComponent.Text = _LocalizationService:GetText(keys[slot])
+	 end
+	 self:BindClick(self.PetGearSlots:GetChildByName("TestGear"),function() _PetLogic:RequestTestPetGear(_PetLogic:GetEquippedClientEntry().id) end)
+	 for _,slot in ipairs({"Cap","Coat","Necklace"}) do local key=slot self:BindClick(self.PetGearSlots:GetChildByName(slot),function() local e=_PetLogic:GetEquippedClientEntry();if _PetLogic:GetPetGearDefinitionForPet(e.id,key)~=nil then _PetLogic:RequestPetGear(key,e.id) end end) end
+	 self:SetPetMode(false)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetPetMode(boolean enabled)
+	 self.PetMode = enabled self.PetDisplay.Enable = enabled self.PetGearSlots.Enable = enabled
+	 -- 캐릭터 능력치 팝업(PlayerInfo/StatPopup)은 펫 화면 위에 남아 겹쳤다(2026-10-14 유저 리포트) — 펫으로 넘어가면 닫는다
+	 local statPopup = self.PlayerInfo:GetChildByName("StatPopup")
+	 if enabled and isvalid(statPopup) and statPopup.Enable then
+	  statPopup.Enable = false
+	  log("[VRF] PetUI: closed character stat popup on pet mode")
+	 end
+	 self.Avatar.Enable = not enabled self.Nameplate.Enable = not enabled self.GearSlots.Enable = not enabled
+	 -- Item lists and the character inventory data remain independent of pet equipment.
+	 self.InventoryPanel.Enable = true
+	 self.PetButton.SpriteGUIRendererComponent.ImageRUID = DataRef(enabled and self.EnabledButtonRUID or "a143f64fe17e4dbfb9635a119dbdfd37")
+	 if enabled then self.IdleRUID = "" self.NextRefresh = 0 self:Refresh() end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Refresh()
+	 local entry=_PetLogic:GetEquippedClientEntry() local pet=entry.progress
+	 local owned=_PetLogic.ClientReady and pet~=nil and pet.Owned
+	 self.PetDisplay:GetChildByName("Name").TextGUIRendererComponent.Text = _LocalizationService:GetText(entry.nameKey)
+	 local key = owned and (pet.Equipped and "PET_EQUIPPED" or "PET_OWNED") or "PET_PREVIEW"
+	 self.PetDisplay:GetChildByName("State").TextGUIRendererComponent.Text = _LocalizationService:GetText(key)
+	 self.PetDisplay:GetChildByName("Portrait").SpriteGUIRendererComponent.Color = Color(1,1,1,owned and 1 or 0.55)
+	 self.ShownRevision = _PetLogic.ClientRevision self:PlayIdle() self:RefreshPetGear()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnPetChanged(string motion)
+	 _PetHouseUI:OnPetChanged(motion)
+	 if self.PetMode then self:Refresh() end
+	 if isvalid(self.InventoryRoot) and self.InventoryRoot.Enable then
+	  local holder = self.InventoryRoot.UIInventory.InventoryTabHolder
+	  if holder ~= nil and holder.InventoryGrid ~= nil then
+	   holder:Update(true, false) holder.InventoryGrid:RefreshItemByGUID("pet-evolution-stone")
+	  end
+	 end
+	end
+	@ExecSpace("ClientOnly")
+	method void PlayIdle()
+		-- Needs affect expression, never take away the pet's earned combat bonus.
+		local pose = "stand"
+		local entry=_PetLogic:GetEquippedClientEntry() local pet=entry.progress
+		if pet ~= nil and pet.Owned then
+			if (pet.Fatigue or 0)>=80 then pose="rest"
+			elseif pet.Fullness < 30 then pose = "hungry"
+			elseif pet.Mood < 30 then pose = "cry"
+			elseif pet.Cleanliness < 30 then pose = "angry" end
+		end
+		self.CustomIdlePose=pose
+		local ruid = entry.motions[pose] or entry.stand
+		if self.IdleRUID == ruid then return end
+		self.IdleRUID = ruid self.IdleAnimationStart=_UtilLogic.ElapsedSeconds
+		local image = self.PetDisplay:GetChildByName("Portrait").SpriteGUIRendererComponent
+		if entry.frames~=nil then
+			image.PreserveSprite=PreserveSpriteType.None image.LocalScale=Vector2(1,1) image.LocalPosition=Vector2(0,0)
+			local scale=_PetLogic:GetCustomPixelScale(self.PetDisplay:GetChildByName("Portrait"),entry.inventoryPixelScale)
+			self.PetDisplay:GetChildByName("Portrait").UITransformComponent.RectSize=Vector2(entry.canvas*scale,entry.canvas*scale)
+			self.PetDisplay:GetChildByName("Portrait").UITransformComponent.anchoredPosition=Vector2(self.PortraitBasePosition.x,self.PortraitBasePosition.y+entry.footOffset*scale)
+		else
+			local scale=entry.inventoryPixelScale or 5.8888888889 image.PreserveSprite=PreserveSpriteType.NativeSize image.LocalScale=Vector2(scale,scale)
+			self.PetDisplay:GetChildByName("Portrait").UITransformComponent.anchoredPosition=self.PortraitBasePosition
+		end
+		image.AnimClipPlayType = SpriteAnimClipPlayType.Loop image.ImageRUID = DataRef(ruid)
+		image.Enable=entry.frames~=nil or not _PetLogic.NativePetGearReady
+		self.CustomImageRUID=entry.frames~=nil and ruid or ""
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUpdate(number delta)
+		-- Poll only while visible; no storage or per-frame network requests.
+		local now = _UtilLogic.ElapsedSeconds
+		if self.PetMode and not self.InventoryRoot.Enable then self:SetPetMode(false) end
+		if self.PetMode and self.InventoryRoot.Enable then
+			if now >= self.NextRefresh then self.NextRefresh = now + 15 _PetLogic:RequestState() end
+			if self.ShownRevision ~= _PetLogic.ClientRevision then self:Refresh() end
+			local entry=_PetLogic:GetEquippedClientEntry()
+			if entry.frames~=nil then
+				local frames=entry.frames[self.CustomIdlePose] or entry.frames.stand
+				local frame=_PetLogic:GetCustomFrameIndex(self.CustomIdlePose,now-self.IdleAnimationStart) local key=entry.id..":"..self.CustomIdlePose..":"..frame
+				if self.CustomFrameKey~=key then
+					self.CustomFrameKey=key local ruid=frames[frame]
+					if self.CustomImageRUID~=ruid then self.CustomImageRUID=ruid self.PetDisplay:GetChildByName("Portrait").SpriteGUIRendererComponent.ImageRUID=DataRef(ruid) end
+				end
+				local scale=_PetLogic:GetCustomPixelScale(self.PetDisplay:GetChildByName("Portrait"),entry.inventoryPixelScale)
+				self.PetDisplay:GetChildByName("Portrait").UITransformComponent.anchoredPosition=Vector2(self.PortraitBasePosition.x,self.PortraitBasePosition.y+entry.footOffset*scale)
+				_PetLogic:AlignCustomPortrait(self.PetDisplay:GetChildByName("Portrait"),entry,entry.inventoryPixelScale)
+			end
+			_PetLogic:RenderPetGearUI(self.PetDisplay:GetChildByName("Portrait"),entry,self.CustomImageRUID)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		-- Release all click bindings before Maker rebuilds the global logic.
+		for _, binding in ipairs(self.Handlers) do
+			if isvalid(binding.entity) then binding.entity:DisconnectEvent(ButtonClickEvent, binding.handle) end
+		end
+		self.Handlers = {}
+	end
+
+
+	@ExecSpace("ClientOnly")
+	method void RefreshPetGear()
+		local entry=_PetLogic:GetEquippedClientEntry() local pet=entry.progress local dog=_PetLogic:GetPetGearDefinitionForPet(entry.id,"Cap")~=nil and pet~=nil and pet.Owned
+		for _,slot in ipairs({"Cap","Coat","Necklace"}) do
+			local def=_PetLogic:GetPetGearDefinitionForPet(entry.id,slot) local e=self.PetGearSlots:GetChildByName(slot)
+			local owned=dog and _PetLogic:HasPetGearBit(pet.GearOwnedMask or 0,def.bit)
+			local worn=owned and _PetLogic:HasPetGearBit(pet.GearEquippedMask or 0,def.bit)
+			e.ButtonComponent.Enable=owned;e:GetChildByName("Icon").SpriteGUIRendererComponent.ImageRUID=DataRef(def.icon)
+			e:GetChildByName("Icon").SpriteGUIRendererComponent.Color=Color(1,1,1,owned and 1 or 0.28)
+			e:GetChildByName("Label").TextGUIRendererComponent.Text=_LocalizationService:GetText(def.key)
+			e:GetChildByName("Stat").TextGUIRendererComponent.Text=_LocalizationService:GetText(def.statKey)
+			e:GetChildByName("Mark").Enable=worn;e:GetChildByName("Mark").TextGUIRendererComponent.Text=_LocalizationService:GetText("PET_GEAR_WORN")
+		end
+		self.PetGearSlots:GetChildByName("Hint").TextGUIRendererComponent.Text=_LocalizationService:GetText(dog and "PET_GEAR_HINT" or "PET_GEAR_EXCLUSIVE")
+		local test=self.PetGearSlots:GetChildByName("TestGear");test.Enable=Environment:IsMakerPlay() and dog;test.ButtonComponent.Enable=Environment:IsMakerPlay() and dog;test:GetChildByName("Label").TextGUIRendererComponent.Text=_LocalizationService:GetText("PET_GEAR_TEST")
+	end
+
+end

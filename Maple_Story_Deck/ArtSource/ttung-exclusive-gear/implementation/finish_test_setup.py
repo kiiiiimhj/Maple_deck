@@ -1,0 +1,10 @@
+from pathlib import Path
+p=Path('work/ttung-gear/runtime.py');s=p.read_text(encoding='utf-8')
+s=s.replace('blank=0,tint=0,offset=0,size=0,finished=false','blank=0,tint=0,offset=0,size=0,flip=0,finished=false')
+s=s.replace('math.floor((tick-1)/4)+1','math.floor((tick-1)/8)+1')
+s=s.replace('local base=bases[i];portrait.SpriteGUIRendererComponent.ImageRUID','local base=bases[i];portrait.SpriteGUIRendererComponent.FlipX=math.floor(((tick-1)%8)/4)==1;portrait.SpriteGUIRendererComponent.ImageRUID')
+s=s.replace('local t=e.UITransformComponent;if t.anchoredPosition','if e.SpriteGUIRendererComponent.FlipX~=portrait.SpriteGUIRendererComponent.FlipX or e.SpriteGUIRendererComponent.FlipY~=portrait.SpriteGUIRendererComponent.FlipY then q.flip=q.flip+1 end;local t=e.UITransformComponent;if t.anchoredPosition')
+s=s.replace("q['samples']==304","q['samples']==608").replace("['wrongTexture','blank','tint','offset','size']","['wrongTexture','blank','tint','offset','size','flip']")
+s=s.replace('H.PetMode=true;H.CustomFrameKey="";H:Refresh()','H.PetMode=true;H.PetDisplay:GetChildByName("Portrait").SpriteGUIRendererComponent.FlipX=false;H.CustomFrameKey="";H:Refresh()')
+s=s.replace("'samples':304","'samples':608,'bothDirections':True")
+p.write_text(s,encoding='utf-8');print('Final UI observer covers every pose in both renderer directions.')

@@ -422,7 +422,8 @@ script PetHouseUI extends Logic
 		syringe.UITransformComponent.anchoredPosition=Vector2(250-105*approach+85*retreat,-32)
 		syringe.UITransformComponent.UIRotation=Vector3(0,0,90+math.sin(elapsed*5)*2)
 		syringe.SpriteGUIRendererComponent.Color=Color(1,1,1,math.min(1,elapsed/0.25)*(1-retreat))
-		local flinch=phase==1 and math.sin(elapsed*27)*math.max(0,1-(elapsed-1.2)/1.3) or 0
+		local recoil=math.max(0,math.min(1,(elapsed-1.2)/0.28))
+		local flinch=phase==1 and math.sin(recoil*math.pi)*0.75 or 0
 		-- Custom pixel pets carry one recoil in their frames; never jitter the whole texture.
 		if self:GetDisplayedPet().frames~=nil then flinch=0 end
 		portrait.UITransformComponent.anchoredPosition=Vector2(flinch*3,self:GetPortraitY()-math.abs(flinch)*2)
@@ -607,7 +608,6 @@ script PetHouseUI extends Logic
 		local assets={}
 		for _,ruid in ipairs(self.WalkBackdropRUIDs) do table.insert(assets,ruid) end
 		for _,ruid in ipairs(self.CompanionFrameRUIDs) do table.insert(assets,ruid) end
-		table.insert(assets,self.HappyFaceRUID)
 		table.insert(assets,"cbb2e71011a543ef862053f86bcfc847")
 		local scene=self:WalkLayer(self.ActivityScene,"WalkScene",self.WalkBackdropRUIDs[1],1580,540,0,0)
 		scene.SpriteGUIRendererComponent.Enable=false
@@ -632,15 +632,10 @@ script PetHouseUI extends Logic
 		notice.UITransformComponent.UIScale=Vector3(0.7,0.7,1)
 		self.WalkReward=self:WalkLayer(self.PetDisplay,"WalkReward","52df3f22bb014921a232021a48a1279b",72,72,0,0)
 		self.WalkReward.Enable=false
-		-- Only the face is replaced; all original walking bodies, colors and scale stay native.
-		local scale=self.PortraitPixelScale
-		local face=self:WalkLayer(self.PetDisplay:GetChildByName("Portrait"),"WalkSmile",self.HappyFaceRUID,21*scale,10*scale,3.5*scale,-1*scale)
-		face.SpriteGUIRendererComponent.Enable=false
-		local mask=face:AddComponent(MaskComponent)
-		mask.Shape=MaskShape.Rect mask.Softness=Vector2Int(0,0)
-		local smile=self:WalkLayer(face,"Mouth",self.HappyFaceRUID,36*scale,36*scale,-3.5*scale,1*scale)
-		smile.SpriteGUIRendererComponent.FlipX=true
-		self.WalkSmile=face face.Enable=false
+		-- Native walking frames already include Guri's face. A second masked
+		-- full-character image must never be rendered over those frames.
+		if isvalid(self.WalkSmile) then self.WalkSmile:Destroy() end
+		self.WalkSmile=nil
 		for _,ruid in ipairs(self.WalkFrameRUIDs) do table.insert(assets,ruid) end
 		scene.Enable=false self.WalkReady=false self.WalkShownRoute=0
 		_ResourceService:PreloadAsync(assets,function(results)
@@ -733,7 +728,7 @@ script PetHouseUI extends Logic
 		local jump=0
 		for _,start in ipairs(found and {0.75,2.3,6.95,8.2,10.1} or {0.75,2.3,8.2,10.1}) do
 		 local p=(t-start)/0.65
-		 if p>0 and p<1 then jump=math.max(jump,4*42*p*(1-p)) end
+		 if p>0 and p<1 then jump=math.max(jump,4*self:GetWalkJumpHeight()*p*(1-p)) end
 		end
 		local phase=noticing and 1 or (digging and 2 or ((celebrating or jump>0) and 3 or 0))
 		local portrait=self.PetDisplay:GetChildByName("Portrait")
@@ -749,12 +744,11 @@ script PetHouseUI extends Logic
 		if entry.frames~=nil then
 			local pose=noticing and "what" or (digging and "sniff" or (celebrating and "love" or "move"))
 			self:RenderCustomPose(pose,t)
-			self.WalkSmile.Enable=false
 		elseif entry.nativeWalk then
 			local pose=noticing and "what" or (digging and "dung" or (celebrating and "love" or "move"))
+			if entry.id=="5002617" then pose="move" end
 			local key=entry.id..":"..pose
 			if self.CustomFrameKey~=key then self.CustomFrameKey=key self:PlayPortrait(entry.motions[pose]) end
-			self.WalkSmile.Enable=false
 		elseif frame~=self.WalkFrame then
 			self.WalkFrame=frame portrait.SpriteGUIRendererComponent.ImageRUID=DataRef(self.WalkFrameRUIDs[frame])
 		end
@@ -763,11 +757,9 @@ script PetHouseUI extends Logic
 			portrait.SpriteGUIRendererComponent.LocalScale=Vector2(1,1)
 			portrait.SpriteGUIRendererComponent.LocalPosition=Vector2(0,0)
 			if portrait.UITransformComponent.RectSize.x~=canvas*scale then portrait.UITransformComponent.RectSize=Vector2(canvas*scale,canvas*scale) end
-			if entry.id=="5002617" then
-				self.WalkSmile.Enable=true
-				self.WalkSmile.UITransformComponent.anchoredPosition=Vector2(3.5*scale,(-1+(frame%2==0 and 1 or 0))*scale)
-			end
+
 		end
+
 		local walking=not noticing and not digging and not celebrating
 		local bob=walking and entry.id=="5002617" and math.sin(t*math.pi*5)^2*2 or 0
 		local companionFrame=walking and math.floor(t/0.12)%#self.CompanionFrameRUIDs+1 or 2
@@ -782,7 +774,7 @@ script PetHouseUI extends Logic
 		-- Guri always faces right and stays at the centre; only scenery travels to the left.
 		portrait.SpriteGUIRendererComponent.FlipX=true
 		portrait.UITransformComponent.anchoredPosition=Vector2(0,(entry.nativeWalk and self:GetPortraitY() or (-150+(entry.footOffset or 18)*scale))+jump+bob-nod)
-		portrait.UITransformComponent.UIRotation=Vector3(0,0,digging and entry.id=="5002617" and math.sin((t-4.2)*math.pi*4)*3 or 0)
+		portrait.UITransformComponent.UIRotation=Vector3(0,0,0)
 		local bush=self.WalkLayers.Bush
 		bush.Enable=found
 		bush.UITransformComponent.anchoredPosition=Vector2(475-distance+(digging and math.sin(t*32)*3 or 0),-153)
@@ -1016,7 +1008,7 @@ script PetHouseUI extends Logic
 				self.Motion=action self.MotionStart=_UtilLogic.ElapsedSeconds
 				self.MotionUntil=self.MotionStart+_PetLogic:GetCareDuration(action) self.IdleRUID="" self.CustomFrameKey=""
 				if entry.frames~=nil then self:RenderCustomAction(action,0)
-				elseif action=="feed" and entry.id=="5002617" then self.FeedingFrame=0 self:PlayPortrait(self.FeedingRUIDs[1])
+				elseif action=="feed" and entry.id=="5002617" then self.FeedingFrame=1 self:PlayPortrait(entry.motions.eat)
 				else self:PlayPortrait(entry.motions[motion]) end
 				self:SetInjection(action=="inject",0) self:SetFeedingMotion(action=="feed",0)
 				self:SetWalking(action=="walk",0) self:SetActionScenery(action,0)
@@ -1036,6 +1028,7 @@ script PetHouseUI extends Logic
 			portrait.UITransformComponent.RectSize=Vector2(entry.canvas*scale,entry.canvas*scale)
 		else local scale=entry.pixelScale or self.PortraitPixelScale image.PreserveSprite=PreserveSpriteType.NativeSize image.LocalScale=Vector2(scale,scale) end
 		image.PlayRate=1 image.AnimClipPlayType=SpriteAnimClipPlayType.Loop image.ImageRUID=DataRef(ruid)
+		image.Enable=entry.frames~=nil or not _PetLogic.NativePetGearReady
 		self.CustomImageRUID=entry.frames~=nil and ruid or ""
 	end
 
@@ -1079,10 +1072,9 @@ script PetHouseUI extends Logic
 		self:SetOduckFeedingPool(active,elapsed)
 		if not active then self.FeedingFrame = 0 return end
 		if self:GetDisplayedPet().id~="5002617" then return end
-		local frame = math.floor(math.max(0, elapsed) / 0.15) % #self.FeedingRUIDs + 1
-		if self.FeedingFrame ~= frame then
-			self.FeedingFrame = frame
-			portrait.SpriteGUIRendererComponent.ImageRUID = DataRef(self.FeedingRUIDs[frame])
+		if self.FeedingFrame == 0 then
+			self.FeedingFrame = 1
+			self:PlayPortrait(self:GetDisplayedPet().motions.eat)
 		end
 		local progress = math.max(0, math.min(3.8, elapsed))
 		local envelope = math.min(1, progress / 0.24, (3.8 - progress) / 0.3)
@@ -1145,6 +1137,7 @@ script PetHouseUI extends Logic
 	 if self.MotionUntil==0 then self:RenderCustomPose(self.CustomIdlePose,now-self.IdleAnimationStart) local entry=self:GetDisplayedPet() if entry.frames~=nil then self.PetDisplay:GetChildByName("Portrait").UITransformComponent.anchoredPosition=Vector2(0,self:GetPortraitY()) end end
 	 local entry=self:GetDisplayedPet()
 	 _PetLogic:AlignCustomPortrait(self.PetDisplay:GetChildByName("Portrait"),entry,entry.pixelScale)
+	 _PetLogic:RenderPetGearUI(self.PetDisplay:GetChildByName("Portrait"),entry,self.CustomImageRUID)
 	end
 
 	@ExecSpace("ClientOnly")
@@ -1360,5 +1353,33 @@ script PetHouseUI extends Logic
 		if wasOpen then log("[VRF] PET-TUTORIAL closed; pet-house remains open") end
 	end
 
+
+	@ExecSpace("ClientOnly")
+	method number GetWalkJumpHeight()
+		-- Measure the whole walking pet and worn headpiece against the needs panel.
+		-- Keep a smooth hop; reduce its amplitude rather than flattening its peak.
+		local entry=self:GetDisplayedPet()
+		if entry.id=="ttungttang" then return 42 end
+		local ids=entry.nativeWalk and _PetLogic.NativePetGearClips[entry.motions.move] or self.WalkFrameRUIDs
+		if ids==nil then return 42 end
+		local meter=self.PetDisplay:GetChildByName("CareMeters").UITransformComponent
+		local ceiling=meter.anchoredPosition.y-meter.RectSize.y*meter.Pivot.y-6
+		local native=entry.nativeWalk
+		local scale=native and entry.pixelScale or self.PortraitPixelScale
+		local rest=native and self:GetPortraitY() or (-150+(entry.footOffset or 18)*scale)
+		local maxTop=-100000
+		local mask=entry.progress~=nil and entry.progress.GearEquippedMask or 0
+		for _,ruid in ipairs(ids) do
+			local m=_PetLogic.NativePetGearSpriteMetrics[ruid]
+			if m~=nil then
+				local top=0;local layers=_PetLogic.NativePetGearOverlays[entry.id][ruid]
+				if _PetLogic:HasPetGearBit(mask,1) and layers~=nil and layers.hat~=nil then top=math.min(top,layers.hat.y) end
+				local py=native and (1-m.py)*m.h or m.h*0.5
+				local sy=native and scale or (entry.canvas or 36)*scale/m.h
+				maxTop=math.max(maxTop,rest+(py-top)*sy)
+			end
+		end
+		return math.max(0,math.min(42,ceiling-maxTop))
+	end
 
 end

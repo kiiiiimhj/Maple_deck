@@ -47,6 +47,8 @@ script PetUI extends Logic
 	  local keys = {Cap="PET_GEAR_HAT", Coat="PET_GEAR_CLOTHES", Necklace="PET_GEAR_NECKLACE"}
 	  self.PetGearSlots:GetChildByName(slot):GetChildByName("Label").TextGUIRendererComponent.Text = _LocalizationService:GetText(keys[slot])
 	 end
+	 self:BindClick(self.PetGearSlots:GetChildByName("TestGear"),function() _PetLogic:RequestTestPetGear(_PetLogic:GetEquippedClientEntry().id) end)
+	 for _,slot in ipairs({"Cap","Coat","Necklace"}) do local key=slot self:BindClick(self.PetGearSlots:GetChildByName(slot),function() local e=_PetLogic:GetEquippedClientEntry();if _PetLogic:GetPetGearDefinitionForPet(e.id,key)~=nil then _PetLogic:RequestPetGear(key,e.id) end end) end
 	 self:SetPetMode(false)
 	end
 
@@ -74,7 +76,7 @@ script PetUI extends Logic
 	 local key = owned and (pet.Equipped and "PET_EQUIPPED" or "PET_OWNED") or "PET_PREVIEW"
 	 self.PetDisplay:GetChildByName("State").TextGUIRendererComponent.Text = _LocalizationService:GetText(key)
 	 self.PetDisplay:GetChildByName("Portrait").SpriteGUIRendererComponent.Color = Color(1,1,1,owned and 1 or 0.55)
-	 self.ShownRevision = _PetLogic.ClientRevision self:PlayIdle()
+	 self.ShownRevision = _PetLogic.ClientRevision self:PlayIdle() self:RefreshPetGear()
 	end
 
 	@ExecSpace("ClientOnly")
@@ -114,6 +116,7 @@ script PetUI extends Logic
 			self.PetDisplay:GetChildByName("Portrait").UITransformComponent.anchoredPosition=self.PortraitBasePosition
 		end
 		image.AnimClipPlayType = SpriteAnimClipPlayType.Loop image.ImageRUID = DataRef(ruid)
+		image.Enable=entry.frames~=nil or not _PetLogic.NativePetGearReady
 		self.CustomImageRUID=entry.frames~=nil and ruid or ""
 	end
 
@@ -137,6 +140,7 @@ script PetUI extends Logic
 				self.PetDisplay:GetChildByName("Portrait").UITransformComponent.anchoredPosition=Vector2(self.PortraitBasePosition.x,self.PortraitBasePosition.y+entry.footOffset*scale)
 				_PetLogic:AlignCustomPortrait(self.PetDisplay:GetChildByName("Portrait"),entry,entry.inventoryPixelScale)
 			end
+			_PetLogic:RenderPetGearUI(self.PetDisplay:GetChildByName("Portrait"),entry,self.CustomImageRUID)
 		end
 	end
 
@@ -149,5 +153,22 @@ script PetUI extends Logic
 		self.Handlers = {}
 	end
 
+
+	@ExecSpace("ClientOnly")
+	method void RefreshPetGear()
+		local entry=_PetLogic:GetEquippedClientEntry() local pet=entry.progress local dog=_PetLogic:GetPetGearDefinitionForPet(entry.id,"Cap")~=nil and pet~=nil and pet.Owned
+		for _,slot in ipairs({"Cap","Coat","Necklace"}) do
+			local def=_PetLogic:GetPetGearDefinitionForPet(entry.id,slot) local e=self.PetGearSlots:GetChildByName(slot)
+			local owned=dog and _PetLogic:HasPetGearBit(pet.GearOwnedMask or 0,def.bit)
+			local worn=owned and _PetLogic:HasPetGearBit(pet.GearEquippedMask or 0,def.bit)
+			e.ButtonComponent.Enable=owned;e:GetChildByName("Icon").SpriteGUIRendererComponent.ImageRUID=DataRef(def.icon)
+			e:GetChildByName("Icon").SpriteGUIRendererComponent.Color=Color(1,1,1,owned and 1 or 0.28)
+			e:GetChildByName("Label").TextGUIRendererComponent.Text=_LocalizationService:GetText(def.key)
+			e:GetChildByName("Stat").TextGUIRendererComponent.Text=_LocalizationService:GetText(def.statKey)
+			e:GetChildByName("Mark").Enable=worn;e:GetChildByName("Mark").TextGUIRendererComponent.Text=_LocalizationService:GetText("PET_GEAR_WORN")
+		end
+		self.PetGearSlots:GetChildByName("Hint").TextGUIRendererComponent.Text=_LocalizationService:GetText(dog and "PET_GEAR_HINT" or "PET_GEAR_EXCLUSIVE")
+		local test=self.PetGearSlots:GetChildByName("TestGear");test.Enable=Environment:IsMakerPlay() and dog;test.ButtonComponent.Enable=Environment:IsMakerPlay() and dog;test:GetChildByName("Label").TextGUIRendererComponent.Text=_LocalizationService:GetText("PET_GEAR_TEST")
+	end
 
 end
