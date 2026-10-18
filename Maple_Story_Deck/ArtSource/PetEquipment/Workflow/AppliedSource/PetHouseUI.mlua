@@ -73,7 +73,7 @@ script PetHouseUI extends Logic
 	property string OduckPoolRUID = "dba02e54ed704cdcaf9a8e25bc9c0f1c"
 	property any DuckyFoodBowl = nil
 	property boolean DuckyBowlReady = false
-	property string DuckyBowlRUID = "5dbbe59d2e5b4a288dca7c01c40db2e6"
+	property string DuckyBowlRUID = "28a469e7cf93429ab3d967b40bbd7793"
 	property any SleepCushion = nil
 	property boolean SleepCushionReady = false
 	property string SleepCushionRUID = "172e6e36f588466693f4a7da94fe7ea4"
@@ -373,7 +373,8 @@ script PetHouseUI extends Logic
 		local value=pet.Affinity or 0
 		dial:GetChildByName("Caption").TextGUIRendererComponent.Text=_LocalizationService:GetText("PET_AFFINITY")
 		dial:GetChildByName("Value").TextGUIRendererComponent.Text=tostring(value).." / 100"
-		dial:GetChildByName("Hint").TextGUIRendererComponent.Text=_LocalizationService:GetText("PET_HEART_DAILY_HINT")
+		-- The once-a-day rule is announced by a toast after the last claim instead of a permanent hint.
+		dial:GetChildByName("Hint").Enable=false
 		for tier=1,3 do
 			local reward=dial:GetChildByName("Reward"..tostring(tier))
 			local claimed=_PetLogic:IsHeartClaimed(pet,tier)
@@ -714,7 +715,9 @@ script PetHouseUI extends Logic
 		end
 		local plan=self.WalkPlan or {route=1,found=false}
 		local route=plan.route local found=plan.found
-		local t=math.max(0,math.min(12,elapsed))
+		-- The walk script is authored on a 12-second timeline; compress it to the real walk duration.
+		local pace=12/math.max(1,_PetLogic.WalkDuration)
+		local t=math.max(0,math.min(12,elapsed*pace))
 		local distance=self:WalkTravel(t,found)
 		if self.WalkShownRoute~=route then
 		 self.WalkShownRoute=route
@@ -739,11 +742,11 @@ script PetHouseUI extends Logic
 		local entry=self:GetDisplayedPet()
 		local scale=entry.frames~=nil and _PetLogic:GetCustomPixelScale(portrait,entry.pixelScale) or self.PortraitPixelScale
 		local canvas=entry.canvas or 36
-		local frame=math.floor((digging and (t-4.2)*1.55 or t)/0.15)%4+1
+		local frame=math.floor((digging and (t-4.2)*1.55 or elapsed)/0.15)%4+1
 		if noticing or celebrating or jump>0 then frame=1 end
 		if entry.frames~=nil then
 			local pose=noticing and "what" or (digging and "sniff" or (celebrating and "love" or "move"))
-			self:RenderCustomPose(pose,t)
+			self:RenderCustomPose(pose,elapsed)
 		elseif entry.nativeWalk then
 			local pose=noticing and "what" or (digging and "dung" or (celebrating and "love" or "move"))
 			if entry.id=="5002617" then pose="move" end
@@ -761,8 +764,8 @@ script PetHouseUI extends Logic
 		end
 
 		local walking=not noticing and not digging and not celebrating
-		local bob=walking and entry.id=="5002617" and math.sin(t*math.pi*5)^2*2 or 0
-		local companionFrame=walking and math.floor(t/0.12)%#self.CompanionFrameRUIDs+1 or 2
+		local bob=walking and entry.id=="5002617" and math.sin(elapsed*math.pi*5)^2*2 or 0
+		local companionFrame=walking and math.floor(elapsed/0.12)%#self.CompanionFrameRUIDs+1 or 2
 		local companion=self.WalkLayers.Companion
 		if companionFrame~=self.CompanionFrame then
 		 self.CompanionFrame=companionFrame
@@ -1232,12 +1235,15 @@ script PetHouseUI extends Logic
 		local bowl=self.DuckyFoodBowl if not isvalid(bowl) then return end
 		bowl.Enable=active and self.DuckyBowlReady and self:GetDisplayedPet().id=="5000498"
 		if not bowl.Enable then return end
-		local scale=_PetLogic:GetCustomPixelScale(bowl,2)
+		local portrait=self.PetDisplay:GetChildByName("Portrait")
+		local desiredScale=portrait.SpriteGUIRendererComponent.LocalScale.x*0.5
+		local scale=_PetLogic:GetCustomPixelScale(portrait,desiredScale)
 		local size=128*scale
 		bowl.UITransformComponent.RectSize=Vector2(size,size)
-		-- Original 128px art: bowl bounds (25,96)-(64,118); keep the base on the paw plane.
-		bowl.UITransformComponent.anchoredPosition=Vector2(-38+(64-44.5)*scale,self:GetPortraitY()+(118-64)*scale)
-		_PetLogic:AlignCustomPortrait(bowl,{frames={},canvas=128},2)
+		-- Shallow 32x10px dish at (28,108)-(60,118). Centre it in front
+		-- of the muzzle, leaving the forepaws visible, with its base on the floor.
+		bowl.UITransformComponent.anchoredPosition=Vector2((-32+64-44)*scale,self:GetPortraitY()+(118-64)*scale)
+		_PetLogic:AlignCustomPortrait(bowl,{frames={},canvas=128},desiredScale)
 		local duration=_PetLogic:GetCareDuration("feed")
 		local fade=math.max(0,math.min(1,elapsed/0.14,(duration-elapsed)/0.22))
 		fade=fade*fade*(3-2*fade)
@@ -1359,13 +1365,22 @@ script PetHouseUI extends Logic
 		-- Measure the whole walking pet and worn headpiece against the needs panel.
 		-- Keep a smooth hop; reduce its amplitude rather than flattening its peak.
 		local entry=self:GetDisplayedPet()
-		if entry.id=="ttungttang" then return 42 end
+		if entry.frames~=nil then
+			local portrait=self.PetDisplay:GetChildByName("Portrait")
+			local scale=_PetLogic:GetCustomPixelScale(portrait,entry.pixelScale)
+			local meter=self.PetDisplay:GetChildByName("CareMeters").UITransformComponent
+			local ceiling=meter.anchoredPosition.y-meter.RectSize.y*meter.Pivot.y-6
+			local highest=entry.canvas
+			for _,pose in ipairs({"move","what","sniff","love"}) do for _,base in ipairs(entry.frames[pose] or {}) do highest=math.min(highest,_PetLogic.CustomPetVisibleTop[base] or 0) end end
+			local top=self:GetPortraitY()+(entry.canvas*0.5-highest)*scale
+			return math.max(0,math.min(42,ceiling-top))
+		end
 		local ids=entry.nativeWalk and _PetLogic.NativePetGearClips[entry.motions.move] or self.WalkFrameRUIDs
 		if ids==nil then return 42 end
 		local meter=self.PetDisplay:GetChildByName("CareMeters").UITransformComponent
 		local ceiling=meter.anchoredPosition.y-meter.RectSize.y*meter.Pivot.y-6
 		local native=entry.nativeWalk
-		local scale=native and entry.pixelScale or self.PortraitPixelScale
+		local scale=native and (_PetLogic:GetCustomPixelScale(self.PetDisplay:GetChildByName("Portrait"),entry.pixelScale/2)*2) or self.PortraitPixelScale
 		local rest=native and self:GetPortraitY() or (-150+(entry.footOffset or 18)*scale)
 		local maxTop=-100000
 		local mask=entry.progress~=nil and entry.progress.GearEquippedMask or 0

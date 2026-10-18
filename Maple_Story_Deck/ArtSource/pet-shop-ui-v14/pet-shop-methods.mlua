@@ -1,0 +1,160 @@
+	@ExecSpace("ClientOnly")
+	method table GetPetShopCatalog()
+		-- Presentation-only catalogue. Oduck is an in-game Easter egg.
+		-- Keep this separate from registered products and purchase grants.
+		return {{id="5002617",price=1300},{id="ttungttang",price=1300},{id="5000498",price=1300},{id="landturtle",price=1300}}
+	end
+
+	@ExecSpace("ClientOnly")
+	method table GetPetShopLabels()
+		local locale=string.sub(string.lower(_LocalizationService.CurrentLocaleId or "ko"),1,2)
+		local labels={
+			ko={tab="펫",coin=" 코인",coming="판매 준비 중",notice="펫 판매를 준비 중이에요.",base="기본 능력치",stats={"공격력","치명타 확률","치명타 피해","최대 체력","스킬 쿨타임 감소"},descriptions={"4초 동안 굴러가며\n몬스터를 밀쳐냅니다.","몬스터를 한곳으로 유인해\n광역 공격을 돕습니다.","여우 모양의 포효로\n몬스터를 2초간 기절시킵니다.","3초 동안 껍질로\n몬스터의 공격을 받아줍니다."}},
+			en={tab="Pets",coin=" coins",coming="Coming soon",notice="Pet sales are coming soon.",base="Starting bonus",stats={"Attack","Critical chance","Critical damage","Max HP","Skill cooldown reduction"},descriptions={"Roll for 4s and\nknock enemies back.","Lure enemies together\nfor area attacks.","A fox-shaped roar\nstuns enemies for 2s.","A shell takes enemy\nattacks for 3s."}},
+			ja={tab="ペット",coin="コイン",coming="販売準備中",notice="ペットは販売準備中です。",base="初期能力値",stats={"攻撃力","クリティカル率","クリティカルダメージ","最大HP","スキルクールタイム短縮"},descriptions={"4秒間転がり、\n敵をノックバックします。","敵を一か所へ誘い、\n範囲攻撃を助けます。","キツネ形の咆哮で\n敵を2秒間気絶させます。","3秒間、甲羅で\n敵の攻撃を引き受けます。"}},
+			zh={tab="宠物",coin="硬币",coming="即将开放",notice="宠物即将开放出售。",base="初始属性",stats={"攻击力","暴击率","暴击伤害","最大生命值","技能冷却缩减"},descriptions={"滚动4秒，\n击退怪物。","将怪物吸引到一起，\n帮助范围攻击。","狐狸形状的咆哮\n使怪物眩晕2秒。","龟壳替你承受\n怪物攻击3秒。"}}
+		}
+		return labels[locale] or labels.en
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlacePetShopElement(Entity entity, number x, number y, number width, number height)
+		local t=entity.UITransformComponent
+		t.AnchorsMin=Vector2(.5,.5);t.AnchorsMax=Vector2(.5,.5);t.Pivot=Vector2(.5,.5)
+		t.anchoredPosition=Vector2(x,y);t.RectSize=Vector2(width,height)
+		t.UIScale=Vector3(1,1,1);t.UIRotation=Vector3.zero
+	end
+
+	@ExecSpace("ClientOnly")
+	method Entity CreatePetShopText(Entity template, Entity parent, string name, number y, number height, number fontSize)
+		local e=_SpawnService:SpawnByEntity(template,name,Vector3.zero,parent,false)
+		self:PlacePetShopElement(e,0,y,282,height)
+		local r=e.TextGUIRendererComponent;r.FontSize=fontSize;r.BestFit=false;r.SizeFit=false
+		r.FontColor=Color(.18,.12,.07,1);r.HorizontalAlignment=TextHorizontalAlignmentOption.Center
+		r.VerticalAlignment=TextVerticalAlignmentOption.Middle;r.OutlineWidth=0;r.Underlay=false
+		e.Enable=true
+		return e
+	end
+
+	@ExecSpace("ClientOnly")
+	method void InitializePetShopUI()
+		if self._T.petShop~=nil then return end
+		local panel=_SpawnService:SpawnByEntity(self.skinPanelRoot,"PetShopPanel",Vector3.zero,self.skinPanelRoot.Parent,false)
+		local panelTransform=self.skinPanelRoot.UITransformComponent
+		self:PlacePetShopElement(panel,panelTransform.anchoredPosition.x,panelTransform.anchoredPosition.y,panelTransform.RectSize.x,panelTransform.RectSize.y)
+		panel.Enable=false
+		local tab=_SpawnService:SpawnByEntity(self.tabSkin.Entity,"TabPet",Vector3.zero,self.tabSkin.Entity.Parent,false)
+		local pos=self.tabSkin.Entity.UITransformComponent.anchoredPosition
+		local previous=self.tabDiamond.Entity.UITransformComponent.anchoredPosition
+		tab.UITransformComponent.anchoredPosition=Vector2(pos.x+(pos.x-previous.x),pos.y)
+		tab.ButtonComponent.Transition=TransitionType.None
+		local label=_SpawnService:SpawnByEntity(self.tabSkin.Entity:GetChildByName("Label"),"Label",Vector3.zero,tab,false)
+		local q={panel=panel,tab=tab,label=label,cards={},handlers={},ready=false}
+		self._T.petShop=q
+		local h=tab:ConnectEvent(ButtonClickEvent,function()self:SelectTab("pet")end)
+		table.insert(q.handlers,{entity=tab,handle=h})
+		local template=self.productScroll.Entity:GetChildByName("ProductCard_0")
+		local nameTemplate=template:GetChildByName("NameText")
+		local descTemplate=template:GetChildByName("DescText")
+		local priceTemplate=template:GetChildByName("PriceBox")
+		local priceTextTemplate=priceTemplate:GetChildByName("PriceText")
+		local iconTemplate=template:GetChildByName("Icon")
+		local assets={}
+		for i,row in ipairs(self:GetPetShopCatalog()) do
+			local at=i
+			local card=_SpawnService:SpawnByEntity(template,"PetCard_"..i,Vector3.zero,panel,false)
+			self:PlacePetShopElement(card,-525+(i-1)*350,0,330,670)
+			card.ButtonComponent.Transition=TransitionType.None
+			card.SpriteGUIRendererComponent.Color=Color(1,1,1,1)
+			local name=self:CreatePetShopText(nameTemplate,card,"NameText",247,50,34)
+			local portrait=_SpawnService:SpawnByEntity(iconTemplate,"PetPortrait",Vector3.zero,card,false)
+			self:PlacePetShopElement(portrait,0,80,250,220)
+			local r=portrait.SpriteGUIRendererComponent;r.Type=ImageType.Simple;r.PreserveSprite=PreserveSpriteType.NativeSize
+			r.LocalPosition=Vector2.zero;r.LocalScale=Vector2(1,1);r.PlayRate=0;r.RaycastTarget=false
+			r.Color=Color(1,1,1,1);r.Outline=false;r.DropShadow=false
+			local base=self:CreatePetShopText(descTemplate,card,"BaseLabel",0,28,20)
+			base.TextGUIRendererComponent.FontColor=Color(.43,.31,.18,1)
+			local bonus=self:CreatePetShopText(descTemplate,card,"BaseBonus",-32,38,24)
+			local skillIcon=_SpawnService:SpawnByEntity(iconTemplate,"SkillIcon",Vector3.zero,card,false)
+			self:PlacePetShopElement(skillIcon,-92,-96,42,42)
+			local sr=skillIcon.SpriteGUIRendererComponent;sr.PreserveSprite=PreserveSpriteType.AspectOnly
+			sr.LocalScale=Vector2(1,1);sr.LocalPosition=Vector2.zero;sr.PlayRate=0;sr.Color=Color(1,1,1,1);sr.RaycastTarget=false
+			local skillName=self:CreatePetShopText(descTemplate,card,"SkillName",-96,40,26)
+			self:PlacePetShopElement(skillName,22,-96,196,40)
+			local skillDesc=self:CreatePetShopText(descTemplate,card,"SkillDescription",-153,66,21)
+			local interval=self:CreatePetShopText(descTemplate,card,"SkillInterval",-204,28,18)
+			interval.TextGUIRendererComponent.FontColor=Color(.43,.31,.18,1)
+			local price=_SpawnService:SpawnByEntity(priceTemplate,"PriceBox",Vector3.zero,card,false)
+			self:PlacePetShopElement(price,0,-259,280,78)
+			local priceText=_SpawnService:SpawnByEntity(priceTextTemplate,"PriceText",Vector3.zero,price,false)
+			self:PlacePetShopElement(priceText,0,0,252,50)
+			priceText.TextGUIRendererComponent.FontSize=31;priceText.TextGUIRendererComponent.BestFit=false
+			priceText.TextGUIRendererComponent.FontColor=Color(1,.90,.62,1)
+			local coming=self:CreatePetShopText(descTemplate,card,"ComingSoon",-306,24,18)
+			coming.TextGUIRendererComponent.FontColor=Color(.43,.31,.18,1)
+			local entry=_PetLogic:GetPetDefinition(row.id)
+			local body=entry.frames~=nil and entry.frames.stand[1] or _PetLogic:GetNativePetFrame(entry.stand,0)
+			local skill=_PetLogic:GetPetSkillInfo(row.id)
+			table.insert(assets,body);table.insert(assets,skill.icon)
+			q.cards[i]={entity=card,petId=row.id,name=name,portrait=portrait,body=body,base=base,bonus=bonus,skillIcon=skillIcon,skillName=skillName,skillDesc=skillDesc,interval=interval,price=priceText,coming=coming}
+			local click=card:ConnectEvent(ButtonClickEvent,function()self:OnPetShopCardClicked(at)end)
+			table.insert(q.handlers,{entity=card,handle=click})
+		end
+		_ResourceService:PreloadAsync(assets,function(results)
+			if not isvalid(self) or self._T.petShop~=q or not isvalid(panel) then return end
+			local ready=true for _,v in pairs(results) do if v~=PreloadResultStatus.Success then ready=false end end
+			q.ready=ready;self:RefreshPetShopUI()
+			log("[VRF] PET-SHOP preview ready="..tostring(ready).." pets="..#q.cards.." price=1300 purchase=false")
+		end)
+		self:RefreshPetShopUI()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshPetShopUI()
+		local q=self._T.petShop if q==nil then return end
+		local text=self:GetPetShopLabels();q.label.TextGUIRendererComponent.Text=text.tab
+		for i,row in ipairs(self:GetPetShopCatalog()) do
+			local c=q.cards[i];local entry=_PetLogic:GetPetDefinition(row.id)
+			c.name.TextGUIRendererComponent.Text=_LocalizationService:GetText(entry.nameKey)
+			local line=_PetLogic:GetPetStatLines(row.id,nil)[1]
+			c.base.TextGUIRendererComponent.Text=text.base
+			c.bonus.TextGUIRendererComponent.Text=text.stats[line.kind].." +"..string.format("%g",line.percent).."%"
+			local skill=_PetLogic:GetPetSkillInfo(row.id)
+			c.skillName.TextGUIRendererComponent.Text=skill.name
+			c.skillDesc.TextGUIRendererComponent.Text=text.descriptions[i]
+			c.interval.TextGUIRendererComponent.Text=skill.interval
+			local price=tostring(row.price);local n=0
+			repeat price,n=string.gsub(price,"^(-?%d+)(%d%d%d)","%1,%2") until n==0
+			c.price.TextGUIRendererComponent.Text=price..text.coin
+			c.coming.TextGUIRendererComponent.Text=text.coming
+			c.portrait.Enable=q.ready;c.skillIcon.Enable=q.ready
+			if q.ready then
+				local sprite=_ResourceService:LoadSpriteAndWait(c.body)
+				local m={w=sprite.Width,h=sprite.Height,px=sprite.Pivot.x,py=sprite.Pivot.y}
+				local desired=entry.frames~=nil and 2 or math.max(1,math.floor(math.min(204/math.max(1,m.w),156/math.max(1,m.h))))
+				local scale=_PetLogic:GetCustomPixelScale(c.portrait,desired)
+				local r=c.portrait.SpriteGUIRendererComponent;r.ImageRUID=DataRef(c.body);r.LocalScale=Vector2(scale,scale)
+				r.LocalPosition=Vector2((m.px-.5)*m.w*scale,-40+(entry.footOffset or 0)*scale)
+				c.skillIcon.SpriteGUIRendererComponent.ImageRUID=DataRef(skill.icon)
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnPetShopCardClicked(integer index)
+		local q=self._T.petShop
+		if q==nil or not q.panel.Enable or self._currentTab~="pet" then return end
+		if self:GetPetShopCatalog()[index]==nil then return end
+		-- UI only: no payment prompt, wallet mutation, ownership or grant call.
+		self:ShowNotice(self:GetPetShopLabels().notice)
+		log("[VRF] PET-SHOP preview clicked index="..index.." purchase=false")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ClearPetShopUI()
+		local q=self._T.petShop if q==nil then return end
+		for _,h in ipairs(q.handlers) do if isvalid(h.entity) then h.entity:DisconnectEvent(ButtonClickEvent,h.handle) end end
+		if isvalid(q.panel) then q.panel:Destroy() end
+		if isvalid(q.tab) then q.tab:Destroy() end
+		self._T.petShop=nil
+	end

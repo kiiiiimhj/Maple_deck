@@ -139,7 +139,7 @@ script GameManager extends Logic
 	-- 에피소드별 몬스터 능력치 배율(2026-09-02 유저 지정) — 체력(GetTimeStepHp)과 공격력(GetWaveAttack)에
 	-- 같은 값을 곱한다. 키가 없는 에피소드는 1.0.
 	-- 4 = 루디브리엄(에피4, 2026-09-28 — 한 단계씩 25%p 올리는 기존 흐름대로 175% 임시 지정, 밸런스 확정 전)
-	property any _episodeStatMultipliers = { [1] = 1.0, [2] = 1.25, [3] = 1.5, [4] = 1.75 }
+	property any _episodeStatMultipliers = { [1] = 1.0, [2] = 1.25, [3] = 1.5, [4] = 1.75, [5] = 2.0 }
 
 	@Sync
 	property boolean TimeAttackMode = false
@@ -1709,24 +1709,32 @@ script GameManager extends Logic
 	@ExecSpace("ServerOnly")
 	method boolean HasEliteRoster()
 		-- 지금 에피소드에 전용 엘리트 로스터가 있나(없으면 예전처럼 "그 존 몬스터 1마리 승급"만 한다)
-		return self.SelectedEpisode >= 1 and self.SelectedEpisode <= 4
+		-- 에피5 아랫마을 첫 맵(190~199)은 전용 엘리트 4종을 사용한다.
+		return self.SelectedEpisode >= 1 and self.SelectedEpisode <= 5
 	end
 
 	@ExecSpace("ServerOnly")
 	method integer GetEliteCount()
+		if self:IsEp5EliteZone(_MapManager.CurrentMapIndex) then return 4 end
 		-- 지금 에피소드의 엘리트 종 수
 		if self.SelectedEpisode == 2 then return self:GetEp2EliteCount() end
 		if self.SelectedEpisode == 3 then return self:GetEp3EliteCount() end
-		if self.SelectedEpisode == 4 then return self:GetEp4EliteCount() end
+		if self.SelectedEpisode == 4 or self.SelectedEpisode == 5 then return self:GetEp4EliteCount() end
 		return self:GetEp1EliteCount()
 	end
 
 	@ExecSpace("ServerOnly")
 	method any GetEliteDef(integer index)
+        return self:GetEliteDefForZone(index,_MapManager.CurrentMapIndex)
+    end
+
+    @ExecSpace("ServerOnly")
+    method any GetEliteDefForZone(integer index, integer zoneIndex)
+        if self:IsEp5EliteZone(zoneIndex) then return self:GetEp5EliteDef(index) end
 		-- 지금 에피소드의 index번째 엘리트 정의
 		if self.SelectedEpisode == 2 then return self:GetEp2EliteDef(index) end
 		if self.SelectedEpisode == 3 then return self:GetEp3EliteDef(index) end
-		if self.SelectedEpisode == 4 then return self:GetEp4EliteDef(index) end
+		if self.SelectedEpisode == 4 or self.SelectedEpisode == 5 then return self:GetEp4EliteDef(index) end
 		return self:GetEp1EliteDef(index)
 	end
 
@@ -2786,13 +2794,14 @@ script GameManager extends Logic
 	@ExecSpace("ServerOnly")
 	method boolean HasBossRoster()
 		-- 지금 에피소드가 "전용 외형 보스 로스터"를 쓰는가. false면 예전처럼 그 존 몬스터가 커진 보스가 나온다.
-		return self.SelectedEpisode >= 1 and self.SelectedEpisode <= 4
+		-- 에피5는 전용 보스가 생기기 전까지 에피4 로스터를 빌려 쓴다
+		return self.SelectedEpisode >= 1 and self.SelectedEpisode <= 5
 	end
 
 	@ExecSpace("ServerOnly")
 	method integer GetBossCount()
 		-- 지금 에피소드 보스 순번의 총 개수
-		if self.SelectedEpisode == 4 then return self:GetEp4BossCount() end
+		if self.SelectedEpisode == 4 or self.SelectedEpisode == 5 then return self:GetEp4BossCount() end
 		if self.SelectedEpisode == 3 then return self:GetEp3BossCount() end
 		if self.SelectedEpisode == 2 then return self:GetEp2BossCount() end
 		return self:GetEp1BossCount()
@@ -2801,7 +2810,7 @@ script GameManager extends Logic
 	@ExecSpace("ServerOnly")
 	method any GetBossDef(integer index)
 		-- 지금 에피소드의 index번째 보스 정의
-		if self.SelectedEpisode == 4 then return self:GetEp4BossDef(index) end
+		if self.SelectedEpisode == 4 or self.SelectedEpisode == 5 then return self:GetEp4BossDef(index) end
 		if self.SelectedEpisode == 3 then return self:GetEp3BossDef(index) end
 		if self.SelectedEpisode == 2 then return self:GetEp2BossDef(index) end
 		return self:GetEp1BossDef(index)
@@ -4020,7 +4029,8 @@ script GameManager extends Logic
 
 	-- 에피소드4 존(mapIndex 134~173)인지
 	method boolean IsEp4Zone(integer mapIndex)
-		return mapIndex >= 134 and mapIndex <= 189  -- 기본맵 50존 + map1 히든맵 5존
+		-- 에피4 기본맵 50존 + map1 히든맵 5존 + 파풀 방(134~189), 그리고 같은 표를 쓰는 에피5 map1(190~199)
+		return mapIndex >= 134 and mapIndex <= 199
 	end
 
 	-- 에피4 존의 idx번째 종 정의(표). 범위를 벗어난 idx는 가장 가까운 칸으로 접는다(기존 풀과 같은 규칙).
@@ -4051,6 +4061,7 @@ script GameManager extends Logic
 			fly = false, ranged = false, charge = false, zigzag = false, buffer = false,
 			hitFx = "", hitFxDur = 0.25, proj = "", scale = 1.0, speedMul = 1.0, loot = "",
 			projGrow = false, hitFxMax = 1,
+			leap = false,  -- 등장하자마자 스프링처럼 튀어올라 플레이어 앞까지 한 번에 오는 근접형(MonsterAI.UpdateLeap)
 			w = 100,  -- stand 그림 폭(px). 공중 블록 스폰 여유 계산용(MonsterSpawner.GetEp4AerialHalfWidth)
 		}
 		for k, v in pairs(d) do def[k] = v end
@@ -4127,6 +4138,17 @@ script GameManager extends Logic
 		s.g_phantom_watch = self:MakeEp4Species({ stand = "3b8d0662d1e84f5cb7a3b99a79b0745e", move = "23fec8a8a0a8411c84ddbebc56c83501", hit = "e3c3cddc3eaf4f2196d4c2e8c4d6b4a2", die = "5fad506092a0491f9d7ba41f35692c7d", dieDur = 1.15, atk = "3199d484edd942a3b14ac04a492725cd", atkDur = 1.25, atkSnd = "14fcc6911fd14005964c7c548f43d28e", hitSnd = "f99f5fcf753c491c86dec54f72785e1f", dieSnd = "76ed519147f14597a41e29d4b92128e4", ranged = true, hitFx = "57fb646728fd45eaa5aaa5e3be528381", hitFxDur = 0.2, scale = 0.96, loot = "g_phantom_watch_card" })
 		-- 게이트키퍼 — 돌진(유저 지정). 덩치(266px)가 커서 0.45배
 		s.gatekeeper = self:MakeEp4Species({ stand = "1e1265c453ad4ed7a9b7780ca40d7d48", move = "ee458018a61344e59e59ef65f0f4908c", hit = "49151a3d8a6e4df58c58acf7bc1fea3d", die = "2a1b0fe14cda4f77834ebfe3b6f8e99d", dieDur = 0.85, atk = "919fe48b6d5149bda73f0819e120758e", atkDur = 2.45, hitSnd = "0f9591d86199407187436ddd6458873d", dieSnd = "69cb67ee44c74cd2a049e96d3c47cf8a", charge = true, scale = 0.675, loot = "gatekeeper_armband" })
+		-- 에피5 map1 (ep5_map1, 2026-10-19 유저 지정) ─────────────────────────────
+		-- 월묘(mob/4230300) — 근접 + 등장 점프(유저 지정 "처음 나오면 스프링처럼 튀어올라서 적 앞까지")
+		s.moon_bunny = self:MakeEp4Species({ stand = "6fb43d816def4db6ac7efba1cf2d0826", move = "330547dd4fb740bcad08ced3f756c033", hit = "cea10cdd3f2b4f11ad2870b3d90123f2", die = "3d81139f6b3b4c6fb00946598056720d", atk = "9a9351eecf4043759b4390fa0f30e787", atkDur = 0.65, atkSnd = "13da6f49640c4f4ba2e2d6cfd2602c4a", hitSnd = "28d4afab8cb04880b883bcf4135653de", dieSnd = "6188671d8309446eab0909d7ee5bee70", leap = true, scale = 1.04, loot = "moon_bunny_ricecake" })  -- 2026-10-19 유저 지정 20% 축소(1.3→1.04)
+		-- 호돌이(mob/5100003) — 지그재그 이동(유저 지정). 팩에 attack이 없어 들이받기
+		s.hodori = self:MakeEp4Species({ stand = "178e072c1a4e4bc1bd05a82977bd09d9", move = "83bbdfab2a7642ea9305a4d192a1de37", hit = "531d58e6d1bb43a39ee495acf3c1d884", die = "a8ed54a75441474491c3acf2908f2be1", hitSnd = "0eba3865a84e4628b0da4889f75eeba0", dieSnd = "53af45a69a6e4420b3cab1cb6278369f", zigzag = true, loot = "tteokguk_ricecake" })
+		-- 호걸(mob/5100005) — 원거리(유저 지정). 팩에 투사체가 없어 착탄(attack1/info/hit)만 쓴다
+		s.hogul = self:MakeEp4Species({ stand = "b7d045ca7e1a41a8ada20b68da439242", move = "8553bd69f22d4c4198a88cfac8f98608", hit = "a499acce515f424fa902084c64aae310", die = "de638bebd3ca4bb094c3beb4e9533981", dieDur = 0.55, atk = "44ea13d6c8384d10a164b501bf5b51a4", atkDur = 1.65, atkSnd = "a7dfcfb8a08b4ddebf8dc8730fc86461", hitSnd = "7563c27f9f5842b795e02aa008ea71cb", dieSnd = "956cfa681ae94b37880631685d900271", ranged = true, hitFx = "aea0ca9c82cf43fe9e6d156f5206e798", hitFxDur = 0.2, loot = "hogul_hide" })
+		-- 삼미호(mob/5100004) — 근접. 에피3 구미호 소환 부하와 같은 리소스·크기(유저 지정 "원래 쓰던대로")
+		s.sammiho = self:MakeEp4Species({ stand = "b87a500e22c94cd3a885f09b49fced3c", move = "9de517a21b984cd18c5d3c0c9b11aed2", hit = "6db5a17308ab48828291a995cbfd334b", die = "3fd1dc4fa74b4ab08167ae259c922f5e", dieDur = 0.72, atk = "49c1c6297e2b404b860cc486d95574b6", atkDur = 1.79, atkSnd = "552551013c6940b3af0549bd89d2713f", hitSnd = "844ff3eae2834cc6bc5a43b8a0355b3b", dieSnd = "209d0b6fc4ac44a3ad0b48a3f5e29b2b", scale = 1.06, loot = "sammiho_tail" })
+		-- 제비(에피5 전용 제작) — 비행 12 / 피격 6 / 사망 6 프레임. 기존 pigeon 종 키와 전투 설정은 유지한다.
+		s.pigeon = self:MakeEp4Species({ stand = "a06664c5a5bb4047adf0e08d0d6f18bc", hit = "ef1ef401cf3d47bd901146cfc5dc02e5", die = "1e6b69108aa844debd8aa93d2003dce3", dieDur = 0.75, hitSnd = "aff95730d41346cb946bf6f8b6bda8d3", fly = true, scale = 1.4, loot = "stiff_feather" })
 		-- 지상 종 stand 그림 폭(px, msw-search 실측 2026-10-08) — 좁은 공중 블록 끝에 걸쳐 떠 보이지 않게
 		-- MonsterSpawner가 이 폭만큼 블록 끝에서 띄운다(유저 리포트 "목마 공중에 떠있는거 같아"). 비행 종은 해당 없음.
 		local widths = {
@@ -4136,6 +4158,7 @@ script GameManager extends Logic
 			master_robo = 76, robotoy = 76, black_ratz = 66, squaroid = 64, ticktock = 64, ratz = 52,
 			brown_teddy = 51, pink_teddy = 51, panda_teddy = 51, trixter = 68, green_trixter = 68,
 			bloctopus = 48, king_bloctopus = 48, tiki = 40, drum_bunny = 36,
+			moon_bunny = 47, hodori = 99, hogul = 102, sammiho = 91,
 		}
 		for name, px in pairs(widths) do
 			if s[name] ~= nil then s[name].w = px end
@@ -4199,6 +4222,17 @@ script GameManager extends Logic
 			[181] = {"dark_klock", "phantom_watch", "master_death_teddy"},
 			[182] = {"g_phantom_watch", "gatekeeper", "master_soul_teddy"},
 			[183] = {"master_death_teddy", "dark_klock", "g_phantom_watch", "gatekeeper"},
+			-- 에피5 map1 (ep5_map1, 2026-10-19) — 월묘/호돌이/호걸/삼미호/제비. 앞 존은 2종, 뒤로 갈수록 섞고 존10은 4종
+			[190] = {"moon_bunny", "hodori"},
+			[191] = {"moon_bunny", "pigeon"},
+			[192] = {"hodori", "sammiho", "pigeon"},
+			[193] = {"hogul", "moon_bunny"},
+			[194] = {"sammiho", "hodori", "pigeon"},
+			[195] = {"hogul", "moon_bunny", "sammiho"},
+			[196] = {"pigeon", "hogul", "hodori"},
+			[197] = {"moon_bunny", "sammiho", "hogul"},
+			[198] = {"hodori", "pigeon", "hogul", "moon_bunny"},
+			[199] = {"sammiho", "hogul", "moon_bunny", "hodori"},
 		}
 		-- 맵1 복사 지형의 히든맵: 같은 첫 다섯 존 몬스터/행동/잡템 정의를 재사용한다.
 		for i=0,4 do self._ep4Zones[184+i]=self._ep4Zones[134+i] end
@@ -4231,6 +4265,12 @@ script GameManager extends Logic
 	@ExecSpace("ServerOnly")
 	method boolean GetEp4IsDrumBuffer(integer mapIndex, integer idx)
 		return self:GetEp4Def(mapIndex, idx).buffer
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean GetEp4IsLeap(integer mapIndex, integer idx)
+		-- 등장 점프 근접형(에피5 월묘)
+		return self:GetEp4Def(mapIndex, idx).leap
 	end
 
 	-- 맵7~9 전용 몬스터 풀 (맵마다 별도 구성) — 7:고스텀프/엑스텀프, 8:와일드보어/아이언호그, 9:히죽대는 고스텀프/아이언보어/파이어보어,
@@ -6981,7 +7021,7 @@ script GameManager extends Logic
 		-- BeginGameplay()의 ActivateMap과 겹쳐 초기 스폰이 두 번(그래서 에피1보다 몬스터가 더 많이)
 		-- 일어나는 버그가 있었다(유저 리포트로 발견) — 에피1 새 시작은 이 분기를 안 타서 항상
 		-- BeginGameplay() 한 번뿐이었으므로 에피2/3만 비대칭이었다.
-		if episode == 2 or episode == 3 or episode == 4 or (episode==1 and _MapManager.TestStartAtSylphUnlock and Environment:IsMakerPlay()) then
+		if episode == 2 or episode == 3 or episode == 4 or episode == 5 or (episode==1 and _MapManager.TestStartAtSylphUnlock and Environment:IsMakerPlay()) then
 			_MapManager:SilentMoveToMap(_MapManager.CurrentMapIndex, _MapManager.DesiredStartMapIndex)
 		end
 		self.GameStarted = true
@@ -7886,6 +7926,7 @@ script GameManager extends Logic
 			"block_golem_card", "king_block_golem_card", "chronos_egg", "platoon_chronos_card", "master_chronos_card", "clock_spring", "ticktock_egg", "bloctopus_blueprint", "king_bloctopus_card",
 			"buffy_hat", "lazy_buffy_bead", "buffoon_card", "deep_buffoon_stone", "pirate_helm", "dual_pirate_engine", "viking_helmet", "gigantic_viking_hat",
 			"soul_teddy_card", "master_soul_teddy_card", "klock_card", "dark_klock_watch", "death_teddy_button", "master_death_teddy_card", "phantom_watch_card", "g_phantom_watch_card", "gatekeeper_armband",
+			"moon_bunny_ricecake", "tteokguk_ricecake", "hogul_hide", "sammiho_tail", "stiff_feather",  -- 에피5 map1
 		}
 		return pool[_UtilLogic:RandomIntegerRange(1, #pool)]
 	end
@@ -10005,6 +10046,71 @@ script GameManager extends Logic
 		self:FlushVoucherIfDirty()
 		self:FlushDiamondIfDirty()
 	end
+
+
+	-- Registered custom monsters: shared pixel-aligned frames; ordinary swallow and four zone elites.
+	property table CustomMonsterClips = {
+		["a06664c5a5bb4047adf0e08d0d6f18bc"]={frames={"a06664c5a5bb4047adf0e08d0d6f18bc","fc46da992b6541f2a4a19bca22d52693","1551302c10de419b9e96cb0fb6c90034","371a3b081f8c45aa8a35ea18cbbb617a","3e09ae6f82b745ca812c13d5f6419a8c","484c343e81444c3fa18d3f72216aa9a0","1640b8f3e7c54459b9c9088218e98d42","463fd9dea3214eeab79f09cc6b45f25d","b74af564e0ef4632ada6d33474db90de","99118d457f64446988f83ec95137e537","349a3447842b4d8daa4bbf2c248ab46b","407f52623b5244f68f47f737369d4a5d"},step=0.065,loop=true},
+		["ef1ef401cf3d47bd901146cfc5dc02e5"]={frames={"ef1ef401cf3d47bd901146cfc5dc02e5","62b9f7c63d6c472bbfd9421547e4c171","92a3b34967134a1fa65215f4faf118ff","a7af4e614f7f4062a2f2b72c1102fcc7","3af889af74ef46a796052246f8f91b81","95648a2227144bb089252b7a8a2f56f1"},step=0.025,loop=false},
+		["1e6b69108aa844debd8aa93d2003dce3"]={frames={"1e6b69108aa844debd8aa93d2003dce3","8cbfc9e726d54e83947eef1757f4a497","3262c792c9344667b1a115c3dca838c6","0a266834da5d4540b0a8972db57f8dd2","798ba6862d2247f09c90b5a31b7741f3","c12c947524a94dee9f46418a075e55b4"},step=0.125,loop=false},
+		["979f42966f8e4f0c97af9e87a6eb0df1"]={frames={"979f42966f8e4f0c97af9e87a6eb0df1","fe58591847744be4a780909296cd4200","b97cb52fb085472b8b5f720c07301f17","8051617c146a45cba1705d86e718f1c9","90bf7916222f462a8747b2c7e5b6e024","ef58e852aa784b02b8a2a259560a1962"},step=0.14,loop=true},
+		["f73421d4de6e471a8e7377145d491957"]={frames={"f73421d4de6e471a8e7377145d491957","4fffa17678064a89abfc0a89e59e73af","93a28ca350d5495396f1cce5348c122b","7f3d89929a804e2ba23c1fa7e9d974fe","446ff45c6d964dcfba77457d5082a88c","1ebf126a4d4b4e0b8bc6f585cb28f016"},step=0.1,loop=true},
+		["19fbe93378c04caaa9dd2826881d8198"]={frames={"19fbe93378c04caaa9dd2826881d8198","8f0336ddb5c84d9984e08fa222155c7a","1fde3ac2f0ea4679ae92b56a055e020c","7e5cb17543e74a2c92e20ac5b2a9458f","1001863ead924899a3900f18cd15f786","edf43b565bd143118aeb2fcd04d80288"},step=0.12,loop=false},
+		["bc87e2bc23f4475c904a8b899fa0b5e5"]={frames={"bc87e2bc23f4475c904a8b899fa0b5e5","ca53fde1f51a4e899f719df460586e55","d8668924fe9a465a9d167fb7f3bba4a5","802fed8bcee24674bddfe80bbfcf3941","51e7c9f09f1047fba42472d1e7287fbc","54ee5ab5ab554ce7a45a04ff847ccd3c"},step=0.025,loop=false},
+		["3092a154451c47829e1754095d195715"]={frames={"3092a154451c47829e1754095d195715","da0735b57c074196a30f301c84d15236","16fde6a6318044d09c6ca2816a564e5a","75f3810952b54ba99b370c80c2e20cff","5b6302a9c47e41dc849fbb5828c13d74","25cccd32cb42485c8576491540658c91"},step=0.125,loop=false},
+		["92260194cef7432b9a7935446c27d1fc"]={frames={"92260194cef7432b9a7935446c27d1fc","a23a9f9bd7bb451390505e52ec65ac3f","4ec175becf944bdf81edf9b3928b53b4","e5814b830c4b43feae9bed76f49bcd0f","09e378f0e7c24010b300c54f8d632eb2","a75de9e0d8044dec8baa82fe547c2d73"},step=0.14,loop=true},
+		["04ae6972821541328a2841728c7bb5b7"]={frames={"04ae6972821541328a2841728c7bb5b7","c41e2d8a3bf7422083bfbde26c2663b7","5dbf3f7ff3cc42a78fce39b9baf50793","1774bccbaca64d35ba296dcf6012b98b","f71b186bfe034a5faf0c4f98e0631563","eefec62d82714f76becaf898cdfc5fa6"},step=0.1,loop=false,durations={0.22,0.1,0.2,0.22,0.12,0.06}},
+		["4e6d8fc145dc41c8959e233ce7dfa9f6"]={frames={"4e6d8fc145dc41c8959e233ce7dfa9f6","a73086f7192742769e4fcca63ddff68b","4a98f71904fb4409acd186d2583f55ae","a0db051a3bdc4c2ab7edaea8b339a1b1","ead5ddf67df74f9aad82ff5f6f8ec236","9fe1fb72927c4aa084984210b0f95265"},step=0.12,loop=false},
+		["2d3c71ee785f4053a3136d45ba47857b"]={frames={"2d3c71ee785f4053a3136d45ba47857b","f7d0d67bbdf1407398cd6c5854b7d4a0","9055e050059c448e812d2fb3c8138cf2","6bf4cd0895d54a7ebf0fbd0226f249cb","e7400db80c064568b545243bd659008a","3cda0255b03d497f95be37ce3e5fa819"},step=0.025,loop=false},
+		["f1874c4b63544dba971bbfb06c2a4553"]={frames={"f1874c4b63544dba971bbfb06c2a4553","ea605a2a380d44a09d5b64ae5c285ab2","575dfca9962d4d529c757ed11a5ba0a6","005805f3a54247d28c34fa6276b9155e","7422e7e8e4d24c638b43ac312d9838dd","4394b170800946ecbdc5fbf473130f6e"},step=0.125,loop=false},
+		["93cb4bc0cb334a629f2a631f6987c1bf"]={frames={"93cb4bc0cb334a629f2a631f6987c1bf","1781658ef57247f091aca73510b532d3","4b1e67fc60f2489da0b5484125541737","084786c36a0e41c6963bac9781a6f9ad","b7a6785189e44410b3a912761e733274","71c55697c9b94ead84ce8e1abf6fd85f"},step=0.14,loop=true},
+		["dc671efca68d4591841f7b7a23c03201"]={frames={"dc671efca68d4591841f7b7a23c03201","8d590b2a6d5c4ce784d4e9d9c5caefad","d000e1f05bab4d139eaff702f060e931","e6c306e47df943a18f080875cc677fd5","091c77aebbf94ee39a6c365826e4914c","a73e92e2e69c46a09e72a1827d96b59b"},step=0.1,loop=true},
+		["4d0e9110787a488c85c38a0250b34eec"]={frames={"4d0e9110787a488c85c38a0250b34eec","45412c7652964f1990d01a00f98eb68b","1a182d1b76e5455bbd07f363dc32cb6f","3a32d2994525428dac20bce523096d5c","9863e545863641c68e7f966b12038e62","d75025597aa147aebcdad28a18c9687c"},step=0.12,loop=false},
+		["e05d1792e1e14a2da9cb046bf34db01c"]={frames={"e05d1792e1e14a2da9cb046bf34db01c","87625db0ff7e4bc08c287c79691c05ee","b812c87f742d4c459cc431f712570b98","3d30e8da24784dc59bf17926b098d8cd","42d713dece28463ea7910acf9742aada","f02b45bcb5694800bae343f9a51fbe13"},step=0.025,loop=false},
+		["08bc7dd0add84cbc86b801303d16a8b6"]={frames={"08bc7dd0add84cbc86b801303d16a8b6","5ed220ba248b48fc9ba9563a381eafe5","b44762e37f7646949836b90745b8cbe1","7a8c0653c572449ea35e52dd8c4041ad","7af078a16b3944aea0c295af47b6b530","a2fa526d65994b0e9a93ec8883460fd6"},step=0.125,loop=false},
+		["e4f3088c73214c6fb8ad08b0406e378c"]={frames={"e4f3088c73214c6fb8ad08b0406e378c","414132c568bf4c7fa8da6dbc6d1ea099","0ebce667c1314646b6cf351a7baa305c","5b77c1163df344859cd763bc83d4572d","616b2ff6a3cd41c1aa8259085af95b46","37639b07aaac4868b679a0e52d095203","2bab7a4b7e764f7eb85764fb059a7052","d9c04ce43242444fa3598f001429f5a9","b10214dcad544c6aac29af998417432c","2b9b108d1f3c4983bf96377f87b35f8d","2c7114cb642b4d77af9595bc2593a3e8","54d7053cec634bcbbd97aaf9fbe6eb8c"},step=0.065,loop=true},
+		["1d345580a9014863b2a4058c6ae1d7ad"]={frames={"1d345580a9014863b2a4058c6ae1d7ad","828e4984bea8427d95b433f95e738cc2","696937c184854de4840fada1525dfa22","c865917d196d4e5794250b6b803937c5","1935d903b3c94edfb731048d2027fdbf","e6e21ce8a7bd4b8f9c38710b48353c1f"},step=0.12,loop=false},
+		["ba74feb188674770ac8ffe69b231889d"]={frames={"ba74feb188674770ac8ffe69b231889d","5fb6fffe86824ed39ba9a6a70b5ac52c","85e17bfdb6664c92a378f52a0d6ab2b1","4445ddf2346b4617bbd7ad67bda1d314","9279976c88b940538b1584f6056b629a","41a1b9ff7cf64d858503b74fc53c4392"},step=0.025,loop=false},
+		["7375fa0a19e741d2bfd09f31b57c6d98"]={frames={"7375fa0a19e741d2bfd09f31b57c6d98","c642078c01fa4a408883d689c62aafeb","854d1b55e2374c58a4d72e8e108a2efd","2cf86f0e36e442deaf9d271c0d0c1034","d33a718bec1646baa3474bb53f14ba99","8251d2ef7c724673ba7114dbcc31cea7"},step=0.125,loop=false},
+	}
+
+	@ExecSpace("ClientOnly")
+	method any GetCustomMonsterAnimation(string ruid)
+		return self.CustomMonsterClips[ruid]
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean WarmCustomMonsterFrames()
+		if self._T.monsterFramesReady then return true end
+		if self._T.monsterFramesLoading then return false end
+		if self._T.monsterFramesRetryAt~=nil and _UtilLogic.ElapsedSeconds<self._T.monsterFramesRetryAt then return false end
+		self._T.monsterFramesLoading=true
+		local assets={}
+		for _,clip in pairs(self.CustomMonsterClips) do for _,ruid in ipairs(clip.frames) do table.insert(assets,ruid) end end
+		_ResourceService:PreloadAsync(assets,function(results)
+			if not isvalid(self) then return end
+			local ready=true local count=0
+			for _,status in pairs(results) do count=count+1;if status~=PreloadResultStatus.Success then ready=false end end
+			ready=ready and count==#assets
+			self._T.monsterFramesReady=ready;self._T.monsterFramesLoading=false
+			if not ready then self._T.monsterFramesRetryAt=_UtilLogic.ElapsedSeconds+1 end
+			log("[VRF] MONSTER_FRAMES frames="..#assets.." ready="..tostring(ready))
+		end)
+		return false
+	end
+
+    -- Dedicated folk village elites only; later maps retain their existing roster.
+    property table Ep5VillageElites = {{name="청안 백호",ep5Kind="tiger",headTop=0.5,stand="979f42966f8e4f0c97af9e87a6eb0df1",move="f73421d4de6e471a8e7377145d491957",attack="19fbe93378c04caaa9dd2826881d8198",attackDur=0.72,hit="bc87e2bc23f4475c904a8b899fa0b5e5",die="3092a154451c47829e1754095d195715",dieDur=0.75,attackSfx="",hitSfx="",dieSfx="",scale=1.55,flying=false,ranged=false,zigzag=true,leap=false,hitFx="",hitFx2="",hitFxDur=0,hitFxDelay=0,hitFxFrames=nil,hitFxFrameDelay=0,flyAttackInterval=0},{name="달그림자 토끼",ep5Kind="rabbit",headTop=0.68,stand="92260194cef7432b9a7935446c27d1fc",move="04ae6972821541328a2841728c7bb5b7",attack="4e6d8fc145dc41c8959e233ce7dfa9f6",attackDur=0.72,hit="2d3c71ee785f4053a3136d45ba47857b",die="f1874c4b63544dba971bbfb06c2a4553",dieDur=0.75,attackSfx="",hitSfx="",dieSfx="",scale=1.55,flying=false,ranged=false,zigzag=false,leap=true,hitFx="",hitFx2="",hitFxDur=0,hitFxDelay=0,hitFxFrames=nil,hitFxFrameDelay=0,flyAttackInterval=0},{name="청령 여우",ep5Kind="fox",headTop=0.63,stand="93cb4bc0cb334a629f2a631f6987c1bf",move="dc671efca68d4591841f7b7a23c03201",attack="4d0e9110787a488c85c38a0250b34eec",attackDur=0.72,hit="e05d1792e1e14a2da9cb046bf34db01c",die="08bc7dd0add84cbc86b801303d16a8b6",dieDur=0.75,attackSfx="",hitSfx="",dieSfx="",scale=1.7,flying=false,ranged=true,zigzag=false,leap=false,hitFx="",hitFx2="",hitFxDur=0,hitFxDelay=0,hitFxFrames=nil,hitFxFrameDelay=0,flyAttackInterval=0},{name="금날개 제비",ep5Kind="swallow",headTop=0.78,stand="e4f3088c73214c6fb8ad08b0406e378c",move="",attack="1d345580a9014863b2a4058c6ae1d7ad",attackDur=0.72,hit="ba74feb188674770ac8ffe69b231889d",die="7375fa0a19e741d2bfd09f31b57c6d98",dieDur=0.75,attackSfx="",hitSfx="",dieSfx="",scale=1.8,flying=true,ranged=false,zigzag=false,leap=false,hitFx="",hitFx2="",hitFxDur=0,hitFxDelay=0,hitFxFrames=nil,hitFxFrameDelay=0,flyAttackInterval=2.8}}
+
+    @ExecSpace("ServerOnly")
+    method boolean IsEp5EliteZone(integer zoneIndex)
+        return zoneIndex>=190 and zoneIndex<=199
+    end
+
+    @ExecSpace("ServerOnly")
+    method any GetEp5EliteDef(integer index)
+        return self.Ep5VillageElites[math.max(1,math.min(4,index))]
+    end
 
 end
 

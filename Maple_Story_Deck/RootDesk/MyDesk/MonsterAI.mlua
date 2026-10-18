@@ -190,6 +190,9 @@ script MonsterAI extends Component
 	property number HeadMarkGap = 0.05
 	-- 클라이언트 로컬 — 부착 이펙트 시리얼
 	property integer _headMarkSerial = 0
+	-- 그림 위쪽이 투명하게 비어 있는 종(에피5 아랫마을 엘리트 등)은 "피벗~그림 꼭대기" 중 실제 머리까지의 비율을
+	-- def.headTop으로 받아 표식을 그만큼 내린다. 1.0 = 그림 꼭대기(기존 동작)
+	property number _headTopRatio = 1.0
 
 	-- ── 상태이상 아이콘(유저 지정 2026-10-07, TickStatusIcons 참고) ─────────────────
 	@Sync
@@ -895,6 +898,19 @@ script MonsterAI extends Component
 	-- 부스트된 ApproachSpeed 하나로 "빠른 접근"이 표현되므로 별도 이동 코드가 필요 없다.
 	property boolean _isCharge = false
 
+	-- 등장 점프 근접형(에피5 월묘, 2026-10-19 유저 지정 "처음에 나오면 스프링처럼 튀어올라서 적 앞까지") —
+	-- 스폰 후 LeapDelay초 서 있다가 LeapCrouchTime초 웅크리고, LeapAirTime초 동안 포물선(높이 LeapHeight)으로
+	-- 튀어 오르며 스케일을 도달 크기까지 한 번에 키운다. 착지하면 일반 도달(OnReachPlayer) 흐름을 그대로 탄다.
+	property boolean _isLeap = false
+	property string _ep5EliteKind = ""
+	property number _leapTimer = 0
+	property number _leapBaseY = 0
+	property number _leapStartScale = 0
+	property number LeapDelay = 0.35
+	property number LeapCrouchTime = 0.22
+	property number LeapAirTime = 0.7
+	property number LeapHeight = 1.6
+
 	property number _chargeWindupTimer = 0
 
 	property boolean _chargeDashActive = false
@@ -1119,6 +1135,7 @@ script MonsterAI extends Component
 			-- OnSyncProperty의 "값 변경" 이벤트만 기다리지 않고 여기서 바로 적용한다.
 			-- 맵 이동 직후처럼 동기화 타이밍이 애매한 경우, OnSyncProperty가 안 불려도
 			-- 몬스터가 기본 플레이스홀더 스프라이트로 멈춰있지 않도록 하기 위함.
+			_GameManager:WarmCustomMonsterFrames()
 			self:ApplyBodySprite(self.MonsterSprite)
 			-- "길잃은 루돌프" 전용 터치 연결 — TouchReceiveComponent가 없는 일반 몬스터에서는
 			-- TouchEvent가 애초에 발생하지 않으므로 이 연결은 무해하다(다른 500여종 몬스터엔 영향 없음).
@@ -1135,6 +1152,7 @@ script MonsterAI extends Component
 	method void InitializeStats(integer zoneIndex, integer wave, boolean isBoss, integer forcedSpeciesIdx)
 		self:CancelBodyAttackMotion(true)
 		self.ProjectileLifeRevision=self.ProjectileLifeRevision+1
+		self._ep5EliteKind="";self._T.ep5RabbitJumpStarted=nil
 		self.PapulatusPhase=0 self._papActionRevision=self._papActionRevision+1
 		-- 방금 막 스폰된 몬스터는 절대 죽어있을 수 없다 — 그런데도 스폰 직후 이 값이 이미 true로
 		-- 관측되는 경우가 실측 확인됐다(같은 틱에 다른 몬스터가 죽은 직후 엔티티 재사용 시 이전
@@ -1193,11 +1211,13 @@ script MonsterAI extends Component
 		self._hpSummonDone = false
 		-- 에피4 북치는 토끼 버퍼/공속 버프도 재사용 엔티티에 남으면 안 된다
 		self._isDrumBuffer = false
+		self._isLeap = false
 		self._atkSpeedBuffMult = 1.0
 		self._atkSpeedBuffUntil = 0
 		self._ep4SpeedMulApplied = 1.0
 		-- 머리 위 표식도 재사용 엔티티에 남으면 일반 몬스터 머리 위에 뜬다(보스 분기가 아래에서 다시 세운다)
 		self._headMark = ""
+		self._headTopRatio = 1.0
 		self._bookKey = ""
 		-- 방패 구슬(게이트키퍼)도 재사용 엔티티에 남으면 그 몸의 다음 몬스터가 공격을 막아버린다
 		self:ClearShieldOrbs()
@@ -2413,6 +2433,7 @@ script MonsterAI extends Component
 		local localPos = _MonsterSpawner:ToLocalSpawnPos(newMap, Vector3(newCenterX, newBaseY, 0))
 		self._flyCenterX = localPos.x
 		self._flyBaseY = localPos.y
+		self._T.charmFlyOffsetY = nil
 		local pos = self.Entity.TransformComponent.Position
 		self.Entity.TransformComponent.Position = Vector3(localPos.x, localPos.y, pos.z)
 	end
@@ -2733,7 +2754,9 @@ script MonsterAI extends Component
 	@ExecSpace("ServerOnly")
 	method void ApplyEliteSpecies(integer eliteIndex)
 		-- 엘리트 전용 종 정의를 이 개체에 적용한다(외형/사운드/크기/거동 — 스탯은 MarkElite 담당).
-		local def = _GameManager:GetEliteDef(eliteIndex)
+		local def = _GameManager:GetEliteDefForZone(eliteIndex,self._spawnZoneIndex)
+		self._ep5EliteKind=def.ep5Kind or "";self._T.ep5RabbitJumpStarted=nil
+		self._headTopRatio = def.headTop or 1.0
 		local wasFlying = self._isFlying
 
 		self._standRUID = def.stand
@@ -2757,6 +2780,7 @@ script MonsterAI extends Component
 		self._chargeDashActive = false
 		self._isZigzag = false
 		self._hasZigzagAfterimage = false
+		self._isLeap = false
 		self._neverAttacks = false
 		self._isGiantNepenthes = false
 		self._hasPhase2 = false
@@ -2840,6 +2864,10 @@ script MonsterAI extends Component
 			self._skipAttackLunge = true
 			self._flyCenterX = self.Entity.TransformComponent.Position.x
 			self._flyBaseY = (self.FlyingWanderMinY + self.FlyingWanderMaxY) * 0.5
+            if self._ep5EliteKind=="swallow" then
+                local pos=self.Entity.TransformComponent.Position
+                self.Entity.TransformComponent.Position=Vector3(pos.x,math.max(-.3,math.min(1.2,pos.y)),pos.z)
+            end
 			self._flyTime = 0
 			self._flyPhaseX = _UtilLogic:RandomDouble() * math.pi * 2
 			self._flyPhaseY = _UtilLogic:RandomDouble() * math.pi * 2
@@ -2869,6 +2897,16 @@ script MonsterAI extends Component
 			log("MonsterAI: elite charge species windup=" .. tostring(def.chargeWindup))
 		end
 
+        if def.zigzag==true and not self._isFlying then
+            self._isZigzag=true self._zigzagBaseX=self.Entity.TransformComponent.Position.x
+            self._zigzagTime=0 self._zigzagPhase=_UtilLogic:RandomDouble()*math.pi*2
+            self._zigzagAmplitudeActual=self.ZigzagAmplitude
+            local world=self.Entity.TransformComponent.WorldPosition
+            local bounds=_MonsterSpawner:GetContainingRunBounds(self._spawnZoneIndex,world.x,world.y)
+            if bounds~=nil then self._zigzagAmplitudeActual=math.max(0,math.min(self.ZigzagAmplitude,math.min(world.x-bounds.xMin,bounds.xMax-world.x)-.15)) end
+        end
+        self._isLeap=def.leap==true and not self._isFlying and not self._reachedPlayer
+        self._leapTimer=0
 		-- 접근 중엔 move, 이미 도달했거나 move가 없는 종(비행형)은 stand로 시작한다
 		if not self._isFlying and self._moveRUID ~= "" and not self._reachedPlayer then
 			self.MonsterSprite = self._moveRUID
@@ -2882,6 +2920,8 @@ script MonsterAI extends Component
 			-- 비행형은 스폰 즉시 고정 크기라 UpdateDepth의 점진적 페이드가 의미 없다 — 꺼둔다
 			self:HideDepthOverlay()
 		end
+		if self._isLeap then self.MonsterSprite=self._standRUID;self:SyncDepthOverlaySprite() end
+		if self._ep5EliteKind~="" then log("[VRF] EP5_ELITE kind="..self._ep5EliteKind.." zone="..self._spawnZoneIndex) end
 		self:RefreshHeadMark()
 		log("MonsterAI: elite #" .. eliteIndex .. " = " .. def.name)
 	end
@@ -3025,7 +3065,7 @@ script MonsterAI extends Component
 		if self._isFlying then reach = 1.0 end
 		local ref = self._scaleMultiplier * reach
 		if ref <= 0 then ref = 1.0 end
-		self._headMark = kind .. "|" .. string.format("%.4f", ref) .. "|" .. self._standRUID
+		self._headMark = kind .. "|" .. string.format("%.4f", ref) .. "|" .. self._standRUID .. "|" .. string.format("%.3f", self._headTopRatio)
 	end
 
 	-- 클라 — _headMark를 읽어 표식을 (다시) 붙인다. stand 클립 첫 프레임의 원본 크기/피벗으로
@@ -3042,6 +3082,7 @@ script MonsterAI extends Component
 		local kind = parts[1]
 		local ref = tonumber(parts[2])
 		local stand = parts[3]
+		local topRatio = tonumber(parts[4] or "1") or 1.0
 		if ref == nil or ref <= 0 then ref = 1.0 end
 		local markRuid = self.EliteHeadMarkRUID
 		local size = self.EliteHeadMarkSize
@@ -3056,7 +3097,7 @@ script MonsterAI extends Component
 		local top = 1.2
 		if body.w > 0 then
 			offX = (0.5 - body.px) * body.w
-			top = (1.0 - body.py) * body.h
+			top = (1.0 - body.py) * body.h * topRatio
 		end
 		local markH = 12.54
 		if mark.h > 0 then markH = mark.h end
@@ -3584,6 +3625,7 @@ script MonsterAI extends Component
 			self:UpdateCharmHeart(delta)
 			self:UpdateStatusIconCycle(delta)
 			self:UpdateIdleFrameClamp()
+			self:UpdateCustomMonsterAnimation(delta)
 			return
 		end
 		if self.CharmActive and (self._dead or _GameManager.GameOver or self._paused or self._spawnZoneIndex~=_MapManager.CurrentMapIndex) then self:ClearCharm(not self._dead) end
@@ -3678,7 +3720,13 @@ script MonsterAI extends Component
 			end
 			return
 		end
-		
+
+		-- 등장 점프 근접형(월묘) — 착지할 때까지 일반 스케일 접근 대신 점프 연출이 접근을 맡는다
+		if self._isLeap and not self._reachedPlayer then
+			self:UpdateLeap(delta)
+			return
+		end
+
 		-- 빙결/스턴 인디케이터는 map(=Entity.CurrentMap, 맵 루트)의 자식으로 스폰되는데 이 몬스터
 		-- 자신은 Zone12 같은 오프셋 컨테이너의 자식일 수 있다 — 로컬 Position을 그대로 쓰면 존 오프셋만큼
 		-- 어긋난 곳으로 계속 갱신되므로 WorldPosition을 써야 한다.
@@ -4383,6 +4431,60 @@ script MonsterAI extends Component
 		log("MonsterAI: charge dash started, boosted ApproachSpeed=" .. self.ApproachSpeed)
 	end
 
+	@ExecSpace("ServerOnly")
+	method void UpdateLeap(number delta)
+		if self._ep5EliteKind=="rabbit" then self:UpdateEp5RabbitLeap(delta);return end
+		-- 서 있기 → 웅크림(납작) → 포물선 점프(세로로 늘어남)로 도달 크기까지 커진 뒤 원래 높이에 착지한다.
+		-- 웅크림까지는 스턴/빙결이면 멈추고, 공중에 뜬 뒤에는 착지까지 끝낸다(허공에 멈춰 떠 있지 않게).
+		local tf = self.Entity.TransformComponent
+		local pos = tf.Position
+		local airStart = self.LeapDelay + self.LeapCrouchTime
+		if self._leapTimer < airStart and (self._isStunned or self._isHardFrozen) then return end
+		if self._leapTimer <= 0 then
+			self._leapBaseY = pos.y
+			self._leapStartScale = self._currentScale
+		end
+		self._leapTimer = self._leapTimer + delta
+		local t = self._leapTimer
+		local base = self._currentScale * self._scaleMultiplier
+		if t < self.LeapDelay then
+			tf.Scale = Vector3(base, base, 1.0)
+			return
+		end
+		if t < airStart then
+			local k = (t - self.LeapDelay) / self.LeapCrouchTime
+			tf.Scale = Vector3(base * (1 + 0.18 * k), base * (1 - 0.25 * k), 1.0)
+			return
+		end
+		local p = (t - airStart) / self.LeapAirTime
+		if p >= 1 then
+			-- 착지: 도달 크기로 맞추고 높이를 되돌린다 — 다음 프레임 일반 흐름이 도달 처리(정지/공격)를 한다
+			self._isLeap = false
+			self._currentScale = self._reachedScaleThreshold
+			tf.Position = Vector3(pos.x, self._leapBaseY, pos.z)
+			local s = self._currentScale * self._scaleMultiplier
+			tf.Scale = Vector3(s, s, 1.0)
+			local worldPos = tf.WorldPosition
+			_ParticleService:PlayBasicParticle(
+				BasicParticleType.DustExplosion,
+				self.Entity,
+				Vector3(worldPos.x, worldPos.y + 0.25 * s, worldPos.z + 0.1),
+				0,
+				Vector3(self.ChargeDustScale, self.ChargeDustScale, self.ChargeDustScale),
+				false,
+				{ SortingLayer = self.ChargeDustSortingLayer, OrderInLayer = self.ChargeDustOrderInLayer }
+			)
+			log("[VRF] leap landed scale=" .. string.format("%.2f", s))
+			return
+		end
+		self._currentScale = self._leapStartScale + (self._reachedScaleThreshold - self._leapStartScale) * p
+		local s = self._currentScale * self._scaleMultiplier
+		local arc = math.sin(p * math.pi)
+		tf.Scale = Vector3(s * (1 - 0.08 * arc), s * (1 + 0.15 * arc), 1.0)
+		tf.Position = Vector3(pos.x, self._leapBaseY + arc * self.LeapHeight, pos.z)
+		self:UpdateDepth()
+	end
+
 	-- 에피4 종 전용 추가 속성(InitializeStats의 존 풀 경로 끝에서 호출) — 공격음 / 접근 속도 배율(블랙 라츠 고속) /
 	-- 비행 공격 주기(attack1이 1.5초보다 긴 크로노스·파이렛·바이킹류가 자기 모션을 잘라먹지 않게) / 북치는 토끼 버퍼.
 	@ExecSpace("ServerOnly")
@@ -4403,6 +4505,8 @@ script MonsterAI extends Component
 			self._flyAttackIntervalOverride = self._attackDuration + 0.7
 			self._attackTimer = self._flyAttackIntervalOverride
 		end
+		self._isLeap = (not self._isFlying) and _GameManager:GetEp4IsLeap(zone, speciesIdx)
+		self._leapTimer = 0
 		self._isDrumBuffer = _GameManager:GetEp4IsDrumBuffer(zone, speciesIdx)
 		if self._isDrumBuffer then
 			-- 첫 북은 스폰 직후 곧바로가 아니라 주기의 절반~전부 사이 무작위(여러 마리가 동시에 치지 않게)
@@ -4503,7 +4607,17 @@ script MonsterAI extends Component
 		self._flyTime = self._flyTime + delta
 		local x = self._flyCenterX + math.sin(self._flyTime * self.FlySpeedX * self._flySpeedMultX + self._flyPhaseX) * self.FlyRangeX
 		local yAmplitude = (self.FlyingWanderMaxY - self.FlyingWanderMinY) * 0.5
-		local y = self._flyBaseY + math.sin(self._flyTime * self.FlySpeedY * self._flySpeedMultY + self._flyPhaseY) * yAmplitude
+		local yCenter=self._flyBaseY
+        if self._ep5EliteKind=="swallow" then yCenter=.45;yAmplitude=.75 end
+        local y = yCenter + math.sin(self._flyTime * self.FlySpeedY * self._flySpeedMultY + self._flyPhaseY) * yAmplitude
+		-- 유혹 해제 직후: 끌려 내려온 높이 차이를 1초에 걸쳐 0으로 줄여 원래 비행 궤도로 복귀(기준 높이를 낮추면 사인파가 바닥 밑으로 빠진다)
+		local lift = self._T.charmFlyOffsetY
+		if lift ~= nil then
+			local t = math.min(1, (self._T.charmFlyReturnAge or 0) + delta)
+			self._T.charmFlyReturnAge = t
+			y = y + lift * (1 - t) * (1 - t)
+			if t >= 1 then self._T.charmFlyOffsetY = nil log("[VRF] PET-CHARM fly return done entity="..self.Entity.Name.." baseY="..self._flyBaseY) end
+		end
 		local pos = self.Entity.TransformComponent.Position
 		self.Entity.TransformComponent.Position = Vector3(x, y, pos.z)
 		
@@ -4651,6 +4765,11 @@ script MonsterAI extends Component
 		-- 본체 + 깊이 오버레이 스프라이트를 동시에 교체(위 주석의 위상 어긋남 방지)
 		if ruid == "" then return end
 		local renderer = self.Entity.SpriteRendererComponent
+		if self:IsClient() then
+			local clip=_GameManager:GetCustomMonsterAnimation(ruid)
+			if clip~=nil then self._T.monsterFrameMotion={key=ruid,clip=clip,age=0,index=1,fresh=true} else self._T.monsterFrameMotion=nil end
+			if self._T.monsterFramesHidden and renderer~=nil then renderer.Enable=true;self._T.monsterFramesHidden=nil end
+		end
 		if renderer ~= nil then renderer.SpriteRUID = ruid end
 		local overlay = self:GetDepthOverlayRenderer()
 		if overlay ~= nil then overlay.SpriteRUID = ruid end
@@ -4809,6 +4928,9 @@ script MonsterAI extends Component
 		self._isPlayingTransientSprite = true
 		self._transientSpriteGeneration = self._transientSpriteGeneration + 1
 		local myGeneration = self._transientSpriteGeneration
+		local hitDuration=self.HitFlashDuration
+		local clip=_GameManager:GetCustomMonsterAnimation(hitRUID)
+		if clip~=nil then hitDuration=math.max(hitDuration,clip.step*#clip.frames+.05) end
 		_TimerService:SetTimerOnce(function()
 			if not isvalid(self) then return end
 			if self._transientSpriteGeneration ~= myGeneration then return end
@@ -4823,11 +4945,11 @@ script MonsterAI extends Component
 				return
 			end
 			-- hit1 상태일 때만 stand로 복원 — die1로 전환된 뒤라면 그대로 둔다
-			if renderer.SpriteRUID == hitRUID then
+			if renderer.SpriteRUID == hitRUID or (self._T.monsterFrameMotion~=nil and self._T.monsterFrameMotion.key==hitRUID) then
 				self:ApplyBodySprite(standRUID)
 			end
 			self._isPlayingTransientSprite = false
-		end, self.HitFlashDuration)
+		end, hitDuration)
 	end
 
 	-- 엔진 기본 내장 데미지 스킨(실제 메이플스토리와 동일한 숫자 그래픽/트윈)을 재생한다.
@@ -6263,7 +6385,9 @@ script MonsterAI extends Component
 		if renderer == nil then return end
 		-- 상태이상 색상 제거 + die1 스프라이트로 전환해 메이플 원본 죽는 연출 재생
 		renderer.Color = Color(1, 1, 1, 1)
-		if dieRUID ~= "" then renderer.SpriteRUID = dieRUID end
+		if dieRUID ~= "" then
+			if _GameManager:GetCustomMonsterAnimation(dieRUID)~=nil then self:ApplyBodySprite(dieRUID) else renderer.SpriteRUID=dieRUID end
+		end
 		-- die1 정확한 1사이클 후 알파 0으로 설정해 루프 방지
 		_TimerService:SetTimerOnce(function()
 			if not isvalid(self) or not isvalid(self.Entity) then return end
@@ -6584,7 +6708,7 @@ script MonsterAI extends Component
 				self:PlayAttackAnimation(self._attackRUID, self.MonsterSprite, self._attackDuration, self._attackSoundRUID)
 			end
 			if variantIsSummon then self:DoAttackVariantSummon() end
-			if not self._skipAttackLunge then
+			if not self._skipAttackLunge or self._ep5EliteKind=="swallow" then
 				self:PlayLungeAnimation(1.0, 0)
 			end
 			-- 비행+원거리(에피4 바이킹류) — 자기 팩 투사체가 플레이어 쪽으로 날아간다. 투사체가 없는 종은 내부에서 리턴.
@@ -7026,7 +7150,7 @@ script MonsterAI extends Component
 			if not isvalid(self) then return end
 			if self._transientSpriteGeneration ~= myGeneration then return end
 			-- attack1 상태일 때만 stand로 복원 — hit1/die1로 이미 전환된 뒤라면 그대로 둔다
-			if renderer.SpriteRUID == attackRUID then
+			if renderer.SpriteRUID == attackRUID or (self._T.monsterFrameMotion~=nil and self._T.monsterFrameMotion.key==attackRUID) then
 				self:ApplyBodySprite(standRUID)
 			end
 			self._isPlayingTransientSprite = false
@@ -7079,7 +7203,7 @@ script MonsterAI extends Component
 		_TimerService:SetTimerOnce(function()
 			if not isvalid(self) then return end
 			if self._transientSpriteGeneration ~= myGeneration then return end
-			if renderer.SpriteRUID == attack2RUID then
+			if renderer.SpriteRUID == attack2RUID or (self._T.monsterFrameMotion~=nil and self._T.monsterFrameMotion.key==attack2RUID) then
 				self:ApplyBodySprite(standRUID)
 			end
 			self._isPlayingTransientSprite = false
@@ -7094,6 +7218,8 @@ script MonsterAI extends Component
 	-- 같은 타이밍에 위로 살짝 뛰었다 착지하는 Y 모션을 더한다(0이면 기존과 동일하게 제자리 들이받기).
     @ExecSpace("ServerOnly")
     method boolean UsesBodyAttackMotion()
+        -- Keep the drawn elite wingbeat while the whole bird pulls back, then strikes in depth.
+        if self._ep5EliteKind=="swallow" then return true end
         -- Junior Boogie was explicitly requested: preserve its native sprite and replace only its old lunge.
         local scaleOnly=self._attackRUID=="" or (self._isFlying and self._standRUID=="2358e38b0c9b4d9da987387deba59de0")
         return scaleOnly and self._attack2RUID=="" and self._hitEffectRUID=="" and self._selfAttackEffectRUID==""
@@ -7131,10 +7257,11 @@ script MonsterAI extends Component
         end
         local renderer=self.Entity.SpriteRendererComponent
         local direction=renderer~=nil and renderer.FlipX and 1 or -1
-        local motion={age=0,position=tf.Position,scale=tf.Scale,life=self.ProjectileLifeRevision,
+        local eliteSwallow=self._ep5EliteKind=="swallow"
+        local motion={age=0,position=tf.Position,scale=tf.Scale,life=self.ProjectileLifeRevision,eliteSwallow=eliteSwallow,
             zone=self._spawnZoneIndex,flying=self._isFlying,strength=strength,direction=direction,
-            windup=self._isFlying and .16 or .10,strike=self._isFlying and .12 or .08,
-            recovery=self._isFlying and .22 or .20,hop=math.min(.06,math.max(0,hopHeight))}
+            windup=eliteSwallow and .24 or (self._isFlying and .16 or .10),strike=self._isFlying and .12 or .08,
+            recovery=eliteSwallow and .36 or (self._isFlying and .22 or .20),hop=math.min(.06,math.max(0,hopHeight))}
         self._T.attackBodyMotion=motion
         if motion.flying and strength==1 then _MonsterSpawner._T.bodyAttackDives[self]=motion end
     end
@@ -7142,7 +7269,7 @@ script MonsterAI extends Component
     @ExecSpace("ServerOnly")
     method void QueueBodyAttackContact(number damage, boolean ignoreImmune, Vector2 attacker, boolean chargeFirstHit)
         if self._T.bodyAttackContacts==nil then self._T.bodyAttackContacts={} end
-        table.insert(self._T.bodyAttackContacts,{age=0,delay=self._isFlying and .28 or .18,damage=damage,
+        table.insert(self._T.bodyAttackContacts,{age=0,delay=self._ep5EliteKind=="swallow" and .36 or (self._isFlying and .28 or .18),damage=damage,
             ignore=ignoreImmune,attacker=attacker,life=self.ProjectileLifeRevision,zone=self._spawnZoneIndex,chargeFirst=chargeFirstHit})
     end
 
@@ -7168,6 +7295,7 @@ script MonsterAI extends Component
             local lift=motion.flying and .12 or motion.hop
             local drop=motion.flying and -.18 or motion.hop*.5
             local backward=motion.flying and -.04 or -.02 local forward=motion.flying and .06 or .04
+            if motion.eliteSwallow then back=.10;peak=.12;lift=.08;drop=-.10;backward=-.08;forward=.14 end
             local scaleOffset=0 local yOffset=0 local xOffset=0
             if motion.age<motion.windup then
                 local u=motion.age/motion.windup u=u*u*(3-2*u)
@@ -7225,6 +7353,7 @@ script MonsterAI extends Component
 	method void OnEndPlay()
 		if self:IsServer() then self:CancelBodyAttackMotion(false) end
 		if self:IsClient() then
+			self._T.monsterFrameMotion=nil;self._T.monsterFramesHidden=nil
 			if isvalid(self._T.charmHeart) then self._T.charmHeart:Destroy() end self._T.charmHeart=nil
 			if isvalid(self._T.bossHpBar) then self._T.bossHpBar:Destroy() end
 			self._T.bossHpBar=nil return
@@ -7502,7 +7631,16 @@ script MonsterAI extends Component
 			local p=self.Entity.TransformComponent.Position
 			local dx=p.x-(self._T.charmOriginX or p.x) local dy=p.y-(self._T.charmOriginY or p.y)
 			self._wanderY=self._wanderY+dy
-			self._flyCenterX=self._flyCenterX+dx self._flyBaseY=self._flyBaseY+dy
+			-- Flying: keep the original base height and ease back from the lowered spot instead.
+			self._flyCenterX=self._flyCenterX+dx
+			if self._isFlying then
+				local amp=(self.FlyingWanderMaxY-self.FlyingWanderMinY)*0.5
+				local expected=self._flyBaseY+math.sin(self._flyTime*self.FlySpeedY*self._flySpeedMultY+self._flyPhaseY)*amp
+				self._T.charmFlyOffsetY=p.y-expected self._T.charmFlyReturnAge=0
+				log("[VRF] PET-CHARM fly return start entity="..self.Entity.Name.." offsetY="..(p.y-expected))
+			else
+				self._flyBaseY=self._flyBaseY+dy
+			end
 			self._zigzagBaseX=self._zigzagBaseX+dx
 			self._chargeSpawnX=self._chargeSpawnX+dx self._chargeSpawnY=self._chargeSpawnY+dy
 			if self.PapulatusPhase==2 then self._papClock=0 self._papFlightStart=p end
@@ -7541,6 +7679,59 @@ script MonsterAI extends Component
 		local width=math.abs(b.x-a.x)*math.max(20,math.min(30,_UILogic.ScreenHeight*0.035))
 		_PetLogic:PlacePetSkillSprite(heart,Vector3(p.x+left-width*0.2,p.y+top+width*0.2,p.z-0.2),width,0,1)
 	end
+
+
+	@ExecSpace("ClientOnly")
+	method void UpdateCustomMonsterAnimation(number delta)
+		local q=self._T.monsterFrameMotion
+		if q==nil then return end
+		local renderer=self.Entity.SpriteRendererComponent
+		if renderer==nil then return end
+		-- Wait for the complete set, then keep one renderer alive across every frame swap.
+		if not _GameManager:WarmCustomMonsterFrames() then renderer.Enable=false;self._T.monsterFramesHidden=true;return end
+		if self._T.monsterFramesHidden then renderer.Enable=true;self._T.monsterFramesHidden=nil end
+		if q.fresh then q.fresh=false
+		elseif not _GameManager:IsGamePaused() then q.age=q.age+math.max(0,delta)*math.max(0,renderer.PlayRate) end
+        local frame=0
+        if q.clip.durations~=nil then
+            local age=q.age local total=0
+            for _,hold in ipairs(q.clip.durations) do total=total+hold end
+            if q.clip.loop then age=age%total end
+            for i,hold in ipairs(q.clip.durations) do frame=i-1;if age<hold then break end;age=age-hold end
+        else
+            frame=math.floor(q.age/q.clip.step)
+            if q.clip.loop then frame=frame%#q.clip.frames else frame=math.min(frame,#q.clip.frames-1) end
+        end
+		q.index=frame+1
+		local ruid=q.clip.frames[q.index]
+		if renderer.SpriteRUID~=ruid then renderer.SpriteRUID=ruid end
+		local overlay=self:GetDepthOverlayRenderer()
+		if overlay~=nil and overlay.SpriteRUID~=ruid then overlay.SpriteRUID=ruid end
+	end
+
+    @ExecSpace("ServerOnly")
+    method void UpdateEp5RabbitLeap(number delta)
+        -- Drawn crouch, takeoff and landing frames share the same .92s trajectory.
+        local tf=self.Entity.TransformComponent local pos=tf.Position
+        local airStart=self.LeapDelay+self.LeapCrouchTime
+        if self._leapTimer<airStart and (self._isStunned or self._isHardFrozen) then return end
+        if self._leapTimer<=0 then self._leapBaseY=pos.y;self._leapStartScale=self._currentScale end
+        self._leapTimer=self._leapTimer+delta
+        local t=self._leapTimer
+        if t>=self.LeapDelay and not self._T.ep5RabbitJumpStarted then
+            self._T.ep5RabbitJumpStarted=true self.MonsterSprite=self._moveRUID self:SyncDepthOverlaySprite()
+        end
+        local progress=math.max(0,math.min(1,(t-airStart)/self.LeapAirTime))
+        self._currentScale=self._leapStartScale+(self._reachedScaleThreshold-self._leapStartScale)*progress
+        local scale=self._currentScale*self._scaleMultiplier
+        tf.Scale=Vector3(scale,scale,1)
+        tf.Position=Vector3(pos.x,self._leapBaseY+math.sin(progress*math.pi)*self.LeapHeight,pos.z)
+        self:UpdateDepth()
+        if progress>=1 then
+            self._isLeap=false self.MonsterSprite=self._standRUID self:SyncDepthOverlaySprite()
+            log("[VRF] EP5_RABBIT landed zone="..self._spawnZoneIndex)
+        end
+    end
 
 end
 -- 2026-10-10 OnMonsterReached 인자 추가(isChargeFirstHit) 후 재컴파일

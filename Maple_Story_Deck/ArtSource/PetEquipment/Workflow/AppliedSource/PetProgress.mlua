@@ -1,0 +1,87 @@
+@Struct
+script PetProgress
+
+	property boolean Owned = false
+	property boolean Equipped = false
+	property integer Level = 1
+	property integer XP = 0
+	property integer Rank = 0
+	property integer Energy = 1000
+	property integer EnergyAt = 0
+	property integer Fullness = 100
+	property integer Cleanliness = 100
+	property integer Mood = 100
+	property integer Fatigue = 0
+	property integer Health = 100
+	property integer Affinity = 0
+	property integer HeartDayKey = 0
+	property integer HeartClaimedMask = 0
+	property integer NeedsAt = 0
+	property integer Stones = 0
+	property integer SleepUntil = 0
+	property integer Stat3 = 0
+	property integer Stat6 = 0
+	property integer Stat9 = 0
+	property integer GearOwnedMask = 0
+	property integer GearEquippedMask = 0
+	property integer GearVariantOwnedMask = 0
+	property integer GearDesigns = 0
+
+	method table Serialize()
+		-- Keep the versioned save independent of runtime controllers and UI entities.
+		return {version=1, Owned=self.Owned, Equipped=self.Equipped, Level=self.Level,
+			XP=self.XP, Rank=self.Rank, Energy=self.Energy, EnergyAt=self.EnergyAt,
+			Fullness=self.Fullness, Cleanliness=self.Cleanliness, Mood=self.Mood,
+			Fatigue=self.Fatigue, Health=self.Health, Affinity=self.Affinity, HeartDayKey=self.HeartDayKey, HeartClaimedMask=self.HeartClaimedMask, NeedsAt=self.NeedsAt, Stones=self.Stones, SleepUntil=self.SleepUntil, Stat3=self.Stat3, Stat6=self.Stat6, Stat9=self.Stat9, GearOwnedMask=self.GearOwnedMask, GearEquippedMask=self.GearEquippedMask,GearVariantOwnedMask=self.GearVariantOwnedMask,GearDesigns=self.GearDesigns}
+	end
+
+	method boolean Deserialize(table data)
+		-- Refuse a future schema rather than overwriting it with an older client.
+		if data == nil or (data.version ~= nil and data.version ~= 1) then return false end
+		local function integerValue(key, fallback, low, high)
+			local value = tonumber(data[key]) or fallback
+			return math.floor(math.max(low, math.min(high, value)))
+		end
+		self.Owned = data.Owned == true
+		self.Equipped = self.Owned and data.Equipped == true
+		self.Rank = integerValue("Rank", 0, 0, 3)
+		self.Level = integerValue("Level", 1, 1, (self.Rank + 1) * 10)
+		self.XP = integerValue("XP", 0, 0, 100000)
+		self.Energy = integerValue("Energy", 1000, 0, 1000)
+		self.EnergyAt = integerValue("EnergyAt", 0, 0, 9007199254740991)
+		self.Fullness = integerValue("Fullness", 100, 0, 100)
+		self.Cleanliness = integerValue("Cleanliness", 100, 0, 100)
+		self.Mood = integerValue("Mood", 100, 0, 100)
+		-- Legacy saves begin rested; activities, not elapsed time, change fatigue.
+		self.Fatigue = integerValue("Fatigue", 0, 0, 100)
+		self.Health = integerValue("Health", 100, 0, 100)
+		self.Affinity = integerValue("Affinity", 0, 0, 100)
+		self.HeartDayKey = integerValue("HeartDayKey", 0, 0, 99991231)
+		self.HeartClaimedMask = integerValue("HeartClaimedMask", 0, 0, 7)
+		self.NeedsAt = integerValue("NeedsAt", 0, 0, 9007199254740991)
+		self.Stones = integerValue("Stones", 0, 0, 1000000000)
+		self.SleepUntil = integerValue("SleepUntil", 0, 0, 9007199254740991)
+		-- Old profiles have no option fields. New rolls must be valid saved type ids.
+		for _,key in ipairs({"Stat3","Stat6","Stat9"}) do
+			local value=data[key]
+			if value~=nil and (type(value)~="number" or value~=value or value~=math.floor(value) or value<0 or value>5) then return false end
+			self[key]=value or 0
+		end
+		for _,key in ipairs({"GearOwnedMask","GearEquippedMask","GearVariantOwnedMask","GearDesigns"}) do
+			local value=data[key] local maximum=key=="GearVariantOwnedMask" and 281474976710655 or (key=="GearDesigns" and 161616 or 7)
+			if value~=nil and (type(value)~="number" or value~=value or value~=math.floor(value) or value<0 or value>maximum) then return false end
+			self[key]=value or 0
+		end
+		for _,bit in ipairs({1,2,4}) do
+			local weight=bit==1 and 1 or (bit==2 and 100 or 10000)
+			local variant=math.floor(self.GearDesigns/weight)%100+1 if variant>17 then return false end
+			local owns=variant>1 and self.GearVariantOwnedMask or self.GearOwnedMask
+			local ownedBit=variant>1 and bit*2^((variant-2)*3) or bit
+			if (variant>1 or math.floor(self.GearEquippedMask/bit)%2==1) and math.floor(owns/ownedBit)%2~=1 then return false end
+		end
+		if not self.Owned and (self.GearVariantOwnedMask~=0 or self.GearDesigns~=0) then return false end
+		if not self.Owned and (self.GearOwnedMask~=0 or self.GearEquippedMask~=0) then return false end
+		return true
+	end
+
+end

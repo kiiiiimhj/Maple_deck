@@ -1,13 +1,15 @@
-# 펫 장비 리소스
+# Pet equipment resources
 
-현재 적용 중인 다섯 펫의 머리장식·옷·목걸이 PNG와 슬롯 아이콘을 이 폴더에서 관리합니다.
+Current applied artwork and editable sources are managed in this folder.
 
-- Textures: 펫 ID / 장비 슬롯 / RUID.png
-- Icons: 슬롯 아이콘
-- Maps/equipment-resources.json: 원본 프레임, 장비 슬롯, 좌표·밀도, RUID, 이 폴더 기준 상대 경로와 파일 해시
-- Sources: 기존 장비 원화
-- Workflow: 현재 추출·등록·검사 작업
-- Previews: 실제 메이커 재생 검사
-- History: 이전 장비 버전 원본과 기록
+- Native pets: Maps/validated-native-equipment-inputs-v11.json and Sources/Validated/<pet>.
+- Ttungttang: Maps/validated-ttung-equipment-inputs.json and Sources/Validated/ttungttang.
+- Live textures and icons: Maps/equipment-resources.json. Each item retains its individual slot state and bonus.
+- Game source snapshots: Workflow/AppliedSource.
+- Current native comparison and actual playback proof: Previews/NativeEquipmentV11.
+- Complete native sheet rebuild from portable inputs: Workflow/NativeEquipmentV11/rebuild_validated.py.
+- Pendant illustration source: Sources/Validated/PendantDesigns; built-in image generation specification: Workflow/NativeEquipmentV11/pendant-prompt.txt.
 
-게임은 등록된 RUID를 사용하므로 원본 폴더 정리는 게임의 리소스 참조를 바꾸지 않습니다. 원격 리소스 저장소의 폴더를 만든 것은 아니며, 프로젝트 원본 파일의 관리 폴더입니다. 개인 계정 스냅샷과 업로드 URL은 포함하지 않습니다.
+The native set adds one variation for each pet/slot. Coats give attack +5%, head ornaments critical damage +10%, necklaces critical chance +5%. Variants of the same slot replace one another and do not stack. Maker inventory's equipment test button makes both designs available for the selected owned pet. Release acquisition remains undecided.
+
+Read AGENTS.md before modifying artwork or rendering. Earlier exploratory outputs are retired; do not rebuild from their defective masks.

@@ -1,0 +1,825 @@
+@Logic
+script ShopUI extends Logic
+
+	property ScrollLayoutGroupComponent productScroll = "3506edd8-d843-4f21-85a4-5a06d260f219"
+	property ButtonComponent btnPrev = "3dce8aa6-c9ae-4310-90f8-520a395d6d6a"
+	property ButtonComponent btnNext = "6c718151-44eb-4282-9eed-092630bfeaef"
+	property Entity scrollTouchArea = "6e336451-5d36-4e79-bd42-d2bd4f9ddc83"
+	property SliderComponent scrollBar = "26212c1d-5b7a-41d6-baa0-c4e400b23841"
+	property integer itemCount = 7
+	property integer currentIndex = 0
+	property number scrollTweenDuration = 0.28
+	-- 실제로 드래그 가능한 스크롤 폭(px). 예전엔 1651을 손으로 박아뒀는데, 스타터팩 구매 후
+	-- 카드가 한 장 빠지면서 장수가 런타임에 바뀌게 되어 계산식으로 돌렸다(RecalcScrollMetrics).
+	-- 카드 크기/간격을 .ui에서 바꾸면 아래 상수만 맞춰주면 된다.
+	property number scrollableRangePx = 1531
+	property number CardWidthPx = 391
+	property number CardSpacingPx = 28
+	property number ListPaddingPx = 46
+	property number ViewportWidthPx = 1420
+
+	-- 인앱 상품 7종을 포털에 등록(2026-09-06)하고 ShopPurchaseLogic의 ID를 실제 값으로 채웠으므로 true.
+	-- false면 카드를 눌러도 결제창 대신 "준비 중" 안내만 뜬다 — 등록 안 된 productId로 PromptPurchase를
+	-- 부르면 결제창이 아니라 오류가 나기 때문에 두는 안전장치다. 상품을 다시 만드는 등 ID가 어긋난
+	-- 동안에는 이 값을 잠시 false로 내려두면 된다
+	property boolean ProductsRegistered = true
+
+	-- 구매 준비중/실패 안내 배너. 공용 토스트(ToastGroup)는 별도 UIGroup이라 로비 위로 못 올라오고
+	-- GroupOrder는 건드리면 다른 .ui 순서까지 틀어지므로, ShopPanel 안에 자체 배너를 두고 쓴다
+	property Entity noticeBanner = "ecde70a5-c6a8-4d92-bdb7-aed8f5b17351"
+	property TextGUIRendererComponent noticeText = "4e364a51-fa43-4cd2-9742-a3de8e74dd76"
+	property number NoticeHoldSeconds = 2.5
+
+	property table _cardHandlers = {}
+	property integer _noticeTimerId = 0
+
+	-- 스타터 패키지(PASS) 보유 여부. 서버가 알려주기 전까지는 false로 둔다 — 아직 안 산 유저의
+	-- 카드를 잘못 빼서 못 사게 만드는 것보다, 잠깐 보였다가 사라지는 쪽이 낫다
+	property boolean _starterOwned = false
+	-- 스크롤이 갈 수 있는 최대 정규화 위치. 스타터를 산 뒤 꺼둔 뒤쪽 빈 슬롯이 화면에 들어오지
+	-- 않도록 드래그/스크롤바를 여기까지만 허용한다(RecalcScrollMetrics가 계산)
+	property number _maxScrollNorm = 1
+
+	-- 상단 탭(랭킹탭과 동일한 방식 — 버튼 스프라이트 색만 on/off로 바꾸고 내용 컨테이너를 토글한다)
+	property ButtonComponent tabDiamond = "a8f48a1b-6b99-4f61-9183-903941fdbdba"
+	property ButtonComponent tabSkin = "06c9008b-2d50-4603-adc7-9cc0482e19fb"
+	property Entity skinPanel = "fa83c977-b38f-4ab8-ae49-bf3e2f4eef0b"
+	property Color TabOnColor = Color(0.85, 0.63, 0.24, 1)
+	property Color TabOffColor = Color(0.34, 0.21, 0.11, 1)
+	property string _currentTab = "diamond"
+	property any _tabDiamondHandler = nil
+	property any _tabSkinHandler = nil
+
+	property Entity skinPanelRoot = "fa83c977-b38f-4ab8-ae49-bf3e2f4eef0b"
+	property Color SkinEquippedLabelColor = Color(1, 0.82, 0.35, 1)
+	property Color SkinNormalLabelColor = Color(1, 0.914, 0.659, 1)
+	property Color SkinLockedLabelColor = Color(0.62, 0.62, 0.68, 1)
+	property table _skinHandlers = {}
+
+	-- 대미지 스킨 구매 확인창. 게임 종료 확인창(OptionGroup/ConfirmPanel)을 그대로 본떴다.
+	-- ShopPanel 안에 두면 뒤 형제인 하단 탭바/재화 배지/우측 버튼이 위에 그려지고 눌리므로 TitleGroup 맨 끝(최상단)에 둔다.
+	-- 딤을 같이 켜서 확인창 바깥 클릭을 막는다. 딤은 모바일에서 MobileScreenFitLogic.GetDimmerPaths 로 화면 끝까지 넓힌다
+	property Entity buyConfirmPanel = "76bf2785-050a-4339-b44c-e5c6ed4f497a"
+	property Entity buyConfirmDimmer = "15521fac-eff0-4f26-85b9-053fcaa3c701"
+	property TextGUIRendererComponent buyConfirmMessage = "48159e23-d12f-49a6-8dc0-2b9a4b9d03bd"
+	property TextGUIRendererComponent buyConfirmSubMessage = "dd6dad9d-afc7-4ca8-aa56-2f707a19f16d"
+	property ButtonComponent btnBuyYes = "4991ff05-79f8-4ca8-b062-eab0dcd3e50e"
+	property ButtonComponent btnBuyNo = "a52c2c64-76d3-4d86-9c70-d9103b3a94ee"
+	property string _pendingSkinKey = ""
+	property any _buyYesHandler = nil
+	property any _buyNoHandler = nil
+
+	property any _prevHandler = nil
+	property any _nextHandler = nil
+	property any _scrollTween = nil
+	property any _dragHandler = nil
+	property any _scrollBarHandler = nil
+	-- 카드 위를 끌면 ScrollLayoutGroup이 스스로 스크롤한다(OnScrollDrag는 바탕 터치 영역만 받음) — 그때도 스크롤바가 따라오게
+	-- 목록의 스크롤 위치 변경 이벤트를 받는다(유저 지적 2026-10-06 "상품 옆으로 넘기면 스크롤은 안 움직이네")
+	property any _listScrollHandler = nil
+	-- 스크립트가 scrollBar.Value를 코드로 갱신할 때(카드 쪽에서 온 변화를 핸들에 반영) true로 세워서,
+	-- 그 갱신이 다시 SliderValueChangedEvent로 되돌아와 카드를 또 움직이는 무한 루프를 막는다
+	property boolean _syncingScrollBar = false
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		-- 상점 상품 목록의 이전/다음 화살표 버튼을 스크롤 위치 이동에 연결한다
+		self._prevHandler = self.btnPrev.Entity:ConnectEvent(ButtonClickEvent, self.OnPrevClicked)
+		self._nextHandler = self.btnNext.Entity:ConnectEvent(ButtonClickEvent, self.OnNextClicked)
+		-- 마우스/터치로 좌우로 끌면 상품 목록이 그만큼 스크롤되도록 연결한다
+		self._dragHandler = self.scrollTouchArea:ConnectEvent(UITouchDragEvent, self.OnScrollDrag)
+		-- 하단 스크롤바 핸들을 직접 끌면 카드 목록도 같이 움직이도록 연결한다
+		self._scrollBarHandler = self.scrollBar.Entity:ConnectEvent(SliderValueChangedEvent, self.OnScrollBarChanged)
+		self._listScrollHandler = self.productScroll.Entity:ConnectEvent(ScrollPositionChangedEvent, self.OnListScrolled)
+
+		self._tabDiamondHandler = self.tabDiamond.Entity:ConnectEvent(ButtonClickEvent, function() self:SelectTab("diamond") end)
+		self._tabSkinHandler = self.tabSkin.Entity:ConnectEvent(ButtonClickEvent, function() self:SelectTab("skin") end)
+
+		self._buyYesHandler = self.btnBuyYes.Entity:ConnectEvent(ButtonClickEvent, function() self:OnSkinBuyConfirmed() end)
+		self._buyNoHandler = self.btnBuyNo.Entity:ConnectEvent(ButtonClickEvent, function() self:CloseSkinBuyConfirm() end)
+		self:CloseSkinBuyConfirm()
+
+		self.noticeBanner.Enable = false
+		self:ApplyProducts()
+		self:ConnectCards()
+		self:ConnectSkinCards()
+		self:InitializePetShopUI()
+		self:RefreshSkinCards()
+		self:SelectTab("diamond")
+		-- 스타터팩을 이미 샀는지 서버에 물어본다. 답이 오면 ReplyStarterOwned → SetStarterOwned로
+		-- 돌아와 카드에 "구매 완료" 덮개가 씌워진다
+		_ShopPurchaseLogic:RequestStarterOwned()
+		log("ShopUI: shop tab ready, registered=" .. tostring(self.ProductsRegistered))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ConnectSkinCards()
+		-- 카드 8장을 눌렀을 때 몇 번 스킨인지 알아야 해서 인덱스를 클로저로 잡아 연결한다
+		local cat = _DamageSkinLogic:GetCatalog()
+		for i = 1, #cat do
+			local capturedIndex = i
+			local card = self.skinPanelRoot:GetChildByName("SkinCard_" .. tostring(i))
+			if isvalid(card) then
+				local h = card:ConnectEvent(ButtonClickEvent, function() self:OnSkinCardClicked(capturedIndex) end)
+				table.insert(self._skinHandlers, { entity = card, eventHandler = h })
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshSkinCards()
+		-- 보유/장착 상태에 맞춰 카드 문구와 색을 다시 칠한다.
+		-- DamageSkinLogic 의 @Sync 값이 바뀔 때마다(OnSyncProperty) 다시 불린다
+		local cat = _DamageSkinLogic:GetCatalog()
+		local equippedKey = _DamageSkinLogic:GetEquippedKey()
+
+		for i = 1, #cat do
+			local entry = cat[i]
+			local card = self.skinPanelRoot:GetChildByName("SkinCard_" .. tostring(i))
+			if isvalid(card) then
+				local owned = _DamageSkinLogic:IsOwned(entry.key)
+				local equipped = (entry.key == equippedKey)
+
+				local nameText = card:GetChildByName("NameText")
+				if isvalid(nameText) then nameText.TextGUIRendererComponent.Text = self:LocalizeProductText(entry.name) end
+
+				local statusLabel = ""
+				local labelColor = self.SkinNormalLabelColor
+				if equipped then
+					statusLabel = _LocalizationService:GetText("MLUA_SHOPUI_001")
+					labelColor = self.SkinEquippedLabelColor
+				elseif owned then
+					statusLabel = _LocalizationService:GetText("MLUA_SHOPUI_002")
+				elseif entry.starterOnly then
+					statusLabel = _LocalizationService:GetText("MLUA_SHOPUI_003")
+					labelColor = self.SkinLockedLabelColor
+				else
+					statusLabel = _LocalizationService:GetTextFormat("FMT_SHOPUI_001", tostring(entry.price))
+				end
+
+				-- 카드/버튼이 그림(금테 아트)으로 바뀌어서 예전처럼 스프라이트를 틴트하면 아트가 물든다.
+				-- 상태 구분은 버튼 안 글씨 색으로만 한다
+				local box = card:GetChildByName("StatusBox")
+				if isvalid(box) then
+					local statusText = box:GetChildByName("StatusText")
+					if isvalid(statusText) then
+						statusText.TextGUIRendererComponent.Text = statusLabel
+						statusText.TextGUIRendererComponent.FontColor = labelColor
+					end
+				end
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnSkinCardClicked(integer index)
+		local cat = _DamageSkinLogic:GetCatalog()
+		local entry = cat[index]
+		if entry == nil then return end
+
+		local owned = _DamageSkinLogic:IsOwned(entry.key)
+		if owned then
+			if entry.key == _DamageSkinLogic:GetEquippedKey() then return end
+			_DamageSkinLogic:RequestEquip(entry.key)
+			return
+		end
+
+		if entry.starterOnly then
+			self:ShowNotice(_LocalizationService:GetText("MLUA_SHOPUI_004"))
+			return
+		end
+
+		self:OpenSkinBuyConfirm(entry)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OpenSkinBuyConfirm(table entry)
+		-- 바로 사지 않고 "구매할까요? 예/아니오"를 먼저 띄운다. 예를 눌러야 RequestBuy 로 넘어간다
+		self._pendingSkinKey = entry.key
+		self.buyConfirmMessage.Text = _LocalizationService:GetText("MLUA_SHOPUI_006")
+		self.buyConfirmSubMessage.Text = _LocalizationService:GetTextFormat("FMT_SHOPUI_002", self:LocalizeProductText(entry.name), tostring(entry.price))
+		self.buyConfirmDimmer:SetEnable(true)
+		self.buyConfirmPanel:SetEnable(true)
+		log("ShopUI: skin buy confirm open key=" .. entry.key)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void CloseSkinBuyConfirm()
+		-- 아니오/탭 전환 시 확인창을 닫고 대기 중인 스킨을 비운다
+		self._pendingSkinKey = ""
+		self.buyConfirmPanel:SetEnable(false)
+		self.buyConfirmDimmer:SetEnable(false)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnSkinBuyConfirmed()
+		-- 예: 확인창을 닫고 서버에 구매 요청(다이아 부족 등은 서버가 NotifyPurchaseFailed 로 알려준다)
+		local key = self._pendingSkinKey
+		self:CloseSkinBuyConfirm()
+		if key == "" then return end
+		log("ShopUI: skin buy confirmed key=" .. key)
+		_DamageSkinLogic:RequestBuy(key)
+	end
+
+	@ExecSpace("Multicast")
+	method void NotifyPurchaseFailed(string message)
+		-- 서버(RequestBuy)가 다이아 부족 등으로 거절했을 때 사유를 띄운다.
+		-- TitleUI.NotifyCoinsChanged 와 같은 이유로 Multicast 를 쓴다
+		if not self:IsClient() then return end
+		self:ShowNotice(_LocText:Resolve(message))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SelectTab(string tabName)
+		-- 다이아 탭은 기존 상품 스크롤(ScrollArea + 하단 스크롤바)을, 스킨 탭은 SkinPanel을 보여준다
+		self._currentTab = tabName
+		self:CloseSkinBuyConfirm()
+		local isDiamond = (tabName == "diamond")
+		self.scrollTouchArea.Enable = isDiamond
+		self.scrollBar.Entity.Enable = isDiamond
+		self.skinPanel.Enable = (tabName == "skin")
+		local petShop=self._T.petShop
+		if petShop~=nil then petShop.panel.Enable=(tabName=="pet");if tabName=="pet" then self:RefreshPetShopUI() end end
+		self:RefreshTabVisual()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshTabVisual()
+		local tabs={{entity=self.tabDiamond.Entity,key="diamond"},{entity=self.tabSkin.Entity,key="skin"}}
+		if self._T.petShop~=nil then table.insert(tabs,{entity=self._T.petShop.tab,key="pet"}) end
+		for _,row in ipairs(tabs) do
+			local r=row.entity.SpriteGUIRendererComponent
+			r.ImageRUID=DataRef(self._currentTab==row.key and "0cfbd6e3aa6845abb4a42659d01b6078" or "df45bdb1640949c9b5269bbd4cee7a66")
+			r.Color=Color(1,1,1,1)
+		end
+	end
+
+	method boolean IsStarterOwned()
+		-- 인게임 간이 다이아 상점(DiaShopUI)이 같은 "스타터 산 사람은 카드에서 뺀다" 규칙을 쓰려고
+		-- 물어본다. 다른 Logic 의 property 를 직접 읽으면 nil 이 나오므로 접근자로 연다
+		return self._starterOwned
+	end
+
+	method boolean AreProductsRegistered()
+		-- DiaShopUI 도 등록 안 된 productId 로 결제창을 띄우면 안 되므로 같은 안전장치를 공유한다
+		return self.ProductsRegistered
+	end
+
+	method table GetVisibleProducts()
+		-- 화면에 실제로 깔 상품 목록. 스타터팩을 이미 산 유저에게는 그 항목을 빼고 뒤를 당긴다
+		-- (덮개로 자리를 계속 차지하지 않게 — 유저 지정). 원본 표는 건드리지 않고 새 테이블을 만든다.
+		local products = _ShopPurchaseLogic:GetProducts()
+		if not self._starterOwned then return products end
+		local out = {}
+		for i = 2, #products do table.insert(out, products[i]) end
+		return out
+	end
+
+	@ExecSpace("ClientOnly")
+	method string LocalizeProductText(string value)
+		-- 상품표(ShopPurchaseLogic)의 표시 필드를 화면 문구로 푼다.
+		-- 표에는 로컬라이제이션 키만 들어 있다 — GetProducts()는 @ExecSpace가 없어서 서버에서도
+		-- 호출되는데 _LocalizationService는 ClientOnly라, 표 안에서 풀면 서버에서 nil이 된다.
+		-- 그래서 ClientOnly인 여기서 푼다.
+		-- 키가 아닌 값("+8%", "")은 그대로 통과시킨다.
+		if value == nil or value == "" then return value end
+		if string.match(value, "^[A-Z0-9_]+$") == nil then return value end
+		return _LocalizationService:GetText(value)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ApplyProducts()
+		-- 카드에 찍히는 문구를 ShopPurchaseLogic의 상품표에서 그대로 가져와 채운다. 표시 문구와 실제
+		-- 지급량이 갈라지지 않도록 원본은 그쪽 한 곳에만 둔다(.ui의 텍스트는 에디터용 자리표시일 뿐).
+		--
+		-- ⚠ ScrollLayoutGroup은 로드 시 한 번만 배치하고 런타임에 다시 계산하지 않는다(실측:
+		-- 카드를 Enable=false 하거나 RectSize=0으로 만들거나 AttachTo로 부모에서 빼도 뒤 카드가
+		-- 안 당겨진다). 그래서 "카드를 빼는" 게 아니라 "내용을 당겨 쓰고 남는 뒤쪽 슬롯을 끄는"
+		-- 방식으로 구현한다 — 슬롯 x좌표는 고정이라 이러면 첫 칸부터 빈틈 없이 채워진다.
+		local products = self:GetVisibleProducts()
+		local list = self.productScroll.Entity
+
+		-- 로컬라이제이션 적용 확인용. 키가 안 풀리면 여기 키 이름이 그대로 찍힌다
+		if #products > 0 then
+			log("ShopUI: ApplyProducts n=" .. tostring(#products)
+				.. " name1=" .. tostring(self:LocalizeProductText(products[1].name)))
+		end
+
+		-- 남는 뒤쪽 슬롯은 끈다(스타터 구매 후 7번째 칸)
+		for i = #products, 6 do
+			local extra = list:GetChildByName("ProductCard_" .. tostring(i))
+			if isvalid(extra) then extra.Enable = false end
+		end
+
+		for i = 1, #products do
+			local p = products[i]
+			local card = list:GetChildByName("ProductCard_" .. tostring(i - 1))
+			if isvalid(card) then
+				card.Enable = true
+
+				-- 로비 상품 카드 배경은 공통 크림색 테두리로 유지한다. 상품 내용/아이콘은 아래에서 그대로 갱신한다.
+				local cardSprite = card.SpriteGUIRendererComponent
+				if cardSprite ~= nil then cardSprite.ImageRUID = DataRef("4b108a37c9634258a6cd558c592a77d1") end
+
+				-- 상품 아이콘. 위와 같은 이유로 반드시 상품을 따라와야 한다
+				local icon = card:GetChildByName("Icon")
+				if isvalid(icon) and p.icon ~= nil then
+					local iconSprite = icon.SpriteGUIRendererComponent
+					if iconSprite ~= nil then iconSprite.ImageRUID = p.icon end
+				end
+
+				local nameText = card:GetChildByName("NameText")
+				if isvalid(nameText) then nameText.TextGUIRendererComponent.Text = self:LocalizeProductText(p.name) end
+
+				local descText = card:GetChildByName("DescText")
+				if isvalid(descText) then descText.TextGUIRendererComponent.Text = self:LocalizeProductText(p.desc) end
+
+				local priceBox = card:GetChildByName("PriceBox")
+				if isvalid(priceBox) then
+					local priceText = priceBox:GetChildByName("PriceText")
+					if isvalid(priceText) then priceText.TextGUIRendererComponent.Text = self:LocalizeProductText(p.price) end
+				end
+
+				-- 스타터팩만 다이아 아이콘 옆에 골드 아이콘을 같이 띄운다
+				local iconSub = card:GetChildByName("IconSub")
+				if isvalid(iconSub) then iconSub.Enable = p.showSub end
+
+				-- 보너스/한정 배지. 내용을 당겨 쓰면 배지 있는 카드에 배지 없는 상품이 들어올 수 있어서
+				-- 반드시 켜고 끄기까지 해야 한다 — 예전엔 p.badge가 nil이면 그냥 넘어가서 앞 상품의
+				-- 배지 문구가 그대로 남았다.
+				-- 배지 엔티티는 원래 카드 0·3·4·5·6에만 있어서 당겨쓰기 때 "+8%"가 사라졌는데,
+				-- 2026-09-06에 카드 1·2에도 BonusBadge를 달아 7장 모두 갖추게 했다(카드 3과 동일 규격).
+				-- ⚠ 카드를 새로 늘릴 땐 BonusBadge도 같이 넣을 것.
+				local badge = card:GetChildByName("BonusBadge")
+				if isvalid(badge) then
+					badge.Enable = (p.badge ~= nil)
+					if p.badge ~= nil then
+						local badgeText = badge:GetChildByName("BadgeText")
+						if isvalid(badgeText) then badgeText.TextGUIRendererComponent.Text = self:LocalizeProductText(p.badge) end
+					end
+				end
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ConnectCards()
+		-- 카드 각각을 눌렀을 때 몇 번 상품인지 알아야 해서 인덱스를 클로저로 잡아 연결한다.
+		-- 인덱스는 GetVisibleProducts 기준이라 스타터를 산 뒤에는 1번이 다이아 300이 된다.
+		-- 스타터 보유 여부가 바뀌면 다시 불리므로, 먼저 이전 핸들러를 끊어 중복 연결을 막는다.
+		for _, rec in ipairs(self._cardHandlers) do
+			if isvalid(rec.entity) then rec.entity:DisconnectEvent(ButtonClickEvent, rec.eventHandler) end
+		end
+		self._cardHandlers = {}
+
+		local products = self:GetVisibleProducts()
+		local list = self.productScroll.Entity
+		for i = 1, #products do
+			local capturedIndex = i
+			local card = list:GetChildByName("ProductCard_" .. tostring(i - 1))
+			if isvalid(card) then
+				local h = card:ConnectEvent(ButtonClickEvent, function() self:OnProductClicked(capturedIndex) end)
+				table.insert(self._cardHandlers, { entity = card, eventHandler = h })
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnProductClicked(integer index)
+		-- 카드 클릭 → 실제 결제창은 MSW의 월드상점이 띄워준다. 지급은 서버의 ShopPurchaseLogic 콜백이 담당.
+		--
+		-- ⚠ index는 ConnectCards가 **GetVisibleProducts 기준**으로 잡아 넘긴 값이다. 여기서 원본 표
+		-- (_ShopPurchaseLogic:GetProducts())로 조회하면 스타터팩을 산 뒤 카드가 한 칸씩 당겨졌을 때
+		-- 화면에 보이는 카드와 다른 상품이 결제된다(예: "다이아 600" 카드를 눌렀는데 결제창은 "다이아 300").
+		-- 인덱스를 만든 쪽과 조회하는 쪽의 기준을 반드시 같게 유지할 것 — 2026-09-10 버그 수정.
+		local products = self:GetVisibleProducts()
+		local p = products[index]
+		if p == nil then return end
+
+		if not self.ProductsRegistered then
+			self:ShowNotice(_LocalizationService:GetText("MLUA_DIASHOPUI_001"))
+			log("ShopUI: purchase blocked, products not registered yet (id=" .. p.id .. ")")
+			return
+		end
+
+		-- 방어용. 스타터팩을 이미 샀으면 GetVisibleProducts에서 빠지므로 여기 걸릴 일이 거의 없지만,
+		-- 서버의 보유 응답이 늦게 와서 카드가 아직 남아 있는 순간에는 여기서 막는다.
+		-- (예전엔 "index == 1"로 판정했는데, 당겨쓰기 후에는 1번이 스타터가 아니라서 엉뚱한 상품을 막았다)
+		if self._starterOwned and p.id == _ShopPurchaseLogic:GetStarterProductId() then
+			self:ShowNotice(_LocalizationService:GetText("MLUA_SHOPUI_005"))
+			log("ShopUI: starter purchase blocked, already owned")
+			return
+		end
+
+		log("ShopUI: PromptPurchase " .. p.id)
+		_WorldShopService:PromptPurchase(p.id)
+	end
+
+	-- 결제 지급 연출(유저 지정 2026-09-15) — 산 상품 카드 자리에서 다이아(골드)가 튀어나와 로비 상단 배지로
+	-- 날아간다. 에피소드/출석/방치 보상과 같은 RewardFlyUI·같은 아이콘(GetPivotFix가 이 RUID 기준으로 맞춰져 있다).
+	-- 서버 ShopPurchaseLogic.ProcessPurchase가 AddDiamond 직전에 NotifyPurchaseGranted로 부른다 — 숫자 보류(Hold)가
+	-- 잔액 동기화보다 먼저 걸려야 배지 숫자가 아이콘 도착 전에 먼저 오르지 않는다.
+	-- 결제가 다음 입장 때 처리되는 경우처럼 상점 카드가 안 보이면 화면 가운데에서 날린다.
+	property string DiamondFlyIconRUID = "81462aeb825b4660991cef05651271cf"
+	property string GoldFlyIconRUID = "02a489cccff24a139a6c3582a5871f58"
+	property number PurchaseFlyGap = 0.3
+
+	@ExecSpace("ClientOnly")
+	method void PlayPurchaseFly(string productId, integer diamond, integer coin)
+		-- 산 상품 카드 자리(안 보이면 화면 가운데)에서 재화 아이콘을 배지로 날린다
+		local src = Vector2(0, 0)
+		local card = self:FindProductCard(productId)
+		local cardVisible = false
+		if isvalid(card) and card.EnabledInHierarchy then
+			cardVisible = true
+			src = _RewardFlyUI:GetLayerPosOf(card, 0, 0)
+		end
+		local delay = 0
+		if diamond > 0 then
+			_RewardFlyUI:Hold("diamond", diamond)
+			_RewardFlyUI:Fly("diamond", diamond, self.DiamondFlyIconRUID, src, delay)
+			delay = delay + self.PurchaseFlyGap
+		end
+		if coin > 0 then
+			_RewardFlyUI:Hold("gold", coin)
+			_RewardFlyUI:Fly("gold", coin, self.GoldFlyIconRUID, src, delay)
+		end
+		log("ShopUI: purchase fly " .. productId .. " diamond=" .. diamond .. " coin=" .. coin .. " cardVisible=" .. tostring(cardVisible))
+	end
+
+	@ExecSpace("ClientOnly")
+	method Entity FindProductCard(string productId)
+		-- 지금 화면에 깔린 카드 중 그 상품이 들어 있는 카드(스타터 구매 후 당겨쓰기 기준 — GetVisibleProducts)
+		local products = self:GetVisibleProducts()
+		for i = 1, #products do
+			if products[i].id == productId then
+				return self.productScroll.Entity:GetChildByName("ProductCard_" .. tostring(i - 1))
+			end
+		end
+		return nil
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ShowNotice(string message)
+		-- 배너를 띄우고 NoticeHoldSeconds 뒤에 끈다. 연타로 여러 번 불리면 앞 타이머를 버리고 다시 잰다
+		self.noticeText.Text = message
+		self.noticeBanner.Enable = true
+		if self._noticeTimerId ~= 0 then _TimerService:ClearTimer(self._noticeTimerId) end
+		self._noticeTimerId = _TimerService:SetTimerOnce(function()
+			self.noticeBanner.Enable = false
+			self._noticeTimerId = 0
+		end, self.NoticeHoldSeconds)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetStarterOwned(boolean owned)
+		-- 서버(ShopPurchaseLogic)가 UserHasPassAndWait 결과를 돌려줄 때, 그리고 스타터팩 결제가
+		-- 지급될 때 불린다. 상태를 여기 한 곳에서만 갱신하고 화면 반영은 아래로 넘긴다
+		self._starterOwned = owned
+		self:ApplyStarterVisibility()
+		log("ShopUI: starter owned=" .. tostring(owned))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ApplyStarterVisibility()
+		-- 스타터 보유 여부가 정해졌을 때(입장 조회 응답 / 구매 직후) 카드 내용을 다시 깐다.
+		self:ApplyProducts()
+		self:ConnectCards()
+		self:RecalcScrollMetrics()
+
+		-- 장수가 줄면 기존 스크롤 위치가 새 한계를 넘을 수 있어 맨 앞으로 되돌린다
+		self.currentIndex = 0
+		self:SetListScroll(0)
+		self:SyncScrollBar(0)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RecalcScrollMetrics()
+		-- itemCount(화살표가 갈 수 있는 마지막 칸)와 스크롤 한계를 보이는 장수에 맞춰 다시 잡는다.
+		--
+		-- ⚠ scrollableRangePx(드래그 감도의 분모)는 **줄이면 안 된다**. 정규화 0~1은 언제나
+		-- .ui에 박힌 7칸 전체 폭을 기준으로 매핑되므로, 분모를 6칸 폭으로 줄이면 손가락 이동량과
+		-- 화면 이동량이 어긋난다. 대신 갈 수 있는 최대 정규화 값(_maxScrollNorm)을 따로 두고
+		-- 드래그/스크롤바에서 거기까지만 허용해, 꺼둔 뒤쪽 빈 슬롯이 화면에 안 들어오게 막는다.
+		local totalCards = #_ShopPurchaseLogic:GetProducts()
+		local visible = #self:GetVisibleProducts()
+		self.itemCount = visible
+
+		local fullContent = self.CardWidthPx * totalCards + self.CardSpacingPx * (totalCards - 1) + self.ListPaddingPx
+		local fullRange = fullContent - self.ViewportWidthPx
+		if fullRange < 1 then fullRange = 1 end
+		self.scrollableRangePx = fullRange
+
+		local visContent = self.CardWidthPx * visible + self.CardSpacingPx * (visible - 1) + self.ListPaddingPx
+		local visRange = visContent - self.ViewportWidthPx
+		if visRange < 0 then visRange = 0 end
+		self._maxScrollNorm = math.min(1, visRange / fullRange)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetProductSoldOut(integer index, boolean soldOut)
+		-- 카드에 "구매 완료" 덮개를 씌운다. 스타터팩은 덮개 대신 카드를 통째로 빼는 방식으로
+		-- 바꿔서(ApplyStarterVisibility) 지금은 아무도 부르지 않는다 — 나중에 "산 뒤에도 목록에는
+		-- 남겨두고 싶은" 1회한정 상품이 생기면 그때 쓰라고 남겨둔 훅이다
+		local card = self.productScroll.Entity:GetChildByName("ProductCard_" .. tostring(index - 1))
+		if not isvalid(card) then return end
+		local cover = card:GetChildByName("SoldOutCover")
+		if isvalid(cover) then cover.Enable = soldOut end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SyncScrollBar(number normalizedValue)
+		-- 카드 쪽 스크롤(드래그/화살표 트윈)이 바뀔 때 핸들 위치를 따라오게 한다.
+		-- 이 대입 자체가 SliderValueChangedEvent를 다시 쏘므로, 그 되돌아온 이벤트를 OnScrollBarChanged가
+		-- 무시하도록 플래그를 세워둔다.
+		self._syncingScrollBar = true
+		self.scrollBar.Value = normalizedValue
+		self._syncingScrollBar = false
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnScrollBarChanged(SliderValueChangedEvent event)
+		-- 방금 SyncScrollBar()가 코드로 쓴 값이 되돌아온 것이면 무시 — 사용자가 직접 핸들을 끈 경우만 처리
+		if self._syncingScrollBar then return end
+		if self._scrollTween then
+			self._scrollTween:Stop()
+			self._scrollTween = nil
+		end
+		-- 핸들을 끝까지 끌어도 빈 슬롯이 안 보이도록 같은 한계를 적용한다
+		local v = math.max(0, math.min(self._maxScrollNorm, event.Value))
+		self:SetListScroll(v)
+		self.currentIndex = math.floor((v / self._maxScrollNorm) * (self.itemCount - 1) + 0.5)
+		if v ~= event.Value then self:SyncScrollBar(v) end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnScrollDrag(UITouchDragEvent event)
+		-- 좌로 끌면(TouchDelta.x < 0) 다음 상품 쪽(정규화 값 증가)으로, 우로 끌면 반대로 스크롤한다
+		if self._scrollTween then
+			self._scrollTween:Stop()
+			self._scrollTween = nil
+		end
+		local current = self.productScroll:GetScrollNormalizedPosition(UITransformAxis.Horizontal)
+		local delta = -event.TouchDelta.x / self.scrollableRangePx
+		-- 상한은 1이 아니라 _maxScrollNorm — 스타터 구매 후 꺼둔 뒤쪽 빈 슬롯이 안 보이게 막는다
+		local newValue = math.max(0, math.min(self._maxScrollNorm, current + delta))
+		self:SetListScroll(newValue)
+		-- 0~_maxScrollNorm 구간을 0~(itemCount-1)로 환산해야 현재 칸 번호가 맞는다
+		self.currentIndex = math.floor((newValue / self._maxScrollNorm) * (self.itemCount - 1) + 0.5)
+		self:SyncScrollBar(newValue)
+	end
+
+	-- 스크롤 위치 변경 이벤트는 한 박자 늦게(비동기로) 돌아온다(UIGridScrollBar 실측 주석 참고) — 스크립트가 직접 옮긴 뒤
+	-- 이 시간(ms) 안에 오는 이벤트는 그 echo로 보고 무시한다. 안 그러면 스크롤바를 끄는 중에 늦게 온 옛 값이 핸들을 되돌린다
+	property number _codeScrollAt = 0
+	property number CodeScrollEchoMs = 200
+
+	@ExecSpace("ClientOnly")
+	method void MarkCodeScroll()
+		self._codeScrollAt = DateTime.UtcNow.Elapsed
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetListScroll(number value)
+		-- 상품 목록 위치는 항상 이걸로 옮긴다(echo 구분용 시각 기록)
+		self:MarkCodeScroll()
+		self.productScroll:SetScrollNormalizedPosition(UITransformAxis.Horizontal, value)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnListScrolled(ScrollPositionChangedEvent event)
+		-- 카드를 직접 끌어 목록이 스스로 움직였을 때(관성 포함) 스크롤바와 현재 칸 번호를 목록 위치에 맞춘다
+		if DateTime.UtcNow.Elapsed - self._codeScrollAt < self.CodeScrollEchoMs then return end
+		local v = event.NormalizedPosition.x
+		if v > self._maxScrollNorm then
+			-- 스타터 구매 후 꺼 둔 뒤쪽 빈 슬롯은 안 보이게 막는다(OnScrollDrag와 같은 상한)
+			v = self._maxScrollNorm
+			self:SetListScroll(v)
+		elseif v < 0 then
+			v = 0
+		end
+		if self._maxScrollNorm > 0 then
+			self.currentIndex = math.floor((v / self._maxScrollNorm) * (self.itemCount - 1) + 0.5)
+		end
+		self:SyncScrollBar(v)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnPrevClicked()
+		-- 왼쪽 화살표 — 이전 상품으로 부드럽게 스크롤
+		self:ScrollToIndexSmooth(math.max(0, self.currentIndex - 1))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnNextClicked()
+		-- 오른쪽 화살표 — 다음 상품으로 부드럽게 스크롤
+		self:ScrollToIndexSmooth(math.min(self.itemCount - 1, self.currentIndex + 1))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ScrollToIndexSmooth(integer newIndex)
+		-- 즉시 점프하던 SetScrollPositionByItemIndex를 스와이프처럼 부드럽게 이어지도록 트윈으로 감싼다.
+		-- 목표 정규화 위치를 알아낼 API가 없어서, 한 번 순간이동시켜 도착 위치를 측정한 뒤
+		-- 원래 위치로 되돌리고 그 구간을 트윈으로 재생하는 방식을 쓴다.
+		if newIndex == self.currentIndex then return end
+		local fromValue = self.productScroll:GetScrollNormalizedPosition(UITransformAxis.Horizontal)
+		self.currentIndex = newIndex
+		self:MarkCodeScroll()
+		self.productScroll:SetScrollPositionByItemIndex(self.currentIndex)
+		wait(1/60) -- 레이아웃이 한 프레임 뒤에 갱신되므로, 도착 위치를 읽기 전에 한 프레임 대기한다
+		local toValue = self.productScroll:GetScrollNormalizedPosition(UITransformAxis.Horizontal)
+		self:SetListScroll(fromValue)
+
+		if self._scrollTween then self._scrollTween:Stop() end
+		self._scrollTween = _TweenLogic:PlayTween(fromValue, toValue, self.scrollTweenDuration, EaseType.QuartEaseOut, function(value)
+			self:SetListScroll(value)
+			self:SyncScrollBar(value)
+		end)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		self:ClearPetShopUI()
+		if self._prevHandler then self.btnPrev.Entity:DisconnectEvent(ButtonClickEvent, self._prevHandler) end
+		if self._nextHandler then self.btnNext.Entity:DisconnectEvent(ButtonClickEvent, self._nextHandler) end
+		if self._dragHandler then self.scrollTouchArea:DisconnectEvent(UITouchDragEvent, self._dragHandler) end
+		if self._scrollBarHandler then self.scrollBar.Entity:DisconnectEvent(SliderValueChangedEvent, self._scrollBarHandler) end
+		if self._listScrollHandler then self.productScroll.Entity:DisconnectEvent(ScrollPositionChangedEvent, self._listScrollHandler) end
+		if self._scrollTween then self._scrollTween:Stop() end
+		for _, rec in ipairs(self._cardHandlers) do
+			if isvalid(rec.entity) then rec.entity:DisconnectEvent(ButtonClickEvent, rec.eventHandler) end
+		end
+		self._cardHandlers = {}
+		if self._noticeTimerId ~= 0 then _TimerService:ClearTimer(self._noticeTimerId) end
+		if self._tabDiamondHandler then self.tabDiamond.Entity:DisconnectEvent(ButtonClickEvent, self._tabDiamondHandler) end
+		if self._tabSkinHandler then self.tabSkin.Entity:DisconnectEvent(ButtonClickEvent, self._tabSkinHandler) end
+		for _, rec in ipairs(self._skinHandlers) do
+			if isvalid(rec.entity) then rec.entity:DisconnectEvent(ButtonClickEvent, rec.eventHandler) end
+		end
+		self._skinHandlers = {}
+		if self._buyYesHandler then self.btnBuyYes.Entity:DisconnectEvent(ButtonClickEvent, self._buyYesHandler) end
+		if self._buyNoHandler then self.btnBuyNo.Entity:DisconnectEvent(ButtonClickEvent, self._buyNoHandler) end
+	end
+
+	@ExecSpace("ClientOnly")
+	method table GetPetShopCatalog()
+		-- Presentation-only catalogue. Oduck is an in-game Easter egg.
+		-- Keep this separate from registered products and purchase grants.
+		return {{id="5002617",price=1300},{id="ttungttang",price=1300},{id="5000498",price=1300},{id="landturtle",price=1300}}
+	end
+
+	@ExecSpace("ClientOnly")
+	method table GetPetShopLabels()
+		local locale=string.sub(string.lower(_LocalizationService.CurrentLocaleId or "ko"),1,2)
+		local labels={
+			ko={tab="펫",coin=" 코인",coming="판매 준비 중",notice="펫 판매를 준비 중이에요.",base="기본 능력치",stats={"공격력","치명타 확률","치명타 피해","최대 체력","스킬 쿨타임 감소"},descriptions={"4초 동안 굴러가며\n몬스터를 밀쳐냅니다.","몬스터를 한곳으로 유인해\n광역 공격을 돕습니다.","여우 모양의 포효로\n몬스터를 2초간 기절시킵니다.","3초 동안 껍질로\n몬스터의 공격을 받아줍니다."}},
+			en={tab="Pets",coin=" coins",coming="Coming soon",notice="Pet sales are coming soon.",base="Starting bonus",stats={"Attack","Critical chance","Critical damage","Max HP","Skill cooldown reduction"},descriptions={"Roll for 4s and\nknock enemies back.","Lure enemies together\nfor area attacks.","A fox-shaped roar\nstuns enemies for 2s.","A shell takes enemy\nattacks for 3s."}},
+			ja={tab="ペット",coin="コイン",coming="販売準備中",notice="ペットは販売準備中です。",base="初期能力値",stats={"攻撃力","クリティカル率","クリティカルダメージ","最大HP","スキルクールタイム短縮"},descriptions={"4秒間転がり、\n敵をノックバックします。","敵を一か所へ誘い、\n範囲攻撃を助けます。","キツネ形の咆哮で\n敵を2秒間気絶させます。","3秒間、甲羅で\n敵の攻撃を引き受けます。"}},
+			zh={tab="宠物",coin="硬币",coming="即将开放",notice="宠物即将开放出售。",base="初始属性",stats={"攻击力","暴击率","暴击伤害","最大生命值","技能冷却缩减"},descriptions={"滚动4秒，\n击退怪物。","将怪物吸引到一起，\n帮助范围攻击。","狐狸形状的咆哮\n使怪物眩晕2秒。","龟壳替你承受\n怪物攻击3秒。"}}
+		}
+		return labels[locale] or labels.en
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlacePetShopElement(Entity entity, number x, number y, number width, number height)
+		local t=entity.UITransformComponent
+		t.AnchorsMin=Vector2(.5,.5);t.AnchorsMax=Vector2(.5,.5);t.Pivot=Vector2(.5,.5)
+		t.anchoredPosition=Vector2(x,y);t.RectSize=Vector2(width,height)
+		t.UIScale=Vector3(1,1,1);t.UIRotation=Vector3.zero
+	end
+
+	@ExecSpace("ClientOnly")
+	method Entity CreatePetShopText(Entity template, Entity parent, string name, number y, number height, number fontSize)
+		local e=_SpawnService:SpawnByEntity(template,name,Vector3.zero,parent,false)
+		self:PlacePetShopElement(e,0,y,282,height)
+		local r=e.TextGUIRendererComponent;r.FontSize=fontSize;r.BestFit=false;r.SizeFit=false
+		r.FontColor=Color(.18,.12,.07,1);r.HorizontalAlignment=TextHorizontalAlignmentOption.Center
+		r.VerticalAlignment=TextVerticalAlignmentOption.Middle;r.OutlineWidth=0;r.Underlay=false
+		e.Enable=true
+		return e
+	end
+
+	@ExecSpace("ClientOnly")
+	method void InitializePetShopUI()
+		if self._T.petShop~=nil then return end
+		local panel=_SpawnService:SpawnByEntity(self.skinPanelRoot,"PetShopPanel",Vector3.zero,self.skinPanelRoot.Parent,false)
+		local panelTransform=self.skinPanelRoot.UITransformComponent
+		self:PlacePetShopElement(panel,panelTransform.anchoredPosition.x,panelTransform.anchoredPosition.y,panelTransform.RectSize.x,panelTransform.RectSize.y)
+		panel.Enable=false
+		local tab=_SpawnService:SpawnByEntity(self.tabSkin.Entity,"TabPet",Vector3.zero,self.tabSkin.Entity.Parent,false)
+		local pos=self.tabSkin.Entity.UITransformComponent.anchoredPosition
+		local previous=self.tabDiamond.Entity.UITransformComponent.anchoredPosition
+		tab.UITransformComponent.anchoredPosition=Vector2(pos.x+(pos.x-previous.x),pos.y)
+		tab.ButtonComponent.Transition=TransitionType.None
+		local label=_SpawnService:SpawnByEntity(self.tabSkin.Entity:GetChildByName("Label"),"Label",Vector3.zero,tab,false)
+		local q={panel=panel,tab=tab,label=label,cards={},handlers={},ready=false}
+		self._T.petShop=q
+		local h=tab:ConnectEvent(ButtonClickEvent,function()self:SelectTab("pet")end)
+		table.insert(q.handlers,{entity=tab,handle=h})
+		local template=self.productScroll.Entity:GetChildByName("ProductCard_0")
+		local nameTemplate=template:GetChildByName("NameText")
+		local descTemplate=template:GetChildByName("DescText")
+		local priceTemplate=template:GetChildByName("PriceBox")
+		local priceTextTemplate=priceTemplate:GetChildByName("PriceText")
+		local iconTemplate=template:GetChildByName("Icon")
+		local assets={}
+		for i,row in ipairs(self:GetPetShopCatalog()) do
+			local at=i
+			local card=_SpawnService:SpawnByEntity(template,"PetCard_"..i,Vector3.zero,panel,false)
+			self:PlacePetShopElement(card,-525+(i-1)*350,0,330,670)
+			card.ButtonComponent.Transition=TransitionType.None
+			card.SpriteGUIRendererComponent.Color=Color(1,1,1,1)
+			local name=self:CreatePetShopText(nameTemplate,card,"NameText",247,50,34)
+			local portrait=_SpawnService:SpawnByEntity(iconTemplate,"PetPortrait",Vector3.zero,card,false)
+			self:PlacePetShopElement(portrait,0,80,250,220)
+			local r=portrait.SpriteGUIRendererComponent;r.Type=ImageType.Simple;r.PreserveSprite=PreserveSpriteType.NativeSize
+			r.LocalPosition=Vector2.zero;r.LocalScale=Vector2(1,1);r.PlayRate=0;r.RaycastTarget=false
+			r.Color=Color(1,1,1,1);r.Outline=false;r.DropShadow=false
+			local base=self:CreatePetShopText(descTemplate,card,"BaseLabel",0,28,20)
+			base.TextGUIRendererComponent.FontColor=Color(.43,.31,.18,1)
+			local bonus=self:CreatePetShopText(descTemplate,card,"BaseBonus",-32,38,24)
+			local skillIcon=_SpawnService:SpawnByEntity(iconTemplate,"SkillIcon",Vector3.zero,card,false)
+			self:PlacePetShopElement(skillIcon,-92,-96,42,42)
+			local sr=skillIcon.SpriteGUIRendererComponent;sr.PreserveSprite=PreserveSpriteType.AspectOnly
+			sr.LocalScale=Vector2(1,1);sr.LocalPosition=Vector2.zero;sr.PlayRate=0;sr.Color=Color(1,1,1,1);sr.RaycastTarget=false
+			local skillName=self:CreatePetShopText(descTemplate,card,"SkillName",-96,40,26)
+			self:PlacePetShopElement(skillName,22,-96,196,40)
+			local skillDesc=self:CreatePetShopText(descTemplate,card,"SkillDescription",-153,66,21)
+			local interval=self:CreatePetShopText(descTemplate,card,"SkillInterval",-204,28,18)
+			interval.TextGUIRendererComponent.FontColor=Color(.43,.31,.18,1)
+			local price=_SpawnService:SpawnByEntity(priceTemplate,"PriceBox",Vector3.zero,card,false)
+			self:PlacePetShopElement(price,0,-259,280,78)
+			local priceText=_SpawnService:SpawnByEntity(priceTextTemplate,"PriceText",Vector3.zero,price,false)
+			self:PlacePetShopElement(priceText,0,0,252,50)
+			priceText.TextGUIRendererComponent.FontSize=31;priceText.TextGUIRendererComponent.BestFit=false
+			priceText.TextGUIRendererComponent.FontColor=Color(1,.90,.62,1)
+			local coming=self:CreatePetShopText(descTemplate,card,"ComingSoon",-306,24,18)
+			coming.TextGUIRendererComponent.FontColor=Color(.43,.31,.18,1)
+			local entry=_PetLogic:GetPetDefinition(row.id)
+			local body=entry.frames~=nil and entry.frames.stand[1] or _PetLogic:GetNativePetFrame(entry.stand,0)
+			local skill=_PetLogic:GetPetSkillInfo(row.id)
+			table.insert(assets,body);table.insert(assets,skill.icon)
+			q.cards[i]={entity=card,petId=row.id,name=name,portrait=portrait,body=body,base=base,bonus=bonus,skillIcon=skillIcon,skillName=skillName,skillDesc=skillDesc,interval=interval,price=priceText,coming=coming}
+			local click=card:ConnectEvent(ButtonClickEvent,function()self:OnPetShopCardClicked(at)end)
+			table.insert(q.handlers,{entity=card,handle=click})
+		end
+		_ResourceService:PreloadAsync(assets,function(results)
+			if not isvalid(self) or self._T.petShop~=q or not isvalid(panel) then return end
+			local ready=true for _,v in pairs(results) do if v~=PreloadResultStatus.Success then ready=false end end
+			q.ready=ready;self:RefreshPetShopUI()
+			log("[VRF] PET-SHOP preview ready="..tostring(ready).." pets="..#q.cards.." price=1300 purchase=false")
+		end)
+		self:RefreshPetShopUI()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshPetShopUI()
+		local q=self._T.petShop if q==nil then return end
+		local text=self:GetPetShopLabels();q.label.TextGUIRendererComponent.Text=text.tab
+		for i,row in ipairs(self:GetPetShopCatalog()) do
+			local c=q.cards[i];local entry=_PetLogic:GetPetDefinition(row.id)
+			c.name.TextGUIRendererComponent.Text=_LocalizationService:GetText(entry.nameKey)
+			local line=_PetLogic:GetPetStatLines(row.id,nil)[1]
+			c.base.TextGUIRendererComponent.Text=text.base
+			c.bonus.TextGUIRendererComponent.Text=text.stats[line.kind].." +"..string.format("%g",line.percent).."%"
+			local skill=_PetLogic:GetPetSkillInfo(row.id)
+			c.skillName.TextGUIRendererComponent.Text=skill.name
+			c.skillDesc.TextGUIRendererComponent.Text=text.descriptions[i]
+			c.interval.TextGUIRendererComponent.Text=skill.interval
+			local price=tostring(row.price);local n=0
+			repeat price,n=string.gsub(price,"^(-?%d+)(%d%d%d)","%1,%2") until n==0
+			c.price.TextGUIRendererComponent.Text=price..text.coin
+			c.coming.TextGUIRendererComponent.Text=text.coming
+			c.portrait.Enable=q.ready;c.skillIcon.Enable=q.ready
+			if q.ready then
+				local sprite=_ResourceService:LoadSpriteAndWait(c.body)
+				local m={w=sprite.Width,h=sprite.Height,px=sprite.Pivot.x,py=sprite.Pivot.y}
+				local desired=entry.frames~=nil and 2 or math.max(1,math.floor(math.min(204/math.max(1,m.w),156/math.max(1,m.h))))
+				local scale=_PetLogic:GetCustomPixelScale(c.portrait,desired)
+				local r=c.portrait.SpriteGUIRendererComponent;r.ImageRUID=DataRef(c.body);r.LocalScale=Vector2(scale,scale)
+				r.LocalPosition=Vector2((m.px-.5)*m.w*scale,-40+(entry.footOffset or 0)*scale)
+				c.skillIcon.SpriteGUIRendererComponent.ImageRUID=DataRef(skill.icon)
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnPetShopCardClicked(integer index)
+		local q=self._T.petShop
+		if q==nil or not q.panel.Enable or self._currentTab~="pet" then return end
+		if self:GetPetShopCatalog()[index]==nil then return end
+		-- UI only: no payment prompt, wallet mutation, ownership or grant call.
+		self:ShowNotice(self:GetPetShopLabels().notice)
+		log("[VRF] PET-SHOP preview clicked index="..index.." purchase=false")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ClearPetShopUI()
+		local q=self._T.petShop if q==nil then return end
+		for _,h in ipairs(q.handlers) do if isvalid(h.entity) then h.entity:DisconnectEvent(ButtonClickEvent,h.handle) end end
+		if isvalid(q.panel) then q.panel:Destroy() end
+		if isvalid(q.tab) then q.tab:Destroy() end
+		self._T.petShop=nil
+	end
+
+end
