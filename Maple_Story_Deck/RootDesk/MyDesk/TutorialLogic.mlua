@@ -113,6 +113,8 @@ script TutorialLogic extends Logic
 	property boolean LobbyLoaded = false
 	property string LobbyStorageKey = "Tutorial.LobbySeen"
 	property integer LobbyRewardDiamond = 1000
+	-- 테스트 전용(Maker에서만): 플레이할 때마다 로비 튜토리얼을 다시 띄운다. 저장·다이아 지급은 안 한다(2026-10-25 유저 "펫 부분 추가하게 볼 수 있게"). ⚠ 출시 전 false
+	property boolean TestReplayLobbyTutorialInMaker = false
 
 	@ExecSpace("ServerOnly")
 	@EventSender("Service", "UserService")
@@ -135,6 +137,7 @@ script TutorialLogic extends Logic
 		log("TutorialLogic: intro comic seen=" .. tostring(self.IntroSeen))
 		local lobbyCode, lobbyRaw = self._storage:GetAndWait(self.LobbyStorageKey)
 		self.LobbySeen = (lobbyCode ~= 0) or (lobbyRaw == "1") or self.TutorialSeen
+		if self:IsLobbyReplayTest() then self.LobbySeen = false end
 		self.LobbyLoaded = true
 		log("TutorialLogic: lobby tutorial seen=" .. tostring(self.LobbySeen))
 		log("TutorialLogic started (seen=" .. tostring(self.TutorialSeen) .. ", eggSeen=" .. tostring(self.EggTutorialSeen) .. ")")
@@ -338,12 +341,24 @@ script TutorialLogic extends Logic
 		-- 로비 튜토리얼 마지막 대사까지 넘겼을 때 클라(LobbyTutorialUI)가 부른다 — 봤음 저장 + 다이아 1,000 지급(계정당 1회)
 		if self.LobbySeen then return end
 		self.LobbySeen = true
+		if self:IsLobbyReplayTest() then
+			-- 반복 보기 테스트: 저장·지급 없이 비행 연출만
+			log("TutorialLogic: lobby tutorial finished (replay test, no save/reward)")
+			_LobbyTutorialUI:OnRewardGranted(self.LobbyRewardDiamond, senderUserId)
+			return
+		end
 		if self._storage ~= nil then self._storage:SetAndWait(self.LobbyStorageKey, "1") end
 		_GameManager:AddDiamond(self.LobbyRewardDiamond)
 		-- 지급한 다이아를 바로 저장 — 날아가는 연출 중에 앱이 꺼져도 보상은 남는다
 		_GameManager:PersistRewardNow(senderUserId)
 		log("TutorialLogic: lobby tutorial finished, +" .. self.LobbyRewardDiamond .. " diamonds")
 		_LobbyTutorialUI:OnRewardGranted(self.LobbyRewardDiamond, senderUserId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean IsLobbyReplayTest()
+		-- Maker 플레이에서 반복 보기 스위치가 켜져 있는가(출시판에선 항상 false)
+		return self.TestReplayLobbyTutorialInMaker and Environment:IsMakerPlay()
 	end
 
 	@ExecSpace("ServerOnly")
