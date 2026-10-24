@@ -1,0 +1,129 @@
+@Logic
+script Ep5Map3QuizLogic extends Logic
+	@Sync property boolean QuizComplete = false
+	property string ObjectPath = "/maps/ep5_map3/FolkDecor_342"
+	property integer ZoneIndex = 217
+	property table Answers = {true,false,true,false,true,false,true,false,true,false,true,false,true,false,true,false,true,false,true,false,true,false,true,false,true,false,true,false,true,false}
+	property table _quizIds = {}
+	property integer _step = 0
+	property integer _session = 0
+	property integer _revision = 0
+	property boolean _open = false
+	property string _userId = ""
+	property Entity _object = nil
+	property boolean _failed = false
+	property boolean _busy = false
+	property number _modalRemaining = 0
+
+	@ExecSpace("ServerOnly")
+	method boolean ValidObject(Entity obj, string userId)
+		if not isvalid(obj) or obj ~= _EntityService:GetEntityByPath(self.ObjectPath) then return false end
+		if not _GameManager.GameStarted or _GameManager.GameOver then return false end
+		local user = _UserService:GetUserEntityByUserId(userId)
+		if not isvalid(user) or user.CurrentMap ~= obj.CurrentMap then return false end
+		return _GameManager:GetSelectedEpisode() == 5 and _MapManager.CurrentMapIndex == self.ZoneIndex
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnObjectTouched(Entity obj, string userId)
+		if self._open or _GameManager:IsGamePaused() or not self:ValidObject(obj, userId) then return end
+		if self.QuizComplete then _UIToast:ShowMessage("EP4_EGG_DONE", userId) return end
+		self._session = self._session + 1
+		self._open = true self._object = obj self._userId = userId self._modalRemaining = 300
+		_GameManager:SetEasterEggPaused(true)
+		log("[VRF] Ep5Map3Quiz: open session=" .. self._session)
+		self:StartQuestions()
+	end
+
+	@ExecSpace("ServerOnly")
+	method void StartQuestions()
+		local pool = {} for i=1,#self.Answers do table.insert(pool,i) end
+		self._quizIds = {}
+		for i = 1, 3 do
+			table.insert(self._quizIds, table.remove(pool, _UtilLogic:RandomIntegerRange(1, #pool)))
+		end
+		self._step = 1 self._failed = false self._revision = self._revision + 1
+		self:ShowQuestion()
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ShowQuestion()
+		_Ep4EasterEggUI:ShowFolkJobQuiz(self._session, self._revision, self._quizIds[self._step], self._step, self._failed, self._userId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean ValidSession(integer session, integer revision, string userId)
+		return not self._busy and self._open and self._session == session and self._revision == revision and self._userId == userId and self:ValidObject(self._object, userId)
+	end
+
+	@ExecSpace("Server")
+	method void RequestAnswer(integer session, integer revision, boolean answer)
+		if not self:ValidSession(session, revision, senderUserId) or self._failed then return end
+		self._revision = self._revision + 1 self._modalRemaining = 300
+		if answer ~= (self.Answers[self._quizIds[self._step]] == true) then
+			self._failed = true self:ShowQuestion()
+			log("[VRF] Ep5Map3Quiz: wrong at step " .. self._step .. "; retry from question 1")
+			return
+		end
+		if self._step < 3 then self._step = self._step + 1 self:ShowQuestion() return end
+		self.QuizComplete = true
+		local obj = self._object local userId = self._userId
+		self:EndModal()
+		self:GrantReward(obj)
+		_UIToast:ShowMessage("EP4_QUIZ_SUCCESS", userId)
+		log("[VRF] Ep5Map3Quiz: success 3/3; reward once per run")
+	end
+
+	@ExecSpace("Server")
+	method void RequestRetry(integer session, integer revision)
+		if not self:ValidSession(session, revision, senderUserId) or not self._failed then return end
+		self._modalRemaining = 300 self:StartQuestions()
+	end
+
+	@ExecSpace("Server")
+	method void RequestCancel(integer session)
+		if not self._open or self._session ~= session or self._userId ~= senderUserId then return end
+		self:EndModal()
+	end
+
+	@ExecSpace("ServerOnly")
+	method void EndModal()
+		if not self._open then return end
+		local userId = self._userId local session = self._session
+		self._open = false self._object = nil self._userId = "" self._modalRemaining = 0
+		_GameManager:SetEasterEggPaused(false)
+		if userId ~= "" and isvalid(_UserService:GetUserEntityByUserId(userId)) then _Ep4EasterEggUI:HideModal(session, userId) end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void GrantReward(Entity obj)
+		if not isvalid(obj) then return end
+		local p = obj.TransformComponent.WorldPosition
+		local f = _GameManager:GetGroundFallFor(obj, p)
+		_GameManager:ApplyPotionDrop(2, p, f.x, f.y, 1)
+		local pool = _CardManager:BuildActiveUpgradePool()
+		if #pool > 0 then _CardManager:GrantCardUpgradesFromPool(pool, p, f.x, f.y, 1, 1, 0) end
+		_EasterEggBonusLogic:RollBonus(p, f.x, f.y)
+		_AchievementLogic:OnEasterEgg()
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnUpdate(number delta)
+		if not self._open then return end
+		self._modalRemaining = self._modalRemaining - delta
+		if self._modalRemaining <= 0 or not self:ValidObject(self._object, self._userId) then self:EndModal() end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		self:EndModal()
+		self._session = self._session + 1 self._revision = self._revision + 1
+		self.QuizComplete = false
+		self._quizIds = {} self._step = 0 self._failed = false self._busy = false
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnEndPlay()
+		self:EndModal()
+	end
+end

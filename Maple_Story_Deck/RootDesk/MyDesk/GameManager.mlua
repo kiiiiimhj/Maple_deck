@@ -154,6 +154,8 @@ script GameManager extends Logic
 	-- 값을 건드리지 않는다(같은 모드로 재시작 — 로비로 나가서 다시 고르기 전까지 유지).
 	-- 2026-09-14 유저 지정: 20분(1200) → 15분(900). "20분 너무 길다"
 	property number TimeAttackDuration = 900
+	-- 타임어택 모드 몬스터 공격력·체력 배율(에피소드 배율에 곱함)
+	property number TimeAttackStatMultiplier = 1.2
 
 	-- 랭킹 보드 id — RankingConfigDataSet.csv의 Id 열과 반드시 일치해야 한다(1=무제한, 2=타임어택)
 	property integer RankBoardIdUnlimited = 1
@@ -1715,7 +1717,13 @@ script GameManager extends Logic
 
 	@ExecSpace("ServerOnly")
 	method integer GetEliteCount()
-		if self:IsEp5EliteZone(_MapManager.CurrentMapIndex) then return 4 end
+        return self:GetEliteCountForZone(_MapManager.CurrentMapIndex)
+    end
+
+    @ExecSpace("ServerOnly")
+    method integer GetEliteCountForZone(integer zoneIndex)
+        if self:IsEp5SpiritEliteZone(zoneIndex) then return #self.Ep5SpiritElites end
+        if self:IsEp5EliteZone(zoneIndex) then return 4 end
 		-- 지금 에피소드의 엘리트 종 수
 		if self.SelectedEpisode == 2 then return self:GetEp2EliteCount() end
 		if self.SelectedEpisode == 3 then return self:GetEp3EliteCount() end
@@ -1730,6 +1738,7 @@ script GameManager extends Logic
 
     @ExecSpace("ServerOnly")
     method any GetEliteDefForZone(integer index, integer zoneIndex)
+        if self:IsEp5SpiritEliteZone(zoneIndex) then return self:GetEp5SpiritEliteDef(index) end
         if self:IsEp5EliteZone(zoneIndex) then return self:GetEp5EliteDef(index) end
 		-- 지금 에피소드의 index번째 엘리트 정의
 		if self.SelectedEpisode == 2 then return self:GetEp2EliteDef(index) end
@@ -2801,7 +2810,8 @@ script GameManager extends Logic
 	@ExecSpace("ServerOnly")
 	method integer GetBossCount()
 		-- 지금 에피소드 보스 순번의 총 개수
-		if self.SelectedEpisode == 4 or self.SelectedEpisode == 5 then return self:GetEp4BossCount() end
+		if self.SelectedEpisode == 5 then return self:GetEp5BossCount() end
+		if self.SelectedEpisode == 4 then return self:GetEp4BossCount() end
 		if self.SelectedEpisode == 3 then return self:GetEp3BossCount() end
 		if self.SelectedEpisode == 2 then return self:GetEp2BossCount() end
 		return self:GetEp1BossCount()
@@ -2810,7 +2820,8 @@ script GameManager extends Logic
 	@ExecSpace("ServerOnly")
 	method any GetBossDef(integer index)
 		-- 지금 에피소드의 index번째 보스 정의
-		if self.SelectedEpisode == 4 or self.SelectedEpisode == 5 then return self:GetEp4BossDef(index) end
+		if self.SelectedEpisode == 5 then return self:GetEp5BossDef(index) end
+		if self.SelectedEpisode == 4 then return self:GetEp4BossDef(index) end
 		if self.SelectedEpisode == 3 then return self:GetEp3BossDef(index) end
 		if self.SelectedEpisode == 2 then return self:GetEp2BossDef(index) end
 		return self:GetEp1BossDef(index)
@@ -2931,14 +2942,16 @@ script GameManager extends Logic
 			end
 		end
 
+		if self.GameStarted and not self.GameOver then _RunClearLogic:TickRun(delta) end
+
 		-- 타임어택 카운트다운은 당연히 타임어택 모드에서만 돈다
 		-- 몬스터 없는 존(그림자 상점/택시/보물상자)·콜로세움에서는 플레이 시계와 같이 멈춘다(유저 지정 2026-09-17, IsPlayClockFrozen)
 		if self.TimeAttackMode and self.GameStarted and not self.GameOver then
-			if not self._timeAttackOvertimeActive and not self:IsPlayClockFrozen() then
+			if not self._timeAttackOvertimeActive and not _RunClearLogic:IsBladePending() and not self:IsPlayClockFrozen() then
 				self.TimeAttackRemaining = self.TimeAttackRemaining - delta
 				if self.TimeAttackRemaining <= 0 then
 					self.TimeAttackRemaining = 0
-					self:SpawnDespairBlade()
+					_RunClearLogic:CompleteRun(true)
 				end
 			end
 		end
@@ -3783,7 +3796,10 @@ script GameManager extends Logic
 	--   1 태초의 마을 100% / 2 구름정원 125% / 3 엘나스 150%
 	-- 맵 선택 화면(WorldSelect)이 이 값을 그대로 읽어 "공격력 125% / 체력 125%"로 표시한다.
 	method number GetEpisodeStatMultiplier()
-		return self:GetEpisodeStatMultiplierFor(self.SelectedEpisode)
+		-- 타임어택은 몬스터 공격력·체력을 1.2배(유저 지정 2026-10-22 — 시작 팝업 i 아이콘 설명 "몬스터가 더 강력해집니다")
+		local mult = self:GetEpisodeStatMultiplierFor(self.SelectedEpisode)
+		if self.TimeAttackMode then mult = mult * self.TimeAttackStatMultiplier end
+		return mult
 	end
 
 	-- 특정 에피소드의 배율 — 맵 선택 화면처럼 아직 고르지 않은 에피소드를 미리 보여줄 때 쓴다
@@ -4029,8 +4045,8 @@ script GameManager extends Logic
 
 	-- 에피소드4 존(mapIndex 134~173)인지
 	method boolean IsEp4Zone(integer mapIndex)
-		-- 에피4 기본맵 50존 + map1 히든맵 5존 + 파풀 방(134~189), 그리고 같은 표를 쓰는 에피5 map1(190~199)
-		return mapIndex >= 134 and mapIndex <= 199
+		-- 에피4 기본맵 50존 + map1 히든맵 5존 + 파풀 방(134~189), 그리고 같은 표를 쓰는 에피5 map1~5(190~239)
+		return mapIndex >= 134 and mapIndex <= 239
 	end
 
 	-- 에피4 존의 idx번째 종 정의(표). 범위를 벗어난 idx는 가장 가까운 칸으로 접는다(기존 풀과 같은 규칙).
@@ -4149,6 +4165,44 @@ script GameManager extends Logic
 		s.sammiho = self:MakeEp4Species({ stand = "b87a500e22c94cd3a885f09b49fced3c", move = "9de517a21b984cd18c5d3c0c9b11aed2", hit = "6db5a17308ab48828291a995cbfd334b", die = "3fd1dc4fa74b4ab08167ae259c922f5e", dieDur = 0.72, atk = "49c1c6297e2b404b860cc486d95574b6", atkDur = 1.79, atkSnd = "552551013c6940b3af0549bd89d2713f", hitSnd = "844ff3eae2834cc6bc5a43b8a0355b3b", dieSnd = "209d0b6fc4ac44a3ad0b48a3f5e29b2b", scale = 1.06, loot = "sammiho_tail" })
 		-- 제비(에피5 전용 제작) — 비행 12 / 피격 6 / 사망 6 프레임. 기존 pigeon 종 키와 전투 설정은 유지한다.
 		s.pigeon = self:MakeEp4Species({ stand = "a06664c5a5bb4047adf0e08d0d6f18bc", hit = "ef1ef401cf3d47bd901146cfc5dc02e5", die = "1e6b69108aa844debd8aa93d2003dce3", dieDur = 0.75, hitSnd = "aff95730d41346cb946bf6f8b6bda8d3", fly = true, scale = 1.4, loot = "stiff_feather" })
+        -- ep5_map2: ordinary village animals; dedicated per-frame art for five species.
+        s.village_chicken=self:MakeEp4Species({name="닭",map2Kind="chicken",stand="c1bc28ed67e54de4ba4eeb7fcd36cde3",move="72520c557a7a484d9ab4d4b6e854df92",hit="c2dc96b29d8a42a687b321414fc6e9a6",die="6677639b6652495f81692d8303d461ba",dieDur=0.65,charge=true,scale=1.0,w=74,hitSnd="84543cf52be042d8a14ee52b265c0c15",dieSnd="3ebfed8497364b95845c3454304e2011",loot="village_chicken_feather"})
+        s.white_chicken=self:MakeEp4Species({name="흰 닭",map2Kind="chicken",stand="1a3feb6df9024b9da33f61204caaea97",move="42db37a029ba41a2a3c1ae5aa3dddbcc",hit="4b37128d9593462c93f2de82479bd804",die="c5120baa3095402c80c3635c6d12c492",dieDur=0.75,charge=true,scale=1.0,w=74,hitSnd="84543cf52be042d8a14ee52b265c0c15",dieSnd="3ebfed8497364b95845c3454304e2011",loot="village_chicken_feather"})
+        -- Native cow: stable original pixels/pivots; prepare, run with dust, then ram on arrival.
+        s.village_cow=self:MakeEp4Species({name="소",map2Kind="cow",stand="b4e09bba26fa4c19a2f3ca9cbc61335c",move="95865a41552c4d5e8d6f0f9129aac746",hit="717bc1974bf74ee98192d20e4cb5466f",die="06d78f6c4c9e4fdfb89eabe43aee2690",dieDur=1.02,charge=true,scale=0.85,w=144,hitSnd="902b36a1a0f84665b9592f2d755352c9",dieSnd="7adf62ccd1c14d309b557d901ff90abc",loot="village_cow_horn"})
+        s.nureongi=self:MakeEp4Species({name="누렁이",map2Kind="nureongi",stand="9fbeacc29d914468a1d0b839f457b519",move="37b886c894404ec685d2f4965b324c48",hit="ecf78cbd89ab4a09ab60e2ba65664656",die="c73de0bc160b48d698be71d3a824e8f0",dieDur=0.75,atk="cfe3f5d6c5c44269be41b3325bc42139",atkDur=0.6,scale=1.3,w=74,fly=false,ranged=false,hitSnd="b375167573d04a0db7067ec1d074786f",dieSnd="74e82828f10441a3a185061333694521",loot="nureongi_collar"})
+        s.brown_squirrel=self:MakeEp4Species({name="밤다람쥐",map2Kind="brown-squirrel",stand="e3a765d78197494ca323d7a8d3aa65ab",move="3dafbd2bf93c414bb5dcd1f619b3cdac",hit="8a093a859f3d4145852378ab7c9c39be",die="6ca217e6cbe54cfa93030aa6442e8b92",dieDur=0.75,atk="64c0fe34813c439e93485cfb97100aa5",atkDur=0.6,scale=1.2,w=58,fly=false,ranged=true,hitSnd="515553eef4314255b63f0fc2688625ef",dieSnd="b47642347f4d4cbc93aafb1c8af9ba51",loot="village_acorn",proj="438e1f148cf0407ea3a81bb401d20eae",hitFx="a1661914cd0a4a06965324aca03939ca",hitFxDur=0.42})
+        s.gray_squirrel=self:MakeEp4Species({name="청설모",map2Kind="gray-squirrel",stand="6135da3ff4de42368935387ce9651d8e",move="b38aab1546db4b879bcbccf7f69c713a",hit="11e5b43373a5487982456abf1753fb84",die="4b3494e9c2334a84839c4f4dbb26f9ff",dieDur=0.75,atk="efa47dc5bd8a4e73b2b40b0857fdcdfc",atkDur=0.6,scale=1.2,w=68,fly=false,ranged=true,hitSnd="515553eef4314255b63f0fc2688625ef",dieSnd="b47642347f4d4cbc93aafb1c8af9ba51",loot="village_acorn",proj="438e1f148cf0407ea3a81bb401d20eae",hitFx="a1661914cd0a4a06965324aca03939ca",hitFxDur=0.42})
+        s.tree_sparrow=self:MakeEp4Species({name="참새",map2Kind="tree-sparrow",stand="acf89a74f94e4641914b63267c7a5c06",move="",hit="c28d2ce3bc2c44a8b87ed8c3716bd462",die="7c8d8e53e0184c8ab9e26d5ed1aa4547",dieDur=0.75,atk="4cd355b81ebe4f0ca07dce4e2a1e42df",atkDur=0.6,scale=1.4,w=66,fly=true,ranged=false,hitSnd="0a9ffd3ee961447ea972e7f4392a4931",dieSnd="03291c9b390d4cc5aa9b22bb0780c4af",loot="sparrow_plume"})
+        s.gray_sparrow=self:MakeEp4Species({name="회색머리 참새",map2Kind="gray-sparrow",stand="3a5a00198b254cccb74dcb6a66bac6c0",move="",hit="e396abd517894ddfa70394bf888526ba",die="3b4acf1f15624bd98d7e763ee49497e3",dieDur=0.75,atk="ee1a1119370f4a308bcb5a4320893ece",atkDur=0.6,scale=1.4,w=60,fly=true,ranged=false,hitSnd="0a9ffd3ee961447ea972e7f4392a4931",dieSnd="03291c9b390d4cc5aa9b22bb0780c4af",loot="sparrow_plume"})
+
+        -- ep5_map3: hornless Korean folk dokkaebi, seven ordinary roles.
+        s.club_dokkaebi=self:MakeEp4Species({name="도깨비방망이",dokkaebiKind="club",stand="d36aee999c5947cca0a2a27dac26acef",move="b11689f9735d4a89b975b608a4f92e68",hit="25afeea3af054b1db19a9994b6de73f0",die="e4959813b4f445378127efa40a8fa6f3",dieDur=0.75,atk="63d82bf00158442592b22ec44c6b8f7b",atkDur=0.6,scale=0.96,w=54,fly=false,ranged=false,charge=false,leap=false,loot="dokkaebi_club_chip"})
+        s.stone_dokkaebi=self:MakeEp4Species({name="맷돌깨비",dokkaebiKind="stone",stand="7ebf55d958ac4748aff5749a3a57cab0",move="7d688f505d0c42a59da80c7e7059837d",hit="0f996dce062a4f278a94cb2f434b5313",die="bf0f5ead997d4b5e88fdddcc6402aae3",dieDur=0.75,atk="117eb618f3de479da9545ab548c57042",atkDur=0.6,scale=0.92,w=68,fly=false,ranged=false,charge=true,leap=false,loot="dokkaebi_moss_stone"})
+        s.jump_dokkaebi=self:MakeEp4Species({name="절구깨비",dokkaebiKind="jump",stand="6fdaa3f049b44b59b7e0961a927cb87e",move="286cd074c15d4f998d066439b16bfbfa",hit="ff20abf07d344bddb2b0410f730fd03d",die="60ab8e1e0a8847ff99f402043bf77c8c",dieDur=0.75,atk="a0b1efd2e76a4a11a31dc858b5c74835",atkDur=0.6,scale=0.92,w=62,fly=false,ranged=false,charge=false,leap=true,loot="dokkaebi_club_chip"})
+        s.onggi_dokkaebi=self:MakeEp4Species({name="옹기깨비",dokkaebiKind="onggi",stand="c7b341aaf8654c149ddcb56359af16c0",move="ff1e37b85a6c46eb9cefaddbf850208a",hit="9d9cad20b9d74e7c85dfc459ae059a61",die="00dc10c1e9744dbcb72e5296842ca896",dieDur=0.75,atk="35a80e2f58b142caa21af2094b5825c2",atkDur=0.6,scale=1.15,w=76,fly=false,ranged=true,charge=false,leap=false,loot="dokkaebi_pot_shard",proj="91da1126f59842adab4162499e3e0dc6",hitFx="eec9b7ddad6849f08927e96465660617",hitFxDur=0.42})
+        s.talisman_dokkaebi=self:MakeEp4Species({name="장승깨비",dokkaebiKind="talisman",stand="6123fffb74234cfaa20d4032dab0f0b9",move="6ba4fcdf526545b28f49cf5c7fa488ac",hit="6eb207940cff47a6a7d8985f8670d7b4",die="616ac5f7356e471b80d5cd19e4ddd027",dieDur=0.75,atk="f22d822b09eb450b830644529e0053a0",atkDur=0.6,scale=1.15,w=66,fly=false,ranged=true,charge=false,leap=false,loot="dokkaebi_talisman",proj="708bf9bf15494b719f0486b515fef92b",hitFx="0fa99e01930e4fe588b7b35860468331",hitFxDur=0.42})
+        s.broom_dokkaebi=self:MakeEp4Species({name="빗자루깨비",dokkaebiKind="broom",stand="8c82959be1f242deb59683cb3bb651f4",move="",hit="c65a910c61b2406b87747ca7002c7bee",die="236ae617153c4b3898132d02452b1cda",dieDur=0.75,atk="f4a6df9b35944124aad61079cf6de102",atkDur=0.8,scale=1.15,w=102,fly=true,ranged=false,charge=false,leap=false,loot="dokkaebi_straw"})
+        -- ep5_map4(2026-10-20 유저 지정): 깨비(1·2페이즈) / 왕도깨비 3색(돌진·점프·원거리) / 귀신 4종(도령·양반·처녀=비행, 대감=근접).
+        -- 원작 resource_pack(mob/5100105~5100109, 9802000~9802003) 원소를 msw-search로 확인. 재생시간은 0.1초×프레임+0.05.
+        -- 깨비 1페이즈(mob/5100105, attack1 없음)가 죽으면 die1(7프레임)을 변신으로 쓰고 2페이즈 깨비(mob/5100109)로 부활한다.
+        s.kebi=self:MakeEp4Species({name="깨비",stand="19a6ebce7e7c4d1a8fd2577e840e2fde",move="7552fbff7ae04b8ba4a42bdbe223353b",hit="b4e171e7179c456489764aa180adbee7",die="32f48077b81f40d6b53a59e3b63174f5",dieDur=0.98,hitSnd="18a0d7c533074384b577f52a202191b9",dieSnd="2382aadd819f49ae8a2e0ba694113c85",scale=1.3,w=34,loot="kebi_ember",
+            phase2={stand="7bed9e4cff8a4353a24e5dca4a8a2299",move="7d9f38bf4d384cafab3c7d8294514ea6",hit="c28a6c55668d4013b3ded9a119c0f471",die="179b4da0cd434b489d101fcf4e4f3c76",dieDur=0.76,atk="7a3ff50ea606499ba0e962a67171d8d1",atkDur=1.58,hitSnd="725ab03cfaac4449b8f7ef22110c459e",dieSnd="7a9c6123f464410388a839baef0e85c2",loot="kebi_ember"}})
+        s.blue_king_dokkaebi=self:MakeEp4Species({name="파란 왕도깨비",stand="1389dc6fd54842a08f27b40e2e2a2c83",move="32260d818679487e8a674afb577f25fd",hit="4b1235d892b14f9eb437478866008655",die="4625d25c322b43a7abe7a18fecb46b0d",dieDur=1.72,atk="c2530182b7c34f87bfb0373b13dbc221",atkDur=2.62,atkSnd="05b4e7ebb298492fb030a0c25f34a1b8",hitSnd="72494930c9974c90bfd03d89968b7971",dieSnd="870e2b411ea04045828770014f293205",charge=true,scale=0.85,w=131,loot="blue_dokkaebi_mask_shard"})
+        s.green_king_dokkaebi=self:MakeEp4Species({name="초록 왕도깨비",stand="1ce5e5d01a4d428c8ccc2bf016ab5b2a",move="9fa48bbec48e461aa6a576e5b872dc66",hit="e6af10379bf14892bb9af95fbeebbc6c",die="25250ac8de304979a934049e3841d65f",dieDur=1.72,atk="3627c0a621394c83ab457d5c23634ae1",atkDur=2.35,atkSnd="6f3038427b694114a22a2f54a78b8cb2",hitSnd="321d271a8c524e979d2afdbbbd1d5bc6",dieSnd="ff21e8e691d94ec4b38e9cb8d5655709",leap=true,scale=0.85,w=131,loot="green_dokkaebi_straw_cord"})
+        s.yellow_king_dokkaebi=self:MakeEp4Species({name="노란 왕도깨비",stand="ce130d16d5444464a8303950f6efbe70",move="3258526ea2944a0eb6c094c6f0e154e4",hit="81c7f777e22c4e7b9074d49bde37cee8",die="b74bdbfad14046d9aa9959f5b5d49e22",dieDur=1.72,atk="c170d6cf669e4dc89f8dca97bcc9945b",atkDur=2.62,atkSnd="ab2f990f369b40abb6df8012c5bacc8a",hitSnd="fa72176dfb3940e582b7e8d5ae4119e7",dieSnd="e5de835f63204667a97856cc62fda913",ranged=true,hitFx="07d6e1c7a8534c318d4da92e6b7d8ec4",hitFxDur=0.32,scale=0.85,w=131,loot="yellow_dokkaebi_club_chip"})
+        s.doryeong_ghost=self:MakeEp4Species({name="도령귀신",stand="f6ddea7772764a56be45732032a3570a",hit="0f19171e3d8f428a895dcc9d9e88e64c",die="32aeefc585d74bb9815469a0fa49af94",dieDur=1.33,atk="6052b70f4fc140798c0b718a467c5bd8",atkDur=0.70,atkSnd="4be83bc9accf4969bc9a9528b7e6118e",hitSnd="4f6827c0d93d4e9e81a052451a84e4a3",dieSnd="9f4e9e4b6a3d4d01ab4fcbd115a92309",fly=true,scale=1.0,w=76,loot="doryeong_hair_tie"})
+        s.yangban_ghost=self:MakeEp4Species({name="양반귀신",stand="0ac8f1b9325f4757831f667f3ea609a5",hit="3b61b17d43cd403d995ca2c70ed7dcbb",die="fc8f47fea69a44aba4b3e5a7d3bf0070",dieDur=1.51,atk="9a9de796ea51499bbec2003a7bbddcbf",atkDur=0.97,atkSnd="d12587be23ce4487be014f6757f93159",hitSnd="4727baae31b34b07bc9f40479fe8b7e1",dieSnd="e85e41b0e56043168c690a50b12f545f",fly=true,scale=0.8,w=116,loot="yangban_ghost_gat"})
+        -- 처녀귀신 팩은 stand/fly/die1뿐(hit1·attack1·사운드 없음) — 비행형은 stand를 그대로 쓴다
+        s.cheonyeo_ghost=self:MakeEp4Species({name="처녀귀신",stand="3b09f4c09cac42c78190cf5df39c2a91",die="29c7b643a16c48d0911755e9b9b97d97",dieDur=0.55,fly=true,scale=0.95,w=103,loot="cheonyeo_wood_comb"})
+        s.daegam_ghost=self:MakeEp4Species({name="대감귀신",stand="2983356c5621407b8af903b1bb1d46e7",move="52a5b80d77234844b77c8912b30dae8e",hit="2cd56d4823494672b21e64cad259fca4",die="009828d15f02456ba0224abea50357fe",dieDur=1.33,atk="c45fd54e7a0e43d79eb2c0bf7e8fe7a7",atkDur=1.51,atkSnd="a8cbaf1c3b1b4af6bbbc736a0c8de8f7",hitSnd="ce32af9cc22b4c318423f55c6d4edf06",dieSnd="067a463a543a4de0ac80aca58a34799f",scale=0.6,w=198,loot="daegam_jade_token"})
+        -- ep5_map5(2026-10-20 유저 지정): 도령귀신 재사용 + 선비귀신(비행) / 제등·몽롱귀신(비행 원거리, attack1 모션) / 야광귀(원거리, 구슬 투사체). 근접은 map4 종 재사용.
+        -- dieDur·atkDur·hitFxDur는 클립 프레임 Delay 합 실측값보다 0.02 짧게(반복 재생 방지). 선비귀신 원본(124x172)은 커서 축소.
+        s.seonbi_ghost=self:MakeEp4Species({name="선비귀신",stand="941b03840b124af2b6b7dca937175ed6",hit="b6285c00fb9c4aeeaf58499f756659bc",die="20588df0ffb84673964861705879f700",dieDur=1.30,atk="8f5af6dd33764c2fa637fd22f7dea7fb",atkDur=2.53,atkSnd="38eefbccf2124154aee071f83ddefe79",dieSnd="c2f4f710c4cf477390cccc3bf7e93112",hitFx="1c348016855b48ba9f40864f3aa3ecec",hitFxDur=0.43,fly=true,scale=0.65,w=124,loot="seonbi_leaf_fan"})
+        s.jedeung_ghost=self:MakeEp4Species({name="제등귀신",stand="fac68a1c66f64619ad575a86ccb014a9",hit="dadba96b45514df8ae56f3adad512c2d",die="a11e57f53e4640f8951fa2ca04f1bb26",dieDur=1.19,atk="3db123d685f743529686a7b2b35b4f8b",atkDur=1.80,hitFx="11b3841b656d48c997f3c8219eb85201",hitFxDur=0.3,fly=true,ranged=true,scale=1.0,w=84,loot="jedeung_lantern"})
+        s.mongrong_ghost=self:MakeEp4Species({name="몽롱귀신",stand="4c9b202ff14d47089b10e18883b22cac",hit="d173f4ea90ce40b49dc280b080fb94b6",die="0d16c2b3e0ff4dcf95f18990cae07a23",dieDur=1.35,atk="a71ee0a573f54c43a795afcc3bed895b",atkDur=1.54,hitFx="095f0f5c6d6846a09dfcf49c0ab5d942",hitFxDur=0.20,fly=true,ranged=true,scale=1.1,w=64,loot="mongrong_hazy_bead"})
+        s.yagwang_ghost=self:MakeEp4Species({name="야광귀",stand="3dbc0a89d76f49e69d8d2001646005db",move="2d8324d5e08841e987b8389740c45476",hit="90fc10820c5f4146827c66169f3c243e",die="e8abe8adcb9b4805b12bb751a6974c49",dieDur=1.30,atk="115d21427cb14d9fb24cd70bfe69f3a4",atkDur=1.18,atkSnd="66877e7fdefa44d09a1e44f37b4b537f",hitSnd="7c7eebeecb9a4d1e8765d327a64b3282",dieSnd="7aaa5f62d1d04b188a33986e2b0c8a45",ranged=true,proj="b27887e0e1a04897ba8e24713c9f3d98",hitFx="220655c9b2d346c699b7b4853383ea4e",hitFxDur=0.46,scale=1.0,w=88,loot="yagwang_stolen_shoe"})
+        s.lantern_dokkaebi=self:MakeEp4Species({name="홍등깨비",dokkaebiKind="lantern",stand="b64c4651b902414ca9181b3612bada21",move="",hit="04c79acdb4594f01bfd812b79672b36a",die="ef2c2a0cff9e49df882b858899da04f5",dieDur=0.75,atk="4d9adf52466840e1adb159e5ed3f6171",atkDur=0.6,scale=1.6,w=66,fly=true,ranged=false,charge=false,leap=false,loot="dokkaebi_lantern_wick"})
 		-- 지상 종 stand 그림 폭(px, msw-search 실측 2026-10-08) — 좁은 공중 블록 끝에 걸쳐 떠 보이지 않게
 		-- MonsterSpawner가 이 폭만큼 블록 끝에서 띄운다(유저 리포트 "목마 공중에 떠있는거 같아"). 비행 종은 해당 없음.
 		local widths = {
@@ -4222,17 +4276,63 @@ script GameManager extends Logic
 			[181] = {"dark_klock", "phantom_watch", "master_death_teddy"},
 			[182] = {"g_phantom_watch", "gatekeeper", "master_soul_teddy"},
 			[183] = {"master_death_teddy", "dark_klock", "g_phantom_watch", "gatekeeper"},
-			-- 에피5 map1 (ep5_map1, 2026-10-19) — 월묘/호돌이/호걸/삼미호/제비. 앞 존은 2종, 뒤로 갈수록 섞고 존10은 4종
-			[190] = {"moon_bunny", "hodori"},
-			[191] = {"moon_bunny", "pigeon"},
-			[192] = {"hodori", "sammiho", "pigeon"},
-			[193] = {"hogul", "moon_bunny"},
-			[194] = {"sammiho", "hodori", "pigeon"},
-			[195] = {"hogul", "moon_bunny", "sammiho"},
-			[196] = {"pigeon", "hogul", "hodori"},
-			[197] = {"moon_bunny", "sammiho", "hogul"},
-			[198] = {"hodori", "pigeon", "hogul", "moon_bunny"},
-			[199] = {"sammiho", "hogul", "moon_bunny", "hodori"},
+			-- 에피5 map1 (ep5_map1) — 2026-10-19 유저 지정으로 map2와 몬스터 교체: 마을 동물(닭/누렁이/다람쥐/참새). 앞 존은 2종, 뒤로 갈수록 지상/원거리/공중 섞음
+            [190]={"village_chicken","nureongi"},
+            [191]={"white_chicken","brown_squirrel"},
+            [192]={"village_chicken","tree_sparrow","brown_squirrel"},
+            [193]={"nureongi","gray_squirrel"},
+            [194]={"white_chicken","gray_sparrow","gray_squirrel"},
+            [195]={"village_chicken","nureongi","brown_squirrel"},
+            [196]={"tree_sparrow","brown_squirrel","white_chicken"},
+            [197]={"nureongi","gray_squirrel","gray_sparrow"},
+            [198]={"village_chicken","white_chicken","tree_sparrow","brown_squirrel"},
+            [199]={"nureongi","brown_squirrel","gray_squirrel","gray_sparrow"},
+			-- 에피5 map2 (ep5_map2) — 2026-10-19 map1에서 옮겨옴: 월묘/호돌이/호걸/삼미호/제비. 존10은 4종
+			[200] = {"moon_bunny","hodori"},
+			[201] = {"moon_bunny","pigeon"},
+			[202] = {"hodori","sammiho","pigeon"},
+			[203] = {"hogul","moon_bunny","village_cow"},
+			[204] = {"sammiho","hodori","pigeon"},
+			[205] = {"hogul","moon_bunny","sammiho","village_cow"},
+			[206] = {"pigeon","hogul","hodori"},
+			[207] = {"moon_bunny","sammiho","hogul","village_cow"},
+			[208] = {"hodori","pigeon","hogul","moon_bunny"},
+			[209] = {"sammiho","hogul","village_cow","hodori"},
+
+            -- ep5_map3: introduce melee/charge first, then jumping, casters and spirits.
+            [210]={"club_dokkaebi","stone_dokkaebi"},
+            [211]={"club_dokkaebi","broom_dokkaebi"},
+            [212]={"jump_dokkaebi","club_dokkaebi","talisman_dokkaebi"},
+            [213]={"stone_dokkaebi","onggi_dokkaebi","broom_dokkaebi"},
+            [214]={"jump_dokkaebi","onggi_dokkaebi","lantern_dokkaebi"},
+            [215]={"club_dokkaebi","talisman_dokkaebi","broom_dokkaebi"},
+            [216]={"stone_dokkaebi","jump_dokkaebi","onggi_dokkaebi"},
+            [217]={"jump_dokkaebi","talisman_dokkaebi","lantern_dokkaebi"},
+            [218]={"club_dokkaebi","stone_dokkaebi","talisman_dokkaebi","broom_dokkaebi"},
+            [219]={"stone_dokkaebi","jump_dokkaebi","onggi_dokkaebi","lantern_dokkaebi"},
+            -- ep5_map4(2026-10-20): 깨비·귀신으로 시작해 왕도깨비 3색이 섞이고, 존10은 4종 마무리
+            [220]={"kebi","doryeong_ghost"},
+            [221]={"kebi","blue_king_dokkaebi"},
+            [222]={"kebi","green_king_dokkaebi","yangban_ghost"},
+            [223]={"blue_king_dokkaebi","daegam_ghost","doryeong_ghost"},
+            [224]={"green_king_dokkaebi","yellow_king_dokkaebi","cheonyeo_ghost"},
+            [225]={"kebi","daegam_ghost","yangban_ghost"},
+            [226]={"blue_king_dokkaebi","yellow_king_dokkaebi","doryeong_ghost"},
+            [227]={"green_king_dokkaebi","daegam_ghost","cheonyeo_ghost"},
+            [228]={"kebi","blue_king_dokkaebi","yellow_king_dokkaebi","yangban_ghost"},
+            [229]={"green_king_dokkaebi","daegam_ghost","cheonyeo_ghost","doryeong_ghost"},
+            -- ep5_map5(2026-10-20): 귀신 4종+도령귀신이 중심, 근접은 map4의 깨비·왕도깨비(파랑·초록)·대감귀신을 섞는다
+            [230]={"doryeong_ghost","yagwang_ghost"},
+            [231]={"seonbi_ghost","kebi"},
+            [232]={"jedeung_ghost","daegam_ghost","doryeong_ghost"},
+            [233]={"mongrong_ghost","blue_king_dokkaebi","yagwang_ghost"},
+            [234]={"seonbi_ghost","green_king_dokkaebi","jedeung_ghost"},
+            [235]={"doryeong_ghost","daegam_ghost","mongrong_ghost"},
+            [236]={"yagwang_ghost","kebi","seonbi_ghost"},
+            [237]={"jedeung_ghost","mongrong_ghost","blue_king_dokkaebi"},
+            [238]={"seonbi_ghost","yagwang_ghost","green_king_dokkaebi","doryeong_ghost"},
+            [239]={"mongrong_ghost","jedeung_ghost","daegam_ghost","seonbi_ghost"},
+
 		}
 		-- 맵1 복사 지형의 히든맵: 같은 첫 다섯 존 몬스터/행동/잡템 정의를 재사용한다.
 		for i=0,4 do self._ep4Zones[184+i]=self._ep4Zones[134+i] end
@@ -5777,6 +5877,10 @@ script GameManager extends Logic
 	-- 유저 지정(2026-09-25): "준비동작 너무 길다" → 전 돌진형 15% 단축(2.0→1.7, 1.0→0.85)
 	@ExecSpace("ServerOnly")
 	method number GetMapChargeShakeDuration(integer mapIndex, integer idx)
+        if mapIndex>=210 and mapIndex<=219 and self:GetEp4Def(mapIndex,idx).charge then return .75 end
+        if mapIndex>=220 and mapIndex<=239 and self:GetEp4Def(mapIndex,idx).charge then return .85 end  -- 파란 왕도깨비
+        if mapIndex>=190 and mapIndex<=209 and (self:GetEp4Def(mapIndex,idx).map2Kind or "")=="cow" then return .85 end
+        if mapIndex>=190 and mapIndex<=209 and (self:GetEp4Def(mapIndex,idx).map2Kind or "")=="chicken" then return .65 end  -- 닭(마을 동물)은 맵 교체 후에도 짧은 준비동작
 		if mapIndex == 70 and idx == 1 then return 0.85 end  -- 트라고스
 		if mapIndex == 73 and idx == 1 then return 0.85 end  -- 트라고스
 		if mapIndex == 74 and idx == 1 then return 0.85 end  -- 트라고스
@@ -5818,8 +5922,18 @@ script GameManager extends Logic
 	-- c1fc1074...로 확인, 2026-08-25 정정 — 페페가 먼저 쓰러지고 격노한 예티만 남는 방향),
 	-- 다크예티와페페→다크예티로 전환된다(듀오가 되었다가, 듀오 상태에서 다시 죽으면 페페 쪽이 먼저
 	-- 쓰러지고 예티만 남는 서사 — 유저 지정).
+	-- 에피4 표 종의 2페이즈(def.phase2 — 에피5 map4 깨비 등). 없으면 nil이라 아래 존 풀 테이블로 넘어간다
+	@ExecSpace("ServerOnly")
+	method any GetEp4Phase2(integer mapIndex, integer idx)
+		if not self:IsEp4Zone(mapIndex) then return nil end
+		local def=self:GetEp4Def(mapIndex,idx)
+		if def==nil then return nil end
+		return def.phase2
+	end
+
 	@ExecSpace("ServerOnly")
 	method boolean GetMapHasPhase2(integer mapIndex, integer idx)
+		local p2=self:GetEp4Phase2(mapIndex,idx) if p2~=nil then return true end
 		-- 주니어예티 3슬롯(99/1, 100/2, 102/2)은 이 함수를 거치지 않는다 — MonsterAI.InitializeStats가
 		-- GetMapIsJuniorYetiPhase2Roll로 먼저 걸러서 스폰 시점 50% 코인플립으로 직접 결정한다
 		-- (그 결과가 곧 이 몬스터의 _hasPhase2다). 아래는 항상 확정(_hasPhase2=true)인 나머지 종만 다룬다.
@@ -5931,6 +6045,7 @@ script GameManager extends Logic
 	-- Phase2(2페이즈 부활 외형 / 주니어예티 스킨변형 외형) 공용 stand RUID.
 	@ExecSpace("ServerOnly")
 	method string GetMapPhase2StandRUID(integer mapIndex, integer idx)
+		local p2=self:GetEp4Phase2(mapIndex,idx) if p2~=nil then return p2.stand end
 		local pools = {
 			[99] = {"2fa39477afb34d8cb6412b7fe5085f42", "f6467914a7f84409b2937fa3668db94d"},  -- 주니어예티→예티(성체) / 다크주니어예티→다크예티
 			[100] = {"", "2fa39477afb34d8cb6412b7fe5085f42"},  -- 주니어예티→예티(성체)
@@ -5978,6 +6093,7 @@ script GameManager extends Logic
 	-- 존99~103/119~128의 성체 진화 목적지도 이 표를 그대로 조회한다).
 	@ExecSpace("ServerOnly")
 	method string GetMonsterLootItemIdPhase2(integer mapIndex, integer idx)
+		local p2=self:GetEp4Phase2(mapIndex,idx) if p2~=nil then return p2.loot end
 		local standRUID = self:GetMapPhase2StandRUID(mapIndex, idx)
 		if standRUID == "f6467914a7f84409b2937fa3668db94d" then return "dark_yeti_horn"           -- 다크예티
 		elseif standRUID == "2fa39477afb34d8cb6412b7fe5085f42" then return "yeti_horn"             -- 예티
@@ -5988,6 +6104,7 @@ script GameManager extends Logic
 
 	@ExecSpace("ServerOnly")
 	method string GetMapPhase2MoveRUID(integer mapIndex, integer idx)
+		local p2=self:GetEp4Phase2(mapIndex,idx) if p2~=nil then return p2.move end
 		local pools = {
 			[99] = {"02dfd5686d7042768adcea2d24c184b4", "53a9227119764c268fbedade502834a8"},
 			[100] = {"", "02dfd5686d7042768adcea2d24c184b4"},
@@ -6023,6 +6140,7 @@ script GameManager extends Logic
 
 	@ExecSpace("ServerOnly")
 	method string GetMapPhase2HitRUID(integer mapIndex, integer idx)
+		local p2=self:GetEp4Phase2(mapIndex,idx) if p2~=nil then return p2.hit end
 		local pools = {
 			[99] = {"186789a04dd34be797ab716279f7fea7", "796022b69ac2462cbc976c7e3a30a5c0"},
 			[100] = {"", "186789a04dd34be797ab716279f7fea7"},
@@ -6058,6 +6176,7 @@ script GameManager extends Logic
 
 	@ExecSpace("ServerOnly")
 	method string GetMapPhase2DieRUID(integer mapIndex, integer idx)
+		local p2=self:GetEp4Phase2(mapIndex,idx) if p2~=nil then return p2.die end
 		local pools = {
 			[99] = {"5a328165fb9a4f47b3810c427b8edbd6", "752df226991c43b4afff11ee8e62ed98"},
 			[100] = {"", "5a328165fb9a4f47b3810c427b8edbd6"},
@@ -6095,6 +6214,7 @@ script GameManager extends Logic
 	-- 일치 — 실제로 pack1(5프레임=0.55)과 pack2(16프레임=1.65) 길이가 크게 다르다).
 	@ExecSpace("ServerOnly")
 	method number GetMapPhase2DieDuration(integer mapIndex, integer idx)
+		local p2=self:GetEp4Phase2(mapIndex,idx) if p2~=nil then return p2.dieDur end
 		local pools = {
 			[99] = {0.75, 0.75},
 			[100] = {0.5, 0.75},
@@ -6130,6 +6250,7 @@ script GameManager extends Logic
 
 	@ExecSpace("ServerOnly")
 	method string GetMapPhase2AttackRUID(integer mapIndex, integer idx)
+		local p2=self:GetEp4Phase2(mapIndex,idx) if p2~=nil then return p2.atk end
 		local pools = {
 			[99] = {"a9e503154e3e4ad5ab0e9e7742dd53ec", "55966425813d4fa1bea67ad1018dcfb5"},  -- 주니어예티→예티(성체) / 다크주니어예티→다크예티
 			[100] = {"", "a9e503154e3e4ad5ab0e9e7742dd53ec"},  -- 주니어예티→예티(성체)
@@ -6166,6 +6287,7 @@ script GameManager extends Logic
 	-- Phase2 attack1 재생시간 — 다크예티/다크예티와페페(전환 목표 팩) attack1 전부 9프레임=0.95초.
 	@ExecSpace("ServerOnly")
 	method number GetMapPhase2AttackDuration(integer mapIndex, integer idx)
+		local p2=self:GetEp4Phase2(mapIndex,idx) if p2~=nil then return p2.atkDur end
 		if mapIndex == 99 and idx == 1 then return 0.95 end  -- 주니어예티→예티(성체)
 		if mapIndex == 100 and idx == 2 then return 0.95 end  -- 주니어예티→예티(성체)
 		if mapIndex == 102 and idx == 2 then return 0.95 end  -- 주니어예티→예티(성체)
@@ -6198,6 +6320,7 @@ script GameManager extends Logic
 
 	@ExecSpace("ServerOnly")
 	method string GetMapPhase2HitSoundRUID(integer mapIndex, integer idx)
+		local p2=self:GetEp4Phase2(mapIndex,idx) if p2~=nil then return p2.hitSnd end
 		local pools = {
 			[99] = {"c1108ba1ec0e45c3be0ba3ccb5ee0adc", "2a852591a7c64a8fb30dcd7227866f68"},
 			[100] = {"", "c1108ba1ec0e45c3be0ba3ccb5ee0adc"},
@@ -6233,6 +6356,7 @@ script GameManager extends Logic
 
 	@ExecSpace("ServerOnly")
 	method string GetMapPhase2DieSoundRUID(integer mapIndex, integer idx)
+		local p2=self:GetEp4Phase2(mapIndex,idx) if p2~=nil then return p2.dieSnd end
 		local pools = {
 			[99] = {"655c74418f4c4d65932641a375e7a4f5", "8049a8708de04238843f029debb2f51a"},
 			[100] = {"", "655c74418f4c4d65932641a375e7a4f5"},
@@ -7012,6 +7136,28 @@ script GameManager extends Logic
 			end
 			return
 		end
+		_RunClearLogic:ResetForRun()
+		-- A fresh run restores harvested flowers and mined crystals; continue keeps them consumed.
+		for _, mapName in ipairs({"ep5_map1", "ep5_map2", "ep5_map3", "map19"}) do
+			local harvestMap = _EntityService:GetEntityByPath("/maps/" .. mapName)
+			if isvalid(harvestMap) then
+				local harvest = harvestMap:GetComponent("script.Ep5CrystalMiningController")
+				if harvest ~= nil then harvest:ResetForNewRun() end
+			end
+		end
+		_Map19CollectLogic:ResetForNewRun()
+		_Ep5OreCollectLogic:ResetForNewRun()
+		_Ep5Map1CollectLogic:ResetForNewRun()
+		_Ep5Map2CollectLogic:ResetForNewRun()
+		_Ep5Map2KillQuestLogic:ResetForNewRun()
+		_Ep5Map3EelLogic:ResetForNewRun()
+		_Ep5Map3CollectLogic:ResetForNewRun()
+		_Ep5Map3QuizLogic:ResetForNewRun()
+		_Ep5Map4HusbandLogic:ResetForNewRun()
+		_Ep5Map4BarterShop:ResetForNewRun()
+		_Ep5Map5SunglassesLogic:ResetForNewRun()
+		_Ep5Map5CollectLogic:ResetForNewRun()
+		_Ep5GourdLogic:ResetForNewRun()
 		_MapManager:SetEpisodeRange(episode)
 		-- MapManager.OnUpdate의 자동 시작-리다이렉트는 월드 시작 직후(에피소드를 고르기 한참 전) 이미
 		-- 에피1 기본값(존1)으로 1회 소비돼버린 상태다 — 에피소드2/3를 골랐다면 여기서 명시적으로 다시
@@ -7021,7 +7167,8 @@ script GameManager extends Logic
 		-- BeginGameplay()의 ActivateMap과 겹쳐 초기 스폰이 두 번(그래서 에피1보다 몬스터가 더 많이)
 		-- 일어나는 버그가 있었다(유저 리포트로 발견) — 에피1 새 시작은 이 분기를 안 타서 항상
 		-- BeginGameplay() 한 번뿐이었으므로 에피2/3만 비대칭이었다.
-		if episode == 2 or episode == 3 or episode == 4 or episode == 5 or (episode==1 and _MapManager.TestStartAtSylphUnlock and Environment:IsMakerPlay()) then
+		if episode == 2 or episode == 3 or episode == 4 or episode == 5 or (episode==1 and _MapManager.DesiredStartMapIndex~=_MapManager.MinMapIndex) then
+			-- 에피1은 시작 존이 기본(1)이 아닐 때만(실피드 테스트 등, 2026-10-23) 옮긴다
 			_MapManager:SilentMoveToMap(_MapManager.CurrentMapIndex, _MapManager.DesiredStartMapIndex)
 		end
 		self.GameStarted = true
@@ -7163,6 +7310,28 @@ script GameManager extends Logic
 		self.TimeAttackRemaining = timeAttack and self.TimeAttackDuration or 0
 		-- 다시하기로 새 런을 시작할 때도 튜토리얼 정지는 반드시 풀고 들어간다(StartGame과 동일)
 		self.TutorialPaused = false ; self.OptionPaused = false ; self.ShopPaused = false
+		_RunClearLogic:ResetForRun()
+		-- A fresh run restores harvested flowers and mined crystals; continue keeps them consumed.
+		for _, mapName in ipairs({"ep5_map1", "ep5_map2", "ep5_map3", "map19"}) do
+			local harvestMap = _EntityService:GetEntityByPath("/maps/" .. mapName)
+			if isvalid(harvestMap) then
+				local harvest = harvestMap:GetComponent("script.Ep5CrystalMiningController")
+				if harvest ~= nil then harvest:ResetForNewRun() end
+			end
+		end
+		_Map19CollectLogic:ResetForNewRun()
+		_Ep5OreCollectLogic:ResetForNewRun()
+		_Ep5Map1CollectLogic:ResetForNewRun()
+		_Ep5Map2CollectLogic:ResetForNewRun()
+		_Ep5Map2KillQuestLogic:ResetForNewRun()
+		_Ep5Map3EelLogic:ResetForNewRun()
+		_Ep5Map3CollectLogic:ResetForNewRun()
+		_Ep5Map3QuizLogic:ResetForNewRun()
+		_Ep5Map4HusbandLogic:ResetForNewRun()
+		_Ep5Map4BarterShop:ResetForNewRun()
+		_Ep5Map5SunglassesLogic:ResetForNewRun()
+		_Ep5Map5CollectLogic:ResetForNewRun()
+		_Ep5GourdLogic:ResetForNewRun()
 		_Ep4Map1EasterEggLogic:ResetForNewRun()
 		_Ep4Map2EasterEggLogic:ResetForNewRun()
 		_Ep4Map3EasterEggLogic:ResetForNewRun()
@@ -7926,7 +8095,11 @@ script GameManager extends Logic
 			"block_golem_card", "king_block_golem_card", "chronos_egg", "platoon_chronos_card", "master_chronos_card", "clock_spring", "ticktock_egg", "bloctopus_blueprint", "king_bloctopus_card",
 			"buffy_hat", "lazy_buffy_bead", "buffoon_card", "deep_buffoon_stone", "pirate_helm", "dual_pirate_engine", "viking_helmet", "gigantic_viking_hat",
 			"soul_teddy_card", "master_soul_teddy_card", "klock_card", "dark_klock_watch", "death_teddy_button", "master_death_teddy_card", "phantom_watch_card", "g_phantom_watch_card", "gatekeeper_armband",
-			"moon_bunny_ricecake", "tteokguk_ricecake", "hogul_hide", "sammiho_tail", "stiff_feather",  -- 에피5 map1
+			"moon_bunny_ricecake", "tteokguk_ricecake", "hogul_hide", "sammiho_tail", "stiff_feather",
+            "village_chicken_feather", "sparrow_plume", "nureongi_collar", "village_acorn", "village_cow_horn",
+            "dokkaebi_club_chip", "dokkaebi_moss_stone", "dokkaebi_pot_shard", "dokkaebi_talisman", "dokkaebi_straw", "dokkaebi_lantern_wick",
+            "kebi_ember", "blue_dokkaebi_mask_shard", "green_dokkaebi_straw_cord", "yellow_dokkaebi_club_chip", "doryeong_hair_tie", "yangban_ghost_gat", "cheonyeo_wood_comb", "daegam_jade_token", "seonbi_leaf_fan", "jedeung_lantern", "mongrong_hazy_bead", "yagwang_stolen_shoe", -- ep5_map4·map5 ordinary monster materials
+              -- ep5_map3 dokkaebi materials  -- 에피5 일반 동물 잡템  -- 에피5 map1
 		}
 		return pool[_UtilLogic:RandomIntegerRange(1, #pool)]
 	end
@@ -10072,7 +10245,109 @@ script GameManager extends Logic
 		["1d345580a9014863b2a4058c6ae1d7ad"]={frames={"1d345580a9014863b2a4058c6ae1d7ad","828e4984bea8427d95b433f95e738cc2","696937c184854de4840fada1525dfa22","c865917d196d4e5794250b6b803937c5","1935d903b3c94edfb731048d2027fdbf","e6e21ce8a7bd4b8f9c38710b48353c1f"},step=0.12,loop=false},
 		["ba74feb188674770ac8ffe69b231889d"]={frames={"ba74feb188674770ac8ffe69b231889d","5fb6fffe86824ed39ba9a6a70b5ac52c","85e17bfdb6664c92a378f52a0d6ab2b1","4445ddf2346b4617bbd7ad67bda1d314","9279976c88b940538b1584f6056b629a","41a1b9ff7cf64d858503b74fc53c4392"},step=0.025,loop=false},
 		["7375fa0a19e741d2bfd09f31b57c6d98"]={frames={"7375fa0a19e741d2bfd09f31b57c6d98","c642078c01fa4a408883d689c62aafeb","854d1b55e2374c58a4d72e8e108a2efd","2cf86f0e36e442deaf9d271c0d0c1034","d33a718bec1646baa3474bb53f14ba99","8251d2ef7c724673ba7114dbcc31cea7"},step=0.125,loop=false},
-	}
+        ["9fbeacc29d914468a1d0b839f457b519"]={frames={"9fbeacc29d914468a1d0b839f457b519","b6143c1bc8aa4a5e8b23d77149d1472c","6b4d37144e0247e89f3a4bae3ef2fbc7","cb2dcb77d0e2426b91c20956693f56b3","3f05062d098a4e5bb90090fb206d72c3","c2a923bbf35c4b57b7e82e91d5664913"},step=0.15,loop=true},
+        ["37b886c894404ec685d2f4965b324c48"]={frames={"37b886c894404ec685d2f4965b324c48","5575431302cc49c7a6e527f6df5a3660","a40a6ef69edb4dee845f49e82ddf6829","cc019be003f940bf9d34f1c7ec8a3181","81d1623b8010410a96be31725d50811d","1bd8b724094b4385bdb366dac821fe49"},step=0.09,loop=true},
+        ["cfe3f5d6c5c44269be41b3325bc42139"]={frames={"cfe3f5d6c5c44269be41b3325bc42139","75e27feb59304dc4a397e7fe9d944b74","8bee1dbf2fff46309a622c4608a232c4","eb4a1c61381d466aba31b42b63851a2b","c01fbd9e1c2742869b22479775b27d6f","fbcacbab7b494af2b405a792f3b5feee"},step=0.1,loop=false},
+        ["ecf78cbd89ab4a09ab60e2ba65664656"]={frames={"ecf78cbd89ab4a09ab60e2ba65664656","f8d32ea9202c4127bc024efff200f097","4c701fb5528246f6bbed1ddf8647cfc0","f84818617d854f06b6799d9260fbc660","c145165238fd46c99758e3914ab8e580","f6af633d48334b85a350f9958df8de68"},step=0.025,loop=false},
+        ["c73de0bc160b48d698be71d3a824e8f0"]={frames={"c73de0bc160b48d698be71d3a824e8f0","3545304dd7fc4535b7c0bdb58f3d637d","0eaaa89db153442592cc3b8c56ea37a1","61cdb6ecf7024a4299521e12dbf50d6b","0e3a1313516a4e48909499b68a0fbf15","ceb3982e06304993a5c5d1158de44e41"},step=0.125,loop=false},
+        ["e3a765d78197494ca323d7a8d3aa65ab"]={frames={"e3a765d78197494ca323d7a8d3aa65ab","27300a6239c24dd7bb134b57b5f970ab","f069b96333054cd2b37a3859792f3633","282a2292da694e6ab2c02ac6f2c89e9e","a6b0f87aded24d90b7dfcf4c71e381d3","b41866cd415a4ed7a78c839b27dbcf87"},step=0.15,loop=true},
+        ["3dafbd2bf93c414bb5dcd1f619b3cdac"]={frames={"3dafbd2bf93c414bb5dcd1f619b3cdac","a9582a532141451982870dc8d8819568","fac83fc984c246aaa39474119bfc77f9","ea1f1cdc1b9d452991ac4cd4865885ca","02035546bc744f09aa4bd4f07f8c7d7a","497a9f5c36104f15a5538620f9a8b6e8"},step=0.09,loop=true},
+        ["64c0fe34813c439e93485cfb97100aa5"]={frames={"64c0fe34813c439e93485cfb97100aa5","792af2ece2f1461cbd24936396642e88","3f519ee8efdf4f12b33483d095f4a24b","8405c0d82bfa431fb0f59393e524877d","80b31d5929f64349adcb9df264dfc5a5","68307513b97d44e6832d26e879671fc1"},step=0.1,loop=false},
+        ["8a093a859f3d4145852378ab7c9c39be"]={frames={"8a093a859f3d4145852378ab7c9c39be","41a3bd456ec34c9f8c1964225dcf2240","2e61c854385e4d6e9371974e6a54bd0e","d049c179817a4ef39f8e12b4b6e0550b","b7e02f294c6244c2b6d0c70b602998c6","b44eaebeba514dbca992cc0a5b7d2310"},step=0.025,loop=false},
+        ["6ca217e6cbe54cfa93030aa6442e8b92"]={frames={"6ca217e6cbe54cfa93030aa6442e8b92","26ee577efd524117a5d43fd6cb30547c","93b2fdcbfb7c450e9712c2578411e461","fe41cda5c7f849f6b449e7e252b48ce3","d035ebc09bec4bc1ab51d3c474d56da4","0ae46dcabbda421d809e7f9ed35e9edd"},step=0.125,loop=false},
+        ["6135da3ff4de42368935387ce9651d8e"]={frames={"6135da3ff4de42368935387ce9651d8e","ea690d8e0d85467bad8d777f7411efe1","786129cdb1ad44b295d3c528fb0f0e8e","4c725b04556e47f1817bcd0662ed8194","94f2d57128cc4716a465957606c9b549","ca067c92c35c4a488f2a79fc48fe0ae1"},step=0.15,loop=true},
+        ["b38aab1546db4b879bcbccf7f69c713a"]={frames={"b38aab1546db4b879bcbccf7f69c713a","2522e9a0ca3b4887b6ab3cf92fd5cd44","7b0ebde1cb2241489bfb098875ead34a","0bfd6c62b5544d9f8f322c6c26f7f82e","0fd034b126854b2a9bb6986217e59803","33a50049b9364d26bd250daa377f2af1"},step=0.09,loop=true},
+        ["efa47dc5bd8a4e73b2b40b0857fdcdfc"]={frames={"efa47dc5bd8a4e73b2b40b0857fdcdfc","80eed1ab2c6f49aca213253cbe973a7a","405785ad07dd44ae86aca3b2f933f102","a5b31ee3623543158dbcbf82f74a05da","56f099fc1c35462ab68bca7e55af707a","adddc4e83550433b9fd3d4a7cbc1c3cd"},step=0.1,loop=false},
+        ["11e5b43373a5487982456abf1753fb84"]={frames={"11e5b43373a5487982456abf1753fb84","c107d3af3f7f481eba08cc746e44d517","c28e5d8775c34105b1e443c649c8d08f","e01b1b06186e49c192ea716f097b3da0","faab9c9b648246c387bbd1f24ba4f76c","4c6fb109ea1c47729eb85c414ad5050e"},step=0.025,loop=false},
+        ["4b3494e9c2334a84839c4f4dbb26f9ff"]={frames={"4b3494e9c2334a84839c4f4dbb26f9ff","eb9289003e2f40aaa69641c9af80fee2","e18c1ef80abf4bffbd867478f34418f1","a9f3ae9147d94831a6fbc7cb2ec8a05f","dd104507601d4690ab73c9fcfd27a48c","84393d7ddf694a8a9bc9e652a2c09b4d"},step=0.125,loop=false},
+        ["acf89a74f94e4641914b63267c7a5c06"]={frames={"acf89a74f94e4641914b63267c7a5c06","4375602c2d90495ab3b0c980c637b09d","21368c828be2451cb0098ac504b745b5","43db3e60c02f4b59903b287e7a204755","50e73f37b800470da4a6c1c5898724d3","a63bce559eaf47c7a78faa6fd4230112","16d4f426ab3f4bd3a1b58cc3db04efec","68488e4747a7406da83c78829094c14a","11533987b3ba4fc7b012074e2f873b85","1458c878721e40fb8478ba4544a0c700","90cb7603478f4bbc90d36ca782f0df26","755fad89ada545f48c2b0bbd5b43e8fd"},step=0.065,loop=true},
+        ["4cd355b81ebe4f0ca07dce4e2a1e42df"]={frames={"4cd355b81ebe4f0ca07dce4e2a1e42df","b8c66cb05c664ffe97d74d35a616589b","efd4839a4a334c77aa2af7a6f8fbf8ef","2e93cd1876a041bfa82e85206798eee8","eb29b10bd59c44dda3e57759e51eb16c","6c4bf96ba7954b9688505d337dac3311"},step=0.1,loop=false},
+        ["c28d2ce3bc2c44a8b87ed8c3716bd462"]={frames={"c28d2ce3bc2c44a8b87ed8c3716bd462","14f16731f111453c8db5a20c827da3d9","fab55dc20dbe4eee9098ed4106aba4de","df27621c24094033a5bbb8eac840242a","83e012fd0c9844b5a0e40b5c74cc14c3","9527be185e344b2c878846492cf5c09d"},step=0.025,loop=false},
+        ["7c8d8e53e0184c8ab9e26d5ed1aa4547"]={frames={"7c8d8e53e0184c8ab9e26d5ed1aa4547","530c291582ef49d699e00bbf6f07c9c6","dd6615fdf8cd4f4d98509f019647bd5e","59b06d7f88ec4003bf38a9ad82ba013b","9b6ed8fb86b443309db843a09d9cdc99","a39fbbc5f5824cc49d9636aa88af04aa"},step=0.125,loop=false},
+        ["3a5a00198b254cccb74dcb6a66bac6c0"]={frames={"3a5a00198b254cccb74dcb6a66bac6c0","ab1d9436ef29426eb7dc460d9a7c24b7","58ac7d8061b04d86b5a41ceda6d852a6","92034a7789b9433cb4a6a86b8a61cb67","5a378c6f58894b6d9a8195154048f626","f0906a13f703472caba147a0ed6d81db","ba7110d22f7c400e94128d3c3a91fafd","f860a2c85d6c4ce783d643da9dc8420b","cddbd4186e5e4b5cac5dabb48b2f5b38","b4d650c5fa5c44adbf61bfabf7de9aa0","7f11268e27324310826228cac4ea62ab","c624e48af7e549b8bdec020de12924aa"},step=0.065,loop=true},
+        ["ee1a1119370f4a308bcb5a4320893ece"]={frames={"ee1a1119370f4a308bcb5a4320893ece","23373d6bd6934b58a714e11c5e40072e","5715287f08cc4632ad4bdb13caffb20e","0d3718f13fd54f858d2129053f69c622","25920fca0807442a8e39636c9429caf5","cf595b970a2b409aa32ef1381aa741a3"},step=0.1,loop=false},
+        ["e396abd517894ddfa70394bf888526ba"]={frames={"e396abd517894ddfa70394bf888526ba","040df7bd7fca41d6a70948dec5e1b03f","426b844a2a0f4cc89ec1a94a3a45e648","eb21577eb46b4f08ac8ec9650c1447c1","8a6b6bf99dcd4366a2f06e53237cfe8d","d72df6b9cf694cceac912c61ae179859"},step=0.025,loop=false},
+        ["3b4acf1f15624bd98d7e763ee49497e3"]={frames={"3b4acf1f15624bd98d7e763ee49497e3","1024da7ae34e4bb0af2d98ffa5805ad4","cecf63492d0b4284b7a0febc83516b95","7ce884b776144274bde9c6d6580bb8a1","d754493aedd94798a84d9ce89ef0c077","70a00f7726da434bab2c72eec9431b8f"},step=0.125,loop=false},
+        ["d36aee999c5947cca0a2a27dac26acef"]={step=0.15,loop=true,frames={"d36aee999c5947cca0a2a27dac26acef","97e8b639957a4b53be89844351976ae3","70bdbbc6245447849ac4e6d018d1b6e8","f4262dbdbc6b42628adfc3c1d9202e39","f28836d7eb7d49d1a05adcaf09bf11ec","6b33ea5182ed4321b07b16a48b41c9ce"}},
+        ["b11689f9735d4a89b975b608a4f92e68"]={step=0.1,loop=true,frames={"b11689f9735d4a89b975b608a4f92e68","01b7e716f79f4b418bf37d18c00d74c7","2691271b39c34d78ae772499f92cf2fe","927d2a59fde64e8bbb94e2145a497d4e","35762b15c18b4e14aed5420688c77dac","0c64db8a5d7a4640bb618c8b33177c3a"}},
+        ["63d82bf00158442592b22ec44c6b8f7b"]={step=0.1,loop=false,frames={"63d82bf00158442592b22ec44c6b8f7b","3f6b0b7c258442ddbc1838c94afe77ad","6a30b798b710424d97eaf36976455cac","2a9b25375c9f481f982ea4a2e796f1f3","de81c530c3944773b29327f0998b32aa","5bc87e3f76da4042b64160b77cbc790d"}},
+        ["25afeea3af054b1db19a9994b6de73f0"]={step=0.025,loop=false,frames={"25afeea3af054b1db19a9994b6de73f0","5050ee401f024276a45aa42d2899df65","6b217bd84c5f43aea9915b7e21501f66","4dfbfe913ac143708ab77ff1962cef7d","6c8a213e606248f98c8d052e9d5d2571","6b71a8764c77468e960468660ea38de1"}},
+        ["e4959813b4f445378127efa40a8fa6f3"]={step=0.125,loop=false,frames={"e4959813b4f445378127efa40a8fa6f3","50597d4c6bf3494ca4a8bea4c3389751","a5970e21816a46b788415be4b2f0614d","773a8eca00774e66a66c86fb630b2363","71dfd52cb0684e438b084b23472e7971","e2fba68fe28842bf9bdfb0e37e3294c8"}},
+        ["7ebf55d958ac4748aff5749a3a57cab0"]={step=0.15,loop=true,frames={"7ebf55d958ac4748aff5749a3a57cab0","5903b6365a604210b67b0c07f3ebeaee","78e2fcd8488e43578041e0d92bcfdd5c","90443619ec124dc795f88cbf1ccd8a8e","1f4991e2a5d34a32968a61bacc328262","0b685bb63adf4664b722ee46f08a8c45"}},
+        ["7d688f505d0c42a59da80c7e7059837d"]={step=0.1,loop=true,frames={"7d688f505d0c42a59da80c7e7059837d","54f4dcc358ce4a3397c8525cf26f8d53","b7551a5fb6244c65aa6db461a9ff0c91","13eb7c11b6ea4eb6aec08026a34bf390","55e29b2beaea4e2a961eb1e54afb0a9d","a6c625f13a37489abe307fb175a558c5"}},
+        ["117eb618f3de479da9545ab548c57042"]={step=0.1,loop=false,frames={"117eb618f3de479da9545ab548c57042","3bb60e0dd28544adadf24a8cbad401c2","9391bc8a83114bd195c1eecf34b5ab4b","41c9309fdbe141ef8c2cfffc80a4aed0","e8b57b3e1ff842c38426d0a25a40ec6d","235501222eb8457ab396378f96bf1655"}},
+        ["0f996dce062a4f278a94cb2f434b5313"]={step=0.025,loop=false,frames={"0f996dce062a4f278a94cb2f434b5313","8e1f4eb17f7e4ee791a4e689d814e5b1","f1231c153437405c9b00386e960f30c4","9c68ad74ae7049b4a150a9eb51ebfe02","00ad7de00dbb44b58a2abec5d02f6ca9","8ab0926e1b8444ccafb61f9d6df32c27"}},
+        ["bf0f5ead997d4b5e88fdddcc6402aae3"]={step=0.125,loop=false,frames={"bf0f5ead997d4b5e88fdddcc6402aae3","c55c2af360ce4e988493a396c9407790","b63201756f614e37beda04eeef8eee37","2890f4bb24bd4b54a6c493f1badb5fee","48569ab7b67c4ffebad36d57c967ef20","25fcbfc825ca447e8f09f5fd5bbf7bd8"}},
+        ["6fdaa3f049b44b59b7e0961a927cb87e"]={step=0.15,loop=true,frames={"6fdaa3f049b44b59b7e0961a927cb87e","47ef0ee100d14be69e61c4f17876e4cc","afed21c243334935841ca6279a2ff28a","f36200cf57d64e31a29009b85bfd2f5f","fe495cf531ec4f49a591f124e72fd64e","440474ee639947f78a1b25dbe34d922e"}},
+        ["286cd074c15d4f998d066439b16bfbfa"]={step=0.1,loop=false,durations={0.22,0.1,0.2,0.22,0.12,0.06},frames={"286cd074c15d4f998d066439b16bfbfa","77505f2839784bac8288085b10ac8c5d","ff35baed970240e199dc8cbe4ab03e4e","296fd17833de4d7e887988f2db3ce957","c715dfdcc5bb4dfb9fa145afcd82a07d","043231b2848b4e8da7c7eb451d712b23"}},
+        ["a0b1efd2e76a4a11a31dc858b5c74835"]={step=0.1,loop=false,frames={"a0b1efd2e76a4a11a31dc858b5c74835","3c61e2fdc3e34c7e8ee4ec5a14b747dc","af981df0848b4a51b9d7d49271ebe110","c30118c8aeb84fa8917e97bdf3674cc5","7cbd1af045d242e9a9fc60f39f21fbdd","5d1d31c77c0c48b78f7aa581f2b5d0e1"}},
+        ["ff20abf07d344bddb2b0410f730fd03d"]={step=0.025,loop=false,frames={"ff20abf07d344bddb2b0410f730fd03d","648e75d1926844a992240863b099757e","7c2730971daa4682b191d0891210f344","a8508b24beb64b20a110f2ead9950d80","ef77e63883404557ba9c7a4597bb6e9b","4dd3583aded547398ed429868a882eff"}},
+        ["60ab8e1e0a8847ff99f402043bf77c8c"]={step=0.125,loop=false,frames={"60ab8e1e0a8847ff99f402043bf77c8c","a584bdeb83e04035aeb652293179227e","161bf982891a41e3a9957ace6368ce8b","02c3ce8fb4ec4ec6aa434adf88cc1dd4","77eaf1754746417ebd8e453e3f855837","b8cc7d7196f44c5585f51a5e5bb36a08"}},
+        ["c7b341aaf8654c149ddcb56359af16c0"]={step=0.15,loop=true,frames={"c7b341aaf8654c149ddcb56359af16c0","1d4f4b67b9a44612804d99eb4bb59ae1","cb68c9d974bd44b3a270afd0ba63344b","075f954a464149ffa2d0396cac2d8742","5e4b01a8502447f793ddf71aa19a311d","cb9569a2200c42fbaf92b748d839cbbb"}},
+        ["ff1e37b85a6c46eb9cefaddbf850208a"]={step=0.1,loop=true,frames={"ff1e37b85a6c46eb9cefaddbf850208a","0ac5ebc078ec402e955ac1d7ba954b36","bc575d5d50504acea2c8563f8e9bbf72","67709b79f51e40d68b80c464085b2c1f","4b987fceb9f54f99aaa01246d9a253a7","704879bb56da494eb4052249b556e2b1"}},
+        ["35a80e2f58b142caa21af2094b5825c2"]={step=0.1,loop=false,frames={"35a80e2f58b142caa21af2094b5825c2","fbb9bc48dcd644bb8791efeba9fb2a1d","8fbdf0a3fc8c4bf6a6eefd40eee397f0","1abe8507db9d4b7d8ad0beb46396acb2","5fa9f1db30cc481f9bad1e40b4508050","df4dc20838624eb794d2c243cbcd0476"}},
+        ["9d9cad20b9d74e7c85dfc459ae059a61"]={step=0.025,loop=false,frames={"9d9cad20b9d74e7c85dfc459ae059a61","b1dce8337f4e41a6a76cb35e8725672a","6c98e74c62b3446a8ed523e3058e5d6f","29653bc940fe4e119f125a9262bf3b41","3cc8c4cfb9a04f498e96f245da14bb1d","1178ec7d217642d981b73c2ed87d16b4"}},
+        ["00dc10c1e9744dbcb72e5296842ca896"]={step=0.125,loop=false,frames={"00dc10c1e9744dbcb72e5296842ca896","e5bb84823ee74267953173776a2a13db","53900b5d617340eda1648bdef9af260f","fc922c5c7968414ea1dfff1251541872","82fde233093b4f6899b805c704ff1fcf","76ae3a57dce74a1cbf6597ece2982f8a"}},
+        ["6123fffb74234cfaa20d4032dab0f0b9"]={step=0.15,loop=true,frames={"6123fffb74234cfaa20d4032dab0f0b9","2c47804a9e8346309edd160cc36f5eba","715e6f3968c24b5989bbb562f4e977cc","f2d31116dbe1405cb239e60f4245cd22","d495c6bf7eb4427981507c3dea0c1222","8d0b139147fa46c180889911a491f9cc"}},
+        ["6ba4fcdf526545b28f49cf5c7fa488ac"]={step=0.1,loop=true,frames={"6ba4fcdf526545b28f49cf5c7fa488ac","2f3cac0e09784ffc97081d82ef13fab7","62e7b20371a34e55a7c90149653eb223","3faf4b67f8ad4d82aceec6c93ecc18ba","0db199e8ea5d42dc98a7edd88bc385ec","5ddb7a345b444c94b524c0b5828fc1c3"}},
+        ["f22d822b09eb450b830644529e0053a0"]={step=0.1,loop=false,frames={"f22d822b09eb450b830644529e0053a0","f768f21236ad4e1a808d03dce906f70e","bd7e63331ec34195990eea6789ab3bc8","1159f9d21abc428fa5ecf99fbbb7209f","084c686964934fbfbc95a5e0e41900f1","ddaa83f781ef45b4af95243d03287c02"}},
+        ["6eb207940cff47a6a7d8985f8670d7b4"]={step=0.025,loop=false,frames={"6eb207940cff47a6a7d8985f8670d7b4","7359d949aa10494f8257d800888e3a19","1b69a73dc1cb46b49ea3075155c743f1","3e1186b8182f455ea139d575b9b531b2","43960367af734c269fed75434f0db2b1","9646484f66504456a0cd9a7f9bb78fdb"}},
+        ["616ac5f7356e471b80d5cd19e4ddd027"]={step=0.125,loop=false,frames={"616ac5f7356e471b80d5cd19e4ddd027","30979ce5988242219baefc56ad7ce493","00d7301acef242d68411c6f876085626","7af0b3d232f24bbc912ea7358e166b8c","ff76f4f3e3e147cdb0a6138e418c945a","4cc9f0273cc84dd098a8e4373749f28c"}},
+        ["8c82959be1f242deb59683cb3bb651f4"]={step=0.075,loop=true,frames={"8c82959be1f242deb59683cb3bb651f4","8061a1e124e041fd87a4fde9e6ad590b","5c09d9a4d02944d79c4a832e8c66c6ed","b55f5939f80f41aca530620e0c8be3f0","81777e5632734504bb07faa6bb1d7216","5d62f808f9c34e2bbe4440c45ee79161","6ad318e8f22a4164b08b5e0a528499a2","04b18d7a1cc7410ea8102647a1e52d5a","489ed6daf9ca4733884d4abd94f83ac2","3b11f82ff16042da8f7d31fe4e844f89","8c002355490b46d6a9901f4db0bc8ff1","128663f5eb294a6789ced80246b11f51"}},
+        ["f4a6df9b35944124aad61079cf6de102"]={step=0.1,loop=false,durations={0.12,0.12,0.07,0.07,0.16,0.26},frames={"f4a6df9b35944124aad61079cf6de102","47cbcd8cf6794782914d492210f0b2b9","cdcb243f8f1a451f8cc487f8e69cc657","5fbfb2752efc4778a0ae86daa7916b3c","3f0925113554448d9ad26cb382481a75","96aa150ec74a4e4baa04746edb40090b"}},
+        ["c65a910c61b2406b87747ca7002c7bee"]={step=0.025,loop=false,frames={"c65a910c61b2406b87747ca7002c7bee","d58f16377cfe447aa9175fb17c5fc5e3","c83470b369a64ee7a271372bfa8a4218","91ad877fc7c64623a23f813f7cf02078","d146aa4c310a42b8af516d92d93afd65","21a3c3ffb9164a5ab6b1bc12ec80176b"}},
+        ["236ae617153c4b3898132d02452b1cda"]={step=0.125,loop=false,frames={"236ae617153c4b3898132d02452b1cda","3f464be744974eb0a78d1c7c303d596f","bbc7fd97041b4fce8abd563cb91afbfe","2ba8b001ba1b42f39a30d65453f4133e","8ed750e03baf4ad9a5a092f64f391abd","c0452f91b4a948d49ca724789c726eb2"}},
+        ["b64c4651b902414ca9181b3612bada21"]={step=0.075,loop=true,frames={"b64c4651b902414ca9181b3612bada21","6a339ba991584738bb8a36933095b0e4","66a06af967814d8f8df0ae023150c71b","7406c8fdba49478f9d0f8ab57c8da944","4ca98de4d2ad4a158fa2d622c196a499","344adf76b344417e8f0301e06a927cec","60bb6297c8e54516a7790e19ab214aa7","5e1b82a5ca7548559982c6c9e94ea4a5","d02bc8d69b31478b9a32cee0963d06e7","61ef888d899941e2847184da0343ac5a","887cf64c4ec84aecbbc54ff2320af62e","24878c44c19e470da85eb91a407b2955"}},
+        ["4d9adf52466840e1adb159e5ed3f6171"]={step=0.1,loop=false,frames={"4d9adf52466840e1adb159e5ed3f6171","f8da9f44b06744e88b99442c937a9603","ee419df59c6e46659676990c77ed549a","fb511fae1249426781a38da6787d3bbb","0d54295e414146d498973102b78be8e6","8a20b0d1cc404774a363a957d5841c54"}},
+        ["04c79acdb4594f01bfd812b79672b36a"]={step=0.025,loop=false,frames={"04c79acdb4594f01bfd812b79672b36a","5ac2bcd41e11410f91fa9baa152e5c62","abcd1b6a12db4d85be68c5b2b895e766","74b7c4a8a1d64ed1ac8b78b3c2796a0b","b73bb4714b7e40068ab4bb2cd934f04e","c4f2ae1deacf42bda909fa7eb4667b5f"}},
+        ["ef2c2a0cff9e49df882b858899da04f5"]={step=0.125,loop=false,frames={"ef2c2a0cff9e49df882b858899da04f5","1be1be8549644e5193d8e56a90c48d79","7be30ad704db4f289702067c5eb1ee5c","49778bcc28154b48a51e41d4e34474e9","fa222d54adf64d879fbc98eea77b57ea","ea80171810674b7e948a55ab7558c5c0"}},
+	
+        -- EP5_SPIRIT_ELITES actor frames
+        ["cc306ef5f0fb426da269bc70489e762d"]={frames={"cc306ef5f0fb426da269bc70489e762d","7f03d45fd5744e5babb9be7aadb18c51","1630bd3210b1488e85a8b2b7bd0ffb5a","d7896a90635e4ce5ab4f7f8ccf508b1b","0f3f0290abcf4ef0bc854f894f6dd553","03e96955502a4040a0f3e347e3394255"},step=0.16,loop=true},
+        ["517444a858f24d77bdaaf2b0f373e761"]={frames={"517444a858f24d77bdaaf2b0f373e761","b1d9739b5ea241b788c08de9c8748baf","f1ee98cbcc6b45dca34e1eec108b1928","57e5e0f4fb944d3095432d7b2887a9b4","dca209d5ff7b41bf950a57118899e321","3904d15775de4213adc5dc58a9e836b5"},step=0.1,loop=true},
+        ["adce3c0719ce4a949970c461ecfdeed3"]={frames={"adce3c0719ce4a949970c461ecfdeed3","d5ef335547be4dd181fd5b0c8c762c57","0036b187b99041bb87e249be335880c8","e725a5b9541c4b629192c5e325f72c66","ec4367c932af43dcbbba689522848d70","5f47073d7c274fd2afbf79c5a0ff19d3"},step=0.14,loop=false},
+        ["d017b50c57de49bba68e64b778138b07"]={frames={"d017b50c57de49bba68e64b778138b07","c9c25b5c22ad4d28b62cc54535264ef5","17d257ec036b482da5978b2c377f527f","404a0dfc21f74ad6acc6aa31a67dce28","8fe4e18fbeb340b7b18dff13616ca652","e7574f151f34499b91ecdba7e150f588"},step=0.055,loop=false},
+        ["cee09ff73bcf4bfbae9fa163f06de4cf"]={frames={"cee09ff73bcf4bfbae9fa163f06de4cf","d05b0401e7224a10ac74d2b9766a4fec","2d6a112d051e48aaa12739f965d7c624","e45baf19e1954156aae39cff3b4ffeb0","8ed7c1fcc54c4680a03ca050ab5ff583","16f2fc40bc2e4abf9ace68728211ad42"},step=0.14,loop=false},
+        ["785eaa7b9cd44cc79d1e45717b965e94"]={frames={"785eaa7b9cd44cc79d1e45717b965e94","22d057d9582e41aeb856ccbee47de03b","9085ccea0510455eb7dbc396160b54a9","f75d571a1d2245308fefbce6fd7834dc","cbf6caf927834ca8bd0367e23b0d3f8b","6b65bd4d1617476e88de6a60432d8f0b"},step=0.16,loop=true},
+        ["d7d0fa2412fb4656a27a36ef323c4fac"]={frames={"d7d0fa2412fb4656a27a36ef323c4fac","e1c4184641344b2c8e397f1a5bc70d6a","517bbc0cf20c45ae854806874f403352","bcc45f8223a440b98436335a11bdeffa","6a57c849c19c43f298d67595d0e84425","108b5297b7eb49c59b2ac9bef6596fa1"},step=0.1,loop=false,durations={0.2,0.1,0.18,0.22,0.12,0.08}},
+        ["d70f7663d47943d3a68af5b5c670d121"]={frames={"d70f7663d47943d3a68af5b5c670d121","09c81e609ec94525a838111d1051d94f","8479e5919ae043b89fd05cac8ba3321b","be36e2e166ad49b2be40767e4260a9ee","86ce3ef448b14d96a8f9f2aff3af1f88","aa9a1301a7794676a34e6fc71db811dc"},step=0.14,loop=false},
+        ["54a21de13b194bcfa76a89aed1611ef1"]={frames={"54a21de13b194bcfa76a89aed1611ef1","ea6af7eb176945e3861c26fd34071a47","a1f7b787f72947f7ab707e0fe1a46a12","dc94a326671b4bddad2c296b906027db","1f343835e220425593c4d43089518dd4","b1ef472898af4ed7b86b41d34354af45"},step=0.055,loop=false},
+        ["f93f3cf496c846e8a4421963af076974"]={frames={"f93f3cf496c846e8a4421963af076974","c65dca1a8886428aac04be769458a74d","c97458572ac34e15ae3ade10b9e1266d","a923d57f48974ff495036cc9fecd7f33","52a4c5fe61fc494f9d9b4be27a2bd38b","3ebd40bcf99e4efd8ae4075da8b1c200"},step=0.14,loop=false},
+        ["efc8d29f7acf44fd8205d59f7e4f5fbc"]={frames={"efc8d29f7acf44fd8205d59f7e4f5fbc","13d850cfcb11417d877bce69856948de","0c8d11d1f46b405598c1d18c6f9d159e","aa6fb1feea954d38bc1d88e3a91c9f80","d4151231744145d7bd3969c48d8e4d30","827f6958519445ce8e696eb5e094a38c"},step=0.16,loop=true},
+        ["8f83fd46459443baaf1e5d5a6ec466f0"]={frames={"8f83fd46459443baaf1e5d5a6ec466f0","3d82bc8297e5442c8259640e55989de8","f2c46ef435c84b83abe4762c76fa2566","4ef0025753284ad2ba1c935eb5de3e14","1be244cfd74241ff9695b4f813f068da","ef9c3e8b2f654bbfb0d70979967fa3dc"},step=0.1,loop=true},
+        ["8199f8c74e074c389f47edabb4a2ef4a"]={frames={"8199f8c74e074c389f47edabb4a2ef4a","18f127113c6d4460aecced9e63587ca0","208aaa2664e0477d82d2da4038b731af","38dc26913c884437a67c5241dd40e519","c0f9b5ee890a42b2a24d9174251c3a43","0d443f4280ae4762869fb3c70a199fb3"},step=0.14,loop=false,durations={0.14,0.14,0.14,0.04,0.24,0.14}},
+        ["9455f163442b4ec3aecf816a1410da32"]={frames={"9455f163442b4ec3aecf816a1410da32","c3b36e572e494ce6a517adc2a965af2f","b208dd3e194c4ce6883a3901acdc49b4","7e4204d4728b4d759cd9f95c1232aa88","f4c7d20f0d424d48a27316ca87f962ab","4c90b91d2d7a4b8e8cbcbb6071bb360e"},step=0.055,loop=false},
+        ["36b5aeff059a460f9da7773adf9afcba"]={frames={"36b5aeff059a460f9da7773adf9afcba","55784b2dcf994e89896d1f6e4584f7f6","daa9ee0898a1418e971c2148053cc4bc","12ab24843379419794bd5b2ee7864e3f","f779847518314294acca0f5958991a05","9f1ba3b70643407f966a480ee4134a73"},step=0.14,loop=false},
+        ["f5f7101f15b94716aa9f730bb8da83ff"]={frames={"f5f7101f15b94716aa9f730bb8da83ff","b931880354204c4a85fca76d929cfea1","22c18130a3d8487da6fd43d4b99ec073","9a02d55bbf4d4bb1a4426223760fecdd","c2b086f2c8214adfa8a88759bbd1c31b","298d3c6d290f470d8f65bbf313546464","d39711c21a144793b2ceecdef14cf98b","59e3436558dd45eeaa70b47c7934463c","b36031bf89484c67a474aa51d6012383","09c1a3ea3caf41d5820dd2ce98bd2915","dbbafe6b7a624138ab6ed4f342340973","ebc5fc6477a54724bfd07b4d42faad9c"},step=0.08,loop=true},
+        ["ae391e847d614c23b845a7733621ca13"]={frames={"ae391e847d614c23b845a7733621ca13","4695039db10849ae99a47d9948d100b2","ab44a076671e496ab9f86ecf17e71219","712d5a8d0043487695932ece2436dff9","bd8fcc3f3ede44ff9e7f64a45a103954","b8395891f44b42358f077cb9102f9112"},step=0.14,loop=false},
+        ["ae238a6a70e548fcbb1d25934225ac72"]={frames={"ae238a6a70e548fcbb1d25934225ac72","03b5d996635542a2ad83ece3ce44a6a7","779e046447a84c5fbd91019ab3d34635","a599d8529d6b4e5aaf846b6f9511d55f","49f603ba5e0d417dbc82fd04eebe6a6c","2fd3dd98b3bb4d8ca1751a82738b8614"},step=0.055,loop=false},
+        ["4a2e04b52bd54719b2bae52840e9e2c6"]={frames={"4a2e04b52bd54719b2bae52840e9e2c6","3f1455f4fbe74e39be3f2f78a471fc80","fbb45549331e4c1596b65508eafe3bc7","2869dd359aa04222959cc6aa944d696d","f0bd820fd27b4cd89d1df4c38358c8a3","fa97533fc6de4b5190741ef3c54c0ff5"},step=0.14,loop=false},
+        ["7ad31a497fcc4eac9a2babc64ec5fe40"]={frames={"7ad31a497fcc4eac9a2babc64ec5fe40","748f0f253206496bab8c10034dd11b40","a02c456f2dee4cb8b4546768338d0946","b13e470c65784a1d9542497ca81dec0a","c48956bbecc4466d97992456ad7521d4","c61461443a7f4690b479af6dc20ae27b"},step=0.16,loop=true},
+        ["7d2e0aaa1d8b48e185f7f27b121c7573"]={frames={"7d2e0aaa1d8b48e185f7f27b121c7573","6a8e48ac902146be926e0171138ff3c3","20a155aa273a495d8690f4069713d6c5","60e4181e3758494e89cac99ec306a754","5616a7765dc143feb7fd514cbb14fcc7","48a3a1006deb494c9004b82b43ed4ecc"},step=0.1,loop=true},
+        ["9c6755b399e04a2a8c1d0a8ce23a0de7"]={frames={"9c6755b399e04a2a8c1d0a8ce23a0de7","b67a6564868540ffae7cb94ed9973cab","3af511a632da4ebebd092923b7ce14f7","3844f89c255e49e59998ff8cab0afe48","67df556b44b641ac8782d26d1fc996cd","b03c5a9bb0c84f53921d2c9d98f61e70"},step=0.14,loop=false},
+        ["f8bf5d8ab742485ba751f3b3facd1a75"]={frames={"f8bf5d8ab742485ba751f3b3facd1a75","0e46846537c14f9c85cfe9e642c12e5c","12745bdc1b3d4ce0aa43c3de60c60ada","30647f32ff364bbfb31e572ae549451a","132f2553d6d546aa8280734b503b7393","b6e426e8a7674e4aa1e227c232fde571"},step=0.055,loop=false},
+        ["d0324e9805764c54b9daa32e1f7c2a97"]={frames={"d0324e9805764c54b9daa32e1f7c2a97","33478974c2e6451ca5516a65e4590792","4932522b69ea4588a3fc149849b04b0d","a2516d9ad00a4aac960d079a49284863","447c9830fe404b33b00790fbba6ef570","40016c7da37a4b158fb0da8ac02c5e63"},step=0.14,loop=false},
+
+        -- EP5_BOSSES custom actor poses
+        ["36f90c33428e4e808406d5e733fe4e31"]={frames={"36f90c33428e4e808406d5e733fe4e31","66e2909a583d4100a01dab8a6613ebac","4c173b672d1f4c7d8e0d3a6e150a6a8e","e52800acec0c496f8b39337f3e515b87","9c522ead9b4e4cc3850c71a5657eee64","22a8de13cbdb41fa9ca3c39278355e54"},step=0.16,loop=true},
+        ["24c604c2b43c4f0e9b7565ef8267153f"]={frames={"24c604c2b43c4f0e9b7565ef8267153f","9e08444d614343b289b42a82c4d07396","312108046b0d4c659b6f14b8f6d90b6d","1edd54b6abc048dea139d3fb070f4a1d","37041fa95a8443e681b68d2ec1b4b71a","79265468d41a48f0bb8b68aa52ff6c5e"},step=0.13,loop=true},
+        ["7a3ae2cb06c84daa80c0432284e87e2f"]={frames={"7a3ae2cb06c84daa80c0432284e87e2f","29a85ebb097f4d6b9590cbf336ea6fd0","1d12e00f1bd74042974d83a891118f1f","c80060b250ad4d8e9c2e4840696885ea","0b257866c3d34de7a66fca3ce7eebc70","850f988307f7447994b3d280ee743fd6"},step=0.17,loop=false},
+        ["2807c102ec4e4dccb69639db6748adbc"]={frames={"2807c102ec4e4dccb69639db6748adbc","79475ba4558449f6a417acc0872ae876","c8eede1e08734d87a6a532aee2474051","5ec3857b58f84982a6072cbf910391b3","13a37b769a8f412582a6b078ba08db63","22a944c9c68b45879e61e5f88553c191"},step=0.06,loop=false},
+        ["13e7888d5bcd4c6991b3c3095692430c"]={frames={"13e7888d5bcd4c6991b3c3095692430c","3bd94e4f8d8945629eb07cbaff098d76","ad87fe7a6610436ea1143b5b53d13bc8","4a55e516f21e4512bd260e250605b8d7","f060f10901474631ab605afd4221dccb","f053ceb34f244dce99ca935d08262df3"},step=0.17,loop=false},
+        ["946840a508d2421aa914a27283d130d1"]={frames={"946840a508d2421aa914a27283d130d1","2c859b97b04b4ce487c51084b8a842fb","c4bf69e52923449488a3c86f17492c9b","354e2a902abc44a292c93382833d43cd","dab3fb916cd34f3c9960b92d18898dab","1659ce38540e41549eac47ca3568467b","7cd4c30bb91d4541be620bfc233e9b3c","a13136f20d564d41b4d6b5153885bc47","e0e4fd011529477292dc5dd791323771","c3f2b214c98a48a0ad422a2b4f9a90cd","55ff82a1036c4e75a785cc4a2b5dabb3","e0d40afff77449a198cef967e77193d1"},step=0.1,loop=true},
+        ["504fa6af38b14cd785219393bfef3f4f"]={frames={"504fa6af38b14cd785219393bfef3f4f","91cdbbc50b494160a38f44088a45f2b2","3860de884c3542ed8c857d5e440ca6f9","135c07c16dc84ec4ae283d5cfa78c484","e653ea359622460e869b5b4a07cfc943","c36ec9c30b2147e1b2e926bfa3d0d76f"},step=0.16,loop=false},
+        ["c67ae909e42649c2bf26c45f95555ca7"]={frames={"c67ae909e42649c2bf26c45f95555ca7","dd8c4b24fee64632973fef0e7ab83dea","78f87766ea4548ffa3df48e46faa2705","ae337b63fbba47eaac3cc63a3467f7a3","bb5e3b4e80e8487bb5e9132683cda026","4c05441393194e81ab9ef90bdf503e7d"},step=0.22,loop=false},
+        ["58e7e6dc571a4bb7bc2833bb55e450c8"]={frames={"58e7e6dc571a4bb7bc2833bb55e450c8","3a864d1cfee34b9190c52250c594acac","cef3876426764c6687d5f025ec7a9f60","1d00ea10c09442a9be2bd74bddee1671","4c938f0d5f2140098ec9c3692e0fe395","6f9523506a6d4a4ebcfec081c0c79a55"},step=0.06,loop=false},
+        ["a1345fc191564ba380f595fdd40e677a"]={frames={"a1345fc191564ba380f595fdd40e677a","8b3bfcfcb67548bd983028d7bd38838b","42a8d2861c35461aa037b6f9ddac9e02","e6aa5beaee824e85aeda5672a376944f","b29f5904ae5944a4a9a88d21c71a26ee","e67b80f90a8642a2b8fba8720d80d646"},step=0.17,loop=false},
+
+        -- HG2_BOSS_V2 six drawn motions
+        ["06c91a24ce6344c09809846fdd36b78e"]={frames={"06c91a24ce6344c09809846fdd36b78e","eb9318f5649644f6abe3a777a53a69bb","c5e3993c32974c25b5a7a3222bf43e20","76c5f3a8462e42d98cf0e4dbc9482fab","510dbb2e33644a249ad94ac61c5e34de","cfc2b64f8eb14dcba3189414a74c9cce"},step=0.16,loop=true},
+        ["b1456616a1f34ba4abb13bcdb09f96a7"]={frames={"b1456616a1f34ba4abb13bcdb09f96a7","265aa3c0a71d4ed596b7adeb206cff4e","65ada25f837642d8a94211f16be12d22","228d6b6590874d48bd1c7a67db8932cf","573af30ae3504dc690188cfa88cd1d2a","389d3418d21047be9e89f4d4562fbeab"},step=0.13,loop=true},
+        ["b1f306f90dc8492ebbb1648c3ed7936a"]={frames={"b1f306f90dc8492ebbb1648c3ed7936a","413df71430ba43039c63b3d62c77bb8c","a86b4613da5a47199e119287aa3ac134","24eaf283a50b4b76aaead502d400e84c","fcbb8b0e13f243cba9b78e2bea3dbd4e","543a17e69b7e421ca5b5e566bd775fa5"},step=0.15,loop=false},
+        ["8c3001aa24b24acda60c9cbd5258831f"]={frames={"8c3001aa24b24acda60c9cbd5258831f","3d6cd352ee824ac38a14cc9d9274eec2","ab04a4a444b8468195936ec28aec549a","55d7f25c433342c588b81a38e2d65d81","3e32546c85c34ccfbbfda555cca88cef","e24aebc2c96e426c9b7e5c016ba67891"},step=0.17,loop=false},
+        ["b72db55a8874495c9ca1694f04411ab2"]={frames={"b72db55a8874495c9ca1694f04411ab2","f7b0dd3b236648858757002597d1d785","58fa1329f5c245aa9470ec7836eeb7f6","eb414001e94b4cf58c86f3ef8034c51c","62019159254b4b8c960278b883e7547f","4af7127f28aa44ac8216e4247e681711"},step=0.06,loop=false},
+        ["ae4f6a55843742d1be12c6e1b9f9beef"]={frames={"ae4f6a55843742d1be12c6e1b9f9beef","85f7934e18eb4eb7a95e8641dde0d4ab","cb68f701cbe648d1912793788275e06d","8b7e191a9f934c529ea524a011082ef9","222e04e801b1454ebac5e4bcf8b98541","e332d57a3232442d90c65effb0b3ac1e"},step=0.17,loop=false},
+}
 
 	@ExecSpace("ClientOnly")
 	method any GetCustomMonsterAnimation(string ruid)
@@ -10104,12 +10379,89 @@ script GameManager extends Logic
 
     @ExecSpace("ServerOnly")
     method boolean IsEp5EliteZone(integer zoneIndex)
-        return zoneIndex>=190 and zoneIndex<=199
+        return zoneIndex>=190 and zoneIndex<=209  -- 2026-10-19 유저 지정: map1·map2 둘 다 에피5 전용 엘리트
     end
 
     @ExecSpace("ServerOnly")
     method any GetEp5EliteDef(integer index)
         return self.Ep5VillageElites[math.max(1,math.min(4,index))]
+    end
+
+    -- EP5_SPIRIT_ELITES: five elites shared by physical map 3, 4 and 5 zones.
+    property table Ep5SpiritElites = {{name="흑철 왕도깨비",ep5Kind="iron-king",spiritElite=true,headTop=0.56,stand="cc306ef5f0fb426da269bc70489e762d",move="517444a858f24d77bdaaf2b0f373e761",attack="adce3c0719ce4a949970c461ecfdeed3",attackDur=0.84,hit="d017b50c57de49bba68e64b778138b07",die="cee09ff73bcf4bfbae9fa163f06de4cf",dieDur=0.84,attackSfx="05b4e7ebb298492fb030a0c25f34a1b8",hitSfx="72494930c9974c90bfd03d89968b7971",dieSfx="870e2b411ea04045828770014f293205",scale=0.85,flying=false,ranged=false,zigzag=true,leap=false,charge=false,chargeWindup=1.2,hitFx="",hitFx2="",hitFxDur=0,hitFxDelay=0,hitFxFrames=nil,hitFxFrameDelay=0,flyAttackInterval=0},{name="청옥 왕도깨비",ep5Kind="jade-king",spiritElite=true,headTop=0.56,stand="785eaa7b9cd44cc79d1e45717b965e94",move="d7d0fa2412fb4656a27a36ef323c4fac",attack="d70f7663d47943d3a68af5b5c670d121",attackDur=0.84,hit="54a21de13b194bcfa76a89aed1611ef1",die="f93f3cf496c846e8a4421963af076974",dieDur=0.84,attackSfx="6f3038427b694114a22a2f54a78b8cb2",hitSfx="321d271a8c524e979d2afdbbbd1d5bc6",dieSfx="ff21e8e691d94ec4b38e9cb8d5655709",scale=0.85,flying=false,ranged=false,zigzag=false,leap=true,charge=false,chargeWindup=1.2,hitFx="",hitFx2="",hitFxDur=0,hitFxDelay=0,hitFxFrames=nil,hitFxFrameDelay=0,flyAttackInterval=0},{name="자안 야광귀",ep5Kind="violet-yagwang",spiritElite=true,headTop=0.56,stand="efc8d29f7acf44fd8205d59f7e4f5fbc",move="8f83fd46459443baaf1e5d5a6ec466f0",attack="8199f8c74e074c389f47edabb4a2ef4a",attackDur=0.84,hit="9455f163442b4ec3aecf816a1410da32",die="36b5aeff059a460f9da7773adf9afcba",dieDur=0.84,attackSfx="66877e7fdefa44d09a1e44f37b4b537f",hitSfx="7c7eebeecb9a4d1e8765d327a64b3282",dieSfx="7aaa5f62d1d04b188a33986e2b0c8a45",scale=0.935,flying=false,ranged=true,zigzag=false,leap=false,charge=false,chargeWindup=1.2,hitFx="",hitFx2="",hitFxDur=0,hitFxDelay=0,hitFxFrames=nil,hitFxFrameDelay=0,flyAttackInterval=0},{name="백련 선비귀신",ep5Kind="ivory-scholar",spiritElite=true,headTop=0.58,stand="f5f7101f15b94716aa9f730bb8da83ff",move="",attack="ae391e847d614c23b845a7733621ca13",attackDur=0.84,hit="ae238a6a70e548fcbb1d25934225ac72",die="4a2e04b52bd54719b2bae52840e9e2c6",dieDur=0.84,attackSfx="38eefbccf2124154aee071f83ddefe79",hitSfx="4727baae31b34b07bc9f40479fe8b7e1",dieSfx="c2f4f710c4cf477390cccc3bf7e93112",scale=0.85,flying=true,ranged=false,zigzag=false,leap=false,charge=false,chargeWindup=1.2,hitFx="",hitFx2="",hitFxDur=0.45,hitFxDelay=0.42,hitFxFrames={"933c48f848824f38923c23114daf3b40","383fc552833242ee94f47c74eff5b4a5","266a0ce6d266489b8661c2a3e3574128","86d6abd0ed3a4574a0607832edbe626c","c06d7e5341e94ca79dc171b3de4737bf","1db3df7109754154839582f4cfb1feaf"},hitFxFrameDelay=0.075,flyAttackInterval=2.8},{name="홍련 대감귀신",ep5Kind="crimson-daegam",spiritElite=true,headTop=0.56,stand="7ad31a497fcc4eac9a2babc64ec5fe40",move="7d2e0aaa1d8b48e185f7f27b121c7573",attack="9c6755b399e04a2a8c1d0a8ce23a0de7",attackDur=0.84,hit="f8bf5d8ab742485ba751f3b3facd1a75",die="d0324e9805764c54b9daa32e1f7c2a97",dieDur=0.84,attackSfx="a8cbaf1c3b1b4af6bbbc736a0c8de8f7",hitSfx="ce32af9cc22b4c318423f55c6d4edf06",dieSfx="067a463a543a4de0ac80aca58a34799f",scale=0.85,flying=false,ranged=false,zigzag=false,leap=false,charge=true,chargeWindup=1.15,hitFx="",hitFx2="",hitFxDur=0,hitFxDelay=0,hitFxFrames=nil,hitFxFrameDelay=0,flyAttackInterval=0}}
+
+    @ExecSpace("ServerOnly")
+    method boolean IsEp5SpiritEliteZone(integer zoneIndex)
+        return zoneIndex>=210 and zoneIndex<=239
+    end
+
+    @ExecSpace("ServerOnly")
+    method any GetEp5SpiritEliteDef(integer index)
+        return self.Ep5SpiritElites[math.max(1,math.min(#self.Ep5SpiritElites,index))]
+    end
+
+    -- 도감용: 아랫마을 엘리트(map1·2) 뒤에 정령 엘리트(map3~5)를 이어 붙인 전체 목록
+    @ExecSpace("ServerOnly")
+    method integer GetEp5AllEliteCount()
+        return #self.Ep5VillageElites + #self.Ep5SpiritElites
+    end
+
+    @ExecSpace("ServerOnly")
+    method any GetEp5AllEliteDef(integer index)
+        local village = #self.Ep5VillageElites
+        if index <= village then return self:GetEp5EliteDef(index) end
+        return self:GetEp5SpiritEliteDef(index - village)
+    end
+
+    @ExecSpace("ServerOnly")
+    method string GetEliteRosterKeyForZone(integer zoneIndex)
+        if self:IsEp5SpiritEliteZone(zoneIndex) then return "ep5-spirit" end
+        if self:IsEp5EliteZone(zoneIndex) then return "ep5-village" end
+        return "episode-"..tostring(self.SelectedEpisode)
+    end
+
+    -- 2026-10-21 유저 지정 순서: 경인년 호걸(공격할수록 공속↑) → 금강 대왕깨비 → 창천 양반귀신 → 유적의 거대 괴물(attack3=주변 공속 버프, 쿨 20초·지속 5초)
+    -- EP5_BOSSES: one dedicated boss cycle for all five folk-village maps, zones 190-239 (4 bosses).
+    property table Ep5Bosses = {{name="경인년 호걸",ep5BossKind="gyeongin-hogeol",drawnBoss=true,headTop=0.455915,stand="06c91a24ce6344c09809846fdd36b78e",move="b1456616a1f34ba4abb13bcdb09f96a7",attack="8c3001aa24b24acda60c9cbd5258831f",attackDur=1.02,attackSfx="2a9f2f04a6374edb894db868036b2923",hitSfx="a55aa93d19844187b9d3508c039f0bde",hit="b72db55a8874495c9ca1694f04411ab2",die="ae4f6a55843742d1be12c6e1b9f9beef",dieDur=1.02,dieSfx="456c919c67f448788c3b91c3080cd336",scale=0.315,selfFx="",selfFxDur=0,selfFxDelay=0,ranged=false,flying=false,flySpeedMul=0.8,hitFx="",hitFxDur=0,hitFxDelay=0,hitFxFrames=nil,hitFxFrameDelay=0,attack2="",attack2Dur=0,attack2Sfx="",summonCooldown=0,summonCount=0,summonFx="",summonFxDur=0,growScalePerHit=0,growScaleMax=0,growAtkPerHit=0,growAtkMax=0,leap=true,atkGrowPerAttack=0.05,atkGrowMax=0.6,jump="b1f306f90dc8492ebbb1648c3ed7936a",hasSplit=false,minionFlying=false,minionDieWithBoss=false,minion=nil,escort={name="호걸 분신",stand="fd6c9c42aed34e3f828b6391dfd0e2d9",move="73ceccb685304dcba9e6b8937088ee18",attack="4cd5708e71c14356a8d84aea21d3dc5e",attackDur=2.02,attackSfx="2a9f2f04a6374edb894db868036b2923",hit="a51d24988ccc437ca306e6b11d7d82d3",die="d2442ba8f8dd4cd899be3cf1d1f7fdd2",dieDur=0.84,hitSfx="a55aa93d19844187b9d3508c039f0bde",dieSfx="456c919c67f448788c3b91c3080cd336",ranged=false,hpRatio=2,scale=1,countPerSide=2,spacing=1.4,cloneOnHit=true,cloneShake=0.35,cloneInterval=0.15,cloneSfx="80b2082d06514f8db07b1619336bc196"}},{name="금강 대왕깨비",ep5BossKind="dokkaebi-lord",drawnBoss=true,headTop=0.52,stand="36f90c33428e4e808406d5e733fe4e31",move="24c604c2b43c4f0e9b7565ef8267153f",attack="7a3ae2cb06c84daa80c0432284e87e2f",attackDur=1.02,attackSfx="ab2f990f369b40abb6df8012c5bacc8a",hitSfx="fa72176dfb3940e582b7e8d5ae4119e7",hit="2807c102ec4e4dccb69639db6748adbc",die="13e7888d5bcd4c6991b3c3095692430c",dieDur=1.02,dieSfx="e5de835f63204667a97856cc62fda913",scale=0.315,selfFx="",selfFxDur=0,selfFxDelay=0,ranged=false,flying=false,flySpeedMul=0.8,hitFx="",hitFxDur=0,hitFxDelay=0,hitFxFrames=nil,hitFxFrameDelay=0,attack2="",attack2Dur=0,attack2Sfx="",summonCooldown=0,summonCount=0,summonFx="",summonFxDur=0,growScalePerHit=0.1,growScaleMax=0.8,growAtkPerHit=0.05,growAtkMax=0.6,leap=false,jump="",hasSplit=false,minionFlying=false,minionDieWithBoss=false,minion=nil,escort=nil},{name="창천 양반귀신",ep5BossKind="yangban-lord",drawnBoss=true,headTop=0.58,stand="946840a508d2421aa914a27283d130d1",move="",attack="504fa6af38b14cd785219393bfef3f4f",attackDur=0.96,attackSfx="d12587be23ce4487be014f6757f93159",hitSfx="4727baae31b34b07bc9f40479fe8b7e1",hit="58e7e6dc571a4bb7bc2833bb55e450c8",die="a1345fc191564ba380f595fdd40e677a",dieDur=1.02,dieSfx="e85e41b0e56043168c690a50b12f545f",scale=0.381,selfFx="",selfFxDur=0,selfFxDelay=0,ranged=true,flying=true,flySpeedMul=0.65,hitFx="",hitFxDur=0,hitFxDelay=0,hitFxFrames=nil,hitFxFrameDelay=0,attack2="c67ae909e42649c2bf26c45f95555ca7",attack2Dur=1.32,attack2Sfx="d12587be23ce4487be014f6757f93159",summonCooldown=24,summonCount=3,summonFx="34887ea12dd34598a59c8fb9fb210c13",summonFxDur=0.9,growScalePerHit=0,growScaleMax=0,growAtkPerHit=0,growAtkMax=0,leap=false,jump="",hasSplit=false,minionFlying=true,minionDieWithBoss=true,minion={name="도령귀신",stand="f6ddea7772764a56be45732032a3570a",move="",attack="6052b70f4fc140798c0b718a467c5bd8",attackDur=0.7,attackSfx="4be83bc9accf4969bc9a9528b7e6118e",hit="0f19171e3d8f428a895dcc9d9e88e64c",die="32aeefc585d74bb9815469a0fa49af94",dieDur=1.33,hitSfx="4f6827c0d93d4e9e81a052451a84e4a3",dieSfx="9f4e9e4b6a3d4d01ab4fcbd115a92309",ranged=false,hpRatio=1.5,scale=0.8},escort=nil},{name="유적의 거대 괴물",ep5BossKind="ruins-giant",drawnBoss=false,headTop=1,stand="f8a4e6bb65f9488e8cc31cff63d3ff7c",move="b1b2179c99964d1e9beefe3746f81344",attack="e03bc70dd25f49eeb0a1c26d34cd718d",attackDur=2.88,attackSfx="f1ecb21fd87b4e82881590445edcad3b",hitSfx="50764428675a4cfbbee0d8ae46216980",hit="123ee82980f146feb3e3c3e3b4650d0b",die="6929346051644bcf9103087e1f93162a",dieDur=1.53,dieSfx="387ca3f280794a15a04fb5e1fafeafd1",scale=0.2415,selfFx="",selfFxDur=0,selfFxDelay=0,ranged=false,flying=false,flySpeedMul=0.8,hitFx="46c205c9c81e4e3095d2293085238e13",hitFxDur=0.72,hitFxDelay=0,hitFxFrames=nil,hitFxFrameDelay=0,attack2="",attack2Dur=0,attack2Sfx="",summonCooldown=0,summonCount=0,summonFx="",summonFxDur=0,growScalePerHit=0,growScaleMax=0,growAtkPerHit=0,growAtkMax=0,leap=false,jump="",hasSplit=false,minionFlying=false,minionDieWithBoss=false,minion=nil,escort=nil}}
+
+    @ExecSpace("ServerOnly")
+    method integer GetEp5BossCount()
+        return #self.Ep5Bosses
+    end
+
+    @ExecSpace("ServerOnly")
+    method any GetEp5BossDef(integer index)
+        if index<1 or index>#self.Ep5Bosses then index=1 end
+        local def=self.Ep5Bosses[index]
+        -- property table 기본값엔 3단 중첩 표(attackVariants의 슬롯들)가 안 들어가서(통째로 무시됨, 2026-10-21 실측) 여기서 붙인다
+        if def.ep5BossKind=="ruins-giant" and def.attackVariants==nil then def.attackVariants=self:GetEp5RuinsGiantVariants() end
+        return def
+    end
+
+    -- 유적의 거대 괴물 공격 순환: attack1 → attack2 → attack3(주변 몬스터 공속 버프, 쿨 20초·지속 5초 — 쿨 중이면 건너뜀)
+    @ExecSpace("ServerOnly")
+    method any GetEp5RuinsGiantVariants()
+        return {
+            {ruid="e03bc70dd25f49eeb0a1c26d34cd718d",dur=2.88,sfx="f1ecb21fd87b4e82881590445edcad3b",isSummon=false,hitFx="46c205c9c81e4e3095d2293085238e13",hitFxDur=0.72},
+            {ruid="651635af62ef46b194984072cce17662",dur=1.44,sfx="9cf530b54a3942a3a377b9e967d4cccc",isSummon=false,hitFx="510eac92e494409d83b78fa252713f4d",hitFxDur=0.6},
+            {ruid="e04f4a9eb5844ced85498fac72e870f9",dur=3.0,sfx="3862dd976c364dadb580a85fce7fda95",isSummon=false,hitFx="4f503d0e54b348c18563ca582b5c6885",hitFxDur=0.72,isBuff=true,buffCooldown=20,buffDuration=5,buffMult=1.2,buffRadius=4},
+        }
+    end
+
+    -- EP5_BOSS_VISIBLE_BOUNDS: ignore transparent production-canvas margins for HP bars.
+    property table Ep5BossVisibleBounds = {["36f90c33428e4e808406d5e733fe4e31"]={width=1.84,centerX=0.04,top=1.59},["24c604c2b43c4f0e9b7565ef8267153f"]={width=1.84,centerX=0.04,top=1.59},["946840a508d2421aa914a27283d130d1"]={width=2.31,centerX=0.385,top=1.83},
+        -- HG2_BOSS_V2 stable visible framing
+        ["06c91a24ce6344c09809846fdd36b78e"]={width=1.77,centerX=-0.055,top=1.6340000000000003},
+        ["b1456616a1f34ba4abb13bcdb09f96a7"]={width=1.77,centerX=-0.055,top=1.6340000000000003},
+        ["b1f306f90dc8492ebbb1648c3ed7936a"]={width=1.77,centerX=-0.055,top=1.6340000000000003},
+        ["8c3001aa24b24acda60c9cbd5258831f"]={width=1.77,centerX=-0.055,top=1.6340000000000003},
+        ["b72db55a8874495c9ca1694f04411ab2"]={width=1.77,centerX=-0.055,top=1.6340000000000003},
+        ["ae4f6a55843742d1be12c6e1b9f9beef"]={width=1.77,centerX=-0.055,top=1.6340000000000003},
+}
+
+    @ExecSpace("ClientOnly")
+    method any GetEp5BossVisibleBounds(string ruid)
+        return self.Ep5BossVisibleBounds[ruid]
     end
 
 end

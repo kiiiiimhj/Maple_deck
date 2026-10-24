@@ -847,6 +847,9 @@ script MonsterSpawner extends Logic
 		if map == nil then return end
 		local es = def.escort
 		self._bossEscorts = {}
+		-- 분신술 보스(에피5 경인년 호걸 — 유저 지정 2026-10-21)는 등장 때 세우지 않는다.
+		-- 착지 후 첫 피격 때 SpawnBossCloneBurst가 같은 호위병 경로로 꺼낸다(존 이동·같이 죽기 그대로 재사용).
+		if es.cloneOnHit == true then return end
 		for side = 1, 2 do
 			local dir = 1
 			if side == 2 then dir = -1 end
@@ -917,6 +920,77 @@ script MonsterSpawner extends Logic
 		if keepHp > 0 then ai.CurrentHp = math.min(keepHp, ai.MaxHp) end
 		if self._bossEscorts == nil then self._bossEscorts = {} end
 		table.insert(self._bossEscorts, ai)
+	end
+
+	-- 분신술(에피5 경인년 호걸)을 이번 보스에서 이미 썼는가. 보스가 새로 뜰 때만 false로 되돌린다 —
+	-- 존 이동 재소환은 보스 엔티티가 새로 태어나도 다시 쓰지 않는다("처음 맞았을 때만", 유저 지정).
+	property boolean _bossCloneDone = false
+
+	-- 분신술: 보스 몸에서 분신이 좌우 번갈아 하나씩 촥! 촥! 튀어나와 호위병 자리에 선다.
+	-- MonsterAI.CheckBossCloneOnHit가 몸 떨림을 시작한 직후 부른다(첫 분신은 떨림이 끝나는 순간).
+	@ExecSpace("ServerOnly")
+	method void SpawnBossCloneBurst(integer zoneIndex, Vector3 bossPos)
+		if self._bossCloneDone then return end
+		local def = _GameManager:GetBossDef(self._bossIndex)
+		if def == nil or def.escort == nil or def.escort.cloneOnHit ~= true then return end
+		local map = self:GetZoneEntity(zoneIndex)
+		if map == nil then return end
+		self._bossCloneDone = true
+		if self._bossEscorts == nil then self._bossEscorts = {} end
+		local es = def.escort
+		local owner = self._currentBoss
+		local total = es.countPerSide * 2
+		for i = 1, total do
+			-- 1,3은 오른쪽 / 2,4는 왼쪽 — 안쪽 자리부터 채운다
+			local dir = 1
+			if i % 2 == 0 then dir = -1 end
+			local slot = math.floor((i - 1) / 2) + 1
+			local x = bossPos.x + dir * es.spacing * slot
+			_TimerService:SetTimerOnce(function()
+				-- 그사이 보스가 죽었거나 존 이동으로 재소환됐으면 남은 분신은 내보내지 않는다
+				if not isvalid(owner) or owner ~= self._currentBoss then return end
+				if owner.MonsterAI == nil or owner.MonsterAI._dead then return end
+				if not isvalid(map) then return end
+				local groundY = self:GetEscortGroundY(zoneIndex, map, x, bossPos.y)
+				local before = #self._bossEscorts
+				self:SpawnOneBossEscort(map, zoneIndex, x, groundY, -1)
+				if #self._bossEscorts > before then
+					self:PlayCloneDash(self._bossEscorts[#self._bossEscorts], bossPos.x, x)
+				end
+				if es.cloneSfx ~= nil and es.cloneSfx ~= "" then _CardManager:PlayBreathSfx(es.cloneSfx) end
+			end, es.cloneShake + (i - 1) * es.cloneInterval)
+		end
+		log("[VRF] BOSS-CLONE burst zone=" .. zoneIndex .. " count=" .. total)
+	end
+
+	-- 분신이 보스 몸 자리에서 제자리까지 0.14초 만에 미끄러져 나간다(반투명 → 불투명).
+	@ExecSpace("ServerOnly")
+	method void PlayCloneDash(any ai, number fromX, number toX)
+		local e = ai.Entity
+		if not isvalid(e) then return end
+		local tf = e.TransformComponent
+		local p0 = tf.Position
+		tf.Position = Vector3(fromX, p0.y, p0.z)
+		local renderer = e.SpriteRendererComponent
+		if renderer ~= nil then renderer.Color = Color(1, 1, 1, 0.45) end
+		local dur = 0.14
+		local step = 1 / 30
+		local elapsed = 0
+		local timerId = 0
+		timerId = _TimerService:SetTimerRepeat(function()
+			if not isvalid(e) then
+				_TimerService:ClearTimer(timerId)
+				return
+			end
+			elapsed = elapsed + step
+			local t = math.min(1, elapsed / dur)
+			local k = 1 - (1 - t) * (1 - t)
+			local p = tf.Position
+			tf.Position = Vector3(fromX + (toX - fromX) * k, p.y, p.z)
+			local r = e.SpriteRendererComponent
+			if r ~= nil then r.Color = Color(1, 1, 1, 0.45 + 0.55 * t) end
+			if t >= 1 then _TimerService:ClearTimer(timerId) end
+		end, step)
 	end
 
 	-- 보스를 따라 존을 옮긴다. 지상형이라 비행형처럼 사인파 중심만 옮기면 되는 게 아니어서,
@@ -1004,6 +1078,13 @@ script MonsterSpawner extends Logic
 		if map == nil then return end
 		local def = _GameManager:GetBossDef(self._bossIndex)
 		if def == nil or def.minion == nil then return end
+        local ep5Owner=nil local ep5Life=0 local ep5Index=self._bossIndex
+        if def.ep5BossKind~=nil then
+            -- EP5_BOSSES: delayed minions belong to the boss that requested them.
+            ep5Owner=self._currentBoss
+            if not isvalid(ep5Owner) or ep5Owner.MonsterAI==nil or ep5Owner.MonsterAI._dead then return end
+            ep5Life=ep5Owner.MonsterAI.ProjectileLifeRevision
+        end
 		local fxDur = def.summonFxDur
 		-- 죽은 부하 참조 정리는 **소환 시점에만** 한다. 존 이동 시점에 정리하면, 방금 스폰된 엔티티가
 		-- 0.3초쯤 isvalid=false로 잡히는 실측 타이밍 이슈(미니빈에서 확인된 함정) 때문에 살아있는
@@ -1046,7 +1127,12 @@ script MonsterSpawner extends Logic
 			self:PlaySummonFx(map, spawnPos, def.summonFx, fxDur)
 			-- 연출이 반쯤 사라진 시점에 부하가 나타나기 시작해 남은 시간 동안 서서히 진해진다
 			_TimerService:SetTimerOnce(function()
-				self:SpawnOneBossMinion(map, zoneIndex, spawnPos, fxDur * 0.5)
+				if ep5Owner~=nil then
+                    if not isvalid(ep5Owner) or ep5Owner~=self._currentBoss or self._bossIndex~=ep5Index then return end
+                    local owner=ep5Owner.MonsterAI
+                    if owner==nil or owner._dead or owner.ProjectileLifeRevision~=ep5Life then return end
+                end
+                self:SpawnOneBossMinion(map, zoneIndex, spawnPos, fxDur * 0.5)
 			end, fxDur * 0.5)
 		end
 		log("MonsterSpawner: boss minions summoned = " .. count .. " (" .. def.minion.name .. ")")
@@ -1335,6 +1421,7 @@ script MonsterSpawner extends Logic
 			self:SpawnBossPartner(mapIndex, currentMap)
 			-- 호위병을 데리고 나오는 보스(1번 블루 머쉬맘 / 에피2 4번 크세르크세스)면 좌우로 같이 세운다.
 			-- escort 정의가 없는 보스는 SpawnBossEscorts가 그냥 리턴한다.
+			self._bossCloneDone = false
 			self:SpawnBossEscorts(mapIndex, self._currentBoss.TransformComponent.Position)
 			-- 보스 등장 연출(유저 지정 2026-09-08: "보스 나올 때 너무 허전하다, 보스인지도 모르겠다").
 			-- 화면 빨간 깜빡임 + 양옆 경광등이 달린 토스트. 존 이동 재배치(RelocateBossToCurrentZone)는
@@ -1803,7 +1890,7 @@ script MonsterSpawner extends Logic
 		if not _GameManager:HasEliteRoster() then return end
 		if map == nil or not isvalid(ai.Entity) then return end
 
-		local eliteIndex = self:DrawEliteIndex()
+		local eliteIndex = self:DrawEliteIndex(mapIndex)
 		local def = _GameManager:GetEliteDefForZone(eliteIndex,mapIndex)
 		-- 컴포넌트 필드 직접 접근 — 이 파일의 기존 관례와 동일하다(SpawnEp1BossSplits의 ai._isLevitating)
 		local wasFlying = ai._isFlying
@@ -1838,8 +1925,14 @@ script MonsterSpawner extends Logic
 	--   · 첫 호출: 무조건 로스터 1번. 가방엔 나머지 종(2~N)만 채워둔다.
 	--   · 이후: 가방에서 무작위로 하나 꺼낸다. 꺼내서 비면 다음 호출 때 전체 종으로 다시 채운다.
 	@ExecSpace("ServerOnly")
-	method integer DrawEliteIndex()
-		local count = _GameManager:GetEliteCount()
+	method integer DrawEliteIndex(integer zoneIndex)
+        -- EP5_SPIRIT_ELITES: rebuild only the species bag when its physical-zone roster changes.
+        local rosterKey=_GameManager:GetEliteRosterKeyForZone(zoneIndex)
+        if self._T.eliteRosterKey~=rosterKey then
+            self._T.eliteRosterKey=rosterKey
+            self._eliteBag=nil
+        end
+        local count = _GameManager:GetEliteCountForZone(zoneIndex)
 		if not self._eliteFirstDone then
 			self._eliteFirstDone = true
 			self._eliteBag = {}
@@ -1862,6 +1955,7 @@ script MonsterSpawner extends Logic
 	-- (다음 첫 엘리트가 다시 로스터 1번이 되도록).
 	@ExecSpace("ServerOnly")
 	method void ResetEliteRotation()
+        self._T.eliteRosterKey=nil
 		self._eliteFirstDone = false
 		self._eliteBag = nil
 	end
@@ -2192,7 +2286,7 @@ script MonsterSpawner extends Logic
 		-- 카메라가 바닥 기준으로 고정돼 있어(MapManager.Ep4FixedCameraY) 그 높이에 서면 화면 밖이라 안 보인다 →
 		-- 바닥 + Ep4MaxAerialSpawnHeight 위의 발판은 스폰 후보에서 뺀다. 다른 에피소드는 기존 동작 그대로.
 		local maxRunY = 9999
-		if mapIndex >= 134 and mapIndex <= 199 then maxRunY = baselineY + self.Ep4MaxAerialSpawnHeight end  -- 에피5 map1(190~199)도 같은 덤프 지형
+		if mapIndex >= 134 and mapIndex <= 239 then maxRunY = baselineY + self.Ep4MaxAerialSpawnHeight end  -- 에피5 map1(190~199)도 같은 덤프 지형
 		
 		if isBoss then
 			-- 보스는 임팩트를 위해 존 중앙을 포함하는 바닥(baselineY) 구간에 고정 스폰
@@ -2279,7 +2373,7 @@ script MonsterSpawner extends Logic
 	-- 블록이 몬스터보다 좁으면 아예 제외한다(유저 리포트 2026-10-08 "목마 발판에 살짝 걸쳐 공중에 떠있다").
 	@ExecSpace("ServerOnly")
 	method number GetAerialEdgeMargin(integer mapIndex, integer speciesIdx, number runWidth)
-		if mapIndex < 134 or mapIndex > 199 then
+		if mapIndex < 134 or mapIndex > 239 then
 			return math.min(self.EdgeMarginAerial, runWidth * 0.3)
 		end
 		local half = self.Ep4AerialDefaultHalfWidth
@@ -2743,7 +2837,7 @@ script MonsterSpawner extends Logic
 		-- 나머지는 단일 지면 — GetFlatRuns 기반 방식이라 이 역시 코드 수정 없이 실제 발판을 그대로 따라간다.
 		if (mapIndex >= 13 and mapIndex <= 15) or mapIndex == 8 or mapIndex == 27 or mapIndex == 28 or mapIndex == 29
 			or (mapIndex >= 61 and mapIndex <= 64) or (mapIndex >= 65 and mapIndex <= 84) or (mapIndex >= 85 and mapIndex <= 88)
-			or (mapIndex >= 89 and mapIndex <= 128) or (mapIndex >= 134 and mapIndex <= 199) then
+			or (mapIndex >= 89 and mapIndex <= 128) or (mapIndex >= 134 and mapIndex <= 239) then
 			-- 134~173(에피4 map1~4, 2026-09-28)도 같은 덤프 계열이라 공중 발판이 촘촘하다(getFootholds 실측
 			-- 맵당 320~400개) — 발판 데이터 기반 스폰으로 지상형이 허공에 뜨지 않게 한다.
 			return self:GetSpawnPositionFromFootholds(mapIndex, isBoss, map, speciesIdx)
@@ -2828,6 +2922,16 @@ script MonsterSpawner extends Logic
 	-- 이번 런 경과 시간(초) — EpisodeRewardLogic이 생존 보상 판정에 쓴다(다른 Logic의 property 직접 읽기 금지)
 	method number GetElapsedPlayTime()
 		return self._elapsedPlayTime
+	end
+
+	-- [DEBUG] CardManager.DebugForceTimeAttackNear(P키, 무제한 모드)가 호출 — 경과 시간을 앞당긴다.
+	-- 몰려오기/엘리트 시계도 같이 넘겨야 지나간 횟수만큼 매 프레임 연달아 터지지 않는다.
+	@ExecSpace("ServerOnly")
+	method void CheatSetElapsedPlayTime(number seconds)
+		self._elapsedPlayTime = seconds
+		while self._nextSwarmTime <= seconds do self._nextSwarmTime = self._nextSwarmTime + self.SwarmInterval end
+		while self._nextEliteClockTime <= seconds do self._nextEliteClockTime = self._nextEliteClockTime + self.EliteClockInterval end
+		log("[VRF] cheat elapsed=" .. tostring(seconds) .. " nextSwarm=" .. tostring(self._nextSwarmTime) .. " nextElite=" .. tostring(self._nextEliteClockTime))
 	end
 
 	-- GameManager가 호출: 스폰 멈추기 (게임 종료 시)

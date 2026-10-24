@@ -27,11 +27,13 @@ script EpisodeRewardLogic extends Logic
 	@Sync property integer Best2 = 0
 	@Sync property integer Best3 = 0
 	@Sync property integer Best4 = 0
+	@Sync property integer Best5 = 0
 	@Sync property boolean Loaded = false
 
 	-- 3칸 × 에피소드 수. EP4(루디브리엄) 칸 10~12 추가 2026-09-29 — 옛 저장(9칸 다 받음)도 비트라 그대로 호환된다
-	property integer TotalSlots = 12
-	property integer EpisodeCount = 4
+	-- EP5(아랫마을) 칸 13~15 추가 2026-10-21
+	property integer TotalSlots = 15
+	property integer EpisodeCount = 5
 	property integer TierSeconds = 300
 	property integer MaxTierSeconds = 900
 	-- 다음 에피소드가 열리는 생존 시간(초) — IsEpisodeUnlocked 참고
@@ -40,13 +42,14 @@ script EpisodeRewardLogic extends Logic
 	property integer UnlockSecondsLate = 900
 	-- ⚠ 테스트용 ON(2026-09-28 유저 지정 "맵 다 열어줘") — 기록과 무관하게 모든 에피소드 입장 허용. 저장은 안 건드린다. 출시 전 false
 	-- 2026-10-07 테스트용 true(유저 지정) "맵 다 풀어줘" — ⚠ 출시 전 false
+	-- 2026-10-23 테스트용 true(유저 지정) "모든맵 해금" — ⚠ 출시 전 false
 	property boolean TestUnlockAllEpisodes = false
 	-- 루디브리엄 이스터에그 테스트용. Maker 플레이에서만 입장을 허용한다.
 	property boolean TestUnlockLudibrium = false
 	-- 엘라스 산맥(EP3) 테스트용(2026-10-05 유저 지정 "엘라스산맥 맵 해금"). Maker 플레이에서만 입장 허용, 기록은 안 건드린다.
 	property boolean TestUnlockElNath = false
 	-- 아랫마을(EP5) 입장 허용(2026-10-19 유저 지정 "에피5 고를 수 있게 하고 해금 풀어놔") — 기록과 무관, 배포판에서도 열린다. ⚠ 출시 정책 정해지면 false
-	property boolean TestUnlockFolkTown = true
+	property boolean TestUnlockFolkTown = false
 	property string StorageKey = "EpisodeReward"
 
 	property string _profileCode = ""
@@ -106,7 +109,7 @@ script EpisodeRewardLogic extends Logic
 		if kind == "gear" then
 			-- EP4는 무기 4종+갑옷 2종이 섞여 나와서 무기 상자 아이콘(툴팁은 "장비 상자")
 			local ep = self:GetSlotEpisode(index)
-			if ep == 1 or ep == 4 then return "88c02c7916d34c9fb93e77ed04891fa1" end
+			if ep == 1 or ep >= 4 then return "88c02c7916d34c9fb93e77ed04891fa1" end
 			return "b3bb11564cc046ff849a6da55e5d7342"
 		end
 		if kind == "gold" then return "02a489cccff24a139a6c3582a5871f58" end
@@ -155,6 +158,7 @@ script EpisodeRewardLogic extends Logic
 		if episode == 2 then return self.Best2 end
 		if episode == 3 then return self.Best3 end
 		if episode == 4 then return self.Best4 end
+		if episode == 5 then return self.Best5 end
 		return 0
 	end
 
@@ -277,12 +281,13 @@ script EpisodeRewardLogic extends Logic
 				self.Best2 = math.floor(tonumber(t["b2"]) or 0)
 				self.Best3 = math.floor(tonumber(t["b3"]) or 0)
 				self.Best4 = math.floor(tonumber(t["b4"]) or 0)
+				self.Best5 = math.floor(tonumber(t["b5"]) or 0)
 			end
 		elseif code ~= 0 and code ~= 1000002 then
 			log_warning("EpisodeRewardLogic: load failed code=" .. tostring(code))
 		end
 		self.Loaded = true
-		log("EpisodeRewardLogic: loaded claimed=" .. self.ClaimedCount .. " best=" .. self.Best1 .. "/" .. self.Best2 .. "/" .. self.Best3 .. "/" .. self.Best4 .. " canClaim=" .. tostring(self:CanClaimNext()))
+		log("EpisodeRewardLogic: loaded claimed=" .. self.ClaimedCount .. " best=" .. self.Best1 .. "/" .. self.Best2 .. "/" .. self.Best3 .. "/" .. self.Best4 .. "/" .. self.Best5 .. " canClaim=" .. tostring(self:CanClaimNext()))
 	end
 
 	@ExecSpace("ServerOnly")
@@ -297,6 +302,7 @@ script EpisodeRewardLogic extends Logic
 		t["b2"] = self.Best2
 		t["b3"] = self.Best3
 		t["b4"] = self.Best4
+		t["b5"] = self.Best5
 		ds:SetAsync(self.StorageKey, _HttpService:JSONEncode(t), function(code, key)
 			if code ~= 0 then log_warning("EpisodeRewardLogic: save failed code=" .. tostring(code)) end
 		end)
@@ -307,7 +313,8 @@ script EpisodeRewardLogic extends Logic
 		if episode == 1 then self.Best1 = seconds
 		elseif episode == 2 then self.Best2 = seconds
 		elseif episode == 3 then self.Best3 = seconds
-		elseif episode == 4 then self.Best4 = seconds end
+		elseif episode == 4 then self.Best4 = seconds
+		elseif episode == 5 then self.Best5 = seconds end
 	end
 
 	-- ── 서버: 생존 시간 감시 ──────────────────────────────────────────────────
@@ -335,7 +342,7 @@ script EpisodeRewardLogic extends Logic
 	@ExecSpace("Server")
 	method void RequestClaim()
 		if not self:CanClaimNext() then
-			log("EpisodeRewardLogic: claim rejected (claimed=" .. self.ClaimedCount .. " best=" .. self.Best1 .. "/" .. self.Best2 .. "/" .. self.Best3 .. "/" .. self.Best4 .. ")")
+			log("EpisodeRewardLogic: claim rejected (claimed=" .. self.ClaimedCount .. " best=" .. self.Best1 .. "/" .. self.Best2 .. "/" .. self.Best3 .. "/" .. self.Best4 .. "/" .. self.Best5 .. ")")
 			return
 		end
 		local index = self:GetNextClaimable()
@@ -423,6 +430,7 @@ script EpisodeRewardLogic extends Logic
 		self.Best2 = 0
 		self.Best3 = 0
 		self.Best4 = 0
+		self.Best5 = 0
 		self:Save()
 		log("EpisodeRewardLogic: debug reset")
 	end
@@ -430,7 +438,7 @@ script EpisodeRewardLogic extends Logic
 	-- ── 클라: 동기화되면 UI 갱신 ──────────────────────────────────────────────
 	@ExecSpace("ClientOnly")
 	method void OnSyncProperty(string name, any value)
-		if name == "ClaimedMask" or name == "ClaimedCount" or name == "Loaded" or name == "Best1" or name == "Best2" or name == "Best3" or name == "Best4" then
+		if name == "ClaimedMask" or name == "ClaimedCount" or name == "Loaded" or name == "Best1" or name == "Best2" or name == "Best3" or name == "Best4" or name == "Best5" then
 			_EpisodeRewardUI:RefreshAll()
 		end
 	end

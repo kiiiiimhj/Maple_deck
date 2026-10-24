@@ -1,0 +1,65 @@
+@Logic
+script Ep5Map3EelLogic extends Logic
+
+	@Sync property boolean Redeemed = false
+	property Entity _bubble = nil
+	property integer _generation = 0
+	property boolean _preparing = false
+	property number BubbleShowDuration = 2
+
+	@ExecSpace("ServerOnly")
+	method void OnObjectTouched(Entity obj, string userId)
+		if self.Redeemed or self._preparing or not isvalid(obj) then return end
+		if obj ~= _EntityService:GetEntityByPath("/maps/ep5_map3/FolkDecor_202") then return end
+		local user = _UserService:GetUserEntityByUserId(userId)
+		if not isvalid(user) or user.CurrentMap ~= obj.CurrentMap then return end
+		if not _GameManager.GameStarted or _GameManager.GameOver or _GameManager:IsGamePaused() then return end
+		if _GameManager:GetSelectedEpisode() ~= 5 or _MapManager.CurrentMapIndex ~= 211 then return end
+		-- Ep4의 하얀 포션 확인과 동일하게 업그레이드 단계만 확인하고 소모하지 않는다.
+		if _CardManager.PotionLevel < 3 then
+			self:ShowRequirement(obj)
+			_UIToast:ShowMessage("EP5_MAP3_NEEDS_EEL",userId)
+			return
+		end
+		self.Redeemed = true
+		self:ClearBubble()
+		_Ep4Map1EasterEggLogic:GrantStandardReward(obj)
+		local p = obj.TransformComponent.WorldPosition local f = _GameManager:GetGroundFallFor(obj,p)
+		_GameManager:GrantLootItemDrop(p,f.x,f.y,"ep5_farmer_gift",1)
+		_AchievementLogic:OnEasterEgg()
+		_UIToast:ShowMessage("EP5_MAP3_EEL_DONE",userId)
+		log("[VRF] ep5 map3 eel complete potionLevel=" .. _CardManager.PotionLevel .. " standard=true key=1")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ShowRequirement(Entity obj)
+		self:ClearBubble()
+		self._preparing = true local generation = self._generation
+		local icon = _CardManager.Potion3RUID
+		local b = _Ep5Map2CollectLogic:GetIconBounds(icon)
+		self._preparing = false
+		if generation ~= self._generation or not isvalid(obj) then return end
+		local p = obj.TransformComponent.WorldPosition
+		local bubble = _SpawnService:SpawnByModelId("giftbubble","Ep5Map3EelBubble",Vector3(p.x-0.765297,p.y+0.9155867,p.z-0.5),obj.CurrentMap)
+		if not isvalid(bubble) then return end
+		self._bubble = bubble
+		_CollectBubbleLogic:ApplyForegroundDepth(bubble)
+		_CollectBubbleLogic:FitIcon(bubble,"Icon",icon,b[1],b[2],b[3],b[4],Vector2(0,0.11),Vector2(0.74,0.74),0)
+		bubble:GetChildByName("Count").Enable = false
+		_TimerService:SetTimerOnce(function()
+			if isvalid(bubble) then bubble:Destroy() end
+			if self._bubble == bubble then self._bubble = nil end
+		end,self.BubbleShowDuration)
+		log("[VRF] ep5 map3 eel requirement shown level=3")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ClearBubble()
+		if isvalid(self._bubble) then self._bubble:Destroy() end self._bubble = nil
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		self._generation = self._generation + 1 self.Redeemed = false self._preparing = false self:ClearBubble()
+	end
+end

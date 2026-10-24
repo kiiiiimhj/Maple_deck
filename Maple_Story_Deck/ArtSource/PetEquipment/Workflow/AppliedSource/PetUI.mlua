@@ -62,7 +62,7 @@ script PetUI extends Logic
 	  self.PetGearSlots:GetChildByName(slot):GetChildByName("Label").TextGUIRendererComponent.Text = _LocalizationService:GetText(keys[slot])
 	 end
 	 self:BindClick(self.PetGearSlots:GetChildByName("TestGear"),function() _PetLogic:RequestTestPetGear(self:GetShownEntry().id) end)
-	 for _,slot in ipairs({"Cap","Coat","Necklace"}) do local key=slot self:BindClick(self.PetGearSlots:GetChildByName(slot),function() local e=self:GetShownEntry();if _PetLogic:GetPetGearDefinitionForPet(e.id,key)~=nil then _PetLogic:RequestPetGear(key,e.id) end end) end
+	 for _,slot in ipairs({"Cap","Coat","Necklace"}) do local key=slot self:BindClick(self.PetGearSlots:GetChildByName(slot),function() self:OnPetGearSlotClicked(key) end) end
 	 -- 펫 보기 오른쪽: 캐릭터 인벤토리 대신 펫 장비 전용 목록(전체/옷/모자/목걸이)
 	 if isvalid(self.PetInventoryPanel) then
 	  local tabs=self.PetInventoryPanel:GetChildByName("Tabs")
@@ -106,9 +106,7 @@ script PetUI extends Logic
 		-- 함께하기/집에 두기: 펫하우스와 같은 서버 equip 액션을 쓴다.
 		local entry=self:GetShownEntry() local pet=entry.progress
 		if not self.PetMode or not entry.ready or pet==nil or not pet.Owned then return end
-		if _UtilLogic.ElapsedSeconds<self.JoinWaitUntil then return end
-		self.JoinWaitUntil=_UtilLogic.ElapsedSeconds+3
-		self:RefreshNavigation()
+		-- 버튼을 끄지 않고 바로 보낸다(유저 지정 2026-10-22). 연타는 서버가 0.25초로 막는다.
 		_PetLogic:RequestPetAction(entry.id,"equip")
 		log("[VRF] PET-INV join request pet="..entry.id.." equipped="..tostring(pet.Equipped))
 	end
@@ -134,6 +132,7 @@ script PetUI extends Logic
 
 	@ExecSpace("ClientOnly")
 	method void SetPetMode(boolean enabled)
+	 if not enabled and isvalid(self.InventoryRoot) then self.InventoryRoot.UIInventory:ClosePetGearPurchaseUI() end
 	 self.PetMode = enabled self.PetDisplay.Enable = enabled self.PetGearSlots.Enable = enabled
 	 -- 캐릭터 능력치 팝업(PlayerInfo/StatPopup)은 펫 화면 위에 남아 겹쳤다(2026-10-14 유저 리포트) — 펫으로 넘어가면 닫는다
 	 local statPopup = self.PlayerInfo:GetChildByName("StatPopup")
@@ -250,6 +249,14 @@ script PetUI extends Logic
 
 
 	@ExecSpace("ClientOnly")
+	method string GetPetGearSlotSilhouette(string slot)
+		-- 빈 칸 부위 실루엣 — 캐릭터 장비 칸(EquipInfoGrid)의 모자/상의/목걸이 아이콘과 같은 그림
+		if slot=="Cap" then return "42e5e834544e4b05b11160213f712635" end
+		if slot=="Coat" then return "b41b2a76b9cf4074baa4c727ca5e1ac9" end
+		return "f32d6dcdcdd44a98b579d06f8e3e99e9"
+	end
+
+	@ExecSpace("ClientOnly")
 	method void RefreshPetGear()
 		local entry=self:GetShownEntry() local pet=entry.progress local dog=_PetLogic:GetPetGearDefinitionForPet(entry.id,"Cap")~=nil and pet~=nil and pet.Owned
 		for _,slot in ipairs({"Cap","Coat","Necklace"}) do
@@ -257,11 +264,18 @@ script PetUI extends Logic
 			local ownedMask=dog and ((def.variant or 1)>1 and pet.GearVariantOwnedMask or pet.GearOwnedMask) or 0
 			local owned=dog and _PetLogic:HasPetGearBit(ownedMask or 0,_PetLogic:GetPetGearOwnershipBit(def.bit,def.variant or 1))
 			local worn=owned and _PetLogic:HasPetGearBit(pet.GearEquippedMask or 0,def.bit)
-			e.ButtonComponent.Enable=owned;e:GetChildByName("Icon").SpriteGUIRendererComponent.ImageRUID=DataRef(def.icon)
-			e:GetChildByName("Icon").SpriteGUIRendererComponent.Color=Color(1,1,1,owned and 1 or 0.28)
+			-- 펫이 있으면 장비가 없어도 눌러서 살 수 있다.
+			-- 캐릭터 장비 칸(EquipInfoGrid)과 똑같이: 칸 바탕은 항상 원색, 착용 중이면 장비 그림, 아니면 부위 실루엣만(유저 지정 2026-10-22)
+			e.ButtonComponent.Enable=dog
+			local icon=e:GetChildByName("Icon")
+			icon.SpriteGUIRendererComponent.ImageRUID=DataRef(worn and def.icon or self:GetPetGearSlotSilhouette(slot))
+			icon.SpriteGUIRendererComponent.Color=Color(1,1,1,1)
+			icon.UITransformComponent.RectSize=worn and Vector2(68,64) or Vector2(70,70)
+			e.SpriteGUIRendererComponent.Color=Color(1,1,1,1)
+			local dim=e:GetChildByName("Dim") if dim~=nil then dim.Enable=false end
 			e:GetChildByName("Label").TextGUIRendererComponent.Text=def.slotName or def.name or _LocalizationService:GetText(def.key)
 			e:GetChildByName("Stat").TextGUIRendererComponent.Text=_LocalizationService:GetText(def.statKey)
-			e:GetChildByName("Mark").Enable=worn;e:GetChildByName("Mark").TextGUIRendererComponent.Text=_LocalizationService:GetText("PET_GEAR_WORN")
+			e:GetChildByName("Mark").Enable=false
 		end
 		self.PetGearSlots:GetChildByName("Hint").TextGUIRendererComponent.Text=_LocalizationService:GetText(dog and "PET_GEAR_HINT" or "PET_GEAR_EXCLUSIVE")
 		local test=self.PetGearSlots:GetChildByName("TestGear");test.Enable=Environment:IsMakerPlay() and dog;test.ButtonComponent.Enable=Environment:IsMakerPlay() and dog;test:GetChildByName("Label").TextGUIRendererComponent.Text=_LocalizationService:GetText("PET_GEAR_TEST")
@@ -282,8 +296,10 @@ script PetUI extends Logic
 					local owned=pet~=nil and pet.Owned and _PetLogic:HasPetGearBit(ownedMask,_PetLogic:GetPetGearOwnershipBit(def.bit,variant))
 					local selected=pet~=nil and _PetLogic:GetPetGearDesignIndex(pet.GearDesigns or 0,def.bit) or 1
 					local worn=owned and _PetLogic:HasPetGearBit(pet.GearEquippedMask or 0,def.bit) and selected==variant
-					local item={petId=entry.id,slot=slot,variant=variant,def=def,worn=worn,wearable=isCurrent and owned}
-					table.insert(isCurrent and mine or others,item)
+					-- 지금 보고 있는 펫을 가졌는데 이 장비는 없으면 다이아로 살 수 있다
+				local buyable=isCurrent and pet~=nil and pet.Owned and not owned
+				local item={petId=entry.id,slot=slot,variant=variant,def=def,worn=worn,wearable=isCurrent and owned,buyable=buyable}
+					if owned then item.buyable=false;table.insert(isCurrent and mine or others,item)end
 				end
 			end
 		end
@@ -310,10 +326,30 @@ script PetUI extends Logic
 			if item~=nil then
 				-- 아이콘이 아직 없는 장비는 기본 스프라이트로 임시 표시
 				local icon=(item.def.icon~=nil and item.def.icon~="") and item.def.icon or "1705e3c5b2c146ac9a699f96fb067408"
-				cell:GetChildByName("Icon").SpriteGUIRendererComponent.ImageRUID=DataRef(icon)
-				cell:GetChildByName("Dim").Enable=not item.wearable
+				local itemIcon=cell:GetChildByName("Icon")
+				itemIcon.SpriteGUIRendererComponent.ImageRUID=DataRef(icon)
+				itemIcon.SpriteGUIRendererComponent.PreserveSprite=PreserveSpriteType.None
+				itemIcon.UITransformComponent.RectSize=Vector2(80,80);itemIcon.UITransformComponent.anchoredPosition=Vector2(0,-8)
+				_PetLogic:ShowPetGearOwnerBadge(cell,item.petId,38,-37,32)
+				-- 인벤토리 칸(UIItemSlot)과 같은 표시: 못 쓰는 칸은 짙은 딤, 장착 중은 옅은 딤 + 가운데 "장착 중"
+				local dim=cell:GetChildByName("Dim")
+				dim.Enable=item.worn or not item.wearable
+				dim.SpriteGUIRendererComponent.Color=item.worn and Color(0,0,0,0.6) or Color(0.05,0.05,0.05,0.85)
 				local worn=cell:GetChildByName("Worn") worn.Enable=item.worn
 				worn.TextGUIRendererComponent.Text=_LocalizationService:GetText("PET_GEAR_WORN")
+				-- 살 수 있는 장비: 흰 자물쇠 + 아래 다이아 아이콘·가격
+				local lock=cell:GetChildByName("Lock") local price=cell:GetChildByName("Price")
+				if isvalid(lock) then lock.Enable=item.buyable end
+				if isvalid(price) then
+					price.Enable=item.buyable
+					-- 다이아 아이콘을 숫자 바로 왼쪽에 붙이고, 둘을 한 덩어리로 가운데 정렬
+					local label=price:GetChildByName("Text") local dia=price:GetChildByName("Dia") local s=tostring(_PetLogic:GetPetGearPrice())
+					local tr=label.TextGUIRendererComponent tr.Text=s tr.HorizontalAlignment=TextHorizontalAlignmentOption.Center
+					local w=math.max(1,math.ceil(tr:GetPreferredWidth(s))) local group=26+2+w
+					-- 유저 지정: 다이아 2px 왼쪽, 숫자 2px 오른쪽
+					dia.UITransformComponent.anchoredPosition=Vector2(-group/2+13-2,0)
+					label.UITransformComponent.anchoredPosition=Vector2(-group/2+28+w/2+2,0) label.UITransformComponent.RectSize=Vector2(w,30)
+				end
 				if item.wearable then wearable=wearable+1 end
 			end
 		end
@@ -346,8 +382,27 @@ script PetUI extends Logic
 		if item==nil then return end
 		local cell=self.PetInventoryPanel:GetChildByName("Cells"):GetChildByName("Cell"..index)
 		self:ShowPetInvTooltip(cell,(item.def.name or _LocalizationService:GetText(item.def.key)).."\n".._LocalizationService:GetText(item.def.statKey))
-		if item.wearable then _PetLogic:RequestPetGearVariant(item.slot,item.petId,item.variant or 1) end
+		if item.wearable then _PetLogic:RequestPetGearVariant(item.slot,item.petId,item.variant or 1)
+		elseif item.buyable then self:OpenBuyGear(item.petId,item.slot,item.variant or 1,item.def) end
 		log("[VRF] PET-INV click pet="..item.petId.." slot="..item.slot.." wearable="..tostring(item.wearable))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OpenBuyGear(string petId, string slot, integer variant, table def)
+		-- 다이아 구매 확인창(인벤토리 공용 확인창 재사용)
+		local name=def.name or _LocalizationService:GetText(def.key)
+		_PetHouseUI:OpenWardrobeForPet(petId)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnPetGearSlotClicked(string slot)
+		-- 왼쪽 장착 칸: 가진 장비면 착용/해제, 펫은 있는데 장비가 없으면 다이아 구매
+		local e=self:GetShownEntry() local pet=e.progress
+		if _PetLogic:GetPetGearDefinitionForPet(e.id,slot)==nil or pet==nil or not pet.Owned then return end
+		local def=_PetLogic:GetSelectedPetGearDefinition(e.id,slot,pet) local variant=def.variant or 1
+		local ownedMask=variant>1 and (pet.GearVariantOwnedMask or 0) or (pet.GearOwnedMask or 0)
+		if _PetLogic:HasPetGearBit(ownedMask,_PetLogic:GetPetGearOwnershipBit(def.bit,variant)) then _PetLogic:RequestPetGear(slot,e.id)
+		else self:OpenBuyGear(e.id,slot,variant,def) end
 	end
 
 	@ExecSpace("ClientOnly")

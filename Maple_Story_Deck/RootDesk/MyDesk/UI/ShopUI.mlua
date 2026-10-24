@@ -23,6 +23,8 @@ script ShopUI extends Logic
 	-- 부르면 결제창이 아니라 오류가 나기 때문에 두는 안전장치다. 상품을 다시 만드는 등 ID가 어긋난
 	-- 동안에는 이 값을 잠시 false로 내려두면 된다
 	property boolean ProductsRegistered = true
+	property string PurchaseButtonGreenRUID = "cf89c03bc365466793e31d5d95f215a4"
+	property string PurchaseButtonNavyRUID = "ac665afab6d1482c91454ae5688dc950"
 
 	-- 구매 준비중/실패 안내 배너. 공용 토스트(ToastGroup)는 별도 UIGroup이라 로비 위로 못 올라오고
 	-- GroupOrder는 건드리면 다른 .ui 순서까지 틀어지므로, ShopPanel 안에 자체 배너를 두고 쓴다
@@ -80,6 +82,14 @@ script ShopUI extends Logic
 	-- 스크립트가 scrollBar.Value를 코드로 갱신할 때(카드 쪽에서 온 변화를 핸들에 반영) true로 세워서,
 	-- 그 갱신이 다시 SliderValueChangedEvent로 되돌아와 카드를 또 움직이는 무한 루프를 막는다
 	property boolean _syncingScrollBar = false
+
+	@ExecSpace("ClientOnly")
+	method void SetPurchaseButtonAppearance(Entity background, boolean canBuy)
+		if not isvalid(background) or background.SpriteGUIRendererComponent==nil then return end
+		local r=background.SpriteGUIRendererComponent
+		r.ImageRUID=DataRef(canBuy and self.PurchaseButtonGreenRUID or self.PurchaseButtonNavyRUID)
+		r.Color=Color(1,1,1,1)
+	end
 
 	@ExecSpace("ClientOnly")
 	method void OnBeginPlay()
@@ -157,10 +167,10 @@ script ShopUI extends Logic
 					statusLabel = _LocalizationService:GetTextFormat("FMT_SHOPUI_001", tostring(entry.price))
 				end
 
-				-- 카드/버튼이 그림(금테 아트)으로 바뀌어서 예전처럼 스프라이트를 틴트하면 아트가 물든다.
-				-- 상태 구분은 버튼 안 글씨 색으로만 한다
+				-- 구매 가능한 스킨만 같은 모양의 초록 버튼으로 표시한다. 보유/장착/스타터 전용은 기존 남색이다.
 				local box = card:GetChildByName("StatusBox")
 				if isvalid(box) then
+					self:SetPurchaseButtonAppearance(box,not owned and not equipped and not entry.starterOnly)
 					local statusText = box:GetChildByName("StatusText")
 					if isvalid(statusText) then
 						statusText.TextGUIRendererComponent.Text = statusLabel
@@ -336,6 +346,7 @@ script ShopUI extends Logic
 
 				local priceBox = card:GetChildByName("PriceBox")
 				if isvalid(priceBox) then
+					self:SetPurchaseButtonAppearance(priceBox,self.ProductsRegistered)
 					local priceText = priceBox:GetChildByName("PriceText")
 					if isvalid(priceText) then priceText.TextGUIRendererComponent.Text = self:LocalizeProductText(p.price) end
 				end
@@ -663,19 +674,36 @@ script ShopUI extends Logic
 
 	@ExecSpace("ClientOnly")
 	method table GetPetShopCatalog()
-		-- Presentation-only catalogue. Oduck is an in-game Easter egg.
-		-- Keep this separate from registered products and purchase grants.
-		return {{id="5002617",price=1300},{id="ttungttang",price=1300},{id="5000498",price=1300},{id="landturtle",price=1300}}
+		-- 2026-10-21 포털 등록(PASS 1,320코인, 계정당 1회) 후 실제 판매. 가격·상품 ID는 PetLogic 정의가 단일 원본이다.
+		local list={}
+		for _,id in ipairs({"5002617","ttungttang","5000498","landturtle","oduck"}) do
+			local entry=_PetLogic:GetPetDefinition(id)
+			table.insert(list,{id=id,price=entry.price,productId=entry.productId})
+		end
+		return list
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean IsPetOwned(string petId)
+		-- 클라 스냅샷 기준 보유 여부(상점 카드 표시/중복 결제 방지 안내용)
+		for _,e in ipairs(_PetLogic:GetPetCatalog()) do
+			if e.id==petId then return e.progress~=nil and e.progress.Owned==true end
+		end
+		return false
 	end
 
 	@ExecSpace("ClientOnly")
 	method table GetPetShopLabels()
 		local locale=string.sub(string.lower(_LocalizationService.CurrentLocaleId or "ko"),1,2)
+		-- 번체(zh-tw)는 간체 zh와 따로 둔다(2026-10-22)
+		if string.lower(_LocalizationService.CurrentLocaleId or "ko")=="zh-tw" then locale="tw" end
 		local labels={
-			ko={tab="펫",coin=" 코인",coming="판매 준비 중",notice="펫 판매를 준비 중이에요.",base="기본 능력치",stats={"공격력","치명타 확률","치명타 피해","최대 체력","스킬 쿨타임 감소"},descriptions={"4초 동안 굴러가며\n몬스터를 밀쳐냅니다.","몬스터를 한곳으로 유인해\n광역 공격을 돕습니다.","여우 모양의 포효로\n몬스터를 2초간 기절시킵니다.","3초 동안 껍질로\n몬스터의 공격을 받아줍니다."}},
-			en={tab="Pets",coin=" coins",coming="Coming soon",notice="Pet sales are coming soon.",base="Starting bonus",stats={"Attack","Critical chance","Critical damage","Max HP","Skill cooldown reduction"},descriptions={"Roll for 4s and\nknock enemies back.","Lure enemies together\nfor area attacks.","A fox-shaped roar\nstuns enemies for 2s.","A shell takes enemy\nattacks for 3s."}},
-			ja={tab="ペット",coin="コイン",coming="販売準備中",notice="ペットは販売準備中です。",base="初期能力値",stats={"攻撃力","クリティカル率","クリティカルダメージ","最大HP","スキルクールタイム短縮"},descriptions={"4秒間転がり、\n敵をノックバックします。","敵を一か所へ誘い、\n範囲攻撃を助けます。","キツネ形の咆哮で\n敵を2秒間気絶させます。","3秒間、甲羅で\n敵の攻撃を引き受けます。"}},
-			zh={tab="宠物",coin="硬币",coming="即将开放",notice="宠物即将开放出售。",base="初始属性",stats={"攻击力","暴击率","暴击伤害","最大生命值","技能冷却缩减"},descriptions={"滚动4秒，\n击退怪物。","将怪物吸引到一起，\n帮助范围攻击。","狐狸形状的咆哮\n使怪物眩晕2秒。","龟壳替你承受\n怪物攻击3秒。"}}
+			ko={tab="펫",coin=" 코인",coming="판매 준비 중",notice="펫 판매를 준비 중이에요.",allOwned="모든 펫과 함께하고 있어요!",owned="보유 중",ownedNotice="이미 함께하고 있는 펫이에요.",once="계정당 1회 구매",base="기본 능력치",stats={"공격력","치명타 확률","치명타 피해","최대 체력","스킬 쿨타임 감소"},descriptions={"5초 동안 굴러가며\n몬스터를 밀쳐냅니다.","몬스터를 한곳으로 유인해\n광역 공격을 돕습니다.","여우 모양의 포효로\n몬스터를 2초간 기절시킵니다.","4초 동안 껍질로\n몬스터의 공격을 받아줍니다."}},
+			en={tab="Pets",coin=" coins",coming="Coming soon",notice="Pet sales are coming soon.",allOwned="You have every pet!",owned="Owned",ownedNotice="You already have this pet.",once="Once per account",base="Starting bonus",stats={"Attack","Critical chance","Critical damage","Max HP","Skill cooldown reduction"},descriptions={"Roll for 5s and\nknock enemies back.","Lure enemies together\nfor area attacks.","A fox-shaped roar\nstuns enemies for 2s.","A shell takes enemy\nattacks for 4s."}},
+			ja={tab="ペット",coin="コイン",coming="販売準備中",notice="ペットは販売準備中です。",allOwned="すべてのペットと一緒です！",owned="所持中",ownedNotice="すでに一緒にいるペットです。",once="アカウントごとに1回",base="初期能力値",stats={"攻撃力","クリティカル率","クリティカルダメージ","最大HP","スキルクールタイム短縮"},descriptions={"5秒間転がり、\n敵をノックバックします。","敵を一か所へ誘い、\n範囲攻撃を助けます。","キツネ形の咆哮で\n敵を2秒間気絶させます。","4秒間、甲羅で\n敵の攻撃を引き受けます。"}},
+			zh={tab="宠物",coin="硬币",coming="即将开放",notice="宠物即将开放出售。",allOwned="你已经拥有全部宠物！",owned="已拥有",ownedNotice="你已经拥有这只宠物。",once="每个账号限购1次",base="初始属性",stats={"攻击力","暴击率","暴击伤害","最大生命值","技能冷却缩减"},descriptions={"滚动5秒，\n击退怪物。","将怪物吸引到一起，\n帮助范围攻击。","狐狸形状的咆哮\n使怪物眩晕2秒。","龟壳替你承受\n怪物攻击4秒。"}},
+			tw={tab="寵物",coin="硬幣",coming="即將開放",notice="寵物即將開放出售。",allOwned="你已經擁有全部寵物！",owned="已擁有",ownedNotice="你已經擁有這隻寵物。",once="每個帳號限購1次",base="初始屬性",stats={"攻擊力","暴擊率","暴擊傷害","最大生命值","技能冷卻縮減"},descriptions={"滾動5秒，\n擊退怪物。","將怪物吸引到一起，\n幫助範圍攻擊。","狐狸形狀的咆哮\n使怪物暈眩2秒。","龜殼替你承受\n怪物攻擊4秒。"}},
+			es={tab="Mascotas",coin=" monedas",coming="Próximamente",notice="Las mascotas llegarán pronto a la tienda.",allOwned="¡Tienes todas las mascotas!",owned="La tienes",ownedNotice="Ya tienes esta mascota.",once="Una vez por cuenta",base="Bonus inicial",stats={"Ataque","Prob. de crítico","Daño crítico","PV máx.","Reducción de enfriamiento"},descriptions={"Rueda durante 5 s y\nempuja a los enemigos.","Atrae a los enemigos juntos\npara ataques en área.","Un rugido de zorro\naturde 2 s a los enemigos.","Un caparazón recibe los\nataques enemigos 4 s."}}
 		}
 		return labels[locale] or labels.en
 	end
@@ -713,6 +741,10 @@ script ShopUI extends Logic
 		tab.ButtonComponent.Transition=TransitionType.None
 		local label=_SpawnService:SpawnByEntity(self.tabSkin.Entity:GetChildByName("Label"),"Label",Vector3.zero,tab,false)
 		local q={panel=panel,tab=tab,label=label,cards={},handlers={},ready=false}
+		-- 5종을 다 사서 남은 카드가 없을 때 패널 가운데 안내(RefreshPetShopUI가 켠다)
+		q.allOwned=self:CreatePetShopText(self.productScroll.Entity:GetChildByName("ProductCard_0"):GetChildByName("DescText"),panel,"AllOwned",0,60,36)
+		self:PlacePetShopElement(q.allOwned,0,0,900,60)
+		q.allOwned.Enable=false
 		self._T.petShop=q
 		local h=tab:ConnectEvent(ButtonClickEvent,function()self:SelectTab("pet")end)
 		table.insert(q.handlers,{entity=tab,handle=h})
@@ -726,7 +758,9 @@ script ShopUI extends Logic
 		for i,row in ipairs(self:GetPetShopCatalog()) do
 			local at=i
 			local card=_SpawnService:SpawnByEntity(template,"PetCard_"..i,Vector3.zero,panel,false)
-			self:PlacePetShopElement(card,-525+(i-1)*350,0,330,670)
+			-- 5장(오덕 추가 2026-10-21)이 패널 폭에 들어가게 0.82배로 줄여 290 간격으로 놓는다
+			self:PlacePetShopElement(card,(i-3)*290,0,330,670)
+			card.UITransformComponent.UIScale=Vector3(.82,.82,1)
 			card.ButtonComponent.Transition=TransitionType.None
 			card.SpriteGUIRendererComponent.Color=Color(1,1,1,1)
 			local name=self:CreatePetShopText(nameTemplate,card,"NameText",247,50,34)
@@ -769,7 +803,7 @@ script ShopUI extends Logic
 			if not isvalid(self) or self._T.petShop~=q or not isvalid(panel) then return end
 			local ready=true for _,v in pairs(results) do if v~=PreloadResultStatus.Success then ready=false end end
 			q.ready=ready;self:RefreshPetShopUI()
-			log("[VRF] PET-SHOP preview ready="..tostring(ready).." pets="..#q.cards.." price=1300 purchase=false")
+			log("[VRF] PET-SHOP ready="..tostring(ready).." pets="..#q.cards)
 		end)
 		self:RefreshPetShopUI()
 	end
@@ -778,6 +812,16 @@ script ShopUI extends Logic
 	method void RefreshPetShopUI()
 		local q=self._T.petShop if q==nil then return end
 		local text=self:GetPetShopLabels();q.label.TextGUIRendererComponent.Text=text.tab
+		-- 이미 산 펫은 맨 오른쪽 끝으로 보낸다(2026-10-21 유저 지정 — 숨기면 다 산 유저는 빈 탭이 된다).
+		-- 안 산 펫이 원래 순서대로 앞에, 산 펫이 뒤에 온다.
+		local order={}
+		for i,row in ipairs(self:GetPetShopCatalog()) do if not self:IsPetOwned(row.id) then table.insert(order,i) end end
+		for i,row in ipairs(self:GetPetShopCatalog()) do if self:IsPetOwned(row.id) then table.insert(order,i) end end
+		for slot,i in ipairs(order) do
+			q.cards[i].entity.Enable=true
+			q.cards[i].entity.UITransformComponent.anchoredPosition=Vector2((slot-(#order+1)/2)*290,0)
+		end
+		q.allOwned.Enable=false
 		for i,row in ipairs(self:GetPetShopCatalog()) do
 			local c=q.cards[i];local entry=_PetLogic:GetPetDefinition(row.id)
 			c.name.TextGUIRendererComponent.Text=_LocalizationService:GetText(entry.nameKey)
@@ -791,18 +835,23 @@ script ShopUI extends Logic
 			local groupWidth=40+6+nameWidth
 			self:PlacePetShopElement(c.skillIcon,-groupWidth/2+20,-96,40,40)
 			self:PlacePetShopElement(c.skillName,-groupWidth/2+46+nameWidth/2,-96,nameWidth,40)
-			c.skillDesc.TextGUIRendererComponent.Text=text.descriptions[i]
+			c.skillDesc.TextGUIRendererComponent.Text=text.descriptions[i] or skill.description
 			c.interval.TextGUIRendererComponent.Text=skill.interval
 			local price=tostring(row.price);local n=0
 			repeat price,n=string.gsub(price,"^(-?%d+)(%d%d%d)","%1,%2") until n==0
-			c.price.TextGUIRendererComponent.Text=price..text.coin
-			c.coming.TextGUIRendererComponent.Text=text.coming
+			local owned=self:IsPetOwned(row.id)
+			c.price.TextGUIRendererComponent.Text=owned and text.owned or price..text.coin
+			self:SetPurchaseButtonAppearance(c.price.Parent,not owned and row.productId~="" and row.price>0)
+			if row.productId=="" then c.coming.TextGUIRendererComponent.Text=text.coming
+			else c.coming.TextGUIRendererComponent.Text="" end -- "계정당 1회 구매" 문구는 숨김(유저 지정 2026-10-22)
 			c.portrait.Enable=q.ready;c.skillIcon.Enable=q.ready
 			if q.ready then
 				local sprite=_ResourceService:LoadSpriteAndWait(c.body)
 				local m={w=sprite.Width,h=sprite.Height,px=sprite.Pivot.x,py=sprite.Pivot.y}
 				local desired=entry.frames~=nil and 2 or math.max(1,math.floor(math.min(204/math.max(1,m.w),156/math.max(1,m.h))))
 				local scale=_PetLogic:GetCustomPixelScale(c.portrait,desired)
+				-- 오덕은 다른 펫보다 작아 보여 15% 키운다(유저 지정 2026-10-22)
+				if row.id=="oduck" then scale=scale*1.15 end
 				local r=c.portrait.SpriteGUIRendererComponent;r.ImageRUID=DataRef(c.body);r.LocalScale=Vector2(scale,scale)
 				r.LocalPosition=Vector2((m.px-.5)*m.w*scale,-40+(entry.footOffset or 0)*scale)
 				-- Source icons can use a bottom pivot (Bugi); center their visible image in the shared slot.
@@ -819,9 +868,13 @@ script ShopUI extends Logic
 		local q=self._T.petShop
 		if q==nil or not q.panel.Enable or self._currentTab~="pet" then return end
 		if self:GetPetShopCatalog()[index]==nil then return end
-		-- UI only: no payment prompt, wallet mutation, ownership or grant call.
-		self:ShowNotice(self:GetPetShopLabels().notice)
-		log("[VRF] PET-SHOP preview clicked index="..index.." purchase=false")
+		-- 결제창만 띄운다 — 지급은 서버 ShopPurchaseLogic.ProcessPurchase(→ PetLogic.GrantPurchasedSpecies)가 한다
+		local row=self:GetPetShopCatalog()[index]
+		-- 안내는 공용 토스트로 — 상점 배너(noticeBanner)는 나중에 만든 펫 패널 뒤에 깔려 안 보였다
+		if self:IsPetOwned(row.id) then _UIToast:ShowMessage(self:GetPetShopLabels().ownedNotice) return end
+		if row.productId=="" or row.price<=0 then _UIToast:ShowMessage(self:GetPetShopLabels().notice) return end
+		_WorldShopService:PromptPurchase(row.productId)
+		log("[VRF] PET-SHOP purchase prompt pet="..row.id.." product="..row.productId)
 	end
 
 	@ExecSpace("ClientOnly")

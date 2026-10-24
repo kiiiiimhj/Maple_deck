@@ -1,0 +1,634 @@
+@Component
+script Ep5CrystalMiningController extends Component
+	-- ep5_map1의 기존 파란 수정에만 적용하는 런 단위 타이밍 채굴.
+	@MinValue(1) @MaxValue(3)
+	property integer MaxRequiredHits = 3
+	@MinValue(1) @MaxValue(3)
+	property integer MaxSpeedLevel = 3
+	property number TrackLength = 704
+	property string CrystalRUID = "d5d290cfd3f6426bb9dfff5a09e59a94"
+	property string OreItemId = "blue_ore"
+	property integer MinZone = 190
+	property integer MaxZone = 199
+	-- 0 = crystal pickaxe; 1 = flower sickle.
+	property integer ToolStyle = 0
+	property string HarvestTitleKey = "MAP19_HARVEST_TITLE"
+	property string HarvestSuccessKey = "EP5_MINING_SUCCESS"
+	property string StrikeSoundRUID = "6dc40825bdbd4184a1bac3d0868389b2"
+	property string SuccessSoundRUID = "972843e759204d3e9ad84e7d3fa94f83"
+	property string SuccessEffectRUID = "a18f1b1d47694977844032e98e54cbc5"
+	property Entity miningGroup = "5b368adf-7361-4407-89f4-912479cce3b1"
+	property Entity miningShield = "67877922-5b2e-43e0-bdcd-8e84f1a9db1b"
+	property Entity miningPanel = "44d51e4f-6188-4cdb-bfc1-b05b69d8f9b1"
+	property Entity miningTrack = "4837d10c-7d79-4059-bf27-2cd42b013f0b"
+	property Entity miningTarget = "642707e9-8286-4b7b-9348-98da0ed2c72b"
+	property Entity miningCursor = "48e66e96-112b-4402-af85-7de81c5e4e06"
+	property Entity miningTitle = "5db11ad8-baa5-4934-b41b-d7b74d36f464"
+	property Entity miningProgress = "51c7a6a1-a74c-4f2d-af28-21629b7e96da"
+	property Entity miningGuide = "ade3f7c5-2207-4c22-85de-5fd3c4b2faf1"
+	property Entity miningPickaxe = "d4dad9e8-959c-4058-a432-454306bd2993"
+	property table _crystals = {}
+	property table _connections = {}
+	property table _depleted = {}
+	property table _targets = {}
+	property table _localTargets = {}
+	property table _targetViews = {}
+	property table _hitFx = {}
+	property table _sparkles = {}
+	property table _fxRemaining = {}
+	property table _pickaxePixels = {}
+	property table _targetLit = {}
+	property boolean _open = false
+	property integer _session = 0
+	property integer _round = 0
+	property integer _required = 1
+	property integer _speed = 1
+	property integer _hits = 0
+	property integer _lastHitIndex = 0
+	property integer _zone = 0
+	property string _owner = ""
+	property Entity _object = nil
+	property number _roundAt = 0
+	property Vector3 _rewardPos = Vector3(0, 0, 0)
+	property number _deadline = 0
+	property boolean _localOpen = false
+	property boolean _pending = false
+	property integer _localSession = 0
+	property integer _localRound = 0
+	property integer _localRequired = 1
+	property integer _localSpeed = 1
+	property number _localStartAt = 0
+	property number _renderAt = 0
+	property number _resultRemaining = 0
+	property number _missEffectRemaining = 0
+	property number _swingRemaining = 0
+	property number _requestCooldown = 0
+	property integer _worldFxSerial = 0
+	property number _worldFxRemaining = 0
+	property string _feedbackKey = ""
+	property string _locale = ""
+
+	method void OnBeginPlay()
+		-- 기존 장식의 위치와 그림을 보존하고 월드 터치와 UI 입력만 연결한다.
+		self._crystals = {} self._connections = {}
+		for _, child in ipairs(self.Entity.Children:ToTable()) do
+			local sprite = child.SpriteRendererComponent
+			if sprite ~= nil and sprite.SpriteRUID == self.CrystalRUID then
+				self._crystals[child.Name] = child
+				if self:IsClient() then
+					local crystalName = child.Name
+					local h = child:ConnectEvent(TouchEvent, function(event) self:OnCrystalTouched(crystalName, event) end)
+					table.insert(self._connections, {entity=child, eventType=TouchEvent, eventHandler=h})
+				end
+			end
+		end
+		if self:IsClient() then
+			if isvalid(self.miningTrack) then
+				local h = self.miningTrack:ConnectEvent(UITouchDownEvent, self.OnBarTouched)
+				table.insert(self._connections, {entity=self.miningTrack, eventType=UITouchDownEvent, eventHandler=h})
+			end
+			self:PreparePresentation()
+			self:HideLocal()
+			log("[VRF] mining ui bindings=" .. #self._connections)
+		end
+		local count = 0 for _, _ in pairs(self._crystals) do count = count + 1 end
+		log("[VRF] mining boot crystals=" .. count .. " client=" .. tostring(self:IsClient()))
+	end
+
+	method number GetCursorFraction(number elapsed, integer speedLevel)
+		-- 서버 판정과 실제 곡괭이 표시가 같은 왕복 곡선을 사용한다.
+		local durations = {2.8, 1.6, 0.95}
+		local speed = math.max(1, math.min(3, speedLevel))
+		local phase = (math.max(0, elapsed) / durations[speed]) % 2
+		if phase > 1 then return 2 - phase end
+		return phase
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnCrystalTouched(string crystalName, TouchEvent event)
+		-- 전투 중 오브젝트 겹침, 로비, 다른 모달, 빠른 중복 요청을 걸러낸다.
+		if self._localOpen or self._requestCooldown > 0 or self._resultRemaining > 0 then return end
+		if not _GameManager.GameStarted or _GameManager.GameOver or _GameManager:IsGamePaused() then return end
+		if isvalid(_TitleUI.titleGroup) and _TitleUI.titleGroup.Enable then return end
+		if _CardManager:IsMonsterUnderTouch(event.TouchPoint) then return end
+		self._requestCooldown = 0.4
+		self:RequestBegin(crystalName)
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean ValidCrystal(string crystalName, string userId)
+		-- 이 맵의 실제 수정과 현재 플레이어/존만 허용한다.
+		local obj = self._crystals[crystalName]
+		if not isvalid(obj) or not obj.Enable or self._depleted[crystalName] then return false end
+		if not _GameManager.GameStarted or _GameManager.GameOver then return false end
+		local user = _UserService:GetUserEntityByUserId(userId)
+		if not isvalid(user) or user.CurrentMap ~= self.Entity then return false end
+		local zone = _MapManager.CurrentMapIndex
+		if zone < self.MinZone or zone > self.MaxZone then return false end
+		local center = _MapManager:GetSpawnPositionForIndex(zone)
+		return math.abs(obj.TransformComponent.WorldPosition.x - center.x) <= 10.5
+	end
+
+	@ExecSpace("Server")
+	method void RequestBegin(string crystalName)
+		-- 서버가 성공 횟수와 속도를 각각 1~3 범위에서 정한다.
+		if self._open or _GameManager:IsGamePaused() or not self:ValidCrystal(crystalName, senderUserId) then return end
+		if self.Entity.Name == "ep5_map3" then _Ep5Map3CollectLogic:EnsureHarvestPlan() end
+		self._session = self._session + 1 self._round = 1
+		self._required = _UtilLogic:RandomIntegerRange(1, math.max(1, math.min(3, self.MaxRequiredHits)))
+		self._speed = _UtilLogic:RandomIntegerRange(1, math.max(1, math.min(3, self.MaxSpeedLevel)))
+		self._hits = 0 self._lastHitIndex = 0 self._rewardPos = Vector3(0, 0, 0)
+		self._owner = senderUserId self._object = self._crystals[crystalName]
+		self._zone = _MapManager.CurrentMapIndex self._open = true
+		-- 채굴 중에도 게임은 멈추지 않고 그대로 진행한다(2026-10-24 유저 지정, 예전엔 SetEasterEggPaused(true))
+		log("[VRF] mining begin crystal=" .. crystalName .. " hits=" .. self._required .. " speed=" .. self._speed)
+		self:BuildTargets()
+		self._roundAt = _UtilLogic.ServerElapsedSeconds + 0.5
+		self._deadline = self._roundAt + 6.5
+		self:SendChallenge()
+	end
+
+	@ExecSpace("ServerOnly")
+	method void BuildTargets()
+		-- 동일한 곡괭이 뒤의 노란 보정 구간과 서버 판정 폭을 정확히 맞춘다.
+		self._targets = {}
+		local matchWidths = {72, 92, 112}
+		local unused = {1, 2, 3}
+		for i = 1, self._required do
+			local pick = _UtilLogic:RandomIntegerRange(1, #unused)
+			local widthTier = table.remove(unused, pick)
+			local width = matchWidths[widthTier] / self.TrackLength
+			local center = i / (self._required + 1) + (_UtilLogic:RandomDouble() - 0.5) * 0.03
+			if self._required == 1 then center = 0.30 + _UtilLogic:RandomDouble() * 0.48 end
+			table.insert(self._targets, {center=center, width=width, hit=false})
+			log("[VRF] mining target=" .. i .. " widthTier=" .. widthTier .. " pixels=" .. width * self.TrackLength)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SendChallenge()
+		-- 성공한 구간 상태만 갱신하고 왕복 커서의 시작 시각과 제한 시간은 유지한다.
+		self:ShowRound(self._session, self._round, self._required, self._speed, self._targets, self._roundAt, self._lastHitIndex, self._owner)
+		log("[VRF] mining round=" .. self._round .. " targets=" .. #self._targets .. " hits=" .. self._hits .. " start=" .. self._roundAt)
+	end
+
+	@ExecSpace("Server")
+	method void RequestStrike(integer session, integer round, number pressedAt)
+		-- 화면에 마지막으로 표시된 시각을 검증해 프레임/통신 지연으로 판정이 어긋나지 않게 한다.
+		if not self._open or self._owner ~= senderUserId or self._session ~= session or self._round ~= round then return end
+		if not isvalid(self._object) or not self:ValidCrystal(self._object.Name, senderUserId) or self._zone ~= _MapManager.CurrentMapIndex then self:EndMining("cancel") return end
+		local now = _UtilLogic.ServerElapsedSeconds
+		if pressedAt ~= pressedAt or pressedAt < self._roundAt or pressedAt > now + 0.1 or pressedAt < now - 0.75 then self:EndMining("miss") return end
+		local fraction = self:GetCursorFraction(pressedAt - self._roundAt, self._speed)
+		local hitIndex = 0
+		for i, target in ipairs(self._targets) do
+			if not target.hit and math.abs(fraction - target.center) <= target.width * 0.5 then hitIndex = i break end
+		end
+		log("[VRF] mining strike round=" .. round .. " hit=" .. tostring(hitIndex > 0) .. " target=" .. hitIndex .. " fraction=" .. fraction)
+		if hitIndex == 0 then self:EndMining("miss") return end
+		self._targets[hitIndex].hit = true self._hits = self._hits + 1 self._lastHitIndex = hitIndex
+		if self._hits < self._required then
+			self._round = self._round + 1 self:SendChallenge() return
+		end
+		local obj = self._object
+		local p = obj.TransformComponent.WorldPosition
+		local fall = _GameManager:GetGroundFallFor(obj, p)
+		self._depleted[obj.Name] = true
+		obj.Enable = false
+		self._rewardPos = p
+		local reward = true
+		if self.Entity.Name == "ep5_map3" then reward = _Ep5Map3CollectLogic:IsRewardFlower(obj.Name) end
+		if reward then
+			_GameManager:GrantLootItemDrop(p, fall.x, fall.y, self.OreItemId, 1)
+			_AchievementLogic:OnEasterEgg()
+		end
+		log("[VRF] mining reward item=" .. self.OreItemId .. " crystal=" .. obj.Name .. " reward=" .. tostring(reward) .. " scale=1")
+		self:EndMining(reward and "success" or "empty")
+	end
+
+	@ExecSpace("Server")
+	method void RequestCancel(integer session)
+		-- ESC와 맵 이탈은 자기 세션만 취소한다.
+		if self._open and self._owner == senderUserId and self._session == session then self:EndMining("cancel") end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void EndMining(string result)
+		-- 채굴 세션을 닫고 연결된 사용자에게 결과를 보낸다(게임을 멈추지 않으므로 풀 일시정지도 없다).
+		if not self._open then return end
+		local userId = self._owner local session = self._session
+		self._open = false self._owner = "" self._object = nil self._deadline = 0
+		if userId ~= "" and isvalid(_UserService:GetUserEntityByUserId(userId)) then self:ShowResult(session, result, self._lastHitIndex, self._rewardPos, userId) end
+		log("[VRF] mining close result=" .. result .. " paused=" .. tostring(_GameManager:IsGamePaused()))
+	end
+
+	@ExecSpace("Client")
+	method void ShowRound(integer session, integer round, integer required, integer speed, table targets, number startAt, integer hitIndex)
+		-- 딤 없이 작은 채굴 바만 보이며 낡은 응답은 새 입력을 덮지 않는다.
+		if session < self._localSession or (session == self._localSession and round <= self._localRound) then return end
+		local player = _UserService.LocalPlayer
+		if not _GameManager.GameStarted or _GameManager.GameOver or not isvalid(player) or player.CurrentMap ~= self.Entity or (isvalid(_TitleUI.titleGroup) and _TitleUI.titleGroup.Enable) then
+			self:HideLocal() self:RequestCancel(session)
+			log("[VRF] mining ui ignored outside gameplay") return
+		end
+		if not isvalid(self.miningGroup) then self:RequestCancel(session) return end
+		self.miningGroup.Enable = true
+		if not isvalid(self.miningTarget) or not isvalid(self.miningCursor) or not isvalid(self.miningPickaxe) or not isvalid(self.miningTrack) or not isvalid(self.miningTitle) or not isvalid(self.miningGuide) or not isvalid(self.miningProgress) or not isvalid(self.miningPanel) or not isvalid(self.miningShield) then
+			self:RequestCancel(session) log_warning("[VRF] mining UI is not ready") return
+		end
+		local previousHit = self._localOpen and self._localSession == session
+		self._localSession = session self._localRound = round self._localRequired = required self._localSpeed = speed
+		self._localStartAt = startAt self._localTargets = targets
+		self._localOpen = true self._pending = false self._resultRemaining = 0
+		if not previousHit then
+			self:ResetResultPresentation()
+			self._feedbackKey = "EP5_MINING_READY" self._swingRemaining = 0
+			self.miningPickaxe.UITransformComponent.UIRotation = Vector3(0, 0, 0)
+		end
+		for i = 1, 3 do
+			local view = self._targetViews[i] local target = targets[i]
+			if not isvalid(view) then self:RequestCancel(session) return end
+			view.Enable = target ~= nil and not target.hit
+			if target ~= nil then
+				view.UITransformComponent.anchoredPosition = Vector2((target.center - 0.5) * self.TrackLength, 0)
+				view.UITransformComponent.RectSize = Vector2(target.width * self.TrackLength, 80)
+				local icon = view:GetChildByName("Crystal")
+				local size = 56
+				local fill = view:GetChildByName("Fill")
+				fill.UITransformComponent.RectSize = Vector2(target.width * self.TrackLength, 80)
+				fill.SpriteGUIRendererComponent.Color = Color(1, 0.79, 0.28, 0.24)
+				icon.UITransformComponent.RectSize = Vector2(size, size)
+				self:DrawPickaxe(icon, size, 0)
+				self._targetLit[i] = false
+			end
+		end
+		self.miningCursor.UITransformComponent.UIRotation = Vector3(0, 0, 0)
+		self.miningPanel.Enable = true self.miningShield.Enable = true
+		self:RenderCursor()
+		if previousHit then self._feedbackKey = "EP5_MINING_HIT" self:PlayHitEffect(hitIndex) end
+		self:RefreshTexts()
+		log("[VRF] mining ui show session=" .. session .. " round=" .. round .. " dim=false match=true targetHeight=80 correction=true speed=" .. speed)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PreparePresentation()
+		-- 같은 벡터 도형을 작은 텍스처로 한 번씩 그려 고정/이동 곡괭이를 맞춘다.
+		self._targetViews = {} self._hitFx = {} self._sparkles = {} self._fxRemaining = {}
+		self._pickaxePixels = {} self._targetLit = {}
+		if not isvalid(self.miningTrack) or not isvalid(self.miningPickaxe) then return end
+		for i = 1, 3 do
+			self._targetViews[i] = self.miningTrack:GetChildByName("Target" .. tostring(i))
+			self._hitFx[i] = self.miningTrack:GetChildByName("HitFx" .. tostring(i))
+			self._sparkles[i] = self.miningTrack:GetChildByName("Sparkle" .. tostring(i))
+			self._fxRemaining[i] = 0 self._targetLit[i] = false
+			if i == 1 then
+				self:DrawPickaxe(self._targetViews[i]:GetChildByName("Crystal"), 56, 3)
+				self:DrawPickaxe(self._targetViews[i]:GetChildByName("Crystal"), 56, 1)
+			end
+			self:DrawPickaxe(self._targetViews[i]:GetChildByName("Crystal"), 56, 0)
+		end
+		self:DrawPickaxe(self.miningPickaxe, 56, 2)
+		log("[VRF] mining tools ready style=" .. self.ToolStyle .. " icons=4 insideBar=true")
+	end
+	@ExecSpace("ClientOnly")
+	method void DrawPickaxe(Entity icon, integer size, integer style)
+		-- 도형은 36px 좌표계, 텍스처는 2배 샘플링하며 모양별 결과를 재사용한다.
+		if not isvalid(icon) or icon.PixelGUIRendererComponent == nil then return end
+		local key = tostring(size) .. ":" .. tostring(style)
+		local pixels = self._pickaxePixels[key]
+		local resolution = size * 2
+		if pixels == nil then
+			local layers = {{kind=1, points={{5.289,27.787},{20.735,12.13},{24.12,15.198},{8.675,30.855}}},{kind=2, points={{3.385,28.316},{3.817,28.02},{4.298,27.933},{4.799,28.063},{5.289,28.422},{7.617,30.749},{8.03,31.396},{8.066,32.032},{7.825,32.609},{7.405,33.077},{6.913,33.417},{6.4,33.5},{5.888,33.345},{5.395,32.971},{3.279,30.855},{2.82,30.206},{2.698,29.546},{2.893,28.906},{3.385,28.316}}},{kind=2, points={{27.611,6.841},{28.044,6.335},{28.537,6.206},{29.069,6.394},{29.621,6.841},{30.053,7.333},{30.216,7.846},{30.083,8.358},{29.621,8.851}}},{kind=2, points={{10.156,2.926},{11.637,2.62},{13.22,2.5},{14.898,2.573},{16.662,2.847},{18.505,3.329},{20.421,4.027},{22.401,4.948},{24.438,6.1},{21.264,9.485},{19.867,8.59},{18.46,7.738},{17.054,6.943},{15.657,6.219},{14.28,5.579},{12.933,5.037},{11.625,4.607},{10.367,4.302},{9.814,4.102},{9.587,3.733},{9.698,3.305},{10.156,2.926}}},{kind=2, points={{28.563,11.707},{29.576,13.207},{30.492,14.742},{31.298,16.307},{31.985,17.898},{32.54,19.512},{32.952,21.142},{33.21,22.786},{33.302,24.438},{33.218,26.095},{32.985,26.738},{32.544,27.034},{32.043,26.913},{31.631,26.306},{31.279,25.041},{30.856,23.786},{30.362,22.545},{29.798,21.319},{29.163,20.111},{28.458,18.924},{27.682,17.761},{26.836,16.624},{25.919,15.516}}},{kind=3, points={{25.072,6.418},{25.527,6.139},{26.028,6.167},{26.553,6.523},{29.516,9.591},{29.939,10.171},{29.939,10.704},{29.516,11.284},{26.553,14.246},{25.974,14.669},{25.441,14.669},{24.861,14.246},{21.687,11.178},{21.334,10.677},{21.334,10.199},{21.687,9.697}}}}
+			local highlight = {{10.896,3.244},{12.374,3.05},{13.87,3.019},{15.384,3.147},{16.913,3.429},{18.458,3.86},{20.016,4.434},{21.586,5.147},{23.168,5.994},{21.899,7.158},{20.536,6.475},{19.153,5.856},{17.757,5.306},{16.358,4.831},{14.963,4.435},{13.582,4.123},{12.224,3.901},{10.896,3.773}}
+			if self.ToolStyle == 1 then
+				layers = {{kind=1,points={{21.841,4.213},{22.319,3.763},{22.914,3.483},{23.566,3.401},{24.211,3.524},{24.787,3.841},{25.237,4.319},{25.517,4.914},{25.599,5.566},{25.476,6.211},{25.159,6.787},{6.159,31.287},{5.681,31.737},{5.086,32.017},{4.434,32.099},{3.789,31.976},{3.213,31.659},{2.763,31.181},{2.483,30.586},{2.401,29.934},{2.524,29.289},{2.841,28.713}}},{kind=2,points={{24,7},{25.74,7.59},{27.294,8.35},{28.657,9.264},{29.83,10.317},{30.809,11.493},{31.593,12.778},{32.179,14.155},{32.565,15.609},{32.75,17.125},{32.731,18.687},{32.507,20.28},{32.074,21.889},{31.432,23.497},{30.578,25.091},{29.509,26.653},{28.225,28.169},{26.723,29.623},{25,31},{25,31},{25.917,29.528},{26.672,28.111},{27.269,26.75},{27.711,25.444},{28.002,24.194},{28.148,23},{28.152,21.861},{28.018,20.778},{27.75,19.75},{27.353,18.778},{26.83,17.861},{26.185,17},{25.424,16.194},{24.549,15.444},{23.565,14.75},{22.476,14.111},{21.286,13.528},{20,13}}},{kind=3,points={{20.265,19.611},{20.533,19.896},{20.7,20.25},{20.749,20.638},{20.677,21.022},{20.489,21.365},{20.204,21.633},{19.85,21.8},{19.462,21.849},{19.078,21.777},{18.735,21.589},{13.435,17.489},{13.167,17.204},{13,16.85},{12.951,16.462},{13.023,16.078},{13.211,15.735},{13.496,15.467},{13.85,15.3},{14.238,15.251},{14.622,15.323},{14.965,15.511}}},{kind=3,points={{6.972,30.517},{7.238,30.804},{7.403,31.159},{7.449,31.547},{7.373,31.931},{7.183,32.272},{6.896,32.538},{6.541,32.703},{6.153,32.749},{5.769,32.673},{5.428,32.483},{2.628,30.283},{2.362,29.996},{2.197,29.641},{2.151,29.253},{2.227,28.869},{2.417,28.528},{2.704,28.262},{3.059,28.097},{3.447,28.051},{3.831,28.127},{4.172,28.317}}}}
+				highlight = {{24.5,8.5},{26.574,9.275},{28.301,10.322},{29.688,11.602},{30.741,13.074},{31.468,14.699},{31.875,16.438},{31.97,18.249},{31.759,20.093},{31.25,21.93},{30.449,23.72},{29.363,25.423},{28,27},{28,27},{28.857,25.252},{29.438,23.519},{29.758,21.813},{29.833,20.148},{29.68,18.539},{29.313,17},{28.747,15.544},{28,14.185},{27.086,12.938},{26.021,11.815},{24.82,10.831},{23.5,10}}
+			end
+			local function sample(poly, x, y)
+				local inside = false local distance = 1000
+				for i = 1, #poly do
+					local a = poly[i] local b = poly[i % #poly + 1]
+					if (a[2] > y) ~= (b[2] > y) and x < (b[1]-a[1])*(y-a[2])/(b[2]-a[2])+a[1] then inside = not inside end
+					local dx = b[1]-a[1] local dy = b[2]-a[2]
+					local t = math.max(0, math.min(1, ((x-a[1])*dx+(y-a[2])*dy)/(dx*dx+dy*dy)))
+					local ox = x-a[1]-t*dx local oy = y-a[2]-t*dy
+					distance = math.min(distance, math.sqrt(ox*ox+oy*oy))
+				end
+				return inside, distance
+			end
+			local function over(bottom, top, coverage)
+				local alpha = top.a * coverage
+				local combined = alpha + bottom.a * (1-alpha)
+				if combined <= 0 then return Color(0,0,0,0) end
+				return Color((top.r*alpha+bottom.r*bottom.a*(1-alpha))/combined, (top.g*alpha+bottom.g*bottom.a*(1-alpha))/combined, (top.b*alpha+bottom.b*bottom.a*(1-alpha))/combined, combined)
+			end
+			local stroke = style == 3 and Color(0.38,0.04,0.03,1) or (style == 2 and Color(0.09,0.13,0.17,1) or (style == 1 and Color(1,0.98,0.87,1) or Color(0.96,0.98,1,0.98)))
+			local ghost = style == 3 and Color(1,0.32,0.24,1) or (style == 1 and Color(1,0.95,0.75,0.85) or Color(0.93,0.97,1,0.65))
+			local aa = 36 / resolution
+			pixels = {}
+			for y = 1, resolution do
+				for x = 1, resolution do
+					local px = (x-0.5)*36/resolution local py = 36-(y-0.5)*36/resolution
+					local color = Color(0,0,0,0)
+					for _, layer in ipairs(layers) do
+						local inside, distance = sample(layer.points, px, py)
+						local fill = style == 2 and (layer.kind == 1 and Color(0.69,0.45,0.20,1) or (layer.kind == 3 and Color(1,0.94,0.73,1) or Color(1,0.84,0.42,1))) or ghost
+						if self.ToolStyle == 1 and style == 2 then
+							fill = layer.kind == 1 and Color(0.69,0.40,0.19,1) or (layer.kind == 3 and Color(0.47,0.86,0.50,1) or Color(0.85,0.96,1,1))
+						end
+						if inside then color = over(color, fill, 1) end
+						local coverage = math.max(0, math.min(1, (0.35+aa*0.5-distance)/aa))
+						if coverage > 0 then color = over(color, stroke, coverage) end
+					end
+					if style == 2 then local inside = sample(highlight,px,py);if inside then color = over(color,Color(1,0.96,0.74,1),1) end end
+					table.insert(pixels,color)
+				end
+			end
+			self._pickaxePixels[key] = pixels
+		end
+		icon.PixelGUIRendererComponent:ResetWithColors(resolution, resolution, pixels)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RenderCursor()
+		-- 실제 겹침과 같은 시각으로 표시하고 목표가 겹칠 때만 윤곽을 밝힌다.
+		self._renderAt = _UtilLogic.ServerElapsedSeconds
+		local fraction = self:GetCursorFraction(self._renderAt - self._localStartAt, self._localSpeed)
+		self.miningCursor.UITransformComponent.anchoredPosition = Vector2((fraction - 0.5) * self.TrackLength, 0)
+		for i, target in ipairs(self._localTargets) do
+			local view = self._targetViews[i]
+			if not target.hit and isvalid(view) then
+				local inRange = self._renderAt >= self._localStartAt and math.abs(fraction - target.center) <= target.width * 0.5
+				if self._targetLit[i] ~= inRange then
+					local icon = view:GetChildByName("Crystal")
+					view:GetChildByName("Fill").SpriteGUIRendererComponent.Color = inRange and Color(1,0.88,0.48,0.42) or Color(1,0.79,0.28,0.24)
+					self:DrawPickaxe(icon, math.floor(icon.UITransformComponent.RectSize.x+0.5), inRange and 1 or 0)
+					self._targetLit[i] = inRange
+				end
+			end
+		end
+	end
+	@ExecSpace("ClientOnly")
+	method void PlayHitEffect(integer hitIndex)
+		-- 맞춘 곡괭이 중심에서 별빛과 작은 금빛 반짝임을 원형으로 퍼뜨린다.
+		local target = self._localTargets[hitIndex]
+		if target == nil then return end
+		local pos = Vector2((target.center - 0.5) * self.TrackLength, 0)
+		local fx = self._hitFx[hitIndex] local sparkle = self._sparkles[hitIndex]
+		if isvalid(fx) then
+			fx.UITransformComponent.anchoredPosition = pos
+			fx.UISpriteParticleComponent:Stop() fx.UISpriteParticleComponent:Play()
+		end
+		if isvalid(sparkle) then
+			sparkle.UITransformComponent.anchoredPosition = pos
+			sparkle.UIBasicParticleComponent:Stop() sparkle.UIBasicParticleComponent:Play()
+		end
+		self._fxRemaining[hitIndex] = 0.75 self._swingRemaining = 0.28
+		_SoundService:PlaySound(self.StrikeSoundRUID, 0.5)
+		log("[VRF] mining hit fx target=" .. hitIndex)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void StopHitEffect(integer hitIndex)
+		-- 짧은 타격 파편도 완료/취소 시 확실히 정리한다.
+		local fx = self._hitFx[hitIndex] local sparkle = self._sparkles[hitIndex]
+		if isvalid(fx) then fx.UISpriteParticleComponent:Stop() end
+		if isvalid(sparkle) then sparkle.UIBasicParticleComponent:Stop() end
+		if (self._fxRemaining[hitIndex] or 0) > 0 then log("[VRF] mining hit fx end target=" .. hitIndex) end
+		self._fxRemaining[hitIndex] = 0
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayWorldSuccess(Vector3 worldPos)
+		-- 꺼진 수정의 월드 위치에서 기존 메이플 청백색 별 폭발을 한 번만 재생한다.
+		self:StopWorldEffect()
+		local options = {}
+		options["SortingLayer"] = "MapLayer0" options["OrderInLayer"] = 1
+		self._worldFxSerial = _EffectService:PlayEffect(self.SuccessEffectRUID, self.Entity, worldPos, 0, Vector3(0.7, 0.7, 1), false, options)
+		self._worldFxRemaining = 0.9
+		log("[VRF] mining world fx serial=" .. self._worldFxSerial .. " x=" .. worldPos.x .. " y=" .. worldPos.y)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void StopWorldEffect()
+		-- 맵을 떠나거나 재생이 끝나면 월드 효과 일련번호를 해제한다.
+		if self._worldFxSerial > 0 then
+			_EffectService:RemoveEffect(self._worldFxSerial)
+			log("[VRF] mining world fx end serial=" .. self._worldFxSerial)
+		end
+		self._worldFxSerial = 0 self._worldFxRemaining = 0
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshTexts()
+		-- 게임의 기존 다국어 번역기로 채굴 안내도 표시한다.
+		self._locale = _LocalizationService.CurrentLocaleId
+		local tr = _LocalizationService:GetTranslatorForLocale(self._locale)
+		self.miningTitle.TextGUIRendererComponent.Text = tr:GetText(self.ToolStyle == 1 and self.HarvestTitleKey or "EP5_MINING_TITLE")
+		local completed = math.max(0, self._localRound - 1)
+		if self._feedbackKey == self.HarvestSuccessKey then completed = self._localRequired end
+		self.miningProgress.TextGUIRendererComponent.Text = tostring(completed) .. " / " .. tostring(self._localRequired)
+		local key = self._feedbackKey
+		if key == "" then key = "EP5_MINING_GUIDE" end
+		if self.ToolStyle == 1 and (key == "EP5_MINING_READY" or key == "EP5_MINING_GUIDE") then key = string.gsub(key, "EP5_MINING_", "MAP19_HARVEST_") end
+		-- 모바일엔 스페이스 키가 없다 — "SPACE 또는" 없는 터치 전용 문구로(2026-10-25 유저 지정)
+		if (key == "EP5_MINING_GUIDE" or key == "MAP19_HARVEST_GUIDE") and _MobileScreenFitLogic:IsActive() then key = key .. "_MOBILE" end
+		self.miningGuide.TextGUIRendererComponent.Text = tr:GetText(key)
+		for i = 1, 3 do
+			local arrow = self.miningPanel:GetChildByName("Speed" .. tostring(i), true)
+			if isvalid(arrow) then arrow.TextGUIRendererComponent.FontColor = i <= self._localSpeed and Color(0.42, 0.85, 1, 1) or Color(0.35, 0.35, 0.35, 0.7) end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PressStrike()
+		-- 키보드/터치는 정확히 같은 1회 입력 경로를 사용한다.
+		if not self._localOpen or self._pending then return end
+		if self._renderAt < self._localStartAt then return end
+		self._pending = true
+		self._swingRemaining = 0.28
+		self:RequestStrike(self._localSession, self._localRound, self._renderAt)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnBarTouched(UITouchDownEvent event)
+		-- PC는 왼쪽 버튼, 모바일은 터치 시작 순간에 판정한다.
+		if event.TouchId == -1 or event.TouchId > 0 then self:PressStrike() end
+	end
+
+	@ExecSpace("ClientOnly")
+	@EventSender("Service", "InputService")
+	handler HandleKeyDown(KeyDownEvent event)
+		-- 길게 누르기는 반복 성공으로 처리하지 않고 키를 누르는 순간만 받는다.
+		if not self._localOpen then return end
+		if event.key == KeyboardKey.Space then self:PressStrike()
+		elseif event.key == KeyboardKey.Escape then self:CancelLocal() end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void CancelLocal()
+		-- 서버 응답을 기다리는 동안 취소 연타를 막는다.
+		if not self._localOpen then return end
+		self._pending = true self:RequestCancel(self._localSession)
+	end
+
+	@ExecSpace("Client")
+	method void ShowResult(integer session, string result, integer hitIndex, Vector3 worldPos)
+		-- 실패 안내는 잠깐 표시하고 닫으며, 게임 조작은 즉시 돌려준다.
+		if session ~= self._localSession then return end
+		local player = _UserService.LocalPlayer
+		if not _GameManager.GameStarted or _GameManager.GameOver or not isvalid(player) or player.CurrentMap ~= self.Entity or (isvalid(_TitleUI.titleGroup) and _TitleUI.titleGroup.Enable) then self:HideLocal() log("[VRF] mining result ignored outside gameplay") return end
+		self._localOpen = false self._pending = false
+		if result ~= "success" then
+			if result ~= "miss" and result ~= "empty" then self:HideLocal() return end
+			for i = 1, 3 do self:StopHitEffect(i) end
+			self._feedbackKey = result == "empty" and "EP5_MAP3_FLOWER_MISS" or "EP5_MINING_MISS"
+			self._resultRemaining = 1.2 self._swingRemaining = 0
+			self._missEffectRemaining = 0.32
+			self:DrawPickaxe(self.miningPickaxe, 56, 3)
+			self.miningShield.Enable = false
+			_SoundService:PlaySound(self.StrikeSoundRUID, 0.28)
+			self:RefreshTexts()
+			self:RenderFailurePresentation()
+			log("[VRF] mining miss toast font=40 duration=1.2 shake=0.32")
+			return
+		end
+		if self._localTargets[hitIndex] ~= nil then self._localTargets[hitIndex].hit = true end
+		if isvalid(self._targetViews[hitIndex]) then self._targetViews[hitIndex].Enable = false end
+		self:PlayHitEffect(hitIndex) self:PlayWorldSuccess(worldPos)
+		self._feedbackKey = self.HarvestSuccessKey
+		self._resultRemaining = 0.85 self._swingRemaining = 0.28
+		self.miningShield.Enable = false
+		_SoundService:PlaySound(self.SuccessSoundRUID, 0.5)
+		self:RefreshTexts()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ResetResultPresentation()
+		-- 실패용 토스트와 흔들림을 닫기/재시도/맵 이탈 때 원래 UI로 돌린다.
+		self._missEffectRemaining = 0
+		if not isvalid(self.miningPanel) or not isvalid(self.miningTrack) then return end
+		self.miningTrack.UITransformComponent.anchoredPosition = Vector2(0, 0)
+		local well = self.miningTrack:GetChildByName("Well").SpriteGUIRendererComponent
+		well.Color = self.ToolStyle == 1 and Color(0.035,0.10,0.075,0.78) or Color(0.035,0.075,0.12,0.74)
+		well.OutlineColor = self.ToolStyle == 1 and Color(0.64,0.95,0.50,1) or Color(0.38,0.8,0.95,0.98)
+		local toast = self.miningPanel:GetChildByName("Guide")
+		toast.UITransformComponent.anchoredPosition = Vector2(0,-64)
+		-- 평소 안내 문구 뒤에도 반투명 검은 배경을 깐다(2026-10-24 유저 지정, 맵 위에서 글씨가 안 보여서) — .ui 값과 같게 유지
+		toast.UITransformComponent.RectSize = Vector2(640,40)
+		toast.UITransformComponent.UIScale = Vector3(1,1,1)
+		toast.SpriteGUIRendererComponent.Color = Color(0,0,0,0.55)
+		self.miningGuide.UITransformComponent.RectSize = Vector2(620,30)
+		local text = self.miningGuide.TextGUIRendererComponent
+		text.FontSize = 20 text.MinSize = 18 text.MaxSize = 20 text.BestFit = true
+		-- 안내 문구가 맵 위에서 잘 안 보여 진하게(2026-10-24 유저 지정) — .ui 값과 같게 유지
+		text.FontColor = Color(1,1,1,1)
+		text.OutlineWidth = 0.3 text.OutlineColor = Color(0.02,0.04,0.07,1)
+		for _, name in ipairs({"Heading","Counter","SpeedLevels"}) do self.miningPanel:GetChildByName(name).Enable = true end
+		if isvalid(self.miningPickaxe) and self.miningPickaxe.PixelGUIRendererComponent ~= nil then self:DrawPickaxe(self.miningPickaxe,56,2) end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RenderFailurePresentation()
+		-- 안내는 바 위에서 작게 튀어나오고, 바/곡괭이만 짧게 붉게 흔들린다.
+		local elapsed = math.max(0, 1.2-self._resultRemaining)
+		local entrance = math.min(1,elapsed/0.14)
+		local pop = 1-(1-entrance)*(1-entrance)*(1-entrance)
+		local alpha = math.min(1,self._resultRemaining/0.18)
+		local toast = self.miningPanel:GetChildByName("Guide")
+		toast.UITransformComponent.anchoredPosition = Vector2(0,102+8*pop)
+		toast.UITransformComponent.RectSize = Vector2(760,84)
+		toast.UITransformComponent.UIScale = Vector3(0.94+0.06*pop,0.94+0.06*pop,1)
+		toast.SpriteGUIRendererComponent.Color = Color(0,0,0,0.82*alpha)
+		self.miningGuide.UITransformComponent.RectSize = Vector2(720,64)
+		local text = self.miningGuide.TextGUIRendererComponent
+		text.FontSize = 40 text.MinSize = 40 text.MaxSize = 40 text.BestFit = false
+		text.FontColor = Color(1,0.97,0.93,alpha)
+		for _, name in ipairs({"Heading","Counter","SpeedLevels"}) do self.miningPanel:GetChildByName(name).Enable = false end
+		local well = self.miningTrack:GetChildByName("Well").SpriteGUIRendererComponent
+		if self._missEffectRemaining > 0 then
+			local strength = self._missEffectRemaining/0.32
+			self.miningTrack.UITransformComponent.anchoredPosition = Vector2(math.sin(elapsed*70)*8*strength,0)
+			well.Color = Color(0.18,0.035,0.04,0.8)
+			well.OutlineColor = Color(1,0.34,0.25,0.7+0.3*strength)
+		else
+			self.miningTrack.UITransformComponent.anchoredPosition = Vector2(0,0)
+			well.Color = self.ToolStyle == 1 and Color(0.035,0.10,0.075,0.78) or Color(0.035,0.075,0.12,0.74)
+		well.OutlineColor = self.ToolStyle == 1 and Color(0.64,0.95,0.50,1) or Color(0.38,0.8,0.95,0.98)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void HideLocal()
+		-- 숨겨진 입력 방패도 함께 꺼서 게임 조작을 가로막지 않는다.
+		self._localOpen = false self._pending = false self._resultRemaining = 0 self._feedbackKey = ""
+		self._swingRemaining = 0 self._requestCooldown = 0
+		self:ResetResultPresentation()
+		for i = 1, 3 do self:StopHitEffect(i) end
+		if isvalid(self.miningPickaxe) then self.miningPickaxe.UITransformComponent.UIRotation = Vector3(0, 0, 0) end
+		if isvalid(self.miningPanel) then self.miningPanel.Enable = false end
+		if isvalid(self.miningShield) then self.miningShield.Enable = false end
+	end
+
+	method void OnUpdate(number delta)
+		-- 게임의 일시정지와 독립적으로 타이밍 바를 갱신하고 이탈/시간 초과를 정리한다.
+		if self:IsServer() then
+			if not self._open then return end
+			if not isvalid(self._object) or not self:ValidCrystal(self._object.Name, self._owner) or self._zone ~= _MapManager.CurrentMapIndex then self:EndMining("cancel") return end
+			if _UtilLogic.ServerElapsedSeconds >= self._deadline then self:EndMining("miss") end
+			return
+		end
+		self._requestCooldown = math.max(0, self._requestCooldown - delta)
+		for i = 1, 3 do
+			local remaining = self._fxRemaining[i] or 0
+			if remaining > 0 then
+				if remaining <= delta then self:StopHitEffect(i)
+				else self._fxRemaining[i] = remaining - delta end
+			end
+		end
+		if self._worldFxRemaining > 0 then
+			self._worldFxRemaining = self._worldFxRemaining - delta
+			if self._worldFxRemaining <= 0 then self:StopWorldEffect() end
+		end
+		if not self._localOpen and self._resultRemaining <= 0 then return end
+		local player = _UserService.LocalPlayer
+		if not isvalid(player) or player.CurrentMap ~= self.Entity or _GameManager.GameOver or not _GameManager.GameStarted or (isvalid(_TitleUI.titleGroup) and _TitleUI.titleGroup.Enable) then
+			if self._localOpen then self:RequestCancel(self._localSession) end
+			self:HideLocal() return
+		end
+		if self._localOpen then
+			self:RenderCursor()
+			if not self._pending and self._renderAt >= self._localStartAt and self._swingRemaining <= 0 and self._feedbackKey ~= "EP5_MINING_GUIDE" then self._feedbackKey = "EP5_MINING_GUIDE" self:RefreshTexts() end
+		end
+		if self._swingRemaining > 0 then
+			self._swingRemaining = math.max(0, self._swingRemaining - delta)
+			local progress = 1 - self._swingRemaining / 0.28
+			local swing = progress < 0.35 and progress / 0.35 or (1 - progress) / 0.65
+			self.miningPickaxe.UITransformComponent.UIRotation = Vector3(0, 0, -10 * swing)
+		end
+		if (self._feedbackKey == "EP5_MINING_MISS" or self._feedbackKey == "EP5_MAP3_FLOWER_MISS") and self._resultRemaining > 0 then
+			if self._missEffectRemaining > 0 then
+				self._missEffectRemaining = math.max(0,self._missEffectRemaining-delta)
+				if self._missEffectRemaining <= 0 then self:DrawPickaxe(self.miningPickaxe,56,2) end
+			end
+			self:RenderFailurePresentation()
+		end
+		if self._locale ~= _LocalizationService.CurrentLocaleId then self:RefreshTexts() end
+		if self._resultRemaining > 0 then self._resultRemaining = self._resultRemaining - delta if self._resultRemaining <= 0 then self:HideLocal() end end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		-- 이어하기는 유지하고, 새 판에서만 채굴한 수정을 원래대로 복원한다.
+		self:EndMining("cancel") self._depleted = {}
+		for _, obj in pairs(self._crystals) do if isvalid(obj) then obj.Enable = true end end
+		log("[VRF] mining reset")
+	end
+
+	method void OnEndPlay()
+		-- 이 맵의 이벤트 연결과 자기 일시정지 소유권을 해제한다.
+		if self:IsServer() then self:EndMining("cancel") return end
+		for _, rec in ipairs(self._connections) do if isvalid(rec.entity) then rec.entity:DisconnectEvent(rec.eventType, rec.eventHandler) end end
+		self._connections = {} self:HideLocal() self:StopWorldEffect()
+	end
+end

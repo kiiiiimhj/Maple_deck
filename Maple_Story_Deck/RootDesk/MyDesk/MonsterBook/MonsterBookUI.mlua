@@ -3,7 +3,7 @@ script MonsterBookUI extends Logic
 
 	-- 몬스터 도감 팝업(ui/MonsterBookGroup.ui) + 로비 도감 버튼(ui/TitleGroup.ui MonsterBookButton) 컨트롤러.
 	-- 상태는 전부 MonsterBookLogic(서버)이 들고 있고, 팝업을 열거나 에피소드를 넘길 때 스냅샷(JSON)을 받아 그린다.
-	--   · 위: 에피소드 사진 배너 + 좌우 화살표(에피소드 1~4 순환)
+	--   · 위: 에피소드 사진 배너 + 좌우 화살표(에피소드 1~5 순환)
 	--   · 가운데: 카드 5열 그리드(위아래 스크롤). 카드 = 몬스터 그림 / 처치 수 "n/다음 목표" / 받기 버튼.
 	--     한 번도 안 잡은 카드는 그림을 까맣게(실루엣) + 카드 전체 어둡게 + 흰 자물쇠.
 	--     엘리트/보스는 그림 위에 머리 위 표식과 같은 해골(왕관 해골 / 불꽃 해골).
@@ -29,6 +29,13 @@ script MonsterBookUI extends Logic
 	property string BossBadgeRUID = "012d32932d3b4bf2866834a73eafb0d6"
 	-- 카드 안 그림 칸 중심 높이(카드 템플릿 Image의 기본 위치 — 카드를 0.78배로 줄이며 52→40.6)
 	property number ImageBaseY = 40.6
+	-- 직접 그려 올린 몬스터(에피5 아랫마을 25종)는 정사각 캔버스에 몸통이 가로 40~55%만 차지해서, 캔버스째 칸에 맞추면
+	-- 절반 크기로 작게 들어가고 안 잡은 카드는 실루엣이 자물쇠에 가려 안 보였다(2026-10-21 유저 리포트).
+	-- 그림이 실제로 있는 영역(캔버스 대비 비율 {왼,위,오른,아래}, 위=0) — 계정 리소스 64px 썸네일 알파로 실측.
+	-- 여기 있는 RUID는 이 영역이 칸을 채우도록 그림 칸 크기를 키워서 배치한다(투명 여백은 칸 밖으로 나가도 안 보인다).
+	property table DrawnVisibleBounds = {["06c91a24ce6344c09809846fdd36b78e"]={0.281,0.438,0.688,0.813},["36f90c33428e4e808406d5e733fe4e31"]={0.25,0.297,0.813,0.813},["3a5a00198b254cccb74dcb6a66bac6c0"]={0.313,0.234,0.75,0.656},["6123fffb74234cfaa20d4032dab0f0b9"]={0.297,0.203,0.703,0.703},["6135da3ff4de42368935387ce9651d8e"]={0.219,0.234,0.719,0.719},["6fdaa3f049b44b59b7e0961a927cb87e"]={0.313,0.281,0.688,0.703},["785eaa7b9cd44cc79d1e45717b965e94"]={0.297,0.297,0.781,0.766},["7ad31a497fcc4eac9a2babc64ec5fe40"]={0.266,0.266,0.719,0.766},["7ebf55d958ac4748aff5749a3a57cab0"]={0.281,0.313,0.703,0.719},["8c82959be1f242deb59683cb3bb651f4"]={0.313,0.172,0.781,0.609},["92260194cef7432b9a7935446c27d1fc"]={0.25,0.234,0.625,0.719},["93cb4bc0cb334a629f2a631f6987c1bf"]={0.25,0.266,0.781,0.719},["946840a508d2421aa914a27283d130d1"]={0.281,0.234,0.844,0.781},["979f42966f8e4f0c97af9e87a6eb0df1"]={0.219,0.359,0.75,0.719},["9fbeacc29d914468a1d0b839f457b519"]={0.172,0.25,0.656,0.719},["a06664c5a5bb4047adf0e08d0d6f18bc"]={0.313,0.156,0.875,0.656},["acf89a74f94e4641914b63267c7a5c06"]={0.313,0.188,0.75,0.656},["b64c4651b902414ca9181b3612bada21"]={0.313,0.281,0.75,0.672},["c7b341aaf8654c149ddcb56359af16c0"]={0.281,0.359,0.75,0.719},["cc306ef5f0fb426da269bc70489e762d"]={0.281,0.234,0.797,0.766},["d36aee999c5947cca0a2a27dac26acef"]={0.359,0.203,0.656,0.719},["e3a765d78197494ca323d7a8d3aa65ab"]={0.234,0.188,0.703,0.719},["e4f3088c73214c6fb8ad08b0406e378c"]={0.297,0.078,0.828,0.672},["efc8d29f7acf44fd8205d59f7e4f5fbc"]={0.297,0.359,0.766,0.766},["f5f7101f15b94716aa9f730bb8da83ff"]={0.281,0.234,0.703,0.766}}
+	-- 그림 칸 원래 크기(PlaceImage가 처음 본 값을 저장)
+	property any _imageBaseSize = nil
 	property Color ProgressColor = Color(0.36, 0.2, 0.08, 1)
 	property Color DoneColor = Color(0.2, 0.5, 0.12, 1)
 
@@ -146,9 +153,9 @@ script MonsterBookUI extends Logic
 	-- ── 에피소드 전환 ──────────────────────────────────────────────────────────
 	@ExecSpace("ClientOnly")
 	method void ChangeEpisode(integer delta)
-		-- 좌우 화살표 — 1~4 순환
+		-- 좌우 화살표 — 1~5 순환(에피5 아랫마을 2026-10-21 추가)
 		if self._claimPending then return end
-		local n = 4
+		local n = 5
 		local ep = self._ep + delta
 		if ep < 1 then ep = n end
 		if ep > n then ep = 1 end
@@ -174,6 +181,7 @@ script MonsterBookUI extends Logic
 		if ep == 2 then return "d83a7e649d724c009faf12e4a3dfda4d" end
 		if ep == 3 then return "3ad5d3ae556b42fe94401c63d788bf7a" end
 		if ep == 4 then return "2fda6679e68c44729890ceb154fdc7f8" end
+		if ep == 5 then return "19df4143f1754311a5583fb7f8a70ba7" end
 		return "95ce798ac8fd4b1ab8177405c18c9949"
 	end
 
@@ -183,6 +191,7 @@ script MonsterBookUI extends Logic
 		if ep == 2 then return "MLUA_IDLEREWARDLOGIC_001" end
 		if ep == 3 then return "MLUA_IDLEREWARDLOGIC_002" end
 		if ep == 4 then return "MLUA_IDLEREWARDLOGIC_004" end
+		if ep == 5 then return "EP5_WORLD_NAME" end
 		return "MLUA_IDLEREWARDLOGIC_003"
 	end
 
@@ -445,12 +454,31 @@ script MonsterBookUI extends Logic
 		local tf = imgEntity.UITransformComponent
 		local baseX = 0
 		local baseY = self.ImageBaseY
+		-- 칸 원래 크기(카드 템플릿 값). 아래 여백 보정이 칸 크기를 바꾸므로 처음 본 값을 기준으로 매번 되돌린다(GridView가 칸을 재활용)
+		if self._imageBaseSize == nil then self._imageBaseSize = tf.RectSize end
+		local rw = self._imageBaseSize.x
+		local rh = self._imageBaseSize.y
+		tf.RectSize = self._imageBaseSize
+		local vb = self.DrawnVisibleBounds[frame.ruid]
+		if vb ~= nil then
+			-- 보이는 영역이 칸에 꽉 차게 키우고, 그 영역의 가운데를 칸 가운데에 둔다
+			local vw = vb[3] - vb[1]
+			local vh = vb[4] - vb[2]
+			local size = math.min(rw / vw, rh / vh)
+			tf.RectSize = Vector2(size, size)
+			-- UI 그림은 스프라이트 기준점(이 그림들은 아래에서 30%쯤)이 칸 가운데에 오므로, 보이는 영역 가운데와 기준점의 차이만큼 되돌린다
+			local px = frame.px
+			local py = frame.py
+			if frame.w <= 0 or frame.h <= 0 then px = 0.5 py = 0.5 end
+			local cx = ((vb[1] + vb[3]) * 0.5 - px) * size
+			local cy = ((1 - (vb[2] + vb[4]) * 0.5) - py) * size
+			tf.anchoredPosition = Vector2(baseX - cx, baseY - cy)
+			return
+		end
 		if frame.w <= 0 or frame.h <= 0 then
 			tf.anchoredPosition = Vector2(baseX, baseY)
 			return
 		end
-		local rw = tf.RectSize.x
-		local rh = tf.RectSize.y
 		local s = math.min(rw / frame.w, rh / frame.h)
 		local dw = frame.w * s
 		local dh = frame.h * s

@@ -37,6 +37,9 @@ script PetHouseUI extends Logic
 	property integer StoneTouchId = -999
 	property number StoneHoldStart = 0
 	property Vector2 StoneTouchPoint = Vector2(0,0)
+	property integer StoneTooltipTimer = 0
+	-- 성장석 말풍선 위치 보정(아이콘 기준): x는 꼬리가 아이콘을 가리키도록 오른쪽으로, y는 아이콘 아래 간격
+	property Vector2 StoneTooltipOffset = Vector2(80,-4)
 	property any WalkScene = nil
 	property any ActivityScene = nil
 	property any CareBackdrop = nil
@@ -93,6 +96,10 @@ script PetHouseUI extends Logic
 	property string EnabledClaimRUID = "2cb4da8ece624bdda222d0d92dc48ad0"
 	property string DisabledClaimRUID = "f3caa6aad0d2427eb44d0542c59e3f35"
 	property integer SelectedPetIndex = 1
+	-- 보유 펫이 없을 때 화면(RefreshEmptyState가 처음 필요할 때 만든다)
+	property any EmptyMessage = nil
+	property any EmptyShopButton = nil
+	property table EmptyHidden = {}
 	property boolean GrowthWasVisible = false
 	property number GrowthRevealStart = 0
 
@@ -179,10 +186,80 @@ script PetHouseUI extends Logic
 	end
 
 	@ExecSpace("ClientOnly")
-	method table GetDisplayedPet()
+	method table GetVisiblePets()
+		-- 펫 하우스는 보유한 펫만 넘겨 본다(2026-10-21 유저 지정 — 구매는 상점 펫 탭에서).
+		-- 상태를 아직 못 받았으면 전체 목록을 그대로 둔다(불러오는 중 화면).
 		local entries=_PetLogic:GetPetCatalog()
+		if not _PetLogic.ClientReady then return entries end
+		local owned={}
+		for _,e in ipairs(entries) do
+			if e.progress~=nil and e.progress.Owned then table.insert(owned,e) end
+		end
+		return owned
+	end
+
+	@ExecSpace("ClientOnly")
+	method table GetDisplayedPet()
+		local entries=self:GetVisiblePets()
+		-- 보유 펫이 없으면 첫 펫 정의로 화면 값만 채우고, 그 위를 "아직 펫이 없습니다" 화면이 덮는다(RefreshEmptyState)
+		if #entries==0 then return _PetLogic:GetPetCatalog()[1] end
 		self.SelectedPetIndex=math.max(1,math.min(#entries,self.SelectedPetIndex))
 		return entries[self.SelectedPetIndex]
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean IsEmptyHouse()
+		return _PetLogic.ClientReady and #self:GetVisiblePets()==0
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshEmptyState()
+		-- 보유 펫이 없으면 방 안의 다른 요소를 전부 끄고 안내 문구 + [상점으로 이동] 버튼만 보여준다.
+		-- 끈 요소는 다음 Refresh 맨 앞에서 되켜고(RestoreEmptyHidden), 평소 Refresh가 다시 제 상태로 맞춘다.
+		local empty=self:IsEmptyHouse()
+		if empty and self.EmptyMessage==nil then
+			local msg=_SpawnService:SpawnByEntity(self.PetPanel:GetChildByName("Status"),"EmptyMessage",Vector3.zero,self.PetPanel,false)
+			local mt=msg.UITransformComponent mt.anchoredPosition=Vector2(0,130) mt.RectSize=Vector2(1000,70)
+			local mr=msg.TextGUIRendererComponent mr.FontSize=44 mr.BestFit=false
+			local btn=_SpawnService:SpawnByEntity(self.PetPanel:GetChildByName("buy"),"EmptyShopButton",Vector3.zero,self.PetPanel,false)
+			btn.UITransformComponent.anchoredPosition=Vector2(0,40)
+			-- SpawnByEntity는 자식을 같이 복제하지 않는다 — 글자(Label)를 따로 복제해 붙인다
+			_SpawnService:SpawnByEntity(self.PetPanel:GetChildByName("buy"):GetChildByName("Label"),"Label",Vector3.zero,btn,false)
+			self.EmptyMessage=msg self.EmptyShopButton=btn
+			self:BindClick(btn,function() self:GoToPetShop() end)
+		end
+		if self.EmptyMessage==nil then return end
+		self.EmptyMessage.Enable=empty self.EmptyShopButton.Enable=empty
+		if not empty then return end
+		self.EmptyMessage.TextGUIRendererComponent.Text=_LocalizationService:GetText("PET_HOUSE_EMPTY")
+		local b=self.EmptyShopButton
+		b.ButtonComponent.Enable=true
+		b.SpriteGUIRendererComponent.ImageRUID=DataRef(self.EnabledButtonRUID)
+		b.SpriteGUIRendererComponent.Color=Color(1,1,1,1)
+		b:GetChildByName("Label").TextGUIRendererComponent.Text=_LocalizationService:GetText("PET_HOUSE_GO_SHOP")
+		self.EmptyHidden={}
+		for _,child in ipairs(self.PetPanel.Children) do
+			-- Maker 테스트 부화 버튼은 펫이 없을 때 써야 해서 남긴다(배포판에선 원래 꺼져 있다)
+			if child~=self.EmptyMessage and child~=b and child.Enable and child.Name~="test" then
+				child.Enable=false
+				table.insert(self.EmptyHidden,child)
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RestoreEmptyHidden()
+		for _,child in ipairs(self.EmptyHidden) do if isvalid(child) then child.Enable=true end end
+		self.EmptyHidden={}
+	end
+
+	@ExecSpace("ClientOnly")
+	method void GoToPetShop()
+		-- [상점으로 이동] — 펫 하우스를 닫고 로비 상점 탭의 펫 탭을 연다
+		self:Close()
+		_TitleUI:OnShopClicked()
+		_ShopUI:SelectTab("pet")
+		log("[VRF] PET-HOUSE empty -> shop pet tab")
 	end
 
 	@ExecSpace("ClientOnly")
@@ -195,7 +272,7 @@ script PetHouseUI extends Logic
 
 	@ExecSpace("ClientOnly")
 	method void RefreshNavigation(boolean busy)
-		local count=#_PetLogic:GetPetCatalog()
+		local count=#self:GetVisiblePets()
 		for _,spec in ipairs({{"PrevPet",-1},{"NextPet",1}}) do
 			local button=self.PetPanel:GetChildByName(spec[1])
 			local target=self.SelectedPetIndex+spec[2]
@@ -210,12 +287,14 @@ script PetHouseUI extends Logic
 		if self.PetTutorialOpen then return end
 		if not self.PetMode or (direction~=-1 and direction~=1) then return end
 		if _UtilLogic.ElapsedSeconds<math.max(self.MotionUntil,self.WaitingUntil) then return end
-		local entries=_PetLogic:GetPetCatalog()
+		local entries=self:GetVisiblePets()
 		local nextIndex=self.SelectedPetIndex+direction
 		if nextIndex<1 or nextIndex>#entries then return end
+		local reopenWardrobe=self:IsWardrobeOpen();self:CloseWardrobe()
 		self.SelectedPetIndex=nextIndex self.IdleRUID="" self.CustomFrameKey=""
 		self.GaugeValues={} self.GaugeTargets={} self.ShownAffinity=0 self.GrowthWasVisible=false self.GrowthFraction=-1
 		self:Refresh()
+		if reopenWardrobe then self:OpenWardrobe()end
 		log("[VRF] PET-HOUSE selection="..entries[nextIndex].id)
 	end
 
@@ -248,6 +327,7 @@ script PetHouseUI extends Logic
 	@ExecSpace("ClientOnly")
 	method void Refresh()
 		-- Paint the last server snapshot; loading never enables a purchase or care action.
+		self:RestoreEmptyHidden()
 		local ready = _PetLogic.ClientReady
 		local entry=self:GetDisplayedPet()
 		local pet=entry.progress or PetProgress()
@@ -331,6 +411,8 @@ script PetHouseUI extends Logic
 		self:SetActionScenery(self.Motion,_UtilLogic.ElapsedSeconds-self.MotionStart)
 		self.ShownRevision = _PetLogic.ClientRevision
 		if self.MotionUntil == 0 then self:PlayIdle() end
+		self:RefreshEmptyState()
+		self:RefreshWardrobe()
 	end
 
 	@ExecSpace("ClientOnly")
@@ -836,29 +918,31 @@ script PetHouseUI extends Logic
 		touch.SpriteGUIRendererComponent.RaycastTarget=true
 		touch:AddComponent(UITouchReceiveComponent)
 		self.StoneTouchArea=touch
-		local tooltip=_SpawnService:SpawnByEntity(self.PetPanel:GetChildByName("StoneCaption"),"StoneTooltip",Vector3(0,0,0),self.PetPanel,false)
-		tooltip.UITransformComponent.RectSize=Vector2(350,58)
-		tooltip.UITransformComponent.anchoredPosition=Vector2(600,282)
-		tooltip.SpriteGUIRendererComponent.Color=Color(0,0,0,0.85)
+		-- 성장석 말풍선(유저 지정 2026-10-22): 인벤토리 아이템 이름 말풍선과 같은 그림을 위아래 뒤집어(꼬리가 위) 성장석 아래에 띄운다
+		-- SpawnByEntity는 자식·위치를 안 옮기므로 말풍선과 글자를 따로 복제해 크기를 맞춘다
+		local src=_PetUI.ItemNameTooltip
+		local tooltip=_SpawnService:SpawnByEntity(src,"StoneTooltip",Vector3(0,0,0),self.PetPanel,false)
+		local tt=tooltip.UITransformComponent
+		tt.AnchorsMin=Vector2(.5,.5) tt.AnchorsMax=Vector2(.5,.5) tt.Pivot=Vector2(.5,.5) tt.RectSize=src.UITransformComponent.RectSize tt.UIScale=Vector3(1,1,1)
+		tooltip.SpriteGUIRendererComponent.FlipY=true
 		tooltip.SpriteGUIRendererComponent.RaycastTarget=false
-		tooltip.TextGUIRendererComponent.FontSize=21
+		local srcLabel=src:GetChildByName("Label")
+		local label=_SpawnService:SpawnByEntity(srcLabel,"Label",Vector3(0,0,0),tooltip,false)
+		local lt=label.UITransformComponent
+		lt.AnchorsMin=Vector2(.5,.5) lt.AnchorsMax=Vector2(.5,.5) lt.Pivot=Vector2(.5,.5) lt.RectSize=srcLabel.UITransformComponent.RectSize lt.UIScale=Vector3(1,1,1)
+		-- 뒤집으면 말풍선 몸통이 아래로 내려가므로 글자도 원본(-3)과 반대로 +3
+		lt.anchoredPosition=Vector2(0,-srcLabel.UITransformComponent.anchoredPosition.y)
+		label.Enable=true
 		tooltip.Enable=false self.StoneTooltip=tooltip
 		_UILogic:SetSiblingIndex(tooltip.UITransformComponent,100002)
 		local function bind(kind,callback)
 		 local handle=touch:ConnectEvent(kind,callback)
 		 table.insert(self.StoneTouchBindings,{entity=touch,kind=kind,handle=handle})
 		end
+		-- 누르면 바로 말풍선(인벤토리처럼 1.5초 뒤 자동으로 닫힘). 꾹 누르기 대기는 뺐다(유저 지정 2026-10-22)
 		bind(UITouchDownEvent,function(event)
-		 if not self.PetMode or (event.TouchId<0 and event.TouchId~=-1) then return end
-		 self.StoneTouchId=event.TouchId self.StoneTouchPoint=event.TouchPoint
-		 self.StoneHoldStart=_UtilLogic.ElapsedSeconds
-		end)
-		bind(UITouchUpEvent,function(event) if event.TouchId==self.StoneTouchId then self:CancelStoneTooltip() end end)
-		bind(UITouchExitEvent,function(event) if event.TouchId==self.StoneTouchId then self:CancelStoneTooltip() end end)
-		bind(UITouchDragEvent,function(event)
-		 if event.TouchId~=self.StoneTouchId then return end
-		 local dx=event.TouchPoint.x-self.StoneTouchPoint.x local dy=event.TouchPoint.y-self.StoneTouchPoint.y
-		 if dx*dx+dy*dy>196 then self:CancelStoneTooltip() end
+		 if not self.PetMode or self.PetTutorialOpen then return end
+		 self:ShowStoneTooltip()
 		end)
 	end
 
@@ -882,18 +966,30 @@ script PetHouseUI extends Logic
 	@ExecSpace("ClientOnly")
 	method void CancelStoneTooltip()
 		self.StoneTouchId=-999 self.StoneHoldStart=0
+		if self.StoneTooltipTimer~=0 then _TimerService:ClearTimer(self.StoneTooltipTimer) self.StoneTooltipTimer=0 end
 		if isvalid(self.StoneTooltip) then self.StoneTooltip.Enable=false end
 	end
 
 	@ExecSpace("ClientOnly")
+	method void ShowStoneTooltip()
+		-- 성장석 아이콘 바로 아래에 꼬리가 위로 향한 말풍선. 꼬리가 말풍선 왼쪽에 있어서 꼬리 끝이 아이콘을 가리키게 오른쪽으로 민다
+		if not isvalid(self.StoneTooltip) then return end
+		local icon=self.PetPanel:GetChildByName("StoneIcon").UITransformComponent
+		local tt=self.StoneTooltip.UITransformComponent
+		tt.anchoredPosition=Vector2(icon.anchoredPosition.x+self.StoneTooltipOffset.x,icon.anchoredPosition.y-icon.RectSize.y*0.5-tt.RectSize.y*0.5+self.StoneTooltipOffset.y)
+		_PetUI:FitTooltipText(self.StoneTooltip:GetChildByName("Label").TextGUIRendererComponent,_LocalizationService:GetText("PET_STONE_TOOLTIP"))
+		self.StoneTooltip.Enable=true
+		_UILogic:SetSiblingIndex(tt,100002)
+		if self.StoneTooltipTimer~=0 then _TimerService:ClearTimer(self.StoneTooltipTimer) end
+		self.StoneTooltipTimer=_TimerService:SetTimerOnce(function() self.StoneTooltipTimer=0 self:CancelStoneTooltip() end,1.5)
+		log("[VRF] PET-HOUSE growth-stone tooltip at "..tostring(tt.anchoredPosition))
+	end
+
+	@ExecSpace("ClientOnly")
 	method void UpdateStoneTooltip()
-		if self.StoneTouchId==-999 or not isvalid(self.StoneTooltip) then return end
-		if not self.PetMode or self.PetTutorialOpen or not self.StoneTouchArea.Enable then self:CancelStoneTooltip() return end
-		if _UtilLogic.ElapsedSeconds-self.StoneHoldStart>=0.4 and not self.StoneTooltip.Enable then
-		 self.StoneTooltip.TextGUIRendererComponent.Text=_LocalizationService:GetText("PET_STONE_TOOLTIP")
-		 self.StoneTooltip.Enable=true
-		 log("[VRF] PET-HOUSE growth-stone tooltip opened by hold")
-		end
+		-- 말풍선이 떠 있는 동안 펫 화면을 벗어나면 닫는다
+		if not isvalid(self.StoneTooltip) or not self.StoneTooltip.Enable then return end
+		if not self.PetMode or self.PetTutorialOpen or not self.StoneTouchArea.Enable then self:CancelStoneTooltip() end
 	end
 
 	@ExecSpace("ClientOnly")
@@ -954,6 +1050,7 @@ script PetHouseUI extends Logic
 	 if not isvalid(self.TitleGroup) or not self.TitleGroup.Enable or not self.TitleGroup:GetChildByName("BattlePanel").Enable then return end
 	 if _GameManager.GameStarted and not _GameManager.GameOver then return end
 	 self.PetMode = true self.Overlay.Enable = true
+	 self:InitializeWardrobe()
 	 self.NextRefresh = _UtilLogic.ElapsedSeconds + 15
 	 self.IdleRUID = "" self.GrowthWasVisible=false self:Refresh() _PetLogic:RequestState()
 	 log("[VRF] PET-HOUSE opened from lobby")
@@ -961,6 +1058,7 @@ script PetHouseUI extends Logic
 
 	@ExecSpace("ClientOnly")
 	method void Close()
+	 self:CloseWardrobe()
 	 self:ClosePetTutorial()
 	 self:CloseStatPopup()
 	 if self.Motion == "walk" then self:ShowWalkLoot() end
@@ -994,6 +1092,8 @@ script PetHouseUI extends Logic
 		elseif not pet.Owned then return end
 		local blocked=_PetLogic:GetCareBlockReason(pet,action)
 		if blocked~="" then _UIToast:ShowMessage(_PetLogic:GetPetMessageKey(entry.id,blocked)) return end
+		-- 함께하기/집에 두기는 버튼을 끄지 않고 바로 보낸다(응답 오면 라벨만 바뀜, 하트 모션 대기 없음 — 유저 지정 2026-10-22)
+		if action=="equip" then _PetLogic:RequestPetAction(entry.id,action) return end
 		self.PendingAction=action self.WaitingUntil=_UtilLogic.ElapsedSeconds+4
 		self:Refresh() _PetLogic:RequestPetAction(entry.id,action)
 	end
@@ -1140,12 +1240,14 @@ script PetHouseUI extends Logic
 	 if self.MotionUntil==0 then self:RenderCustomPose(self.CustomIdlePose,now-self.IdleAnimationStart) local entry=self:GetDisplayedPet() if entry.frames~=nil then self.PetDisplay:GetChildByName("Portrait").UITransformComponent.anchoredPosition=Vector2(0,self:GetPortraitY()) end end
 	 local entry=self:GetDisplayedPet()
 	 _PetLogic:AlignCustomPortrait(self.PetDisplay:GetChildByName("Portrait"),entry,entry.pixelScale)
-	 _PetLogic:RenderPetGearUI(self.PetDisplay:GetChildByName("Portrait"),entry,self.CustomImageRUID)
+	 self:UpdateWardrobePortrait()
+	 _PetLogic:RenderPetGearUI(self.PetDisplay:GetChildByName("Portrait"),self:GetWardrobeRenderEntry(entry),self.CustomImageRUID)
 	end
 
 	@ExecSpace("ClientOnly")
 	method void OnEndPlay()
 	 self:Close()
+	 self:DestroyWardrobe()
 	 for _, binding in ipairs(self.Handlers) do
 	  if isvalid(binding.entity) then binding.entity:DisconnectEvent(ButtonClickEvent, binding.handle) end
 	 end
@@ -1395,6 +1497,212 @@ script PetHouseUI extends Logic
 			end
 		end
 		return math.max(0,math.min(42,ceiling-maxTop))
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean IsWardrobeOpen()
+		local q=self._T.wardrobe
+		return q~=nil and q.open and isvalid(q.root) and q.root.Enable
+	end
+
+	@ExecSpace("ClientOnly")
+	method void InitializeWardrobe()
+		if self._T.wardrobe~=nil then return end
+		local inventory=_PetUI.InventoryRoot.UIInventory
+		local sourcePanel=inventory.SellConfirm:GetChildByName("Panel")
+		local artTemplate=sourcePanel:GetChildByName("Bg")
+		local textTemplate=sourcePanel:GetChildByName("SubMessage")
+		local slotTemplate=_PetUI.PetGearSlots:GetChildByName("Cap")
+		local iconTemplate=slotTemplate:GetChildByName("Icon")
+		local q={cards={},open=false,savedVisibility={}}
+		local function place(e,x,y,w,h)inventory:PlacePetGearPurchaseElement(e,x,y,w,h)end
+		local function art(parent,name,ruid,x,y,w,h,sliced)
+			local e=_SpawnService:SpawnByEntity(artTemplate,name,Vector3.zero,parent,false)
+			place(e,x,y,w,h);local r=e.SpriteGUIRendererComponent
+			r.ImageRUID=DataRef(ruid);r.Type=sliced and ImageType.Sliced or ImageType.Simple;r.PreserveSprite=PreserveSpriteType.None;r.RaycastTarget=false
+			return e
+		end
+		q.button=_SpawnService:SpawnByEntity(self.StatButton,"WardrobeButton",Vector3.zero,self.PetPanel,false)
+		place(q.button,628,222,132,56)
+		q.button.SpriteGUIRendererComponent.ImageRUID=DataRef("8a6cc157cb144d9188eb54fd09248e94")
+		q.button.SpriteGUIRendererComponent.Type=ImageType.Simple;q.button.SpriteGUIRendererComponent.PreserveSprite=PreserveSpriteType.None;q.button.SpriteGUIRendererComponent.RaycastTarget=true
+		q.button.ButtonComponent.Transition=TransitionType.ColorTint;q.button.ButtonComponent.Selectable=false
+		q.buttonLabel=_SpawnService:SpawnByEntity(self.StatButton:GetChildByName("Label"),"Label",Vector3.zero,q.button,false)
+		place(q.buttonLabel,0,0,114,38)
+		q.buttonLabel.TextGUIRendererComponent.Text=_LocalizationService:GetText("PET_WARDROBE")
+		-- 검은 테두리(유저 지정 2026-10-22, 0.08은 얇다고 해서 2배)
+		q.buttonLabel.TextGUIRendererComponent.OutlineColor=Color(0,0,0,1);q.buttonLabel.TextGUIRendererComponent.OutlineWidth=0.16
+		self:BindClick(q.button,function()if self:IsWardrobeOpen()then self:CloseWardrobe()else self:OpenWardrobe()end end)
+		q.root=_SpawnService:SpawnByEntity(self.PetDisplay,"PetWardrobe",Vector3.zero,self.PetPanel,false)
+		place(q.root,440,0,660,560)
+		q.background=art(q.root,"Background","d64558d3613a4e9bbe94fb4223e9d88d",0,0,660,560,true)
+		q.background.SpriteGUIRendererComponent.RaycastTarget=true
+		q.titlePanel=art(q.root,"TitlePanel","6868227a81f74195a3076a1a96e2533f",-25,240,420,64,false)
+		q.title=inventory:CreatePetGearPurchaseText(textTemplate,q.titlePanel,"Title",0,0,300,40,26,true)
+		q.close=_SpawnService:SpawnByEntity(self.CloseButton,"Close",Vector3.zero,q.root,false)
+		-- 닫기 버튼 2배(36→72, 유저 지정 2026-10-22)
+		place(q.close,284,240,72,72);q.close.SpriteGUIRendererComponent.RaycastTarget=true
+		self:BindClick(q.close,function()self:CloseWardrobe()end)
+		q.hint=inventory:CreatePetGearPurchaseText(textTemplate,q.root,"Hint",0,189,600,24,15,true)
+		q.hint.TextGUIRendererComponent.Text=_LocalizationService:GetText("PET_WARDROBE_HINT")
+		q.status=inventory:CreatePetGearPurchaseText(textTemplate,q.root,"Status",-140,-243,330,40,14,true)
+		q.reset=_SpawnService:SpawnByEntity(sourcePanel:GetChildByName("BtnNo"),"ResetPreview",Vector3.zero,q.root,false)
+		place(q.reset,200,-243,200,50);q.reset.SpriteGUIRendererComponent.ImageRUID=DataRef("e6142efec43b4440acfb1298a6e01408")
+		q.reset.SpriteGUIRendererComponent.Type=ImageType.Sliced;q.reset.SpriteGUIRendererComponent.PreserveSprite=PreserveSpriteType.None;q.reset.SpriteGUIRendererComponent.RaycastTarget=true
+		q.reset.ButtonComponent.Transition=TransitionType.ColorTint;q.reset.ButtonComponent.Selectable=false
+		local tr=q.reset.TextGUIRendererComponent;tr.Text=_LocalizationService:GetText("PET_WARDROBE_RESET");tr.FontSize=18;tr.BestFit=false;tr.Padding=RectOffset(0,0,0,0);tr.HorizontalAlignment=TextHorizontalAlignmentOption.Center;tr.VerticalAlignment=TextVerticalAlignmentOption.Middle;tr.FontColor=Color(.23,.13,.025,1)
+		self:BindClick(q.reset,function()self:ClearWardrobePreview()end)
+		for index=1,6 do
+			local n=index;local row=math.floor((index-1)/3);local col=(index-1)%3
+			local e=_SpawnService:SpawnByEntity(slotTemplate,"WardrobeItem"..index,Vector3.zero,q.root,false)
+			place(e,(col-1)*205,77-row*194,190,186)
+			local r=e.SpriteGUIRendererComponent;r.ImageRUID=DataRef("62049d396c78487b8a49dd3872431ec8");r.Type=ImageType.Sliced;r.PreserveSprite=PreserveSpriteType.None;r.RaycastTarget=true
+			e.ButtonComponent.Enable=true;e.ButtonComponent.Transition=TransitionType.ColorTint;e.ButtonComponent.Selectable=false
+			local c={entity=e}
+			c.background=art(e,"ItemBackground","b0ee1368553c4561a66d0d06ea0941cc",0,14,90,90,false)
+			c.icon=_SpawnService:SpawnByEntity(iconTemplate,"Icon",Vector3.zero,e,false);place(c.icon,0,14,80,80)
+			c.icon.SpriteGUIRendererComponent.Type=ImageType.Simple;c.icon.SpriteGUIRendererComponent.PreserveSprite=PreserveSpriteType.None
+			c.slot=inventory:CreatePetGearPurchaseText(textTemplate,e,"Slot",0,76,166,22,17,true)
+			c.slot.TextGUIRendererComponent.FontColor=Color(1,.84,.40,1)
+			c.name=inventory:CreatePetGearPurchaseText(textTemplate,e,"Name",0,-49,166,36,16,true)
+			c.name.TextGUIRendererComponent.BestFit=true;c.name.TextGUIRendererComponent.MinSize=14;c.name.TextGUIRendererComponent.MaxSize=16
+			-- 다이아+가격: 오른쪽 10px, 위 5px(유저 지정 2026-10-22)
+			c.diamond=_SpawnService:SpawnByEntity(iconTemplate,"Diamond",Vector3.zero,e,false);place(c.diamond,-22,-75,20,20)
+			c.diamond.SpriteGUIRendererComponent.ImageRUID=DataRef(_GameManager.DiamondIconRUID);c.diamond.SpriteGUIRendererComponent.Type=ImageType.Simple;c.diamond.SpriteGUIRendererComponent.PreserveSprite=PreserveSpriteType.None
+			c.price=inventory:CreatePetGearPurchaseText(textTemplate,e,"Price",20,-75,58,24,20,false)
+			c.owned=inventory:CreatePetGearPurchaseText(textTemplate,e,"Owned",-12,-80,130,24,18,true)
+			self:BindClick(e,function()self:SelectWardrobeItem(n)end)
+			q.cards[index]=c
+		end
+		self._T.wardrobe=q;q.root.Enable=false
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OpenWardrobeForPet(string petId)
+		local found=0
+		for index,entry in ipairs(self:GetVisiblePets())do if entry.id==petId and entry.progress~=nil and entry.progress.Owned then found=index break end end
+		if found==0 then return end
+		_PetUI.InventoryRoot.UIInventory:Close()
+		self.SelectedPetIndex=found;self:Open();self:OpenWardrobe()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OpenWardrobe()
+		if self:IsWardrobeOpen() then return end
+		if not self.PetMode or self.PetTutorialOpen or _UtilLogic.ElapsedSeconds<math.max(self.MotionUntil,self.WaitingUntil) then return end
+		local entry=self:GetDisplayedPet();if entry.progress==nil or not entry.progress.Owned then return end
+		self:InitializeWardrobe();self:CloseStatPopup();self:CancelStoneTooltip()
+		local q=self._T.wardrobe;q.open=true;q.petId=entry.id;q.preview=nil;q.selected=nil
+		q.savedVisibility={};q.savedWidgets={};q.navPositions={}
+		for _,name in ipairs({"CareMeters","State"})do local e=self.PetDisplay:GetChildByName(name);table.insert(q.savedWidgets,{entity=e,enabled=e.Enable});e.Enable=false end
+		if isvalid(self.GrowthTrack)then table.insert(q.savedWidgets,{entity=self.GrowthTrack,enabled=self.GrowthTrack.Enable});self.GrowthTrack.Enable=false end
+		for _,name in ipairs({"PrevPet","NextPet"})do local e=self.PetPanel:GetChildByName(name);local p=e.UITransformComponent.anchoredPosition;q.navPositions[name]={x=p.x,y=p.y}end
+		for _,name in ipairs({"feed","wash","walk","sleep","inject","equip","rank","XP"})do
+			local e=self.PetPanel:GetChildByName(name);q.savedVisibility[name]=e.Enable;e.Enable=false
+		end
+		q.root.Enable=true;_UILogic:SetSiblingIndex(q.root.UITransformComponent,100003)
+		self:RefreshWardrobe()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshWardrobe()
+		local q=self._T.wardrobe;if q==nil then return end
+		local entry=self:GetDisplayedPet();local pet=entry.progress
+		q.button.Enable=self.PetMode and pet~=nil and pet.Owned
+		q.button.ButtonComponent.Enable=q.button.Enable and _UtilLogic.ElapsedSeconds>=math.max(self.MotionUntil,self.WaitingUntil)
+		if not q.open then return end
+		if not self.PetMode or entry.id~=q.petId or pet==nil or not pet.Owned then self:CloseWardrobe()return end
+		q.title.TextGUIRendererComponent.Text=_LocalizationService:GetTextFormat("PET_WARDROBE_TITLE",_LocalizationService:GetText(entry.nameKey))
+		local labels=_PetUI.InventoryRoot.UIInventory:GetPetGearPurchaseLabels()
+		for index,c in ipairs(q.cards)do
+			local variant=math.floor((index-1)/3)+1;local slot=({"Cap","Coat","Necklace"})[(index-1)%3+1]
+			local def=_PetLogic:GetPetGearVariants(entry.id,slot)[variant]
+			c.entity.Enable=def~=nil
+			if def~=nil then
+				c.slotName=slot;c.variant=variant;c.def=def
+				local mask=variant>1 and (pet.GearVariantOwnedMask or 0)or(pet.GearOwnedMask or 0)
+				c.isOwned=_PetLogic:HasPetGearBit(mask,_PetLogic:GetPetGearOwnershipBit(def.bit,variant))
+				local wearing=_PetLogic:HasPetGearBit(pet.GearEquippedMask or 0,def.bit)and _PetLogic:GetPetGearDesignIndex(pet.GearDesigns or 0,def.bit)==variant
+				c.icon.SpriteGUIRendererComponent.ImageRUID=DataRef(def.icon);c.icon.SpriteGUIRendererComponent.Color=Color(1,1,1,1)
+				c.slot.TextGUIRendererComponent.Text=labels.slots[slot]
+				c.name.TextGUIRendererComponent.Text=_PetLogic:GetPetGearName(def)
+				c.diamond.Enable=not c.isOwned;c.price.Enable=not c.isOwned;c.owned.Enable=c.isOwned
+				c.price.TextGUIRendererComponent.Text=tostring(_PetLogic:GetPetGearPrice())
+				c.owned.TextGUIRendererComponent.Text=_LocalizationService:GetText(wearing and "PET_GEAR_WORN" or "PET_WARDROBE_OWNED")
+				c.entity.SpriteGUIRendererComponent.ImageRUID=DataRef(q.selected==index and "b0ee1368553c4561a66d0d06ea0941cc"or"62049d396c78487b8a49dd3872431ec8")
+				-- 펫 얼굴은 인벤토리처럼 장비 칸(ItemBackground 90x90, 중심 0,14) 우측 하단 모서리에 붙인다(유저 지정 2026-10-22)
+				_PetLogic:ShowPetGearOwnerBadge(c.entity,entry.id,29,-13,28)
+			end
+		end
+		q.status.TextGUIRendererComponent.Text=_LocalizationService:GetText(q.preview~=nil and "PET_WARDROBE_PREVIEWING" or "PET_WARDROBE_EXCLUSIVE")
+		q.reset.ButtonComponent.Enable=q.preview~=nil
+		for name,_ in pairs(q.savedVisibility)do self.PetPanel:GetChildByName(name).Enable=false end
+		for _,v in ipairs(q.savedWidgets or {})do if isvalid(v.entity)then v.entity.Enable=false end end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SelectWardrobeItem(integer index)
+		if not self:IsWardrobeOpen() then return end
+		local q=self._T.wardrobe;local c=q.cards[index];local entry=self:GetDisplayedPet()
+		if c==nil or c.def==nil or q.petId~=entry.id then return end
+		local pet=entry.progress;if pet==nil or not pet.Owned then return end
+		local bit=c.def.bit;local mask=pet.GearEquippedMask or 0
+		if not _PetLogic:HasPetGearBit(mask,bit)then mask=mask+bit end
+		local weight=bit==1 and 1 or(bit==2 and 100 or 10000);local designs=pet.GearDesigns or 0
+		designs=designs-math.floor(designs/weight)%100*weight+(c.variant-1)*weight
+		q.preview={petId=entry.id,mask=mask,designs=designs};q.selected=index
+		self:RefreshWardrobe()
+		_PetUI.InventoryRoot.UIInventory:OpenWardrobeGearConfirm(entry.id,c.slotName,c.variant)
+	end
+
+	@ExecSpace("ClientOnly")
+	method table GetWardrobeRenderEntry(table entry)
+		local q=self._T.wardrobe
+		if q==nil or not q.open or q.preview==nil or q.preview.petId~=entry.id then return entry end
+		local visual={};for key,value in pairs(entry)do visual[key]=value end
+		visual.progress={Owned=true,GearEquippedMask=q.preview.mask,GearDesigns=q.preview.designs}
+		return visual
+	end
+
+	@ExecSpace("ClientOnly")
+	method void UpdateWardrobePortrait()
+		local q=self._T.wardrobe
+		if q==nil or not q.open then return end
+		self.PetDisplay:GetChildByName("Portrait").UITransformComponent.anchoredPosition=Vector2(-270,self:GetPortraitY())
+		local name=self.PetDisplay:GetChildByName("Name");local p=name.UITransformComponent.anchoredPosition
+		name.UITransformComponent.anchoredPosition=Vector2(-270,p.y)
+		for key,p in pairs(q.navPositions or {})do self.PetPanel:GetChildByName(key).UITransformComponent.anchoredPosition=Vector2(p.x-270,p.y)end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ClearWardrobePreview()
+		local q=self._T.wardrobe;if q==nil then return end
+		q.preview=nil;q.selected=nil
+		if q.open then self:RefreshWardrobe()end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void CloseWardrobe()
+		local q=self._T.wardrobe;if q==nil then return end
+		q.open=false;q.preview=nil;q.selected=nil;q.root.Enable=false
+		local inventory=_PetUI.InventoryRoot.UIInventory
+		if inventory._T.petGearPurchase~=nil and inventory._T.petGearPurchase.origin=="wardrobe"then inventory:ClosePetGearPurchaseUI()end
+		for name,enabled in pairs(q.savedVisibility)do self.PetPanel:GetChildByName(name).Enable=enabled end
+		q.savedVisibility={}
+		for _,v in ipairs(q.savedWidgets or {})do if isvalid(v.entity)then v.entity.Enable=v.enabled end end
+		for key,p in pairs(q.navPositions or {})do self.PetPanel:GetChildByName(key).UITransformComponent.anchoredPosition=Vector2(p.x,p.y)end
+		q.savedWidgets={};q.navPositions={}
+		self.PetDisplay:GetChildByName("Portrait").UITransformComponent.anchoredPosition=Vector2(0,self:GetPortraitY())
+		local name=self.PetDisplay:GetChildByName("Name");local p=name.UITransformComponent.anchoredPosition;name.UITransformComponent.anchoredPosition=Vector2(0,p.y)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void DestroyWardrobe()
+		local q=self._T.wardrobe;if q==nil then return end
+		self:CloseWardrobe()
+		if isvalid(q.root)then q.root:Destroy()end
+		if isvalid(q.button)then q.button:Destroy()end
+		self._T.wardrobe=nil
 	end
 
 end

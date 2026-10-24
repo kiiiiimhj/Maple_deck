@@ -1,0 +1,385 @@
+@Component
+script MushroomInspectChallenge extends Component
+
+	@MinValue(1) @MaxValue(3)
+	property integer MaxSpeedLevel = 3
+	-- 0=random, 1=normal green band, 2=wider green band.
+	@MinValue(0) @MaxValue(2)
+	property integer TargetWidthMode = 0
+	property number TargetRadius = 62
+	property number StartRadius = 148
+	property number EndRadius = 32
+	property Vector2 ObjectUIOffset = Vector2(0, -110)
+	property number ObjectWorldYOffset = 0.15
+	property Entity inspectGroup = "57a02d6d-7557-4ba3-9faf-0f365afdb0d3"
+	property Entity panel = "fc071ea7-c1e3-4693-a353-2c2cec4ab137"
+	property Entity touchArea = "56b9245c-bc77-46ba-9a03-2300a53394dc"
+	property Entity movingRing = "47e23b36-0996-451d-8cb1-ba342dfe458f"
+	property Entity normalBand = "758821e1-d4e8-43cf-9adf-40225cec58e2"
+	property Entity wideBand = "97266d94-4f62-4ddd-9a57-ffa2af970661"
+	property Entity magnifier = "2330da57-1d81-49ed-8543-57797e2313f3"
+	property TextGUIRendererComponent guide = "c740f0bf-30bb-4aa2-8bf4-68dbaabf8e39"
+	property TextGUIRendererComponent speedText = "a74cb9b9-2998-469d-bc01-8ffeb5bb02de"
+	property Entity feedback = "7c106ec9-3545-4e9d-b691-575c0c0cdd42"
+	property UIBasicParticleComponent sparkle = "9b867f9e-8e92-4c02-a8fb-f6f3d2ad749b"
+	property any _touchConnection = nil
+	property integer _session = 0
+	property boolean _active = false
+	property string _owner = ""
+	property integer _speed = 1
+	property integer _band = 1
+	property number _startAt = 0
+	property number _deadline = 0
+	property boolean _localOpen = false
+	property boolean _pending = false
+	property integer _localSession = 0
+	property integer _localSpeed = 1
+	property integer _localBand = 1
+	property number _localStartAt = 0
+	property number _renderAt = 0
+	property number _resultRemaining = 0
+	property boolean _success = false
+	property string _locale = ""
+	property boolean _artReady = false
+	-- 2026-10-24 유저 지정: 존4 버섯 전용이던 이 도전을 웹 체크리스트에서 고른 이스터에그 77개에도 붙였다.
+	-- 성공하면 그 오브젝트의 원래 터치 처리(확률·보상·대사 그대로)를 부르고, 실패하면 아무것도 안 나오며 다시 도전할 수 있다.
+	-- 튜토리얼 이스터에그(map04 버섯)만 IsTutorialEgg=true — 취소 시 튜토리얼 종료 처리를 그 하나에만 건다.
+	property boolean IsTutorialEgg = true
+	property boolean _granting = false
+	property integer _zone = 0
+	property integer _localZone = 0
+
+	method void OnBeginPlay()
+		if self:IsClient() then
+			-- 돋보기 그림은 UI 하나를 같이 쓰므로 붙은 오브젝트가 많아도 한 번만 그린다
+			if not self._artReady and _InspectChallengeLogic:ClaimArt() then self:DrawVectorArt() end
+			self._artReady = true
+			if self._touchConnection == nil then self._touchConnection = self.touchArea:ConnectEvent(UITouchDownEvent, self.OnCircleTouched) end
+			self:HideLocal()
+			log("[VRF] mushroom inspect UI boot vector=true bandWidths=18,28 speeds=3.2,2.5,1.9")
+		end
+	end
+
+	method number GetDuration(integer speed)
+		local durations = {3.2, 2.5, 1.9}
+		return durations[math.max(1, math.min(3, speed))]
+	end
+
+	method number GetBandWidth(integer band)
+		return band == 2 and 28 or 18
+	end
+
+	method number GetRadius(number elapsed, integer speed)
+		local p = math.max(0, math.min(1, elapsed / self:GetDuration(speed)))
+		return self.StartRadius + (self.EndRadius - self.StartRadius) * p
+	end
+
+	method boolean IsHit(number elapsed, integer speed, integer band)
+		if elapsed < 0 or elapsed > self:GetDuration(speed) then return false end
+		return math.abs(self:GetRadius(elapsed, speed) - self.TargetRadius) <= self:GetBandWidth(band) * 0.5
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean ValidUser(string userId)
+		if not self.Entity.Enable or not _GameManager.GameStarted or _GameManager.GameOver then return false end
+		-- 도전 중에 구역을 옮기면 취소된다(시작한 구역을 기억해 비교)
+		if self._active and self._zone ~= _MapManager.CurrentMapIndex then return false end
+		local player = _UserService:GetUserEntityByUserId(userId)
+		if not isvalid(player) or player.CurrentMap ~= self.Entity.CurrentMap then return false end
+		return self:IsRewardAvailable()
+	end
+
+	-- 이 오브젝트에 붙은 원래 이스터에그 스크립트(상자 제외). 성공 시 OnInspectSuccess, 가능 여부는 IsInspectAvailable
+	@ExecSpace("ServerOnly")
+	method Component GetInspectTrigger()
+		for _, name in ipairs({"script.Ep1TouchEasterEggTrigger", "script.Ep2Map1SkillEasterEggTrigger", "script.Ep2Map2ItemEasterEggTrigger",
+			"script.Ep3Map1SkillCoverTrigger", "script.Ep3Map2SkillCoverTrigger", "script.Ep3Map3ItemEasterEggTrigger",
+			"script.Ep4Map4EasterEggTrigger", "script.Ep4Map5RewardTrigger", "script.Ep5GourdInspectTrigger", "script.Ep5Map1InspectTrigger", "script.Ep5Map4InspectTrigger", "script.Ep5Map5SunglassesInspectTrigger"}) do
+			local c = self.Entity:GetComponent(name)
+			if c ~= nil then return c end
+		end
+		return nil
+	end
+
+	-- 이미 열린 상자·이미 쓴 이스터에그는 도전 자체를 띄우지 않는다(예전에도 눌러봐야 조용히 무시되던 상태)
+	@ExecSpace("ServerOnly")
+	method boolean IsRewardAvailable()
+		local chest = self.Entity:GetComponent("script.TreasureChestEgg")
+		if chest ~= nil then return not chest:IsOpened() end
+		local trigger = self:GetInspectTrigger()
+		if trigger ~= nil then return trigger:IsInspectAvailable() end
+		return false
+	end
+
+	-- 성공 시 원래 보상 경로를 그대로 탄다(확률·대사 포함)
+	@ExecSpace("ServerOnly")
+	method void GrantSuccess(string userId)
+		local chest = self.Entity:GetComponent("script.TreasureChestEgg")
+		if chest ~= nil then chest:OpenChest() return end
+		local trigger = self:GetInspectTrigger()
+		if trigger ~= nil then trigger:OnInspectSuccess(userId) end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void BeginForUser(string userId)
+		if self._active or not self:ValidUser(userId) then return end
+		-- The first-egg guide yields to this game without marking it complete or paying its reward yet.
+		if _GameManager.OptionPaused or _GameManager.ShopPaused or _GameManager.EasterEggPaused or _GameManager.EntryPresentationPending then return end
+		if _GameManager.TutorialPaused and not _TutorialLogic.EggActive then return end
+		-- 화면 UI가 하나라 다른 오브젝트 도전이 열려 있으면 시작하지 않는다
+		if not _InspectChallengeLogic:TryClaim(self.Entity.Path) then return end
+		self._zone = _MapManager.CurrentMapIndex
+		self._active = true self._owner = userId self._session = self._session + 1
+		_TutorialLogic:SuspendEggGuideForInspection(self.Entity.Path)
+		self._speed = _UtilLogic:RandomIntegerRange(1, math.max(1, math.min(3, self.MaxSpeedLevel)))
+		self._band = self.TargetWidthMode
+		if self._band < 1 or self._band > 2 then self._band = _UtilLogic:RandomIntegerRange(1, 2) end
+		self._startAt = _UtilLogic.ServerElapsedSeconds + 0.35
+		self._deadline = self._startAt + self:GetDuration(self._speed) + 0.25
+		self:ShowChallenge(self._session, self._speed, self._band, self._startAt, userId)
+		log("[VRF] mushroom inspect begin session=" .. self._session .. " speed=" .. self._speed .. " band=" .. self:GetBandWidth(self._band) .. " paused=" .. tostring(_GameManager:IsGamePaused()))
+	end
+
+	@ExecSpace("Server")
+	method void RequestPress(integer session, number pressedAt)
+		if not self._active or self._session ~= session or self._owner ~= senderUserId then return end
+		if not self:ValidUser(senderUserId) or _GameManager:IsGamePaused() then self:EndChallenge("cancel") return end
+		local now = _UtilLogic.ServerElapsedSeconds
+		if pressedAt ~= pressedAt or pressedAt < self._startAt or pressedAt > now + 0.1 or pressedAt < now - 0.75 then self:EndChallenge("miss") return end
+		local hit = self:IsHit(pressedAt - self._startAt, self._speed, self._band)
+		log("[VRF] mushroom inspect press hit=" .. tostring(hit) .. " radius=" .. self:GetRadius(pressedAt - self._startAt, self._speed) .. " band=" .. self:GetBandWidth(self._band))
+		if not hit then self:EndChallenge("miss") return end
+		-- 보상부터 굴리고, 그 사이 꽝 대사가 나갔으면(템 안 나옴) "성공!" 연출 대신 조용히 닫는다(2026-10-24 유저 지정)
+		local owner = self._owner
+		local missBefore = _EasterEggMessageLogic:GetMissCount()
+		-- 지급 중 대기(튜토리얼 완료 저장 SetAndWait 등) 사이에 OnUpdate가 "보상 없음"으로 보고 취소하지 않게 막는다
+		self._granting = true
+		self:GrantSuccess(owner)
+		self._granting = false
+		self:EndChallenge(_EasterEggMessageLogic:GetMissCount() > missBefore and "empty" or "success")
+	end
+
+	@ExecSpace("Server")
+	method void RequestCancel(integer session)
+		if self._active and self._session == session and self._owner == senderUserId then self:EndChallenge("cancel") end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void EndChallenge(string outcome)
+		if not self._active then return end
+		local owner = self._owner
+		self._active = false self._owner = "" self._deadline = 0
+		_InspectChallengeLogic:Release(self.Entity.Path)
+		if outcome == "cancel" and self.IsTutorialEgg and _TutorialLogic.EggActive then _TutorialLogic:EndEggTutorial(false) end
+		if owner ~= "" and isvalid(_UserService:GetUserEntityByUserId(owner)) then self:ShowResult(self._session, outcome, owner) end
+		log("[VRF] mushroom inspect end=" .. outcome .. " openedOnlyOnSuccess=true")
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean IsGameplayVisible()
+		local player = _UserService.LocalPlayer
+		return _GameManager.GameStarted and not _GameManager.GameOver and isvalid(player)
+			and player.CurrentMap == self.Entity.CurrentMap and _MapManager.CurrentMapIndex == self._localZone
+			and not (isvalid(_TitleUI.titleGroup) and _TitleUI.titleGroup.Enable)
+	end
+
+	@ExecSpace("Client")
+	method void ShowChallenge(integer session, integer speed, integer band, number startAt)
+		if session <= self._localSession then return end
+		self:HideLocal()
+		self._localSession = session
+		self._localZone = _MapManager.CurrentMapIndex
+		if not self:IsGameplayVisible() then self:RequestCancel(session) return end
+		self._localSpeed = speed self._localBand = band self._localStartAt = startAt
+		self._localOpen = true self._pending = false self._success = false
+		self.normalBand.Enable = band == 1 self.wideBand.Enable = band == 2
+		self.feedback.Enable = false
+		self.guide.Entity.Enable = true self.speedText.Entity.Enable = true
+		self.touchArea.Enable = true self.inspectGroup.Enable = true
+		self:UpdateObjectAnchor(0)
+		self.magnifier.UITransformComponent.UIScale = Vector3(1, 1, 1)
+		self:TintRing(Color(1, 0.81, 0.24, 1))
+		self:RefreshTexts()
+		self:RenderRing()
+		log("[VRF] mushroom inspect show session=" .. session .. " smoothCircle=true objectAnchored=true noDim=true")
+	end
+
+	@ExecSpace("ClientOnly")
+	method Vector2 GetObjectAnchor()
+		local wp = self.Entity.TransformComponent.WorldPosition
+		local target = _UILogic:ScreenToUIPosition(
+			_UILogic:WorldToScreenPosition(Vector2(wp.x, wp.y + self.ObjectWorldYOffset)))
+		local edge = _UILogic:ScreenToUIPosition(Vector2(_UILogic.ScreenWidth, _UILogic.ScreenHeight))
+		local halfWidth = math.abs(edge.x) local halfHeight = math.abs(edge.y)
+		local x = math.max(-halfWidth + 178, math.min(halfWidth - 178, target.x + self.ObjectUIOffset.x))
+		local y = math.max(-halfHeight + 415, math.min(halfHeight - 220, target.y + self.ObjectUIOffset.y))
+		return Vector2(x, y)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void UpdateObjectAnchor(number shake)
+		-- Reproject each frame so the challenge stays beside the mushroom as the camera moves.
+		local anchor = self:GetObjectAnchor()
+		self.panel.UITransformComponent.anchoredPosition = Vector2(anchor.x + shake, anchor.y)
+		local edge = _UILogic:ScreenToUIPosition(Vector2(_UILogic.ScreenWidth, _UILogic.ScreenHeight))
+		local halfWidth = math.abs(edge.x)
+		local below = anchor.y > 0
+		local guideX = math.max(-halfWidth + 449, math.min(halfWidth - 449, anchor.x)) - anchor.x
+		local speedX = math.max(-halfWidth + 349, math.min(halfWidth - 349, anchor.x)) - anchor.x
+		local feedbackX = math.max(-halfWidth + 404, math.min(halfWidth - 404, anchor.x)) - anchor.x
+		-- Keep the longer labels on screen without pulling the lens away from its world object.
+		self.guide.Entity.UITransformComponent.anchoredPosition = Vector2(guideX, below and -185 or 205)
+		self.speedText.Entity.UITransformComponent.anchoredPosition = Vector2(speedX, below and -220 or 170)
+		self.feedback.UITransformComponent.anchoredPosition = Vector2(feedbackX, below and -205 or 205)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshTexts()
+		self._locale = _LocalizationService.CurrentLocaleId
+		self.guide.Text = _LocalizationService:GetText("MUSHROOM_INSPECT_GUIDE")
+		local bandKey = self._localBand == 2 and "MUSHROOM_INSPECT_WIDE" or "MUSHROOM_INSPECT_NORMAL"
+		self.speedText.Text = _LocalizationService:GetTextFormat("MUSHROOM_INSPECT_SPEED", tostring(self._localSpeed), _LocalizationService:GetText(bandKey))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RenderRing()
+		self._renderAt = _UtilLogic.ServerElapsedSeconds
+		local radius = self:GetRadius(self._renderAt - self._localStartAt, self._localSpeed)
+		local scale = radius / 100
+		self.movingRing.UITransformComponent.UIScale = Vector3(scale, scale, 1)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void DrawVectorArt()
+		-- The lens keeps its analytical vector geometry. Circles use bilinear sprites
+		-- so their edges stay round while the diameter changes.
+		local clear = Color(0,0,0,0)
+		local icon={} local ink=Color(0.085,0.145,0.12,1) local white=Color(1,0.97,0.87,1)
+		local glass=Color(0.48,0.87,0.91,0.16) local glint=Color(0.78,0.97,1,0.9)
+		local coverage=function(d) return math.max(0,math.min(1,0.5-d)) end
+		local over=function(bottom,top,a)
+			if a<=0 then return bottom end
+			local ta=top.a*a local out=ta+bottom.a*(1-ta)
+			if out<=0 then return clear end
+			return Color((top.r*ta+bottom.r*bottom.a*(1-ta))/out,(top.g*ta+bottom.g*bottom.a*(1-ta))/out,(top.b*ta+bottom.b*bottom.a*(1-ta))/out,out)
+		end
+		for y=1,176 do for x=1,176 do
+			local px=(x-0.5)*0.5-44 local py=(y-0.5)*0.5-44
+			local t=math.max(0,math.min(1,((px+8)*(-21)+(py+9)*(-21))/882))
+			local hx=px-(-8-21*t) local hy=py-(-9-21*t) local h=math.sqrt(hx*hx+hy*hy)
+			local lx=px-10 local ly=py-10 local r=math.sqrt(lx*lx+ly*ly)
+			local color=over(clear,ink,coverage(h-7))
+			color=over(color,white,coverage(h-4.5))
+			color=over(color,glass,coverage(r-20))
+			color=over(color,ink,coverage(math.abs(r-23)-5.5))
+			color=over(color,white,coverage(math.abs(r-23)-3.5))
+			if ly>5 and lx<6 then color=over(color,glint,coverage(math.abs(r-14)-1.25)) end
+			icon[#icon+1]=color
+		end end
+		self.magnifier.PixelGUIRendererComponent:ResetWithColors(176,176,icon)
+		self:TintRing(Color(1,0.81,0.24,1))
+		log("[VRF] mushroom inspect smooth sprites ready filter=bilinear greenAlpha=0.66 backgroundAlpha=0.24 icon=176")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void TintRing(Color color)
+		self.movingRing:GetChildByName("Outline").SpriteGUIRendererComponent.Color = color
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Press()
+		if not self._localOpen or self._pending or self._renderAt < self._localStartAt then return end
+		self._pending = true
+		self:RequestPress(self._localSession, self._renderAt)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnCircleTouched(UITouchDownEvent event)
+		if event.TouchId == -1 or event.TouchId > 0 then self:Press() end
+	end
+
+	@ExecSpace("ClientOnly")
+	@EventSender("Service", "InputService")
+	handler HandleKeyDown(KeyDownEvent event)
+		if not self._localOpen then return end
+		if event.key == KeyboardKey.Space then self:Press()
+		elseif event.key == KeyboardKey.Escape then self:RequestCancel(self._localSession) self:HideLocal() end
+	end
+
+	@ExecSpace("Client")
+	method void ShowResult(integer session, string outcome)
+		if session ~= self._localSession then return end
+		self._localOpen = false self._pending = false
+		self.touchArea.Enable = false
+		-- "empty" = 맞췄지만 꽝 — 돋보기는 바로 닫고 꽝 대사(토스트)만 보이게 한다
+		if outcome == "cancel" or outcome == "empty" or not self:IsGameplayVisible() then self:HideLocal() log("[VRF] mushroom inspect feedback=" .. outcome) return end
+		self._success = outcome == "success"
+		self._resultRemaining = self._success and 0.75 or 1.2
+		local key = self._success and "EP5_MINING_SUCCESS" or "EP5_MINING_MISS"
+		self.feedback:GetChildByName("Label").TextGUIRendererComponent.Text = _LocalizationService:GetText(key)
+		self.feedback.Enable = true
+		self:UpdateObjectAnchor(0)
+		self.guide.Entity.Enable = false self.speedText.Entity.Enable = false
+		self:TintRing(self._success and Color(1, 0.96, 0.72, 1) or Color(1, 0.29, 0.22, 1))
+		if self._success then
+			self.sparkle:Stop() self.sparkle:Play()
+			_SoundOptionLogic:PlaySfx("972843e759204d3e9ad84e7d3fa94f83", 0.55)
+		else
+			_SoundOptionLogic:PlaySfx("6dc40825bdbd4184a1bac3d0868389b2", 0.28)
+		end
+		log("[VRF] mushroom inspect feedback=" .. outcome)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void HideLocal()
+		self._localOpen = false self._pending = false self._resultRemaining = 0
+		if isvalid(self.inspectGroup) then self.inspectGroup.Enable = false end
+		if isvalid(self.touchArea) then self.touchArea.Enable = false end
+		if isvalid(self.sparkle) then self.sparkle:Stop() end
+	end
+
+	method void OnUpdate(number delta)
+		if self:IsServer() then
+			if not self._active or self._granting then return end
+			if not self:ValidUser(self._owner) or _GameManager:IsGamePaused() then self:EndChallenge("cancel") return end
+			if _UtilLogic.ServerElapsedSeconds >= self._deadline then self:EndChallenge("miss") end
+			return
+		end
+		if not self._localOpen and self._resultRemaining <= 0 then return end
+		-- The server releases the egg tutorial before sending this challenge. That
+		-- @Sync update can arrive after the RPC, so allow its brief ready interval.
+		local releasingGuide = self._localOpen and _GameManager.TutorialPaused
+			and _UtilLogic.ServerElapsedSeconds < self._localStartAt + 0.25
+			and not (_GameManager.OptionPaused or _GameManager.ShopPaused or _GameManager.EasterEggPaused or _GameManager.EntryPresentationPending)
+		if not self:IsGameplayVisible() or (_GameManager:IsGamePaused() and not releasingGuide) then
+			if self._localOpen then self:RequestCancel(self._localSession) end
+			self:HideLocal() return
+		end
+		self:UpdateObjectAnchor(0)
+		if self._localOpen then self:RenderRing() end
+		if self._locale ~= _LocalizationService.CurrentLocaleId then self:RefreshTexts() end
+		if self._resultRemaining > 0 then
+			self._resultRemaining = math.max(0, self._resultRemaining - delta)
+			if self._resultRemaining <= 0 then self:HideLocal() return end
+			if self._success then
+				local k = 1 + 0.1 * math.sin((0.75 - self._resultRemaining) / 0.75 * math.pi)
+				self.magnifier.UITransformComponent.UIScale = Vector3(k, k, 1)
+			else
+				local t = 1.2 - self._resultRemaining
+				local shake = t < 0.28 and math.sin(t * 80) * 7 * (1 - t / 0.28) or 0
+				self:UpdateObjectAnchor(shake)
+			end
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		self:EndChallenge("cancel")
+	end
+
+	method void OnEndPlay()
+		if self:IsServer() then self:EndChallenge("cancel") return end
+		if self._touchConnection ~= nil and isvalid(self.touchArea) then self.touchArea:DisconnectEvent(UITouchDownEvent, self._touchConnection) end
+		self._touchConnection = nil self:HideLocal()
+	end
+end

@@ -29,6 +29,13 @@ script WorldCharacterSelectUI extends Logic
 	property Entity unlimitedModeCheckMark = "a23b7b51-ac37-43fd-a16e-584d92317301"
 	property boolean _unlimitedModeChecked = true
 	property any _unlimitedModeToggleHandler = nil
+	-- 2026-10-22 유저 지정: 체크 문구를 "타임어택"으로 바꿨다 → 체크마크는 타임어택일 때 켜진다(_unlimitedModeChecked의 반대).
+	-- 옆 i 아이콘을 누르면 설명 말풍선이 2초 뜬다
+	property ButtonComponent modeInfoButton = "101d928c-ea91-40ed-ae08-756381f6f575"
+	property Entity modeInfoTooltip = "8166349a-6729-422c-a4e1-0fb343b25e0d"
+	property TextGUIRendererComponent modeInfoTooltipText = "f8e7ad7d-c415-44c8-9a9c-5f578a028d11"
+	property any _modeInfoHandler = nil
+	property integer _modeInfoTimer = 0
 
 	-- 월드 목록 — 지금은 실제 입장 가능한 월드가 1개뿐이라, </> 이동 기능이 실제로 동작하는 걸 보여주기
 	-- 위해 "준비중" 더미 월드를 하나 더 둔다. enterable=false인 월드는 확인을 눌러도 입장하지 않는다.
@@ -84,10 +91,10 @@ script WorldCharacterSelectUI extends Logic
 			-- 배지 = 무기(에피1과 같은 심볼) + 갑옷(에피2 첫 배지와 같은 심볼) — WeaponTierDataLogic byEpisode[4]와 짝
 			{ name = _LocalizationService:GetText("MLUA_IDLEREWARDLOGIC_004"), imageRuid = "2fda6679e68c44729890ceb154fdc7f8", enterable = true,
 				partIcons = { "3ceaa3af732e4956b623b5f470f628c5", "b41b2a76b9cf4074baa4c727ca5e1ac9" } },
-			-- 2026-10-19: 에피소드5(아랫마을) — 사진은 ep5_map1 존1 플레이 화면(HUD 숨김) 스샷. 지금은 ep5_map1(존190~199)만 있다. 장비 분배표(WeaponTierDataLogic)에
-			-- 에피5 칸이 없어 전체 풀로 폴백하므로 배지는 에피4와 같게 둔다
+			-- 2026-10-19: 에피소드5(아랫마을) — 사진은 ep5_map1 존1 플레이 화면(HUD 숨김) 스샷. 지금은 ep5_map1(존190~199)만 있다.
+			-- 2026-10-22: 드롭을 장갑+망토로 정했다(WeaponTierDataLogic byEpisode[5]) — 배지도 에피3과 같은 장갑/망토
 			{ name = _LocalizationService:GetText("EP5_WORLD_NAME"), imageRuid = "19df4143f1754311a5583fb7f8a70ba7", enterable = true,
-				partIcons = { "3ceaa3af732e4956b623b5f470f628c5", "b41b2a76b9cf4074baa4c727ca5e1ac9" } },
+				partIcons = { "1c9eba05b6c142e789f5a197c472c066", "1d74d38d49ac41c5a14009e6f6414772" } },
 		}
 		-- 2026-09-16 유저 지정: 해금된 캐릭터는 컨셉 소개, 해금 전에는 "무엇을 해야 풀리는지"를 같은 자리에
 		-- 보여준다(unlockHint). 누적 카운터로 풀리는 쉐이드/린은 진행도(progressKind)까지 한 줄 더 붙는다.
@@ -119,7 +126,9 @@ script WorldCharacterSelectUI extends Logic
 		self._closeHandler = self.btnClose.Entity:ConnectEvent(ButtonClickEvent, self.Close)
 		self._confirmHandler = self.btnConfirm.Entity:ConnectEvent(ButtonClickEvent, self.OnConfirmClicked)
 		self._unlimitedModeToggleHandler = self.unlimitedModeCheckbox.Entity:ConnectEvent(ButtonClickEvent, self.OnUnlimitedModeToggleClicked)
-		self.unlimitedModeCheckMark.Enable = self._unlimitedModeChecked
+		self.unlimitedModeCheckMark.Enable = not self._unlimitedModeChecked
+		self._modeInfoHandler = self.modeInfoButton.Entity:ConnectEvent(ButtonClickEvent, self.OnModeInfoClicked)
+		self.modeInfoTooltip.Enable = false
 		self._prevHandler = self.btnWorldPrev.Entity:ConnectEvent(ButtonClickEvent, function() self:ChangeWorld(-1) end)
 		self._nextHandler = self.btnWorldNext.Entity:ConnectEvent(ButtonClickEvent, function() self:ChangeWorld(1) end)
 		self._dragHandler = self.charScrollTouchArea:ConnectEvent(UITouchDragEvent, self.OnScrollDrag)
@@ -147,10 +156,11 @@ script WorldCharacterSelectUI extends Logic
 	method void Open()
 		self.popupGroup.Enable = true
 		self._worldIndex = 1
-		-- 열 때마다 기본값(체크=무제한 모드)으로 초기화 — 지난번에 타임어택을 골랐어도 매번
+		-- 열 때마다 기본값(무제한, 타임어택 체크 해제)으로 초기화 — 지난번에 타임어택을 골랐어도 매번
 		-- 다시 명시적으로 선택하게 해서 실수로 타임어택이 시작되는 일을 막는다
 		self._unlimitedModeChecked = true
-		self.unlimitedModeCheckMark.Enable = true
+		self.unlimitedModeCheckMark.Enable = false
+		self:HideModeInfo()
 		self:RefreshSylphSlot()
 		self:RefreshLeionSlot()
 		self:RefreshShadeSlot()
@@ -168,6 +178,7 @@ script WorldCharacterSelectUI extends Logic
 
 	@ExecSpace("ClientOnly")
 	method void Close()
+		self:HideModeInfo()
 		self.popupGroup.Enable = false
 	end
 
@@ -511,7 +522,29 @@ script WorldCharacterSelectUI extends Logic
 	method void OnUnlimitedModeToggleClicked()
 		-- 체크박스 토글 — 안쪽 체크마크(Mark)의 Enable로 상태를 표시한다
 		self._unlimitedModeChecked = not self._unlimitedModeChecked
-		self.unlimitedModeCheckMark.Enable = self._unlimitedModeChecked
+		self.unlimitedModeCheckMark.Enable = not self._unlimitedModeChecked
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnModeInfoClicked()
+		-- i 아이콘: 아이콘 위에 설명 말풍선(꼬리가 왼쪽 아래라 꼬리 끝이 아이콘을 가리키게 오른쪽으로 민다), 2초 뒤 닫힘
+		local icon = self.modeInfoButton.Entity.UITransformComponent
+		local bg = self.modeInfoButton.Entity.Parent.UITransformComponent
+		local tt = self.modeInfoTooltip.UITransformComponent
+		local x = bg.anchoredPosition.x + icon.anchoredPosition.x + 80
+		local y = bg.anchoredPosition.y + icon.anchoredPosition.y + icon.RectSize.y * 0.5 + tt.RectSize.y * 0.5
+		tt.anchoredPosition = Vector2(x, y)
+		_PetUI:FitTooltipText(self.modeInfoTooltipText, _LocalizationService:GetText("TIMEATTACK_INFO"))
+		self.modeInfoTooltip.Enable = true
+		_UILogic:SetSiblingIndex(tt, 1000)
+		if self._modeInfoTimer ~= 0 then _TimerService:ClearTimer(self._modeInfoTimer) end
+		self._modeInfoTimer = _TimerService:SetTimerOnce(function() self._modeInfoTimer = 0 self:HideModeInfo() end, 2)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void HideModeInfo()
+		if self._modeInfoTimer ~= 0 then _TimerService:ClearTimer(self._modeInfoTimer) self._modeInfoTimer = 0 end
+		if isvalid(self.modeInfoTooltip) then self.modeInfoTooltip.Enable = false end
 	end
 
 	@ExecSpace("ClientOnly")
@@ -541,6 +574,8 @@ script WorldCharacterSelectUI extends Logic
 		if self._closeHandler then self.btnClose.Entity:DisconnectEvent(ButtonClickEvent, self._closeHandler) end
 		if self._confirmHandler then self.btnConfirm.Entity:DisconnectEvent(ButtonClickEvent, self._confirmHandler) end
 		if self._unlimitedModeToggleHandler then self.unlimitedModeCheckbox.Entity:DisconnectEvent(ButtonClickEvent, self._unlimitedModeToggleHandler) end
+		if self._modeInfoHandler then self.modeInfoButton.Entity:DisconnectEvent(ButtonClickEvent, self._modeInfoHandler) end
+		self:HideModeInfo()
 		if self._prevHandler then self.btnWorldPrev.Entity:DisconnectEvent(ButtonClickEvent, self._prevHandler) end
 		if self._nextHandler then self.btnWorldNext.Entity:DisconnectEvent(ButtonClickEvent, self._nextHandler) end
 		if self._dragHandler then self.charScrollTouchArea:DisconnectEvent(UITouchDragEvent, self._dragHandler) end

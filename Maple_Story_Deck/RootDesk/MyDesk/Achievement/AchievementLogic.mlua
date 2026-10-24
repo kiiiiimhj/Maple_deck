@@ -37,7 +37,7 @@ script AchievementLogic extends Logic
 
 	-- ── 업적 정의(서버/클라 공용 — ExecSpace 없음) ─────────────────────────────
 	method table GetDefs()
-		-- { id, name(제목), desc(조건 설명), stat, target } 60개. 표시 순서 = 이 순서
+		-- { id, name(제목), desc(조건 설명), stat, target } 70개(에피5 10개 2026-10-21 추가). 표시 순서 = 이 순서
 		if self._defs ~= nil then return self._defs end
 		local d = {}
 		local function add(id, name, desc, stat, target)
@@ -113,6 +113,17 @@ script AchievementLogic extends Logic
 		add("gold_use_100k", "MLUA_ACHIEVEMENTLOGIC_117", "MLUA_ACHIEVEMENTLOGIC_118", "goldspent", 100000)
 		add("gold_use_1m", "MLUA_ACHIEVEMENTLOGIC_119", "MLUA_ACHIEVEMENTLOGIC_120", "goldspent", 1000000)
 		-- 메타
+		-- 에피5 아랫마을(2026-10-21 유저 지정 "업적 10개") — 키 121~140
+		add("ep5_15", "MLUA_ACHIEVEMENTLOGIC_121", "MLUA_ACHIEVEMENTLOGIC_122", "ep5_15", 1)
+		add("ep5_nocont_15", "MLUA_ACHIEVEMENTLOGIC_123", "MLUA_ACHIEVEMENTLOGIC_124", "ep5_nocont_15", 1)
+		add("ep5_kill_3000", "MLUA_ACHIEVEMENTLOGIC_125", "MLUA_ACHIEVEMENTLOGIC_126", "ep5kill", 3000)
+		add("ep5_elite_20", "MLUA_ACHIEVEMENTLOGIC_127", "MLUA_ACHIEVEMENTLOGIC_128", "ep5elite", 20)
+		add("ep5_boss_1", "MLUA_ACHIEVEMENTLOGIC_129", "MLUA_ACHIEVEMENTLOGIC_130", "ep5boss", 1)
+		add("ep5_boss_10", "MLUA_ACHIEVEMENTLOGIC_131", "MLUA_ACHIEVEMENTLOGIC_132", "ep5boss", 10)
+		add("ep5_boss_all", "MLUA_ACHIEVEMENTLOGIC_133", "MLUA_ACHIEVEMENTLOGIC_134", "ep5bosskinds", 4)
+		add("sp_dokkaebi", "MLUA_ACHIEVEMENTLOGIC_135", "MLUA_ACHIEVEMENTLOGIC_136", "sp_dokkaebi", 300)
+		add("sp_ghost", "MLUA_ACHIEVEMENTLOGIC_137", "MLUA_ACHIEVEMENTLOGIC_138", "sp_ghost", 300)
+		add("sp_village", "MLUA_ACHIEVEMENTLOGIC_139", "MLUA_ACHIEVEMENTLOGIC_140", "sp_village", 300)
 		add("done_30", "MLUA_ACHIEVEMENTLOGIC_099", "MLUA_ACHIEVEMENTLOGIC_100", "done", 30)
 		self._defs = d
 		return d
@@ -280,6 +291,10 @@ script AchievementLogic extends Logic
 		self:Add("kill", 1)
 		if isElite then self:Add("elite", 1) end
 		if isFlying then self:Add("fly", 1) end
+		if _GameManager:GetSelectedEpisode() == 5 then
+			self:Add("ep5kill", 1)
+			if isElite then self:Add("ep5elite", 1) end
+		end
 		local sp = self:GetSpeciesStat(lootItemId)
 		if sp ~= "" then self:Add(sp, 1) end
 	end
@@ -298,6 +313,10 @@ script AchievementLogic extends Logic
 		if string.find(s, "nepenthes", 1, true) then return "sp_nep" end
 		if string.find(s, "golem", 1, true) then return "sp_golem" end
 		if string.find(s, "yeti", 1, true) then return "sp_yeti" end
+		-- 에피5 아랫마을(잡템 이름 기준): 도깨비류 / 귀신류(도령·선비·처녀·양반·대감·제등·몽롱·야광귀) / 마을 동물
+		if string.find(s, "dokkaebi", 1, true) or string.find(s, "kebi", 1, true) then return "sp_dokkaebi" end
+		if string.find(s, "doryeong", 1, true) or string.find(s, "seonbi", 1, true) or string.find(s, "cheonyeo", 1, true) or string.find(s, "yangban", 1, true) or string.find(s, "daegam", 1, true) or string.find(s, "jedeung", 1, true) or string.find(s, "mongrong", 1, true) or string.find(s, "yagwang", 1, true) then return "sp_ghost" end
+		if string.find(s, "village_", 1, true) or string.find(s, "nureongi", 1, true) or string.find(s, "sparrow", 1, true) then return "sp_village" end
 		return ""
 	end
 
@@ -305,6 +324,20 @@ script AchievementLogic extends Logic
 	method void OnBossDefeated()
 		-- GameManager.OnBossDefeated
 		self:Add("boss", 1)
+		if _GameManager:GetSelectedEpisode() == 5 then
+			-- 에피5 보스 4종을 다 잡았는지는 잡은 보스 순번 비트(ep5bossbits)로 센다(ClearCurrentBoss 전이라 지금 순번 = 잡은 보스)
+			self:Add("ep5boss", 1)
+			local idx = _MonsterSpawner:GetBossIndex()
+			if idx >= 1 and idx <= 4 then
+				local bits = self:GetStat("ep5bossbits") | (1 << (idx - 1))
+				self:SetMax("ep5bossbits", bits)
+				local kinds = 0
+				for i = 0, 3 do
+					if ((bits >> i) & 1) == 1 then kinds = kinds + 1 end
+				end
+				self:SetMax("ep5bosskinds", kinds)
+			end
+		end
 	end
 
 	@ExecSpace("ServerOnly")
@@ -473,6 +506,10 @@ script AchievementLogic extends Logic
 			if ep >= 1 and ep <= 3 then self:SetMax("ep" .. ep .. "_15", 1) end
 			if self._runMaxSkills <= 5 then self:SetMax("skill5_15", 1) end
 			if not self._runContinued then self:SetMax("nocont_15", 1) end
+			if ep == 5 then
+				self:SetMax("ep5_15", 1)
+				if not self._runContinued then self:SetMax("ep5_nocont_15", 1) end
+			end
 		end
 	end
 

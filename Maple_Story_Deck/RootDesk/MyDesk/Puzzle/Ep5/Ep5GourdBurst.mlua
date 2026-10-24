@@ -1,0 +1,61 @@
+@Component
+script Ep5GourdBurst extends Component
+
+	property boolean _active = false
+	property boolean _localActive = false
+	property Vector3 _origin = Vector3(0,0,0)
+	property Vector3 _target = Vector3(0,0,0)
+	property Vector3 _baseScale = Vector3(1,1,1)
+	property number _at = 0
+	property number Duration = 0.72
+	property number ArcHeight = 1.4
+
+	@ExecSpace("ServerOnly")
+	method void Launch(Vector3 origin, Vector3 target, number delay)
+		local ai = self.Entity:GetComponent("script.MonsterAI")
+		ai:Pause() ai._transformLocked = true
+		self._origin = origin self._target = target self._at = _UtilLogic.ServerElapsedSeconds+0.10+delay
+		self._baseScale = self.Entity.TransformComponent.Scale self._active = true
+		self.Entity.TransformComponent.Position = _MonsterSpawner:ToLocalSpawnPos(self.Entity.Parent,origin)
+		self.Entity.Visible = false
+		self:ShowBurst(origin,target,self._baseScale,self._at)
+	end
+
+	@ExecSpace("Multicast")
+	method void ShowBurst(Vector3 origin, Vector3 target, Vector3 scale, number at)
+		if self:IsServer() then return end
+		self._origin = origin self._target = target self._baseScale = scale self._at = at self._localActive = true
+	end
+
+	method void OnUpdate(number delta)
+		if self:IsServer() then
+			if not self._active then return end
+			if not _GameManager.GameStarted or _GameManager.GameOver then self.Entity:Destroy() return end
+			local elapsed = _UtilLogic.ServerElapsedSeconds-self._at
+			if elapsed < 0 then return end
+			self.Entity.Visible = true
+			if elapsed >= self.Duration then
+				self._active = false
+				self.Entity.TransformComponent.Position = _MonsterSpawner:ToLocalSpawnPos(self.Entity.Parent,self._target)
+				self.Entity.TransformComponent.Scale = self._baseScale self.Entity.TransformComponent.ZRotation = 0
+				local ai = self.Entity:GetComponent("script.MonsterAI")
+				ai._transformLocked = false
+				if ai._spawnZoneIndex == _MapManager.CurrentMapIndex then ai:Resume() end
+				log("[VRF] gourd monster landed kind=" .. ai._ep5DokkaebiKind .. " zone=" .. ai._spawnZoneIndex)
+			end
+			return
+		end
+		if not self._localActive then return end
+		local elapsed = _UtilLogic.ServerElapsedSeconds-self._at
+		if elapsed < 0 then return end
+		local t = math.max(0,math.min(1,elapsed/self.Duration))
+		local p = Vector3(self._origin.x+(self._target.x-self._origin.x)*t,self._origin.y+(self._target.y-self._origin.y)*t+4*self.ArcHeight*t*(1-t),0)
+		local parentTf = self.Entity.Parent.TransformComponent
+		if parentTf ~= nil then local w = parentTf.WorldPosition p = Vector3(p.x-w.x,p.y-w.y,p.z-w.z) end
+		self.Entity.TransformComponent.Position = p
+		local s = 0.24+0.76*t
+		self.Entity.TransformComponent.Scale = Vector3(self._baseScale.x*s,self._baseScale.y*s,self._baseScale.z)
+		self.Entity.TransformComponent.ZRotation = math.sin(t*math.pi)*(self._target.x<self._origin.x and 18 or -18)
+		if t >= 1 then self._localActive = false self.Entity.TransformComponent.ZRotation = 0 end
+	end
+end

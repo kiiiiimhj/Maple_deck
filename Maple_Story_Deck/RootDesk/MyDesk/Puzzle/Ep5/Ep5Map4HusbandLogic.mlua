@@ -1,0 +1,160 @@
+@Logic
+script Ep5Map4HusbandLogic extends Logic
+	@Sync property boolean Accepted = false
+	@Sync property boolean Defeated = false
+	@Sync property boolean Completed = false
+	property Entity _monster = nil
+	property Entity _bubble = nil
+	property string _owner = ""
+	property integer _generation = 0
+	property boolean _spawning = false
+	property number BubbleShowDuration = 2
+	property string PortraitRUID = "fda3e4bc60744a5a947399e536711971"
+	property string OriginalWifeRUID = "7dfd6a15960f46d683649a073694fe49"
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		self:ResetForNewRun()
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean ValidUser(Entity obj, string userId)
+		local player = _UserService:GetUserEntityByUserId(userId)
+		return isvalid(obj) and obj.Enable and isvalid(player) and player.CurrentMap == obj.CurrentMap
+			and obj.CurrentMap.Name == "ep5_map4" and _MapManager.CurrentMapIndex == (obj.Name == "FolkDecor_323" and 221 or 226)
+			and _GameManager:GetSelectedEpisode() == 5 and _GameManager.GameStarted
+			and not _GameManager.GameOver and not _GameManager:IsGamePaused()
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnObjectTouched(Entity obj, string userId)
+		if not self:ValidUser(obj,userId) or self.Completed then return end
+		local map = obj.CurrentMap
+		if obj == map:GetChildByName("FolkDecor_323") then
+			if not self.Accepted then
+				self.Accepted = true self._owner = userId
+				self:ShowPortrait(obj)
+				_UIToast:ShowMessage("EP5_MAP4_HUSBAND_ASK",userId)
+				log("[VRF] husband quest accepted")
+			elseif self.Defeated then
+				self.Completed = true self:ClearBubble()
+				obj.SpriteRendererComponent.SpriteRUID = "1abfcc52876d426da4af286df88978a7"
+				map:GetChildByName("FolkDecor_324").Enable = true
+				map:GetChildByName("FolkDecor_325").Enable = true
+				_Ep4Map1EasterEggLogic:GrantStandardReward(obj)
+				local p = obj.TransformComponent.WorldPosition local f = _GameManager:GetGroundFallFor(obj,p)
+				_GameManager:GrantLootItemDrop(p,f.x,f.y,"ep5_farmer_gift",1)
+				_AchievementLogic:OnEasterEgg()
+				_UIToast:ShowMessage("EP5_MAP4_HUSBAND_DONE",userId)
+				log("[VRF] husband quest redeemed familyVisible=true wifeChanged=true standard=true key=1")
+			else self:ShowPortrait(obj) end
+		elseif obj == map:GetChildByName("FolkDecor_326") then
+			if not self.Accepted then _UIToast:ShowMessage("EP5_MAP4_HUSBAND_FIRST",userId) return end
+			if self.Defeated then _UIToast:ShowMessage("EP5_MAP4_HUSBAND_RETURN",userId) return end
+			self:SpawnHusband(obj)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ShowPortrait(Entity obj)
+		self:ClearBubble()
+		local p = obj.TransformComponent.WorldPosition
+		local b = _SpawnService:SpawnByModelId("giftbubble","HusbandWantedBubble",Vector3(p.x-0.765297,p.y+0.9155867,p.z-0.5),obj.CurrentMap)
+		if not isvalid(b) then return end self._bubble = b
+		_CollectBubbleLogic:ApplyForegroundDepth(b)
+		_CollectBubbleLogic:FitIcon(b,"Icon",self.PortraitRUID,-20,20,-26,26,Vector2(0,0.11),Vector2(0.74,0.74),0)
+		b:GetChildByName("Count").Enable = false
+		_TimerService:SetTimerOnce(function() if isvalid(b) then b:Destroy() end if self._bubble == b then self._bubble = nil end end,self.BubbleShowDuration)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SpawnHusband(Entity obj)
+		-- Keep the rice attack, size this NPC sprite like an elite, and replace the resting body only after a successful spawn.
+		if self._spawning or isvalid(self._monster) then return end
+		self._spawning = true local generation = self._generation
+		local map = obj.CurrentMap local p = obj.TransformComponent.WorldPosition
+		local x = math.max(_MapManager:GetSpawnPositionForIndex(226).x-4,p.x+1.3)
+		local y = _MonsterSpawner:GetBottomGroundY(map,x)
+		local e = _SpawnService:SpawnByModelId(_MonsterSpawner.MonsterModelId,"HusbandMonster",_MonsterSpawner:ToLocalSpawnPos(map,Vector3(x,y,0)),map)
+		if not isvalid(e) then self._spawning = false return end
+		self._monster = e e.Visible = false
+		local ai = e:GetComponent("script.MonsterAI")
+		ai:InitializeStats(226,_GameManager.Wave,false,1)
+		ai:Pause()
+		ai._ep5DokkaebiKind = "" ai._ep5Map2Kind = "" ai._ep5EliteKind = ""
+		ai._isFlying = false ai._isLeap = false ai._isCharge = false ai._isZigzag = true ai._hasPhase2 = false
+		ai._hasZigzagAfterimage = false
+		ai._zigzagBaseX = e.TransformComponent.Position.x
+		ai._zigzagTime = 0 ai._zigzagPhase = 0
+		ai._zigzagAmplitudeActual = ai.ZigzagAmplitude
+		local world = e.TransformComponent.WorldPosition
+		local bounds = _MonsterSpawner:GetContainingRunBounds(226,world.x,world.y)
+		if bounds ~= nil then ai._zigzagAmplitudeActual = math.max(0,math.min(ai.ZigzagAmplitude,math.min(world.x-bounds.xMin,bounds.xMax-world.x)-0.15)) end
+		ai._isRangedInk = true ai._isRangedSlash = false ai._neverAttacks = false
+		ai._standRUID = "f736d0b4e81040d4a8022d99ed538ea9"
+		ai._moveRUID = "32dfdcef04184182bdab7d58f3ddd612"
+		ai._attackRUID = "30cc99a7eb2041dcb79cff04907bc2cb"
+		ai._hitRUID = "68fbdf6d52404220b6ef07fc00adc6d1"
+		ai._dieRUID = "39ed73f3ab9040e4b16eb3d4d0eee867"
+		ai._bookKey = ai._standRUID ai._hitEffectRUID = "" ai._projectileRUID = ""
+		ai._attackSoundRUID = "" ai._hitSoundRUID = "" ai._dieSoundRUID = ""
+		local visualScale = self:ReadEliteScale()
+		ai._attackDuration = _Ep5GourdLogic:ReadDuration(ai._attackRUID)
+		ai._dieDuration = _Ep5GourdLogic:ReadDuration(ai._dieRUID)
+		if generation ~= self._generation or not isvalid(e) then if isvalid(e) then e:Destroy() end self._spawning = false return end
+		local base = _GameManager:GetTimeStepHp(_GameManager:GetTimeStep())
+		if _GameManager.TestMonsterHp > 0 then base = _GameManager.TestMonsterHp end
+		ai.MaxHp = base*3 ai.CurrentHp = ai.MaxHp
+		ai._reachedScaleThreshold = ai.RangedReachedScale ai:SetScaleMultiplier(visualScale)
+		ai._noHitAnimDuringAttack = true ai._customAttackInterval = math.max(2.2,ai._attackDuration+0.7)
+		ai:RefreshIdleSprite() ai:UpdateDepth() e.Visible = true
+		obj.Enable = false
+		ai:Resume()
+		self._spawning = false
+		_UIToast:ShowMessage("EP5_MAP4_HUSBAND_SPAWN",self._owner)
+		log("[VRF] husband spawned count=1 hp=" .. ai.MaxHp .. " normalHp=" .. base .. " ranged=true zigzag=true eliteScale=" .. visualScale .. " restingHidden=" .. tostring(not obj.Enable))
+	end
+
+	@ExecSpace("ServerOnly")
+	method number ReadEliteScale()
+		-- Match the existing elite roster: a 137.5 px longest edge before perspective scaling.
+		if self._T.husbandEliteScale ~= nil then return self._T.husbandEliteScale end
+		local clip = _ResourceService:LoadAnimationClipAndWait("f736d0b4e81040d4a8022d99ed538ea9")
+		local edge = 0
+		for _,frame in ipairs(clip.Frames:ToTable()) do
+			local sprite = frame.FrameSprite
+			edge = math.max(edge,sprite.Width,sprite.Height)
+		end
+		local scale = edge > 0 and 137.5/edge or 1.75
+		self._T.husbandEliteScale = scale
+		return scale
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnHusbandDefeated(Entity monster)
+		if not self.Accepted or self.Completed or self.Defeated or monster ~= self._monster then return end
+		self.Defeated = true
+		_UIToast:ShowMessage("EP5_MAP4_HUSBAND_RETURN",self._owner)
+		log("[VRF] husband defeated returnToClient=true")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ClearBubble()
+		if isvalid(self._bubble) then self._bubble:Destroy() end self._bubble = nil
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		-- A fresh run restores the resting husband so this quest can be attempted again.
+		self._generation = self._generation+1 self.Accepted = false self.Defeated = false self.Completed = false self._spawning = false self._owner = ""
+		if isvalid(self._monster) then self._monster:Destroy() end self._monster = nil self:ClearBubble()
+		local map = _EntityService:GetEntityByPath("/maps/ep5_map4")
+		if isvalid(map) then
+			map:GetChildByName("FolkDecor_326").Enable = true
+			map:GetChildByName("FolkDecor_323").SpriteRendererComponent.SpriteRUID = self.OriginalWifeRUID
+			map:GetChildByName("FolkDecor_324").Enable = false map:GetChildByName("FolkDecor_325").Enable = false
+			for _,e in pairs(map.Children) do local t = e:GetComponent("script.Ep5Map4InspectTrigger") if t ~= nil then t:ResetForNewRun() end end
+		end
+		log("[VRF] husband quest reset familyHidden=true")
+	end
+end

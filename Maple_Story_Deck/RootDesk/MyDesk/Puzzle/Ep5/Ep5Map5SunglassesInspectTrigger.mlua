@@ -1,0 +1,58 @@
+@Component
+script Ep5Map5SunglassesInspectTrigger extends Component
+
+	property integer Zone = 230
+	-- Exactly one scarecrow is chosen for the run; the shared quest logic judges successful searches.
+	property any _touchHandler = nil
+
+	method void OnBeginPlay()
+		if self:IsClient() and self._touchHandler == nil then self._touchHandler = self.Entity:ConnectEvent(TouchEvent,self.OnTouched) end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnTouched(TouchEvent event)
+		if not _GameManager.GameStarted or _GameManager.GameOver or _GameManager:IsGamePaused() then return end
+		if _TitleUI.titleGroup.Enable or _CardManager:IsMonsterUnderTouch(event.TouchPoint) then return end
+		self:RequestInspect()
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean IsInspectAvailable()
+		return self.Entity.Enable and _GameManager:GetSelectedEpisode() == 5
+			and self.Entity.CurrentMap.Name == "ep5_map5" and _MapManager.CurrentMapIndex == self.Zone
+			and _Ep5Map5SunglassesLogic.PickedItemId ~= "" and not _Ep5Map5SunglassesLogic.Found and not _Ep5Map5SunglassesLogic.Redeemed
+			and not _Ep1TouchEasterEggLogic:IsUsed(self.Entity.Path)
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean ValidUser(string userId)
+		local player = _UserService:GetUserEntityByUserId(userId)
+		return _GameManager.GameStarted and not _GameManager.GameOver and not _GameManager:IsGamePaused()
+			and self:IsInspectAvailable() and isvalid(player) and player.CurrentMap == self.Entity.CurrentMap
+	end
+
+	@ExecSpace("Server")
+	method void RequestInspect()
+		if not self:ValidUser(senderUserId) then return end
+		local inspect = self.Entity:GetComponent("script.MushroomInspectChallenge")
+		if inspect ~= nil then inspect:BeginForUser(senderUserId) end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnInspectSuccess(string userId)
+		if not self:ValidUser(userId) then return end
+		_Ep5Map5SunglassesLogic:OnSearchSuccess(self.Entity,userId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		_Ep1TouchEasterEggLogic._used[self.Entity.Path] = nil
+		_Ep1TouchEasterEggLogic._touchCounts[self.Entity.Path] = nil
+		local inspect = self.Entity:GetComponent("script.MushroomInspectChallenge")
+		if inspect ~= nil then inspect:ResetForNewRun() end
+	end
+
+	method void OnEndPlay()
+		if self:IsClient() and self._touchHandler ~= nil then self.Entity:DisconnectEvent(TouchEvent,self._touchHandler) self._touchHandler = nil end
+	end
+end

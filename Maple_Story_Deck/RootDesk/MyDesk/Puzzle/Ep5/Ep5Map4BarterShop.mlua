@@ -1,0 +1,212 @@
+@Logic
+script Ep5Map4BarterShop extends Logic
+	property integer Price = 30
+	property string _cost1 = ""
+	property string _cost2 = ""
+	property integer _skill = 0
+	property boolean _sold1 = false
+	property boolean _sold2 = false
+	property boolean _open = false
+	property string _owner = ""
+	property integer _session = 0
+	property integer _zone = 0
+	property number _timeout = 0
+	property table _pendingGrants = {}
+	property integer _generation = 0
+	property boolean _shown = false
+	property integer _localSession = 0
+	property table _view = {}
+	property table _savedView = {}
+	property string _locale = ""
+
+	@ExecSpace("ServerOnly")
+	method boolean ValidPlayer(string userId)
+		local player = _UserService:GetUserEntityByUserId(userId)
+		local obj = _EntityService:GetEntityByPath("/maps/ep5_map4/FolkDecor_328")
+		if not isvalid(player) or not isvalid(obj) or not obj.Enable or player.CurrentMap ~= obj.CurrentMap then return false end
+		if not _GameManager.GameStarted or _GameManager.GameOver or _GameManager:GetSelectedEpisode() ~= 5 then return false end
+		local zone = _MapManager.CurrentMapIndex
+		if zone < 220 or zone > 229 then return false end
+		return math.abs(obj.TransformComponent.WorldPosition.x-_MapManager:GetSpawnPositionForIndex(zone).x)<8
+	end
+
+	@ExecSpace("ServerOnly")
+	method void PrepareStock()
+		if self._cost1 == "" then
+			local pool = {} local seen = {}
+			for zone=220,229 do for species=1,4 do
+				local id = _GameManager:GetMonsterLootItemId(zone,species)
+				if id ~= "" and not seen[id] and _PlayerInventory:GetItemDef(id) ~= nil then seen[id] = true table.insert(pool,id) end
+			end end
+			if #pool == 0 then return end
+			self._cost1 = pool[_UtilLogic:RandomIntegerRange(1,#pool)] self._cost2 = pool[_UtilLogic:RandomIntegerRange(1,#pool)]
+		end
+		if self._skill == 0 and not self._sold2 then
+			local pool = _CardManager:BuildActiveUpgradePool()
+			if #pool > 0 then self._skill = pool[_UtilLogic:RandomIntegerRange(1,#pool)] end
+		end
+	end
+
+	@ExecSpace("Server")
+	method void RequestOpen()
+		if not self:ValidPlayer(senderUserId) or _GameManager:IsGamePaused() then return end
+		self:PrepareStock() if self._cost1 == "" then return end
+		self._session = self._session+1 self._open = true self._owner = senderUserId self._zone = _MapManager.CurrentMapIndex self._timeout = 300
+		_GameManager.ShopPaused = true
+		self:SendStock(false,0)
+		log("[VRF] village barter open price=30 potion=" .. self._cost1 .. " skill=" .. self._cost2 .. " card=" .. self._skill)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SendStock(boolean purchased, integer slot)
+		self:ShowStock(self._session,{cost1=self._cost1,cost2=self._cost2,skill=self._skill,sold1=self._sold1,sold2=self._sold2,count1=_PlayerInventory:GetItemCount(self._cost1),count2=_PlayerInventory:GetItemCount(self._cost2),zone=self._zone,purchased=purchased,slot=slot},self._owner)
+	end
+
+	@ExecSpace("Server")
+	method void RequestBuy(integer session, integer slot)
+		if not self._open or session ~= self._session or senderUserId ~= self._owner or not self:ValidPlayer(senderUserId) or self._zone ~= _MapManager.CurrentMapIndex then return end
+		if slot ~= 1 and slot ~= 2 then return end
+		if (slot == 1 and self._sold1) or (slot == 2 and self._sold2) then return end
+		if slot == 2 then
+			local available = false for _,id in ipairs(_CardManager:BuildActiveUpgradePool()) do if id == self._skill then available = true break end end
+			if not available then _UIToast:ShowMessage("MLUA_SHADOWSHOPUI_002",senderUserId) self:SendStock(false,0) return end
+		end
+		local cost = slot == 1 and self._cost1 or self._cost2
+		if not _PlayerInventory:RemoveItem(cost,self.Price) then _UIToast:ShowMessage("EP5_MAP4_BARTER_SHORT",senderUserId) self:SendStock(false,0) return end
+		if slot == 1 then self._sold1 = true table.insert(self._pendingGrants,{kind="potion"})
+		else self._sold2 = true table.insert(self._pendingGrants,{kind="skill",cardIdx=self._skill,upgradeType=_CardManager:GetEliteUpgradeType(self._skill)}) end
+		self._timeout = 300 self:SendStock(true,slot)
+		log("[VRF] village barter bought slot=" .. slot .. " cost=" .. cost .. " amount=30")
+	end
+
+	@ExecSpace("Server")
+	method void RequestClose(integer session)
+		if self._open and session == self._session and senderUserId == self._owner then self:CloseServer() end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void CloseServer()
+		if not self._open then return end
+		local userId = self._owner local session = self._session local generation = self._generation
+		self._open = false self._owner = "" self._timeout = 0 _GameManager.ShopPaused = false
+		for i,grant in ipairs(self._pendingGrants) do
+			_TimerService:SetTimerOnce(function()
+				if generation == self._generation then _ShadowShopUI:ApplyGrant(grant) end
+			end,(i-1)*_ShadowShopUI.RewardPopStagger+0.85)
+		end
+		self._pendingGrants = {}
+		if userId ~= "" and isvalid(_UserService:GetUserEntityByUserId(userId)) then self:HideShop(session,userId) end
+		log("[VRF] village barter closed pauseReleased=true")
+	end
+
+	@ExecSpace("Client")
+	method void ShowStock(integer session, table state)
+		if session < self._localSession then return end
+		local u = _ShadowShopUI
+		if not self._shown then
+			self._savedView = {}
+			for _,e in ipairs({u.item1Btn.Entity,u.item2Btn.Entity}) do
+				local t = e.UITransformComponent
+				self._savedView[e.Name] = {x=t.anchoredPosition.x,y=t.anchoredPosition.y,price=e:GetChildByName("PriceIcon").SpriteGUIRendererComponent.ImageRUID.DataId}
+			end
+			local icon = u.shopGroup:GetChildByName("CurrencyBar",true):GetChildByName("Icon").SpriteGUIRendererComponent
+			self._savedView.currency = icon.ImageRUID.DataId
+			self._shown = true u._selectedSlotIndex = 0
+		end
+		self._localSession = session self._view = state self._locale = ""
+		u._villageMode = true u.shopGroup.Enable = true
+		self:RefreshView()
+		if state.purchased then
+			if state.slot == 1 then u:QueueReward(u.PotionIconRUID,_GameManager.HpBarFlyTargetUI,"potion",0)
+			else u:QueueReward(u:GetCardIconRUID(state.skill),u:GetSkillFlyTargetUI(state.skill),"skill",state.skill) end
+			u:PlayPurchaseToast()
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshView()
+		if not self._shown then return end
+		local u = _ShadowShopUI local v = self._view self._locale = _LocalizationService.CurrentLocaleId
+		for i=3,5 do u:GetItemBtn(i).Entity.Enable = false end
+		u.item1Btn.Entity.Enable = true u.item2Btn.Entity.Enable = true
+		local p1 = self._savedView[u.item1Btn.Entity.Name] local p2 = self._savedView[u.item2Btn.Entity.Name]
+		u.item1Btn.Entity.UITransformComponent.anchoredPosition = Vector2(p1.x,45)
+		u.item2Btn.Entity.UITransformComponent.anchoredPosition = Vector2(p2.x,-85)
+		u.item1Icon.ImageRUID = u.PotionIconRUID
+		u:ApplyFixedItemDisplay(v.sold1,u.item1Btn,u.item1Icon,u.item1Name,u.PotionName)
+		if v.skill > 0 then
+			u.item2Icon.ImageRUID = u:GetCardIconRUID(v.skill)
+			u:ApplyFixedItemDisplay(v.sold2,u.item2Btn,u.item2Icon,u.item2Name,u:GetCardName(v.skill))
+		else u.item2Name.Text = _LocText:Resolve("EP5_MAP4_BARTER_NO_SKILL") u.item2Btn.Enable = false end
+		for i=1,2 do
+			local item = u:GetItemBtn(i).Entity local id = i == 1 and v.cost1 or v.cost2
+			item:GetChildByName("PriceIcon").SpriteGUIRendererComponent.ImageRUID = _PlayerInventory:GetItemDef(id).icon
+			item:GetChildByName("PriceText").TextComponent.Text = tostring(self.Price)
+		end
+		u.shopGroup:GetChildByName("TitleBar",true):GetChildByName("Title").TextComponent.Text = _LocText:Resolve("EP5_MAP4_BARTER_TITLE")
+		u.shopGroup:GetChildByName("CurrencyBar",true):GetChildByName("Label").TextComponent.Text = _LocText:Resolve("EP5_MAP4_BARTER_CURRENCY")
+		u:RefreshItemSelection() self:RefreshPurchaseButton()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshPurchaseButton()
+		if not self._shown then return end
+		local u = _ShadowShopUI local v = self._view local slot = u._selectedSlotIndex
+		local can = false
+		if slot == 1 then can = not v.sold1 and v.count1 >= self.Price
+		elseif slot == 2 then can = not v.sold2 and v.count2 >= self.Price and v.skill > 0 and _CardManager:GetSlotLevelNum(v.skill)<5 end
+		u.btnPurchase.Enable = can
+		u.btnPurchase.Entity.SpriteGUIRendererComponent.Color = can and Color(1,1,1,1) or Color(0.4,0.4,0.4,1)
+		local cost = slot == 2 and v.cost2 or v.cost1
+		u.currencyCountText.Text = tostring(slot == 2 and v.count2 or v.count1)
+		u.shopGroup:GetChildByName("CurrencyBar",true):GetChildByName("Icon").SpriteGUIRendererComponent.ImageRUID = _PlayerInventory:GetItemDef(cost).icon
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PurchaseSelected(integer slot)
+		if self._shown then self:RequestBuy(self._localSession,slot) end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Close()
+		if not self._shown then return end
+		self:RequestClose(self._localSession)
+		self:RestoreView()
+	end
+
+	@ExecSpace("Client")
+	method void HideShop(integer session)
+		if self._shown and session == self._localSession then self:RestoreView() end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RestoreView()
+		local u = _ShadowShopUI
+		self._shown = false u._villageMode = false u.shopGroup.Enable = false
+		for _,e in ipairs({u.item1Btn.Entity,u.item2Btn.Entity}) do
+			local old = self._savedView[e.Name]
+			if old ~= nil then e.UITransformComponent.anchoredPosition = Vector2(old.x,old.y) e:GetChildByName("PriceIcon").SpriteGUIRendererComponent.ImageRUID = old.price end
+		end
+		u.item1Icon.ImageRUID = u.PotionIconRUID u.item2Icon.ImageRUID = u.TicketIconRUID
+		local bar = u.shopGroup:GetChildByName("CurrencyBar",true)
+		bar:GetChildByName("Icon").SpriteGUIRendererComponent.ImageRUID = self._savedView.currency
+		bar:GetChildByName("Label").TextComponent.Text = _LocText:Resolve("UI_SHADOWSHOPGROUP_002")
+		u.shopGroup:GetChildByName("TitleBar",true):GetChildByName("Title").TextComponent.Text = _LocText:Resolve("UI_SHADOWSHOPGROUP_004")
+		u:RefreshPriceTexts() u:RefreshPotionTicketDisplay() u:RefreshSlotDisplay() u:PlayAllRewardFlourishes()
+	end
+
+	method void OnUpdate(number delta)
+		if self:IsServer() and self._open then
+			self._timeout = self._timeout-delta
+			if self._timeout <= 0 or not self:ValidPlayer(self._owner) or self._zone ~= _MapManager.CurrentMapIndex then self:CloseServer() end
+		elseif self:IsClient() and self._shown then
+			if self._locale ~= _LocalizationService.CurrentLocaleId then self:RefreshView() end
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		self._generation = self._generation+1 self._pendingGrants = {} self:CloseServer()
+		self._cost1 = "" self._cost2 = "" self._skill = 0 self._sold1 = false self._sold2 = false self._pendingGrants = {}
+	end
+end

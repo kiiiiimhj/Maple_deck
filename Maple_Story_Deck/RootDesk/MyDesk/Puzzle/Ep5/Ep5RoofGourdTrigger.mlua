@@ -1,0 +1,172 @@
+@Component
+script Ep5RoofGourdTrigger extends Component
+
+	property Entity Gourd = nil
+	property integer Zone = 190
+	property number ItemChance = 0.15
+	property Vector2 RoofOffset = Vector2(-0.28,1.13)
+	property number FlightDuration = 1.05
+	property number FlightHeight = 1.35
+	property number GourdScale = 0.8
+	@Sync property integer Phase = 0
+	property integer _generation = 0
+	property number _flightAt = 0
+	property number _resolveAt = 0
+	property number _hideAt = 0
+	property Vector3 _start = Vector3(0,0,0)
+	property Vector3 _land = Vector3(0,0,0)
+	property table _spawned = {}
+	property any _touchHandler = nil
+	property integer _localPhase = 0
+	property number _localAt = 0
+	property Vector3 _localStart = Vector3(0,0,0)
+	property Vector3 _localLand = Vector3(0,0,0)
+	property boolean _rewardResolved = false
+
+	method void OnBeginPlay()
+		if self:IsServer() then _Ep5GourdLogic:Register(self) end
+		if self:IsClient() and self._touchHandler == nil then self._touchHandler = self.Entity:ConnectEvent(TouchEvent,self.OnTouched) end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnTouched(TouchEvent event)
+		if not _GameManager.GameStarted or _GameManager.GameOver or _GameManager:IsGamePaused() or _TitleUI.titleGroup.Enable then return end
+		if _CardManager:IsMonsterUnderTouch(event.TouchPoint) then return end
+		if self.Entity.CurrentMap.Name == "ep5_map2" and _Ep5Map2KillQuestLogic:IsNpcUnderTouch(event.TouchPoint) then return end
+		self:RequestRelease()
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean ValidUser(string userId)
+		local player = _UserService:GetUserEntityByUserId(userId)
+		return _GameManager.GameStarted and not _GameManager.GameOver and not _GameManager:IsGamePaused()
+			and _GameManager:GetSelectedEpisode() == 5 and _MapManager.CurrentMapIndex == self.Zone
+			and isvalid(player) and player.CurrentMap == self.Entity.CurrentMap and self.Entity.Enable
+	end
+
+	@ExecSpace("Server")
+	method void RequestRelease()
+		if self.Phase ~= 0 or not self:ValidUser(senderUserId) or _InspectChallengeLogic._activePath ~= "" then return end
+		local p = self.Entity.TransformComponent.WorldPosition
+		local center = _MapManager:GetSpawnPositionForIndex(self.Zone).x
+		local x = math.max(center-4.3,math.min(center+4.3,p.x-1.55))
+		local ground = _MonsterSpawner:GetBottomGroundY(self.Entity.CurrentMap,x)
+		self._start = Vector3(p.x+self.RoofOffset.x,p.y+self.RoofOffset.y,0)
+		self._land = Vector3(x,ground+0.06*self.GourdScale,0)
+		self.Phase = 1 self._generation = self._generation + 1
+		self._flightAt = _UtilLogic.ServerElapsedSeconds+0.08
+		self.Gourd.TransformComponent.Position = self._start
+		self.Gourd.TransformComponent.Scale = Vector3(self.GourdScale,self.GourdScale,1)
+		self.Gourd.Enable = true
+		self:ShowFlight(self._start,self._land,self._flightAt)
+		log("[VRF] gourd launch source=" .. self.Entity.Path .. " zone=" .. self.Zone .. " fromRoof=true")
+	end
+
+	method Vector3 FlightPosition(Vector3 a, Vector3 b, number t)
+		return Vector3(a.x+(b.x-a.x)*t,a.y+(b.y-a.y)*t+4*self.FlightHeight*t*(1-t),0)
+	end
+
+	@ExecSpace("Multicast")
+	method void ShowFlight(Vector3 start, Vector3 land, number at)
+		if self:IsServer() then return end
+		self._localStart = start self._localLand = land self._localAt = at self._localPhase = 1
+		self.Gourd.SpriteRendererComponent.SpriteRUID = "63122af3a17d4024abe95cd7cac3ddf3"
+		self.Gourd.SpriteRendererComponent.StartFrameIndex = 0 self.Gourd.SpriteRendererComponent.EndFrameIndex = 2147483647
+		self.Gourd.SpriteRendererComponent.Color = Color(1,1,1,1)
+	end
+
+	@ExecSpace("Multicast")
+	method void ShowLanding(Vector3 pos, number hitDuration)
+		if self:IsServer() then return end
+		self._localLand = pos self._localPhase = 2 self._localAt = _UtilLogic.ServerElapsedSeconds
+		self.Gourd.TransformComponent.Position = pos self.Gourd.TransformComponent.ZRotation = 0
+		self.Gourd.SpriteRendererComponent.SpriteRUID = "22f7f833898542c899831b144982bcdc"
+		self._resolveAt = hitDuration
+		_SoundOptionLogic:PlaySfx("6dc40825bdbd4184a1bac3d0868389b2",0.28)
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean IsInspectAvailable()
+		return self.Phase == 2 and self.Gourd.Enable and _MapManager.CurrentMapIndex == self.Zone
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OpenGourd(string userId)
+		if not self:IsInspectAvailable() or not self:ValidUser(userId) then return end
+		self.Phase = 3 self._rewardResolved = false
+		self._resolveAt = _UtilLogic.ServerElapsedSeconds + 0.12
+		self._hideAt = _UtilLogic.ServerElapsedSeconds + math.max(0.9,_Ep5GourdLogic.DieDuration)
+		self:ShowOpen(_Ep5GourdLogic.DieDuration,_Ep5GourdLogic.DieFrames)
+	end
+
+	@ExecSpace("Multicast")
+	method void ShowOpen(number duration, integer frameCount)
+		if self:IsServer() then return end
+		self._localPhase = 3 self._localAt = _UtilLogic.ServerElapsedSeconds self._resolveAt = duration self._hideAt = frameCount
+		self.Gourd.SpriteRendererComponent.SpriteRUID = "17e009a0ccf24c559e930cee63dd06b0"
+		self.Gourd.SpriteRendererComponent.StartFrameIndex = 0 self.Gourd.SpriteRendererComponent.EndFrameIndex = frameCount-1
+		_SoundOptionLogic:PlaySfx("972843e759204d3e9ad84e7d3fa94f83",0.5)
+	end
+
+	method void OnUpdate(number delta)
+		local now = _UtilLogic.ServerElapsedSeconds
+		if self:IsServer() then
+			if self.Phase == 1 and now >= self._flightAt+self.FlightDuration then
+				self.Phase = 2 self.Gourd.TransformComponent.Position = self._land
+				self:ShowLanding(self._land,_Ep5GourdLogic.HitDuration)
+				log("[VRF] gourd landed x=" .. self._land.x .. " y=" .. self._land.y)
+			elseif self.Phase == 3 then
+				if not self._rewardResolved and now >= self._resolveAt then
+					self._rewardResolved = true
+					if _GameManager.GameStarted and not _GameManager.GameOver and _MapManager.CurrentMapIndex == self.Zone then
+						if _Ep5GourdLogic:IsItemRoll(_UtilLogic:RandomDouble(),self.ItemChance) then _Ep5GourdLogic:GrantBushReward(self._land,self.Entity.CurrentMap)
+						else self._spawned = _Ep5GourdLogic:SpawnDokkaebi(self.Entity.CurrentMap,self._land,self.Zone) end
+					end
+				end
+				if now >= self._hideAt then self.Phase = 4 self.Gourd.Enable = false end
+			end
+			return
+		end
+		if not isvalid(self.Gourd) or not self.Gourd.Enable then return end
+		local tf = self.Gourd.TransformComponent
+		if self._localPhase == 1 then
+			local t = math.max(0,math.min(1,(now-self._localAt)/self.FlightDuration))
+			tf.Position = self:FlightPosition(self._localStart,self._localLand,t)
+			local s = self.GourdScale*(0.35+0.65*t+0.5*math.sin(t*math.pi))
+			tf.Scale = Vector3(s,s,1) tf.ZRotation = -24*(1-t)+12*math.sin(t*math.pi)
+		elseif self._localPhase == 2 then
+			local t = now-self._localAt local bounce = t < 0.22 and math.sin(t/0.22*math.pi) or 0
+			tf.Position = self._localLand tf.Scale = Vector3(self.GourdScale*(1+0.12*bounce),self.GourdScale*(1-0.10*bounce),1)
+			if t >= self._resolveAt then self._localPhase = 0 self.Gourd.SpriteRendererComponent.SpriteRUID = "63122af3a17d4024abe95cd7cac3ddf3" end
+		elseif self._localPhase == 3 and now-self._localAt >= self._resolveAt then
+			self.Gourd.SpriteRendererComponent.StartFrameIndex = self._hideAt-1
+			self.Gourd.SpriteRendererComponent.EndFrameIndex = self._hideAt-1 self._localPhase = 0
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		self._generation = self._generation + 1 self.Phase = 0 self._rewardResolved = false
+		if isvalid(self.Gourd) then
+			local inspect = self.Gourd:GetComponent("script.MushroomInspectChallenge")
+			if inspect ~= nil then inspect:ResetForNewRun() end
+			self.Gourd.Enable = false
+		end
+		for _, entity in ipairs(self._spawned) do if isvalid(entity) then entity:Destroy() end end
+		self._spawned = {} self:ResetPresentation()
+	end
+
+	@ExecSpace("Multicast")
+	method void ResetPresentation()
+		if self:IsServer() then return end
+		self._localPhase = 0
+		if not isvalid(self.Gourd) then return end
+		self.Gourd.SpriteRendererComponent.SpriteRUID = "63122af3a17d4024abe95cd7cac3ddf3"
+		self.Gourd.SpriteRendererComponent.StartFrameIndex = 0 self.Gourd.SpriteRendererComponent.EndFrameIndex = 2147483647
+		self.Gourd.TransformComponent.ZRotation = 0 self.Gourd.TransformComponent.Scale = Vector3(self.GourdScale,self.GourdScale,1)
+	end
+
+	method void OnEndPlay()
+		if self:IsClient() and self._touchHandler ~= nil then self.Entity:DisconnectEvent(TouchEvent,self._touchHandler) self._touchHandler = nil end
+	end
+end

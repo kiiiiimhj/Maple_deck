@@ -1,0 +1,432 @@
+@Logic
+script PetUI extends Logic
+
+	property Entity InventoryRoot = "f5cb1fa3-87bb-4968-8af4-4d682d6eb199"
+	property Entity PlayerInfo = "e2d32dd6-01fd-4cc1-bf70-dcebf8de21cc"
+	property Entity Avatar = "9e23bd26-5fce-459f-b1ed-73f70433bdf2"
+	property Entity Nameplate = "a5bd2179-28ec-440b-b991-1c9dc6202fc2"
+	property Entity GearSlots = "35ac4f43-9438-4a06-9406-b05a3410bcdc"
+	property Entity InventoryPanel = "df5b9734-3620-4c84-b76b-0afffac1eeab"
+	property Entity PetGearSlots = "a221f82d-9356-4098-96c5-d7c59c596aae"
+	property Entity PetDisplay = "c28a3729-4d48-49a2-9f69-41cf8f304d98"
+	property Entity PetButton = "517c1735-c1e8-42fc-94c2-9e99251bf987"
+	property Entity PetInventoryPanel = "f062774e-5d30-4a18-b270-0d6e0ddca7de"
+	property Entity ItemNameTooltip = "783b6c15-db07-4702-886d-48d75fd308b1"
+	property string PetInvTab = "All"
+	property integer PetInvPage = 1
+	property integer PetInvTooltipTimer = 0
+	property integer ViewedPetIndex = 1
+	property Vector2 PortraitBaseSize = Vector2(212,212)
+	property number JoinWaitUntil = 0
+	property string ArrowOnRUID = "280fd26304f7442fb742555a7a674fc9"
+	property string ArrowOffRUID = "0c25f4ba834745aba5ec24fe38d0bc1e"
+	property string JoinRUID = "4384a214dae64683a7c0f92392c3ad87"
+	property string JoinOffRUID = "929c7f14f3ef4d77a644f41c5f9a2bfd"
+	property string StayHomeRUID = "f6b09cf25a7d457380be0174bd253286"
+	property boolean PetMode = false
+	property table Handlers = {}
+	property number NextRefresh = 0
+	property number MotionUntil = 0
+	property string Motion = ""
+	property string IdleRUID = ""
+	property string CustomIdlePose = "stand"
+	property number IdleAnimationStart = 0
+	property string CustomFrameKey = ""
+	property string CustomImageRUID = ""
+	property Vector2 PortraitBasePosition = Vector2(0,-148)
+	property integer ShownRevision = -1
+	property string EnabledButtonRUID = "e2553674fb1c44a1836b7b56ce27f2b4"
+	property string DisabledButtonRUID = "6a34f87232c649cfaa6d770aae45e293"
+
+	@ExecSpace("ClientOnly")
+	method void BindClick(Entity entity, any callback)
+		-- Every global UI subscription is paired with cleanup on editor reload.
+		if not isvalid(entity) then return end
+		local handle = entity:ConnectEvent(ButtonClickEvent, callback)
+		table.insert(self.Handlers, {entity=entity, handle=handle})
+	end
+
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+	 self.PortraitBasePosition=self.PetDisplay:GetChildByName("Portrait").UITransformComponent.anchoredPosition
+	 self.PortraitBaseSize=self.PetDisplay:GetChildByName("Portrait").UITransformComponent.RectSize
+	 self:BindClick(self.PetButton, function() self:SetPetMode(not self.PetMode) end)
+	 self:BindClick(self.PlayerInfo:GetChildByName("StatButton"), function() self:SetPetMode(false) end)
+	 self:BindClick(self.PlayerInfo:GetChildByName("AvatarViewToggle"), function() self:SetPetMode(false) end)
+	 self.PetButton:GetChildByName("Label").TextGUIRendererComponent.Text = _LocalizationService:GetText("PET_TAB")
+	 self.PetGearSlots:GetChildByName("Heading").TextGUIRendererComponent.Text = _LocalizationService:GetText("PET_GEAR")
+	 self.PetGearSlots:GetChildByName("Hint").TextGUIRendererComponent.Text = _LocalizationService:GetText("PET_GEAR_PENDING")
+	 for _, slot in ipairs({"Cap", "Coat", "Necklace"}) do
+	  local keys = {Cap="PET_GEAR_HAT", Coat="PET_GEAR_CLOTHES", Necklace="PET_GEAR_NECKLACE"}
+	  self.PetGearSlots:GetChildByName(slot):GetChildByName("Label").TextGUIRendererComponent.Text = _LocalizationService:GetText(keys[slot])
+	 end
+	 self:BindClick(self.PetGearSlots:GetChildByName("TestGear"),function() _PetLogic:RequestTestPetGear(self:GetShownEntry().id) end)
+	 for _,slot in ipairs({"Cap","Coat","Necklace"}) do local key=slot self:BindClick(self.PetGearSlots:GetChildByName(slot),function() self:OnPetGearSlotClicked(key) end) end
+	 -- 펫 보기 오른쪽: 캐릭터 인벤토리 대신 펫 장비 전용 목록(전체/옷/모자/목걸이)
+	 if isvalid(self.PetInventoryPanel) then
+	  local tabs=self.PetInventoryPanel:GetChildByName("Tabs")
+	  local labels={All="UI_EQUIPMENTGROUP_007",Coat="PET_GEAR_CLOTHES",Cap="PET_GEAR_HAT",Necklace="PET_GEAR_NECKLACE"}
+	  for name,key in pairs(labels) do
+	   local tabName=name
+	   tabs:GetChildByName(name):GetChildByName("Label").TextGUIRendererComponent.Text=_LocalizationService:GetText(key)
+	   self:BindClick(tabs:GetChildByName(name),function() self.PetInvTab=tabName self.PetInvPage=1 self:HidePetInvTooltip() self:RefreshPetInventory() end)
+	  end
+	  local cells=self.PetInventoryPanel:GetChildByName("Cells")
+	  for i=0,23 do local index=i self:BindClick(cells:GetChildByName("Cell"..i),function() self:OnPetInvCellClicked(index) end) end
+	 end
+	 -- 펫 이름/상태 양옆 화살표로 펫 넘겨 보기, 아래 함께하기 버튼(펫하우스와 같은 모양)
+	 self:BindClick(self.PetDisplay:GetChildByName("PrevPet"),function() self:MoveViewedPet(-1) end)
+	 self:BindClick(self.PetDisplay:GetChildByName("NextPet"),function() self:MoveViewedPet(1) end)
+	 self:BindClick(self.PetDisplay:GetChildByName("Equip"),function() self:RequestJoin() end)
+	 self:SetPetMode(false)
+	end
+
+	@ExecSpace("ClientOnly")
+	method table GetShownEntry()
+		-- 인벤토리 펫 보기에서 지금 넘겨 보고 있는 펫(카탈로그 순서).
+		local entries=_PetLogic:GetPetCatalog()
+		self.ViewedPetIndex=math.max(1,math.min(#entries,self.ViewedPetIndex))
+		return entries[self.ViewedPetIndex]
+	end
+
+	@ExecSpace("ClientOnly")
+	method void MoveViewedPet(integer direction)
+		-- 끝에서는 넘어가지 않는다(펫하우스와 동일, 순환 없음).
+		local entries=_PetLogic:GetPetCatalog()
+		local nextIndex=self.ViewedPetIndex+direction
+		if not self.PetMode or nextIndex<1 or nextIndex>#entries then return end
+		self.ViewedPetIndex=nextIndex self.PetInvPage=1 self.IdleRUID="" self.CustomFrameKey=""
+		self:HidePetInvTooltip() self:Refresh()
+		log("[VRF] PET-INV view pet="..entries[nextIndex].id.." index="..nextIndex)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RequestJoin()
+		-- 함께하기/집에 두기: 펫하우스와 같은 서버 equip 액션을 쓴다.
+		local entry=self:GetShownEntry() local pet=entry.progress
+		if not self.PetMode or not entry.ready or pet==nil or not pet.Owned then return end
+		-- 버튼을 끄지 않고 바로 보낸다(유저 지정 2026-10-22). 연타는 서버가 0.25초로 막는다.
+		_PetLogic:RequestPetAction(entry.id,"equip")
+		log("[VRF] PET-INV join request pet="..entry.id.." equipped="..tostring(pet.Equipped))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshNavigation()
+		-- 화살표: 그쪽에 펫이 더 있으면 초록, 없으면 회색. 함께하기: 보유 펫만 초록(함께 중이면 집에 두기).
+		local count=#_PetLogic:GetPetCatalog()
+		for _,spec in ipairs({{"PrevPet",-1},{"NextPet",1}}) do
+			local button=self.PetDisplay:GetChildByName(spec[1]) local target=self.ViewedPetIndex+spec[2]
+			local enabled=target>=1 and target<=count
+			button.ButtonComponent.Enable=enabled
+			button.SpriteGUIRendererComponent.ImageRUID=DataRef(enabled and self.ArrowOnRUID or self.ArrowOffRUID)
+		end
+		local entry=self:GetShownEntry() local pet=entry.progress
+		local owned=_PetLogic.ClientReady and pet~=nil and pet.Owned
+		local waiting=_UtilLogic.ElapsedSeconds<self.JoinWaitUntil
+		local join=self.PetDisplay:GetChildByName("Equip")
+		join.ButtonComponent.Enable=owned and not waiting
+		join.SpriteGUIRendererComponent.ImageRUID=DataRef((not owned or waiting) and self.JoinOffRUID or (pet.Equipped and self.StayHomeRUID or self.JoinRUID))
+		join:GetChildByName("Label").TextGUIRendererComponent.Text=_LocalizationService:GetText(owned and pet.Equipped and "PET_HOUSE_REST_TOGETHER" or "PET_HOUSE_JOIN")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetPetMode(boolean enabled)
+	 if not enabled and isvalid(self.InventoryRoot) then self.InventoryRoot.UIInventory:ClosePetGearPurchaseUI() end
+	 self.PetMode = enabled self.PetDisplay.Enable = enabled self.PetGearSlots.Enable = enabled
+	 -- 캐릭터 능력치 팝업(PlayerInfo/StatPopup)은 펫 화면 위에 남아 겹쳤다(2026-10-14 유저 리포트) — 펫으로 넘어가면 닫는다
+	 local statPopup = self.PlayerInfo:GetChildByName("StatPopup")
+	 if enabled and isvalid(statPopup) and statPopup.Enable then
+	  statPopup.Enable = false
+	  log("[VRF] PetUI: closed character stat popup on pet mode")
+	 end
+	 self.Avatar.Enable = not enabled self.Nameplate.Enable = not enabled self.GearSlots.Enable = not enabled
+	 -- 펫 보기에서는 캐릭터 인벤토리 대신 펫 장비 전용 목록을 보여준다(데이터는 서로 독립).
+	 self.InventoryPanel.Enable = not enabled
+	 if isvalid(self.PetInventoryPanel) then self.PetInventoryPanel.Enable = enabled end
+	 self:HidePetInvTooltip()
+	 if enabled then
+	  self.PetInvTab = "All"
+	  -- 처음 보여줄 펫 = 지금 함께하는 펫(없으면 보유 펫, 그것도 없으면 첫 펫)
+	  local equipped=_PetLogic:GetEquippedClientEntry()
+	  for i,entry in ipairs(_PetLogic:GetPetCatalog()) do if entry.id==equipped.id then self.ViewedPetIndex=i end end
+	 end
+	 self.PetButton.SpriteGUIRendererComponent.ImageRUID = DataRef(enabled and self.EnabledButtonRUID or "a143f64fe17e4dbfb9635a119dbdfd37")
+	 if enabled then self.IdleRUID = "" self.NextRefresh = 0 self:Refresh() end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Refresh()
+	 local entry=self:GetShownEntry() local pet=entry.progress
+	 local owned=_PetLogic.ClientReady and pet~=nil and pet.Owned
+	 self.PetDisplay:GetChildByName("Name").TextGUIRendererComponent.Text = _LocalizationService:GetText(entry.nameKey)
+	 local key = owned and (pet.Equipped and "PET_EQUIPPED" or "PET_OWNED") or "PET_PREVIEW"
+	 self.PetDisplay:GetChildByName("State").TextGUIRendererComponent.Text = _LocalizationService:GetText(_PetLogic:GetPetMessageKey(entry.id,key))
+	 self:RefreshNavigation()
+	 self.PetDisplay:GetChildByName("Portrait").SpriteGUIRendererComponent.Color = Color(1,1,1,owned and 1 or 0.55)
+	 self.ShownRevision = _PetLogic.ClientRevision self:PlayIdle() self:RefreshPetGear()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnPetChanged(string motion)
+	 _PetHouseUI:OnPetChanged(motion)
+	 self.JoinWaitUntil = 0
+	 if self.PetMode then self:Refresh() end
+	 if isvalid(self.InventoryRoot) and self.InventoryRoot.Enable then
+	  local holder = self.InventoryRoot.UIInventory.InventoryTabHolder
+	  if holder ~= nil and holder.InventoryGrid ~= nil then
+	   holder:Update(true, false) holder.InventoryGrid:RefreshItemByGUID("pet-evolution-stone")
+	  end
+	 end
+	end
+	@ExecSpace("ClientOnly")
+	method void PlayIdle()
+		-- Needs affect expression, never take away the pet's earned combat bonus.
+		local pose = "stand"
+		local entry=self:GetShownEntry() local pet=entry.progress
+		if pet ~= nil and pet.Owned then
+			if (pet.Fatigue or 0)>=80 then pose="rest"
+			elseif pet.Fullness < 30 then pose = "hungry"
+			elseif pet.Mood < 30 then pose = "cry"
+			elseif pet.Cleanliness < 30 then pose = "angry" end
+		end
+		self.CustomIdlePose=pose
+		local ruid = entry.motions[pose] or entry.stand
+		if self.IdleRUID == ruid then return end
+		self.IdleRUID = ruid self.IdleAnimationStart=_UtilLogic.ElapsedSeconds
+		local image = self.PetDisplay:GetChildByName("Portrait").SpriteGUIRendererComponent
+		if entry.frames~=nil then
+			image.PreserveSprite=PreserveSpriteType.None image.LocalScale=Vector2(1,1) image.LocalPosition=Vector2(0,0)
+			local scale=_PetLogic:GetCustomPixelScale(self.PetDisplay:GetChildByName("Portrait"),entry.inventoryPixelScale)
+			self.PetDisplay:GetChildByName("Portrait").UITransformComponent.RectSize=Vector2(entry.canvas*scale,entry.canvas*scale)
+			self.PetDisplay:GetChildByName("Portrait").UITransformComponent.anchoredPosition=Vector2(self.PortraitBasePosition.x,self.PortraitBasePosition.y+entry.footOffset*scale)
+		else
+			local scale=entry.inventoryPixelScale or 5.8888888889 image.PreserveSprite=PreserveSpriteType.NativeSize image.LocalScale=Vector2(scale,scale)
+			-- 넘겨 보기로 뚱땅(직접 그린 프레임) 다음에 오면 칸 크기가 남아 있으므로 원래 크기로 되돌린다
+			self.PetDisplay:GetChildByName("Portrait").UITransformComponent.RectSize=self.PortraitBaseSize
+			self.PetDisplay:GetChildByName("Portrait").UITransformComponent.anchoredPosition=self.PortraitBasePosition
+		end
+		image.AnimClipPlayType = SpriteAnimClipPlayType.Loop image.ImageRUID = DataRef(ruid)
+		image.Enable=entry.frames~=nil or not _PetLogic.NativePetGearReady
+		self.CustomImageRUID=entry.frames~=nil and ruid or ""
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUpdate(number delta)
+		-- Poll only while visible; no storage or per-frame network requests.
+		local now = _UtilLogic.ElapsedSeconds
+		if self.PetMode and not self.InventoryRoot.Enable then self:SetPetMode(false) end
+		if self.PetMode and self.InventoryRoot.Enable then
+			if now >= self.NextRefresh then self.NextRefresh = now + 15 _PetLogic:RequestState() end
+			if self.ShownRevision ~= _PetLogic.ClientRevision then self:Refresh() end
+			-- 서버 응답 없이 대기 시간이 끝나면 함께하기 버튼을 다시 켠다
+			if self.JoinWaitUntil > 0 and now >= self.JoinWaitUntil then self.JoinWaitUntil = 0 self:RefreshNavigation() end
+			local entry=self:GetShownEntry()
+			if entry.frames~=nil then
+				local frames=entry.frames[self.CustomIdlePose] or entry.frames.stand
+				local frame=_PetLogic:GetCustomFrameIndex(self.CustomIdlePose,now-self.IdleAnimationStart) local key=entry.id..":"..self.CustomIdlePose..":"..frame
+				if self.CustomFrameKey~=key then
+					self.CustomFrameKey=key local ruid=frames[frame]
+					if self.CustomImageRUID~=ruid then self.CustomImageRUID=ruid self.PetDisplay:GetChildByName("Portrait").SpriteGUIRendererComponent.ImageRUID=DataRef(ruid) end
+				end
+				local scale=_PetLogic:GetCustomPixelScale(self.PetDisplay:GetChildByName("Portrait"),entry.inventoryPixelScale)
+				self.PetDisplay:GetChildByName("Portrait").UITransformComponent.anchoredPosition=Vector2(self.PortraitBasePosition.x,self.PortraitBasePosition.y+entry.footOffset*scale)
+				_PetLogic:AlignCustomPortrait(self.PetDisplay:GetChildByName("Portrait"),entry,entry.inventoryPixelScale)
+			end
+			_PetLogic:RenderPetGearUI(self.PetDisplay:GetChildByName("Portrait"),entry,self.CustomImageRUID)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		-- Release all click bindings before Maker rebuilds the global logic.
+		for _,e in pairs(self._T.petInvPager or {})do if isvalid(e)then e:Destroy()end end;self._T.petInvPager=nil
+		for _, binding in ipairs(self.Handlers) do
+			if isvalid(binding.entity) then binding.entity:DisconnectEvent(ButtonClickEvent, binding.handle) end
+		end
+		self.Handlers = {}
+	end
+
+
+	@ExecSpace("ClientOnly")
+	method string GetPetGearSlotSilhouette(string slot)
+		-- 빈 칸 부위 실루엣 — 캐릭터 장비 칸(EquipInfoGrid)의 모자/상의/목걸이 아이콘과 같은 그림
+		if slot=="Cap" then return "42e5e834544e4b05b11160213f712635" end
+		if slot=="Coat" then return "b41b2a76b9cf4074baa4c727ca5e1ac9" end
+		return "f32d6dcdcdd44a98b579d06f8e3e99e9"
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshPetGear()
+		local entry=self:GetShownEntry() local pet=entry.progress local dog=_PetLogic:GetPetGearDefinitionForPet(entry.id,"Cap")~=nil and pet~=nil and pet.Owned
+		for _,slot in ipairs({"Cap","Coat","Necklace"}) do
+			local def=_PetLogic:GetSelectedPetGearDefinition(entry.id,slot,pet) local e=self.PetGearSlots:GetChildByName(slot)
+			local ownedMask=dog and ((def.variant or 1)>1 and pet.GearVariantOwnedMask or pet.GearOwnedMask) or 0
+			local owned=dog and _PetLogic:HasPetGearBit(ownedMask or 0,_PetLogic:GetPetGearOwnershipBit(def.bit,def.variant or 1))
+			local worn=owned and _PetLogic:HasPetGearBit(pet.GearEquippedMask or 0,def.bit)
+			-- 펫이 있으면 장비가 없어도 눌러서 살 수 있다.
+			-- 캐릭터 장비 칸(EquipInfoGrid)과 똑같이: 칸 바탕은 항상 원색, 착용 중이면 장비 그림, 아니면 부위 실루엣만(유저 지정 2026-10-22)
+			e.ButtonComponent.Enable=dog
+			local icon=e:GetChildByName("Icon")
+			icon.SpriteGUIRendererComponent.ImageRUID=DataRef(worn and def.icon or self:GetPetGearSlotSilhouette(slot))
+			icon.SpriteGUIRendererComponent.Color=Color(1,1,1,1)
+			icon.UITransformComponent.RectSize=worn and Vector2(68,64) or Vector2(70,70)
+			e.SpriteGUIRendererComponent.Color=Color(1,1,1,1)
+			local dim=e:GetChildByName("Dim") if dim~=nil then dim.Enable=false end
+			e:GetChildByName("Label").TextGUIRendererComponent.Text=def.slotName or def.name or _LocalizationService:GetText(def.key)
+			e:GetChildByName("Stat").TextGUIRendererComponent.Text=_LocalizationService:GetText(def.statKey)
+			e:GetChildByName("Mark").Enable=false
+		end
+		self.PetGearSlots:GetChildByName("Hint").TextGUIRendererComponent.Text=_LocalizationService:GetText(dog and "PET_GEAR_HINT" or "PET_GEAR_EXCLUSIVE")
+		local test=self.PetGearSlots:GetChildByName("TestGear");test.Enable=Environment:IsMakerPlay() and dog;test.ButtonComponent.Enable=Environment:IsMakerPlay() and dog;test:GetChildByName("Label").TextGUIRendererComponent.Text=_LocalizationService:GetText("PET_GEAR_TEST")
+		self:RefreshPetInventory()
+	end
+
+	@ExecSpace("ClientOnly")
+	method table BuildPetInvItems()
+		-- 모든 펫의 장비를 모은다. 지금 함께하는 펫 것이 앞, 그 펫이 가진 것만 장착 가능(나머지는 딤드).
+		local current=self:GetShownEntry()
+		local slots=self.PetInvTab=="All" and {"Coat","Cap","Necklace"} or {self.PetInvTab}
+		local mine={} local others={}
+		for _,entry in ipairs(_PetLogic:GetPetCatalog()) do
+			local pet=entry.progress local isCurrent=entry.id==current.id
+			for _,slot in ipairs(slots) do
+				for variant,def in ipairs(_PetLogic:GetPetGearVariants(entry.id,slot)) do
+					local ownedMask=variant>1 and (pet~=nil and pet.GearVariantOwnedMask or 0) or (pet~=nil and pet.GearOwnedMask or 0)
+					local owned=pet~=nil and pet.Owned and _PetLogic:HasPetGearBit(ownedMask,_PetLogic:GetPetGearOwnershipBit(def.bit,variant))
+					local selected=pet~=nil and _PetLogic:GetPetGearDesignIndex(pet.GearDesigns or 0,def.bit) or 1
+					local worn=owned and _PetLogic:HasPetGearBit(pet.GearEquippedMask or 0,def.bit) and selected==variant
+					-- 지금 보고 있는 펫을 가졌는데 이 장비는 없으면 다이아로 살 수 있다
+				local buyable=isCurrent and pet~=nil and pet.Owned and not owned
+				local item={petId=entry.id,slot=slot,variant=variant,def=def,worn=worn,wearable=isCurrent and owned,buyable=buyable}
+					if owned then item.buyable=false;table.insert(isCurrent and mine or others,item)end
+				end
+			end
+		end
+		for _,item in ipairs(others) do table.insert(mine,item) end
+		return mine
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshPetInventory()
+		-- 탭 표시 + 칸 채우기(아이콘·장착 중·딤드).
+		if not isvalid(self.PetInventoryPanel) or not self.PetInventoryPanel.Enable then return end
+		local tabs=self.PetInventoryPanel:GetChildByName("Tabs")
+		for _,name in ipairs({"All","Coat","Cap","Necklace"}) do
+			tabs:GetChildByName(name).SpriteGUIRendererComponent.ImageRUID=DataRef(name==self.PetInvTab and "b0ee1368553c4561a66d0d06ea0941cc" or "62049d396c78487b8a49dd3872431ec8")
+		end
+		local items=self:BuildPetInvItems() self._T.petInvItems=items
+		local pages=math.max(1,math.ceil(#items/24));self.PetInvPage=math.max(1,math.min(pages,self.PetInvPage));local offset=(self.PetInvPage-1)*24
+		self:RefreshPetInventoryPages(pages)
+		local cells=self.PetInventoryPanel:GetChildByName("Cells")
+		local wearable=0
+		for i=0,23 do
+			local cell=cells:GetChildByName("Cell"..i) local item=items[offset+i+1]
+			cell.Enable=item~=nil
+			if item~=nil then
+				-- 아이콘이 아직 없는 장비는 기본 스프라이트로 임시 표시
+				local icon=(item.def.icon~=nil and item.def.icon~="") and item.def.icon or "1705e3c5b2c146ac9a699f96fb067408"
+				local itemIcon=cell:GetChildByName("Icon")
+				itemIcon.SpriteGUIRendererComponent.ImageRUID=DataRef(icon)
+				itemIcon.SpriteGUIRendererComponent.PreserveSprite=PreserveSpriteType.None
+				itemIcon.UITransformComponent.RectSize=Vector2(80,80);itemIcon.UITransformComponent.anchoredPosition=Vector2(0,-8)
+				_PetLogic:ShowPetGearOwnerBadge(cell,item.petId,38,-37,32)
+				-- 인벤토리 칸(UIItemSlot)과 같은 표시: 못 쓰는 칸은 짙은 딤, 장착 중은 옅은 딤 + 가운데 "장착 중"
+				local dim=cell:GetChildByName("Dim")
+				dim.Enable=item.worn or not item.wearable
+				dim.SpriteGUIRendererComponent.Color=item.worn and Color(0,0,0,0.6) or Color(0.05,0.05,0.05,0.85)
+				local worn=cell:GetChildByName("Worn") worn.Enable=item.worn
+				worn.TextGUIRendererComponent.Text=_LocalizationService:GetText("PET_GEAR_WORN")
+				-- 살 수 있는 장비: 흰 자물쇠 + 아래 다이아 아이콘·가격
+				local lock=cell:GetChildByName("Lock") local price=cell:GetChildByName("Price")
+				if isvalid(lock) then lock.Enable=item.buyable end
+				if isvalid(price) then
+					price.Enable=item.buyable
+					-- 다이아 아이콘을 숫자 바로 왼쪽에 붙이고, 둘을 한 덩어리로 가운데 정렬
+					local label=price:GetChildByName("Text") local dia=price:GetChildByName("Dia") local s=tostring(_PetLogic:GetPetGearPrice())
+					local tr=label.TextGUIRendererComponent tr.Text=s tr.HorizontalAlignment=TextHorizontalAlignmentOption.Center
+					local w=math.max(1,math.ceil(tr:GetPreferredWidth(s))) local group=26+2+w
+					-- 유저 지정: 다이아 2px 왼쪽, 숫자 2px 오른쪽
+					dia.UITransformComponent.anchoredPosition=Vector2(-group/2+13-2,0)
+					label.UITransformComponent.anchoredPosition=Vector2(-group/2+28+w/2+2,0) label.UITransformComponent.RectSize=Vector2(w,30)
+				end
+				if item.wearable then wearable=wearable+1 end
+			end
+		end
+		
+		log("[VRF] PET-INV tab="..self.PetInvTab.." items="..#items.." wearable="..wearable)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshPetInventoryPages(integer pages)
+		local q=self._T.petInvPager
+		if q==nil then
+			q={};self._T.petInvPager=q
+			for _,spec in ipairs({{"Prev","PrevPet",-1},{"Next","NextPet",1}}) do
+				local e=_SpawnService:SpawnByEntity(self.PetDisplay:GetChildByName(spec[2]),"PetGearPage"..spec[1],Vector3.zero,self.PetInventoryPanel,false)
+				local dir=spec[3];self:BindClick(e,function()self.PetInvPage=self.PetInvPage+dir;self:HidePetInvTooltip();self:RefreshPetInventory()end);q[spec[1]]=e
+			end
+			q.Label=_SpawnService:SpawnByEntity(self.PetGearSlots:GetChildByName("Cap"):GetChildByName("Label"),"PetGearPageCount",Vector3.zero,self.PetInventoryPanel,false)
+		end
+		local size=self.PetInventoryPanel.UITransformComponent.RectSize local x=size.x*.5-100 local y=-size.y*.5-24
+		for _,spec in ipairs({{"Prev",-52,self.PetInvPage>1},{"Next",52,self.PetInvPage<pages}}) do
+			local e=q[spec[1]] local t=e.UITransformComponent;t.AnchorsMin=Vector2(.5,.5);t.AnchorsMax=Vector2(.5,.5);t.Pivot=Vector2(.5,.5);t.anchoredPosition=Vector2(x+spec[2],y);t.RectSize=Vector2(34,34);t.UIScale=Vector3(1,1,1);e.Enable=pages>1;e.ButtonComponent.Enable=spec[3];e.SpriteGUIRendererComponent.ImageRUID=DataRef(spec[3] and self.ArrowOnRUID or self.ArrowOffRUID)
+		end
+		local t=q.Label.UITransformComponent;t.AnchorsMin=Vector2(.5,.5);t.AnchorsMax=Vector2(.5,.5);t.Pivot=Vector2(.5,.5);t.anchoredPosition=Vector2(x,y);t.RectSize=Vector2(60,30);t.UIScale=Vector3(1,1,1);q.Label.TextGUIRendererComponent.Text=tostring(self.PetInvPage).." / "..tostring(pages);q.Label.Enable=pages>1
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnPetInvCellClicked(integer index)
+		-- 이름 말풍선은 항상, 장착/해제는 지금 펫이 가진 장비만.
+		local item=(self._T.petInvItems or {})[(self.PetInvPage-1)*24+index+1]
+		if item==nil then return end
+		local cell=self.PetInventoryPanel:GetChildByName("Cells"):GetChildByName("Cell"..index)
+		self:ShowPetInvTooltip(cell,(item.def.name or _LocalizationService:GetText(item.def.key)).."\n".._LocalizationService:GetText(item.def.statKey))
+		if item.wearable then _PetLogic:RequestPetGearVariant(item.slot,item.petId,item.variant or 1)
+		elseif item.buyable then self:OpenBuyGear(item.petId,item.slot,item.variant or 1,item.def) end
+		log("[VRF] PET-INV click pet="..item.petId.." slot="..item.slot.." wearable="..tostring(item.wearable))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OpenBuyGear(string petId, string slot, integer variant, table def)
+		-- 다이아 구매 확인창(인벤토리 공용 확인창 재사용)
+		local name=def.name or _LocalizationService:GetText(def.key)
+		_PetHouseUI:OpenWardrobeForPet(petId)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnPetGearSlotClicked(string slot)
+		-- 왼쪽 장착 칸: 가진 장비면 착용/해제, 펫은 있는데 장비가 없으면 다이아 구매
+		local e=self:GetShownEntry() local pet=e.progress
+		if _PetLogic:GetPetGearDefinitionForPet(e.id,slot)==nil or pet==nil or not pet.Owned then return end
+		local def=_PetLogic:GetSelectedPetGearDefinition(e.id,slot,pet) local variant=def.variant or 1
+		local ownedMask=variant>1 and (pet.GearVariantOwnedMask or 0) or (pet.GearOwnedMask or 0)
+		if _PetLogic:HasPetGearBit(ownedMask,_PetLogic:GetPetGearOwnershipBit(def.bit,variant)) then _PetLogic:RequestPetGear(slot,e.id)
+		else self:OpenBuyGear(e.id,slot,variant,def) end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ShowPetInvTooltip(Entity cell, string text)
+		-- 인벤토리와 같은 말풍선을 누른 칸 위에 1.5초 띄운다.
+		if not isvalid(self.ItemNameTooltip) or not isvalid(cell) then return end
+		local tr=self.ItemNameTooltip.UITransformComponent local panelTr=self.PetInventoryPanel.UITransformComponent
+		local parentTr=self.ItemNameTooltip.Parent.UITransformComponent
+		local c=cell.UITransformComponent.anchoredPosition
+		local x=panelTr.Position.x+c.x+80
+		local maxX=960-parentTr.Position.x-tr.RectSize.x*0.5-10
+		if x>maxX then x=maxX end
+		tr.anchoredPosition=Vector2(x,panelTr.Position.y+c.y+100)
+		self.ItemNameTooltip:GetChildByName("Label").TextGUIRendererComponent.Text=text
+		self.ItemNameTooltip:SetEnable(true)
+		if self.PetInvTooltipTimer~=0 then _TimerService:ClearTimer(self.PetInvTooltipTimer) end
+		self.PetInvTooltipTimer=_TimerService:SetTimerOnce(function() self.PetInvTooltipTimer=0 self:HidePetInvTooltip() end,1.5)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void HidePetInvTooltip()
+		-- 말풍선 닫기(탭 전환·펫 보기 전환)
+		if self.PetInvTooltipTimer~=0 then _TimerService:ClearTimer(self.PetInvTooltipTimer) self.PetInvTooltipTimer=0 end
+		if isvalid(self.ItemNameTooltip) then self.ItemNameTooltip:SetEnable(false) end
+	end
+
+end

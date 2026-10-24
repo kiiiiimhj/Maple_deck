@@ -37,6 +37,12 @@ script GameOverUI extends Logic
 	property number ExitRestartOnlyX = 185
 	-- DPS 아이콘 아래 "획득 골드"(유저 지정 2026-10-02) — 이번 판 런 골드(GameManager.Gold, 유물 보너스 포함)
 	property TextComponent goldValueText = "ecccb5b5-0514-4313-8a2d-4430096baaa1"
+	property Entity clearRecordRow = "1dadbc00-8f8a-4162-905f-5edde943c104"
+	property TextGUIRendererComponent clearRecordText = "dae91bbe-7859-4277-aa1c-9ad1e1c3dd21"
+	-- 결과창 제목(유저 지정 2026-10-24) — 클리어(무제한 10/15분 돌파·타임어택 완주)한 판이면 "GameOver" 대신 "Clear!".
+	-- 원래 "GameOver"도 번역 없이 영어 그대로라 같은 정책으로 둔다
+	property TextComponent gameOverTitle = "d1347353-d459-4553-a9b6-a9b99c804de0"
+	property string _shownClearRecord = ""
 	property integer _shownGold = -1
 	property Entity topDps = "5e60ee45-775f-4e7b-a0ef-a8244c1ffade"
 	property string _shownDpsSnapshot = ""
@@ -95,6 +101,7 @@ script GameOverUI extends Logic
 		end
 		if isOver and isvalid(self.gameOverGroup) and self.gameOverGroup.Enable then
 			self:RefreshContinueButton()
+			if _RunClearLogic:GetClearRecord() ~= self._shownClearRecord then self:RefreshClearRecord() end
 			-- 죽는 순간 날아오던 드롭(다이아/뽑기권)이 결과창이 뜬 뒤에 적립될 수 있다 — 바뀌면 칸을 다시 그린다
 			if _RunLootLogic:GetSummary() ~= self._shownLoot then self:RefreshScore() end
 			-- 유물 골드 보너스는 게임오버 순간 서버에서 더해져 @Sync가 결과창보다 늦게 올 수 있다 — 바뀌면 다시 쓴다
@@ -106,17 +113,32 @@ script GameOverUI extends Logic
 	@ExecSpace("ClientOnly")
 	method void ShowGameOver()
 		-- 최종 웨이브/레벨/스코어 정보를 표시하고 패널을 연다
-		self.statsText.Text = "Wave " .. _GameManager.Wave .. "  |  Lv." .. _GameManager.Level
+		-- 2026-10-24 유저 지정: 클리어 줄 대신 이 줄 끝에 실제 버틴 시간(Time MM:SS)을 붙인다
+		local sec = math.max(0, _GameManager.RunElapsedSec)
+		self.statsText.Text = "Wave " .. _GameManager.Wave .. "  |  Lv." .. _GameManager.Level .. string.format("  |  Time %02d:%02d", math.floor(sec / 60), sec % 60)
 		self:RefreshScore()
 		self:RefreshTopDps()
 		self:RefreshContinueButton()
 		self:RefreshOvertimeButtons()
+		self:RefreshClearRecord()
 		-- 게임오버 팝업은 언제나 상점이 닫힌 상태로 시작한다(지난 판에 열어둔 채 끝났을 수 있다)
 		_DiaShopUI:Close()
 		self.gameOverGroup.Enable = true
 		self.itemList.ScrollLayoutGroupComponent:SetScrollNormalizedPosition(UITransformAxis.Horizontal, 0)
 		self:SyncScrollBar(0)
 		log("GameOverUI: shown (Wave " .. _GameManager.Wave .. ", Lv." .. _GameManager.Level .. ")")
+	end
+
+	-- The earned clear survives Continue and is cleared only when a fresh run begins.
+	@ExecSpace("ClientOnly")
+	method void RefreshClearRecord()
+		self._shownClearRecord = _RunClearLogic:GetClearRecord()
+		local seconds = _RunClearLogic:GetClearSeconds()
+		-- "클리어 (15:00 돌파)" 줄은 유저 지정(2026-10-24)으로 안 보여준다 — 클리어는 제목 "Clear!"로,
+		-- 시간은 Wave|Lv 줄의 Time으로 대신한다
+		self.clearRecordRow.Enable = false
+		if isvalid(self.gameOverTitle) then self.gameOverTitle.Text = seconds > 0 and "Clear!" or "GameOver" end
+		log("[VRF] stage clear result title=" .. tostring(isvalid(self.gameOverTitle) and self.gameOverTitle.Text) .. " stats=" .. self.statsText.Text)
 	end
 
 	-- 이번 런에 가방에 쌓인 잡템을 "획득 스코어"로 환산해 보여준다 — 아직 실제로 환전/차감하지는

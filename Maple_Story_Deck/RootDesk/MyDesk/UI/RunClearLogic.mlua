@@ -1,0 +1,192 @@
+@Logic
+script RunClearLogic extends Logic
+
+	-- One atomic run record keeps the earned clear and its actual time together on clients.
+	@Sync property string ClearRecord = ""
+	property integer _runSerial = 0
+	property integer _goalSeconds = 900
+	property boolean _bladePending = false
+	property number _bladeRemaining = 0
+	property number SlowSeconds = 0.5
+	property number BannerHoldSeconds = 1.5
+	property number BannerExitSeconds = 0.3
+	property string ClearSoundRUID = "c3881663d79a48c684124132bfaabb7b"
+	property Entity presentationGroup = "ce551e82-b30a-4505-9042-bd52269503cd"
+	property Entity flash = "7c74bb2d-2f1c-41d1-b434-65bdc3c486d4"
+	property Entity banner = "060e0fd3-9a4e-4cd2-ae76-ff6a2ee2b7eb"
+	property TextGUIRendererComponent subtitle = "73ecf066-cbc4-4f28-8b50-1567ff711708"
+	property table _particles = {}
+	property string _seenRecord = ""
+	property boolean _presenting = false
+	property boolean _slowActive = false
+	property boolean _presentationTimeAttack = false
+	property number _startedMillis = 0
+
+	method void OnBeginPlay()
+		if self:IsServer() then
+			self:ResetForRun()
+			return
+		end
+		self._particles = {}
+		for _, name in ipairs({"BurstLeft", "BurstRight", "BurstTopLeft", "BurstTopRight"}) do
+			local e = self.presentationGroup:GetChildByName(name)
+			if isvalid(e) then table.insert(self._particles, e.UIBasicParticleComponent) end
+		end
+		self:CancelPresentation()
+		log("[VRF] stage clear UI boot particles=" .. tostring(#self._particles))
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetForRun()
+		self._runSerial = self._runSerial + 1
+		-- EP1/2 already finish their survival milestones at 10 minutes; EP3+ at 15.
+		-- Time Attack retains its configured countdown as the clear condition.
+		local episode = _GameManager:GetSelectedEpisode()
+		local seconds = _EpisodeRewardLogic:GetSlotMinutes(episode * 3) * 60
+		if _GameManager.TimeAttackMode then seconds = _GameManager.TimeAttackDuration end
+		self._goalSeconds = math.max(1, math.floor(seconds))
+		self._bladePending = false
+		self._bladeRemaining = 0
+		self.ClearRecord = ""
+		log("[VRF] stage clear reset run=" .. tostring(self._runSerial) .. " goal=" .. tostring(self._goalSeconds))
+	end
+
+	method string GetClearRecord()
+		return self.ClearRecord
+	end
+
+	method integer GetGoalSeconds()
+		return self._goalSeconds
+	end
+
+	method integer GetClearSeconds()
+		return tonumber(string.match(self.ClearRecord, "^%d+|(%d+)|[01]$")) or 0
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean IsBladePending()
+		return self._bladePending
+	end
+
+	@ExecSpace("ServerOnly")
+	method void TickRun(number delta)
+		if not _GameManager.GameStarted or _GameManager.GameOver or _GameManager:IsGamePaused() or _GameManager:IsPlayClockFrozen() then return end
+		if self._bladePending then
+			self._bladeRemaining = math.max(0, self._bladeRemaining - delta)
+			if self._bladeRemaining <= 0 then
+				self._bladePending = false
+				if _GameManager.TimeAttackMode and self.ClearRecord ~= "" then
+					_GameManager:SpawnDespairBlade()
+					log("[VRF] stage clear blade after banner")
+				end
+			end
+		end
+		if not _GameManager.TimeAttackMode and self.ClearRecord == "" and _MonsterSpawner._elapsedPlayTime >= self._goalSeconds then
+			self:CompleteRun(false)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void CompleteRun(boolean timeAttack)
+		if not _GameManager.GameStarted or _GameManager.GameOver or self.ClearRecord ~= "" then return end
+		self.ClearRecord = string.format("%d|%d|%d", self._runSerial, self._goalSeconds, timeAttack and 1 or 0)
+		if timeAttack then
+			self._bladePending = true
+			self._bladeRemaining = self.BannerHoldSeconds + self.BannerExitSeconds
+		end
+		log("[VRF] stage clear earned record=" .. self.ClearRecord .. " pendingBlade=" .. tostring(self._bladePending))
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean IsGameplayVisible()
+		return _GameManager.GameStarted and not _GameManager.GameOver and not _GameManager:IsGamePaused()
+			and not (isvalid(_TitleUI.titleGroup) and _TitleUI.titleGroup.Enable)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RestoreClientSpeed()
+		if not self._slowActive then return end
+		_UtilLogic:SetClientTimeScale(1)
+		self._slowActive = false
+		log("[VRF] stage clear client speed restored=1")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void CancelPresentation()
+		self:RestoreClientSpeed()
+		self._presenting = false
+		if isvalid(self.presentationGroup) then self.presentationGroup.Enable = false end
+		for _, particle in ipairs(self._particles) do if isvalid(particle) then particle:Stop() end end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void StartPresentation()
+		self._presentationTimeAttack = string.sub(self.ClearRecord, -1) == "1"
+		local seconds = self:GetClearSeconds()
+		local clock = string.format("%02d:%02d", math.floor(seconds / 60), seconds % 60)
+		self.subtitle.Text = _LocalizationService:GetTextFormat("RUN_CLEAR_SURVIVED", clock)
+		self.banner.UITransformComponent.anchoredPosition = Vector2(0, 40)
+		self.banner.UITransformComponent.UIScale = Vector3(0.6, 0.6, 1)
+		self.banner.CanvasGroupComponent.GroupAlpha = 0
+		self.flash.SpriteGUIRendererComponent.Color = Color(1, 0.95, 0.73, 0)
+		self._startedMillis = DateTime.UtcNow.Elapsed
+		self._presenting = true
+		self.presentationGroup.Enable = true
+		_UILogic:SetSiblingIndex(self.presentationGroup.UITransformComponent, 1000000)
+		self._slowActive = true
+		_UtilLogic:SetClientTimeScale(0.25)
+		for _, particle in ipairs(self._particles) do particle:Stop() particle:Play() end
+		_SoundOptionLogic:PlaySfx(self.ClearSoundRUID, 0.85)
+		log("[VRF] stage clear presentation start slow=0.25 seconds=0.5 timeAttack=" .. tostring(self._presentationTimeAttack))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUpdate(number delta)
+		if self.ClearRecord ~= self._seenRecord then
+			self._seenRecord = self.ClearRecord
+			self:CancelPresentation()
+			if self.ClearRecord ~= "" and self:IsGameplayVisible() then self:StartPresentation() end
+		end
+		if not self._presenting then return end
+		if not self:IsGameplayVisible() then self:CancelPresentation() return end
+		-- Real time is independent of the 0.25 client scale, including its restoration.
+		local elapsed = math.max(0, (DateTime.UtcNow.Elapsed - self._startedMillis) / 1000)
+		if elapsed >= self.SlowSeconds then self:RestoreClientSpeed() end
+		local total = self.BannerHoldSeconds + self.BannerExitSeconds
+		if elapsed >= total then
+			self:CancelPresentation()
+			if not self._presentationTimeAttack then
+				_UIToast:ShowMessageFor("RUN_CLEAR_RECORD_CHALLENGE", 2.2)
+				log("[VRF] stage clear challenge toast shown")
+			end
+			log("[VRF] stage clear presentation end")
+			return
+		end
+		local alpha = 1
+		local scale = 1
+		local y = 40
+		if elapsed < 0.24 then
+			local p = elapsed / 0.24
+			scale = 0.6 + 0.52 * (1 - (1 - p) * (1 - p))
+			alpha = math.min(1, p * 3)
+		elseif elapsed < 0.4 then
+			scale = 1.12 - 0.12 * ((elapsed - 0.24) / 0.16)
+		elseif elapsed >= self.BannerHoldSeconds then
+			local p = (elapsed - self.BannerHoldSeconds) / self.BannerExitSeconds
+			y = 40 + 210 * p * p
+			alpha = 1 - p
+			scale = 1 - 0.08 * p
+		end
+		self.banner.UITransformComponent.anchoredPosition = Vector2(0, y)
+		self.banner.UITransformComponent.UIScale = Vector3(scale, scale, 1)
+		self.banner.CanvasGroupComponent.GroupAlpha = alpha
+		local flashAlpha = math.max(0, 1 - elapsed / 0.3) * 0.32
+		if elapsed >= 0.32 and elapsed < 0.56 then flashAlpha = math.sin((elapsed - 0.32) / 0.24 * math.pi) * 0.12 end
+		self.flash.SpriteGUIRendererComponent.Color = Color(1, 0.95, 0.73, flashAlpha)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		self:CancelPresentation()
+	end
+end

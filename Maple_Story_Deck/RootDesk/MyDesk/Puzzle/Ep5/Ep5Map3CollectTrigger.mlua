@@ -1,0 +1,71 @@
+@Component
+script Ep5Map3CollectTrigger extends Component
+
+	property any _touchHandler = nil
+	property any _shakeTween = nil
+	property number ShakeDuration = 0.35
+	property number ShakeAngle = 10
+
+	method void OnBeginPlay()
+		if self:IsClient() then
+			self._touchHandler = self.Entity:ConnectEvent(TouchEvent, self.OnTouched)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnTouched(TouchEvent event)
+		if _CardManager:IsMonsterUnderTouch(event.TouchPoint) then return end
+		if not _GameManager.GameStarted or _GameManager.GameOver or _GameManager:IsGamePaused() then return end
+		if _TitleUI.titleGroup.Enable then return end
+		self:PlayShake()
+		self:RequestTouch()
+	end
+
+	property number PressDuration = 0.24
+	property number PressDownOffset = 0.10
+	property number _pressRestY = 0
+	property Vector3 _pressRestScale = Vector3(1, 1, 1)
+
+	@ExecSpace("ClientOnly")
+	method void PlayShake()
+		local target = self.Entity
+		if not isvalid(target) then return end
+		local transform = target.TransformComponent
+		if self._shakeTween ~= nil then
+			self._shakeTween:Stop()
+			self._shakeTween = nil
+		else
+			self._pressRestY = transform.Position.y
+			self._pressRestScale = Vector3(transform.Scale.x, transform.Scale.y, transform.Scale.z)
+		end
+		transform.ZRotation = 0
+		local restY = self._pressRestY
+		local s = self._pressRestScale
+		self._shakeTween = _TweenLogic:PlayTween(0.0, 1.0, self.PressDuration, EaseType.Linear, function(t)
+			if not isvalid(self) or not isvalid(target) then return end
+			local k = math.sin(t * math.pi)
+			local pos = transform.Position
+			transform.Position = Vector3(pos.x, restY - self.PressDownOffset * k, pos.z)
+			transform.Scale = Vector3(s.x * (1 + 0.06 * k), s.y * (1 - 0.10 * k), s.z)
+			if t >= 1.0 then
+				transform.Position = Vector3(transform.Position.x, restY, pos.z)
+				transform.Scale = s
+				self._shakeTween = nil
+			end
+		end)
+	end
+
+	@ExecSpace("Server")
+	method void RequestTouch()
+		local player = _UserService:GetUserEntityByUserId(senderUserId)
+		if not isvalid(player) or player.CurrentMap ~= self.Entity.CurrentMap or not self.Entity.Enable then return end
+		_Ep5Map3CollectLogic:OnObjectTouched(self.Entity)
+	end
+
+	method void OnEndPlay()
+		if self:IsClient() and self._touchHandler ~= nil then
+			self.Entity:DisconnectEvent(TouchEvent, self._touchHandler)
+		end
+	end
+
+end

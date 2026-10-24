@@ -1,0 +1,88 @@
+@Logic
+script Ep5GourdLogic extends Logic
+
+	property table _sources = {}
+	property number HitDuration = 0.4
+	property number DieDuration = 0.5
+	property integer DieFrames = 4
+	-- Each reference points to one of the seven existing EP5 dokkaebi species.
+	property table DokkaebiPool = {{zone=210,species=1},{zone=210,species=2},{zone=212,species=1},{zone=213,species=2},{zone=212,species=3},{zone=211,species=2},{zone=214,species=3}}
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		self.HitDuration = self:ReadDuration("22f7f833898542c899831b144982bcdc")
+		self.DieDuration = self:ReadDuration("17e009a0ccf24c559e930cee63dd06b0")
+		local clip = _ResourceService:LoadAnimationClipAndWait("17e009a0ccf24c559e930cee63dd06b0")
+		self.DieFrames = #clip.Frames:ToTable()
+		log("[VRF] gourd clips hit=" .. self.HitDuration .. " die=" .. self.DieDuration .. " frames=" .. self.DieFrames)
+	end
+
+	@ExecSpace("ServerOnly")
+	method number ReadDuration(string ruid)
+		local clip = _ResourceService:LoadAnimationClipAndWait(ruid)
+		local duration = 0 local longest = 0
+		for _, frame in ipairs(clip.Frames:ToTable()) do duration = duration + frame.Delay longest = math.max(longest,frame.Delay) end
+		if longest > 5 then duration = duration / 1000 end
+		return math.max(0.1, math.min(3, duration))
+	end
+
+	@ExecSpace("ServerOnly")
+	method void Register(Component source)
+		for _, old in ipairs(self._sources) do if old == source then return end end
+		table.insert(self._sources,source)
+	end
+
+	method boolean IsItemRoll(number roll, number chance)
+		return roll >= 0 and roll < chance
+	end
+
+	@ExecSpace("ServerOnly")
+	method void GrantBushReward(Vector3 pos, Entity map)
+		local ground = _MonsterSpawner:GetBottomGroundY(map,pos.x)
+		local fall = math.max(0,pos.y-ground)*100
+		local pool = _CardManager:BuildActiveUpgradePool()
+		if _UtilLogic:RandomIntegerRange(1,2) == 2 and #pool > 0 then
+			_CardManager:GrantCardUpgradesFromPool(pool,pos,fall,ground,1,1,0)
+		else
+			_GameManager:ApplyPotionDrop(1,pos,fall,ground,1)
+		end
+		_EasterEggBonusLogic:RollBonus(pos,fall,ground)
+		_UIToast:ShowTimedMessage("EP5_GOURD_ITEM",3)
+		log("[VRF] gourd outcome=item bushReward=true")
+	end
+
+	@ExecSpace("ServerOnly")
+	method table SpawnDokkaebi(Entity map, Vector3 origin, integer zone)
+		local choice = self.DokkaebiPool[_UtilLogic:RandomIntegerRange(1,#self.DokkaebiPool)]
+		local center = _MapManager:GetSpawnPositionForIndex(zone).x
+		local spreadCenter = math.max(center-1,math.min(center+1,origin.x))
+		local spawned = {}
+		for i=1,6 do
+			local x = spreadCenter + (i-3.5)*1.12
+			local y = _MonsterSpawner:GetBottomGroundY(map,x)
+			local target = Vector3(x,y,0)
+			local entity = _SpawnService:SpawnByModelId(_MonsterSpawner.MonsterModelId,"Monster",_MonsterSpawner:ToLocalSpawnPos(map,target),map)
+			if isvalid(entity) then
+				entity.Visible = false
+				local ai = entity:GetComponent("script.MonsterAI")
+				ai._swarmAppearanceZone = choice.zone
+				ai:InitializeStats(zone,_GameManager.Wave,false,choice.species)
+				ai._lootZoneOverride = choice.zone
+				if ai._isFlying then target.y = entity.TransformComponent.WorldPosition.y end
+				local burst = entity:AddComponent("script.Ep5GourdBurst")
+				burst:Launch(origin,target,(i-1)*0.055)
+				table.insert(spawned,entity)
+			end
+		end
+		_AchievementLogic:OnEasterEgg()
+		_UIToast:ShowTimedMessage("EP5_GOURD_MONSTERS",3)
+		log("[VRF] gourd outcome=monsters count=" .. #spawned .. " appearanceZone=" .. choice.zone .. " species=" .. choice.species .. " sameSpecies=true")
+		return spawned
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		for _, source in ipairs(self._sources) do if isvalid(source) then source:ResetForNewRun() end end
+		log("[VRF] gourd reset sources=" .. #self._sources)
+	end
+end

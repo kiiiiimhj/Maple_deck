@@ -1,0 +1,121 @@
+@Logic
+script Ep5Map2KillQuestLogic extends Logic
+
+	@Sync property boolean Accepted = false
+	@Sync property boolean Redeemed = false
+	@Sync property integer Kills = 0
+	property integer Goal = 50
+	property string _owner = ""
+	property string _icon = ""
+	property Entity _bubble = nil
+	property number BubbleShowDuration = 2
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		log("[VRF] ep5 map2 kill quest ready goal=50 allSpecies=true")
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean IsNpcUnderTouch(Vector2 touchPoint)
+		if _MapManager.CurrentMapIndex ~= 204 then return false end
+		local npc = _EntityService:GetEntityByPath("/maps/ep5_map2/FolkDecor_352")
+		if not isvalid(npc) or not npc.Enable then return false end
+		local touch = npc.TouchReceiveComponent
+		local point = _UILogic:ScreenToWorldPosition(touchPoint)
+		local pos = npc.TransformComponent.WorldPosition local scale = npc.TransformComponent.Scale
+		local inside = math.abs(point.x-pos.x-touch.Offset.x*scale.x) <= touch.TouchArea.x*math.abs(scale.x)*0.5
+			and math.abs(point.y-pos.y-touch.Offset.y*scale.y) <= touch.TouchArea.y*math.abs(scale.y)*0.5
+		if inside then log("[VRF] ep5 map2 npc touch priority=true") end
+		return inside
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean ValidUser(Entity obj, string userId)
+		local player = _UserService:GetUserEntityByUserId(userId)
+		return _GameManager.GameStarted and not _GameManager.GameOver and not _GameManager:IsGamePaused()
+			and _GameManager:GetSelectedEpisode() == 5 and _MapManager.CurrentMapIndex == 204
+			and isvalid(obj) and obj.Enable and obj.Name == "FolkDecor_352" and obj.CurrentMap.Name == "ep5_map2"
+			and isvalid(player) and player.CurrentMap == obj.CurrentMap
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnObjectTouched(Entity obj, string userId)
+		if self.Redeemed or not self:ValidUser(obj,userId) then return end
+		if not self.Accepted then
+			self.Accepted = true self.Kills = 0 self._owner = userId
+			self:ShowRequirement(obj)
+			_UIToast:ShowMessage("EP5_MAP2_KILL_ACCEPTED",userId)
+			log("[VRF] ep5 map2 kill quest accepted goal=" .. self.Goal)
+			return
+		end
+		if self.Kills < self.Goal then self:ShowRequirement(obj) return end
+		self.Redeemed = true
+		_Ep4Map1EasterEggLogic:GrantStandardReward(obj)
+		_AchievementLogic:OnEasterEgg()
+		self:ShowHeart(obj)
+		log("[VRF] ep5 map2 kill quest redeemed kills=" .. self.Kills .. " reward=standard")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnMonsterKilled(integer zone)
+		if not self.Accepted or self.Redeemed or self.Kills >= self.Goal then return end
+		if not _GameManager.GameStarted or _GameManager.GameOver or _GameManager:GetSelectedEpisode() ~= 5 then return end
+		if zone < 200 or zone > 209 then return end
+		self.Kills = self.Kills + 1
+		if self.Kills == self.Goal and self._owner ~= "" and isvalid(_UserService:GetUserEntityByUserId(self._owner)) then
+			_UIToast:ShowMessage("EP1_KILLQUEST_DONE",self._owner)
+		end
+		log("[VRF] ep5 map2 kill quest progress=" .. self.Kills .. "/" .. self.Goal .. " zone=" .. zone)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ShowRequirement(Entity obj)
+		self:ClearBubble()
+		if self._icon == "" then self._icon = _GameManager:GetMapStandRUID(200,1) end
+		local bounds = _Ep5Map2CollectLogic:GetIconBounds(self._icon)
+		local p = obj.TransformComponent.WorldPosition
+		local b = _SpawnService:SpawnByModelId("giftbubble","Ep5Map2KillBubble",Vector3(p.x-0.765297,p.y+0.9155867,p.z-0.5),obj.CurrentMap)
+		if not isvalid(b) then return end
+		self._bubble = b
+		_CollectBubbleLogic:ApplyForegroundDepth(b)
+		_CollectBubbleLogic:FitIcon(b,"Icon",self._icon,bounds[1],bounds[2],bounds[3],bounds[4],Vector2(0,0.11),Vector2(0.82,0.74),0)
+		_CollectBubbleLogic:FillText(b,"Count","X" .. math.max(0,self.Goal-self.Kills),Vector3(0.36,-0.14,0.0001),2)
+		self:ScheduleClear(b)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ShowHeart(Entity obj)
+		self:ClearBubble()
+		local p = obj.TransformComponent.WorldPosition
+		local b = _SpawnService:SpawnByModelId("giftbubble","Ep5Map2KillHeart",Vector3(p.x-1.25,p.y+1.25,p.z-0.5),obj.CurrentMap)
+		if not isvalid(b) then return end
+		self._bubble = b
+		_CollectBubbleLogic:ApplyForegroundDepth(b)
+		local icon = b:GetChildByName("Icon")
+		icon.SpriteRendererComponent.SpriteRUID = "7ecb5769578f4b05808afaad17ee83ac"
+		icon.TransformComponent.Position = Vector3(-0.4361,-0.2908,0)
+		icon.TransformComponent.Scale = Vector3(5.788959,5.78895855,1)
+		b:GetChildByName("Count").Enable = false
+		self:ScheduleClear(b)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ScheduleClear(Entity bubble)
+		_TimerService:SetTimerOnce(function()
+			if isvalid(bubble) then bubble:Destroy() end
+			if self._bubble == bubble then self._bubble = nil end
+		end,self.BubbleShowDuration)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ClearBubble()
+		if isvalid(self._bubble) then self._bubble:Destroy() end
+		self._bubble = nil
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		self.Accepted = false self.Redeemed = false self.Kills = 0 self._owner = ""
+		self:ClearBubble()
+	end
+end
