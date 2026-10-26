@@ -1,0 +1,314 @@
+@Logic
+script Ep5SealPuzzleUI extends Logic
+	property Entity Modal = nil
+	property Entity Board = nil
+	property integer Revision = 0
+	property integer Token = 0
+	property number _age = 0
+	property boolean _assembling = false
+	property boolean _drawing = false
+	property boolean _submitted = false
+	property integer _pointer = 0
+	property integer _node = 0
+	property integer _edge = 0
+	property Vector2 _last = Vector2(0,0)
+	property table _route = {}
+	property table _used = {}
+	property table _events = {}
+	property table _pieces = {}
+	property table _guides = {}
+	property table _traces = {}
+	property number _completeAge = -1
+	property number _edgeProgress = 0
+	property number _edgeSpan = 1
+	property number _edgeGoal = 0.92
+	property table _routeEdges = {}
+	property table _anchors = {}
+	property number DirectionThreshold = 0.60
+	property Vector2 _gestureOrigin = Vector2(0,0)
+	property any _holdHandler = nil
+	property any _releaseHandler = nil
+
+	method table Nodes()
+		-- Coordinates reproduce the diamond, inner square and intersecting vertical line exactly.
+		return {Vector2(0,228),Vector2(228,0),Vector2(0,-228),Vector2(-228,0),Vector2(0,86),Vector2(0,-86),Vector2(-86,86),Vector2(86,86),Vector2(86,-86),Vector2(-86,-86)}
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		-- Capture held input across the whole screen so leaving the paper never cancels a stroke.
+		local prefix="/ui/Ep5SealPuzzle/Modal/"
+		self.Modal=_EntityService:GetEntityByPath("/ui/Ep5SealPuzzle/Modal") self.Board=_EntityService:GetEntityByPath(prefix.."Board")
+		self._events={} self._pieces={} self._guides={} self._traces={}
+		for i=1,4 do self._pieces[i]=_EntityService:GetEntityByPath(prefix.."Board/Piece"..i) end
+		for i=1,13 do self._guides[i]=_EntityService:GetEntityByPath(prefix.."Board/Guide"..i) self._traces[i]=_EntityService:GetEntityByPath(prefix.."Board/Trace"..i) end
+		self:Subscribe(self.Board,UITouchDownEvent,self.OnDown) self:Subscribe(self.Board,UITouchDragEvent,self.OnDrag)
+		self:Subscribe(self.Board,UITouchUpEvent,self.OnUp)
+		self._holdHandler=_InputService:ConnectEvent(ScreenTouchHoldEvent,self.OnScreenHold)
+		self._releaseHandler=_InputService:ConnectEvent(ScreenTouchReleaseEvent,self.OnScreenRelease)
+		self:Subscribe(_EntityService:GetEntityByPath(prefix.."Retry"),ButtonClickEvent,self.OnRetry)
+		self:Subscribe(_EntityService:GetEntityByPath(prefix.."Close"),ButtonClickEvent,self.OnClose)
+		self:Hide()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Subscribe(Entity entity, any eventType, any callback)
+		-- Retain every subscription so the final lifecycle releases them all.
+		table.insert(self._events,{entity=entity,eventType=eventType,subscription=entity:ConnectEvent(eventType,callback)})
+	end
+
+	@ExecSpace("Client")
+	method void Open(integer revision, integer token, boolean assemble)
+		-- Four quarters arrive in order before the one-stroke input is enabled.
+		if not isvalid(self.Modal) then return end
+		self.Revision=revision self.Token=token self._age=0 self._assembling=assemble self._completeAge=-1 self._submitted=false
+		self.Modal.Enable=true self:ResetRoute()
+		_UILogic:SetSiblingIndex(self.Modal.Parent.UITransformComponent,1000000)
+		self:SetText("Title","EP5_SEAL_PUZZLE_TITLE") self:SetText("Instruction","EP5_SEAL_DRAW_HELP")
+		self:SetText("Hint",assemble and "EP5_SEAL_ASSEMBLING" or "EP5_SEAL_DRAW_HINT")
+		self:SetText("Retry/Text","EP5_SEAL_RETRY") self:SetText("Close/Text","EP5_SEAL_CLOSE")
+		self:UpdateAssembly()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetText(string relative, string key)
+		-- Resolve all player-facing copy through the existing six-language dataset.
+		local e=_EntityService:GetEntityByPath("/ui/Ep5SealPuzzle/Modal/"..relative)
+		if isvalid(e) then e.TextGUIRendererComponent.Text=_LocText:Resolve(key) end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ResetRoute()
+		-- Reset the trace, completed-edge history and pointer anchors for a fresh stroke.
+		self._drawing=false self._pointer=0 self._node=0 self._edge=0 self._route={} self._used={} self._edgeProgress=0 self._edgeSpan=1 self._edgeGoal=0.92 self._routeEdges={} self._anchors={}
+		for _,e in ipairs(self._traces) do e.Enable=false end
+		for _,e in ipairs(self._guides) do e.Enable=not self._assembling end
+		self:SetText("Progress","EP5_SEAL_PROGRESS_EMPTY")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUpdate(number delta)
+		-- Animate the paper assembly independently of the paused combat clock.
+		if not isvalid(self.Modal) or not self.Modal.Enable then return end
+		if _MapManager.CurrentMapIndex~=240 or _GameManager.GameOver then self:Hide() return end
+		self._age=self._age+delta
+		if self._completeAge>=0 then
+			if self._age-self._completeAge>0.48 then self:Hide() end
+			return
+		end
+		if self._assembling then
+			self:UpdateAssembly()
+			if self._age>=1.35 then self._assembling=false self:ResetRoute() self:SetText("Hint","EP5_SEAL_DRAW_HINT") end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void UpdateAssembly()
+		-- Each quarter settles into its matching quadrant with a short eased flight.
+		local final={Vector2(-140,140),Vector2(140,140),Vector2(-140,-140),Vector2(140,-140)}
+		for i,e in ipairs(self._pieces) do
+			local t=self._assembling and math.max(0,math.min(1,(self._age-(i-1)*0.22)/0.55)) or 1
+			local ease=1-(1-t)^3 local p=final[i]
+			e.Enable=t>0
+			e.UITransformComponent.anchoredPosition=Vector2(p.x+(p.x<0 and -270 or 270)*(1-ease),p.y+160*(1-ease))
+			e.UITransformComponent.Scale=Vector3(0.82+0.18*ease,0.82+0.18*ease,1)
+			e.SpriteGUIRendererComponent.Color=Color(1,1,1,t)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnDown(UITouchDownEvent event)
+		-- Anchor a single held pointer so forward drawing and reverse erasing share the same path.
+		if not self.Modal.Enable or self._assembling or self._submitted or self._drawing or event.TouchId==-2 or event.TouchId==-3 then return end
+		self:ResetRoute()
+		local p=_UILogic:ScreenToLocalUIPosition(event.TouchPoint,self.Board.UITransformComponent) local nodes=self:Nodes()
+		local start=0
+		for _,i in ipairs({1,3}) do local d=p-nodes[i] if d.x*d.x+d.y*d.y<=48*48 then start=i break end end
+		if start==0 then self:SetText("Hint","EP5_SEAL_START_HINT") return end
+		self._node=start self._route={start} self._pointer=event.TouchId self._drawing=true self._last=p self._gestureOrigin=p self._anchors={p}
+		self:SetText("Hint","EP5_SEAL_KEEP_DRAWING")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnDrag(UITouchDragEvent event)
+		-- Resampling supports fast drags, touch screens and different frame rates.
+		if not self._drawing or event.TouchId~=self._pointer then return end
+		self:Feed(_UILogic:ScreenToLocalUIPosition(event.TouchPoint,self.Board.UITransformComponent))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Feed(Vector2 point)
+		-- Follow the gesture direction instead of a narrow pixel corridor, including outside the board.
+		local d=point-self._last local distance=math.sqrt(d.x*d.x+d.y*d.y)
+		local steps=math.max(1,math.min(256,math.ceil(distance/8))) local origin=self._last
+		for i=1,steps do
+			if not self._drawing then break end
+			self:Sample(origin+d*(i/steps))
+		end
+		self._last=point
+	end
+
+	method table Segment(Vector2 p, Vector2 a, Vector2 b)
+		-- Return line distance and projected progress for forgiving touch hit-testing.
+		local v=b-a local q=p-a local length=v.x*v.x+v.y*v.y
+		local t=(q.x*v.x+q.y*v.y)/length local c=a+v*math.max(0,math.min(1,t)) local d=p-c
+		return {distance=math.sqrt(d.x*d.x+d.y*d.y),t=t}
+	end
+
+	@ExecSpace("ClientOnly")
+	method void UpdateProgress()
+		-- Count only completed edges, including after the latest edge is undone.
+		local text=_EntityService:GetEntityByPath("/ui/Ep5SealPuzzle/Modal/Progress")
+		text.TextGUIRendererComponent.Text=tostring(#self._route-1).." / 13"
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ClearPartialEdge()
+		-- Returning to the previous junction erases only this unfinished line.
+		if self._edge>0 then self._traces[self._edge].Enable=false end
+		self._edge=0 self._edgeProgress=0 self._edgeSpan=1 self._edgeGoal=0.92
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ReopenPreviousEdge()
+		-- Pop exactly the last completed line and use its actual pointer anchors for smooth reverse motion.
+		local last=#self._routeEdges local edge=self._routeEdges[last]
+		local finish=self._anchors[#self._anchors]
+		table.remove(self._routeEdges) table.remove(self._route) table.remove(self._anchors)
+		self._used[edge]=nil self._node=self._route[#self._route] self._edge=edge
+		self._gestureOrigin=self._anchors[#self._anchors]
+		local nodes=self:Nodes() local e=_Ep5FinalSealLogic:GetSealEdges()[edge]
+		local nextNode=e[1]==self._node and e[2] or e[1] local v=nodes[nextNode]-nodes[self._node]
+		local drag=finish-self._gestureOrigin
+		self._edgeSpan=math.max(0.1,(drag.x*v.x+drag.y*v.y)/(v.x*v.x+v.y*v.y))
+		self._edgeGoal=1 self._edgeProgress=1 self:UpdateProgress()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Sample(Vector2 point)
+		-- Snap endpoint arrivals as well as direction, avoiding accumulated pointer drift at junctions.
+		local nodes=self:Nodes() local edges=_Ep5FinalSealLogic:GetSealEdges() local a=nodes[self._node]
+		local drag=point-self._gestureOrigin local travel=math.sqrt(drag.x*drag.x+drag.y*drag.y)
+		if travel<18 then if self._edge>0 then self:ClearPartialEdge() end return end
+		local candidate=0 local best=self.DirectionThreshold local currentScore=-1
+		local previous=self._routeEdges[#self._routeEdges] or 0
+		for i,e in ipairs(edges) do
+			local nextNode=e[1]==self._node and e[2] or (e[2]==self._node and e[1] or 0)
+			local canUndo=self._edge==0 and i==previous
+			if nextNode>0 and (not self._used[i] or canUndo) then
+				local v=nodes[nextNode]-a local length=math.sqrt(v.x*v.x+v.y*v.y)
+				local score=(drag.x*v.x+drag.y*v.y)/(travel*length)
+				if i==self._edge then currentScore=score end
+				if score>best then best=score candidate=i end
+			end
+		end
+		if self._edge==0 then
+			if candidate==0 then return end
+			if candidate==previous then
+				self:ReopenPreviousEdge() a=nodes[self._node] drag=point-self._gestureOrigin
+			else
+				self._edge=candidate self._edgeProgress=0 self._edgeSpan=1 self._edgeGoal=0.92
+			end
+		elseif self._edgeGoal<1 and self._edgeProgress<0.40 and candidate>0 and candidate~=self._edge and best>currentScore+0.10 then
+			self._traces[self._edge].Enable=false self._edge=candidate self._edgeProgress=0
+		end
+		local edge=edges[self._edge] local nextNode=edge[1]==self._node and edge[2] or edge[1]
+		local b=nodes[nextNode] local v=b-a
+		local progress=(drag.x*v.x+drag.y*v.y)/((v.x*v.x+v.y*v.y)*self._edgeSpan)
+		if progress<=0 then self:ClearPartialEdge() return end
+		self._edgeProgress=math.min(1,progress)
+		self:DrawTrace(self._edge,a,a+v*self._edgeProgress)
+		local endDelta=point-b
+		local atEnd=self._edgeGoal<1 and endDelta.x*endDelta.x+endDelta.y*endDelta.y<=28*28
+		if self._edgeProgress>=self._edgeGoal or atEnd then
+			local finished=self._edge
+			self._used[finished]=true self:DrawTrace(finished,a,b) self._node=nextNode
+			self._edge=0 self._edgeProgress=0 self._edgeSpan=1 self._edgeGoal=0.92 self._gestureOrigin=point
+			table.insert(self._route,nextNode) table.insert(self._routeEdges,finished) table.insert(self._anchors,point)
+			self:UpdateProgress()
+			if #self._routeEdges==13 then
+				self._drawing=false self._submitted=true
+				_Ep5FinalSealLogic:SubmitRoute(self.Revision,self.Token,self._route)
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void DrawTrace(integer edge, Vector2 a, Vector2 b)
+		-- Keep the luminous traced portion above the dark ink guide.
+		local e=self._traces[edge] local d=b-a local length=math.sqrt(d.x*d.x+d.y*d.y)
+		e.Enable=length>0.01 e.UITransformComponent.anchoredPosition=(a+b)*0.5
+		e.UITransformComponent.RectSize=Vector2(math.max(0.1,length),11)
+		e.UITransformComponent.ZRotation=math.deg(math.atan(d.y,d.x))
+		e.SpriteGUIRendererComponent.Color=Color(0.62,0.18,0.78,1)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void FailStroke()
+		-- Preserve the page and show an explicit retry hint instead of silent failure.
+		self:ResetRoute() self:SetText("Hint","EP5_SEAL_TRY_AGAIN")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUp(UITouchUpEvent event)
+		-- Process the final pointer position before an actual release ends an unfinished stroke.
+		if not self._drawing or event.TouchId~=self._pointer then return end
+		self:Feed(_UILogic:ScreenToLocalUIPosition(event.TouchPoint,self.Board.UITransformComponent))
+		if self._drawing then self:FailStroke() end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnScreenHold(ScreenTouchHoldEvent event)
+		-- Continue the captured pointer outside the board; screen mouse IDs use 1 instead of UI -1.
+		if not self._drawing or not self.Modal.Enable then return end
+		if event.TouchId~=self._pointer and not (self._pointer==-1 and event.TouchId==1) then return end
+		self:Feed(_UILogic:ScreenToLocalUIPosition(event.TouchPoint,self.Board.UITransformComponent))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnScreenRelease(ScreenTouchReleaseEvent event)
+		-- A real release anywhere on screen ends the stroke, while leaving the board alone does not.
+		if not self._drawing then return end
+		if event.TouchId~=self._pointer and not (self._pointer==-1 and event.TouchId==1) then return end
+		self:Feed(_UILogic:ScreenToLocalUIPosition(event.TouchPoint,self.Board.UITransformComponent))
+		if self._drawing then self:FailStroke() end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnRetry()
+		-- Retry only the stroke after the paper assembly has finished.
+		if self._assembling or self._submitted then return end
+		self:ResetRoute() self:SetText("Hint","EP5_SEAL_DRAW_HINT")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnClose()
+		-- Closing releases the server pause while preserving the assembled sheet.
+		if self._submitted then return end
+		_Ep5FinalSealLogic:ClosePuzzle(self.Revision,self.Token) self:Hide()
+	end
+
+	@ExecSpace("Client")
+	method void Complete()
+		-- Give a readable completion beat before the seal-release presentation starts.
+		self._drawing=false self._submitted=true self._completeAge=self._age
+		self:SetText("Hint","EP5_SEAL_SPELL_COMPLETE")
+		_SoundOptionLogic:PlaySfx("668564fe8e91483ebe5656e97ccee5cc",0.8)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Hide()
+		-- Disable the modal and discard the active pointer on scene changes or restart.
+		if isvalid(self.Modal) then self.Modal.Enable=false end
+		self._drawing=false self._pointer=0
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		-- Release board, screen-capture and button subscriptions created by this controller.
+		if self._holdHandler~=nil then _InputService:DisconnectEvent(ScreenTouchHoldEvent,self._holdHandler) self._holdHandler=nil end
+		if self._releaseHandler~=nil then _InputService:DisconnectEvent(ScreenTouchReleaseEvent,self._releaseHandler) self._releaseHandler=nil end
+		for _,e in ipairs(self._events) do if isvalid(e.entity) then e.entity:DisconnectEvent(e.eventType,e.subscription) end end
+		self._events={} self:Hide()
+	end
+end

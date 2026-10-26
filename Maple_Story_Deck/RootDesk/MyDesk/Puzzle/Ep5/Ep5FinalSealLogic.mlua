@@ -1,0 +1,270 @@
+@Logic
+script Ep5FinalSealLogic extends Logic
+	@Sync property integer FragmentCount = 0
+	@Sync property boolean Defeated = false
+	@Sync property boolean PapersPlaced = false
+	@Sync property boolean PuzzleOpen = false
+	@Sync property boolean SealOpening = false
+	@Sync property boolean AwaitingAcquire = false
+	@Sync property boolean RewardReady = false
+	@Sync property integer RunRevision = 0
+	property integer AttemptToken = 0
+	property integer ReturnZone = 237
+	property Entity Boss = nil
+	property string Owner = ""
+	property boolean _loading = false
+	property boolean _claimBusy = false
+	-- Temporary Maker test: start Folktown at map5 with only the first three paper quarters.
+	property boolean TestMap5WithThreePapersInMaker = false
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		-- Hide both portals and the altar until their run conditions are met.
+		self:ResetForNewRun()
+	end
+
+	method boolean IsMakerTestEntryEnabled()
+		-- Keep the test entry and world unlock limited to Maker play.
+		return self.TestMap5WithThreePapersInMaker and Environment:IsMakerPlay()
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean CanCollectSealPapers()
+		-- Respect the saved character unlock even if the account load is still finishing at entry.
+		if not _CharacterUnlockLogic._balorLoadReady then _CharacterUnlockLogic:LoadBalorUnlock() end
+		return not _CharacterUnlockLogic:IsBalorUnlocked()
+	end
+
+	@ExecSpace("ServerOnly")
+	method void PrepareMakerTestInventory(integer episode)
+		-- Seed three test papers only for accounts that still need to rescue Balor.
+		if episode~=5 or not self:IsMakerTestEntryEnabled() or not self:CanCollectSealPapers() then return end
+		for i,id in ipairs(self:FragmentIds()) do
+			local count=_PlayerInventory:GetItemCount(id)
+			if count>0 then _PlayerInventory:RemoveItem(id,count) end
+			if i<=3 then _PlayerInventory:AddItem(id,1) end
+		end
+		self:RefreshEntrance()
+		log("[VRF] ep5 Maker test: map5 entry, papers 1/1/1/0, final quest available")
+	end
+
+	method table FragmentIds()
+		-- Each of the four different quests contributes one distinct quarter.
+		return {"ep5_seal_paper_1","ep5_seal_paper_2","ep5_seal_paper_3","ep5_seal_paper_4"}
+	end
+
+	@ExecSpace("ServerOnly")
+	method void RefreshEntrance()
+		-- Collected Balor accounts no longer receive paper prompts or the hidden entrance.
+		local count=0
+		for _,id in ipairs(self:FragmentIds()) do if _PlayerInventory:GetItemCount(id)>0 then count=count+1 end end
+		local needed=self:CanCollectSealPapers()
+		if not needed then count=0 end
+		local changed=count~=self.FragmentCount self.FragmentCount=count
+		local portal=_EntityService:GetEntityByPath("/maps/ep5_map5/portal-3")
+		if isvalid(portal) then portal.Enable=needed and (count==4 or self.PapersPlaced) end
+		if changed and count==4 then _UIToast:ShowMessage("EP5_SEAL_FOUR_FOUND") end
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean IsArenaUser(string userId)
+		-- Check the actual player map as well as the logical zone for every request.
+		local user=_UserService:GetUserEntityByUserId(userId)
+		return isvalid(user) and user.CurrentMap==_EntityService:GetEntityByPath("/maps/ep5_map5_ester") and _MapManager.CurrentMapIndex==240 and not _MapManager.AwayOnSideMap
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnEntranceTouched(Entity target, string userId)
+		-- The rescue entrance is available only before Balor has been permanently collected.
+		self:RefreshEntrance()
+		if not self:CanCollectSealPapers() then return end
+		if self.FragmentCount<4 and not self.PapersPlaced then return end
+		if target~=_EntityService:GetEntityByPath("/maps/ep5_map5/portal-3") or not target.Enable then return end
+		if not _GameManager.GameStarted or _GameManager.GameOver or _GameManager:IsGamePaused() or _MapManager._moveLocked then return end
+		local user=_UserService:GetUserEntityByUserId(userId)
+		if not isvalid(user) or user.CurrentMap~=target.CurrentMap or _MapManager.CurrentMapIndex~=237 then return end
+		self.Owner=userId self.ReturnZone=_MapManager.CurrentMapIndex
+		_MapManager:MoveToMap(self.ReturnZone,240)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void Activate()
+		-- Spawn one ranged centipede, using the El Nath boss hit-growth caps.
+		self:RefreshScene()
+		if self.Defeated or isvalid(self.Boss) or self._loading then return end
+		if _MapManager.CurrentMapIndex~=240 or not _GameManager.GameStarted or _GameManager.GameOver then return end
+		self._loading=true local revision=self.RunRevision
+		local map=_EntityService:GetEntityByPath("/maps/ep5_map5_ester")
+		local e=_SpawnService:SpawnByModelId(_MonsterSpawner.MonsterModelId,"GiantCentipede",Vector3(2.7,-1.35,0),map)
+		if not isvalid(e) then self._loading=false return end
+		e.Visible=false self.Boss=e
+		local ai=e:GetComponent("script.MonsterAI")
+		ai:InitializeStats(239,_GameManager.Wave,false,1) ai:Pause() ai:SetSpawnZone(240) ai._lootZoneOverride=239
+		ai.FolkCentipede=true ai._isBoss=true ai._isElite=false ai.PapulatusPhase=0
+		ai._isFlying=false ai._isLeap=false ai._isCharge=false ai._isZigzag=false ai._hasPhase2=false
+		ai._isGiantNepenthes=false ai._ep5EliteKind="" ai._ep5Map2Kind="" ai._ep5DokkaebiKind=""
+		ai._neverAttacks=false ai._isRangedInk=true ai._isRangedSlash=false ai._skipAttackLunge=true
+		ai._standRUID="11251f6aa4d243969ad780e2d98e2b20" ai._moveRUID="2ce3ba1341dd450f8a725145018b5f09"
+		ai._attackRUID="7d5ce049933949e28d61e1d98f169e23" ai._attackDuration=1.92
+		ai._hitRUID="cc416aa8f949400b819accb9f08e5b67" ai._hitSoundRUID="b2a041fa7514469e8b908fb92d8a3916"
+		ai._dieRUID="326b353c4fdf4360bb6cdcde157d33c3" ai._dieDuration=2.28 ai._dieSoundRUID=""
+		ai._attackSoundRUID="ce8d7842da904801b5664bf014d32214"
+		ai._projectileRUID="" ai._hitEffectRUID="" ai._selfAttackEffectRUID="" ai._bookKey="B:"..ai._standRUID
+		ai._currentScale=1 ai._reachedScaleThreshold=1 ai._reachedPlayer=true ai._scaleMultiplier=1.05
+		ai._growScalePerHit=0.10 ai._growScaleMax=0.80 ai._growAtkPerHit=0.05 ai._growAtkMax=0.60
+		ai._erdasHitGrowthBonus=0 ai._growAtkBonus=0 ai._customAttackInterval=3.3 ai._attackTimer=1.2 ai._noHitAnimDuringAttack=true
+		local hp=_MonsterSpawner:GetFirstBossHpOverride()
+		if hp<=0 then hp=_GameManager:GetTimeStepHp(_GameManager:GetTimeStep())*_GameManager.BossHpMultiplier end
+		ai.MaxHp=math.max(5000,math.floor(hp*1.5)) ai.CurrentHp=ai.MaxHp
+		ai.BossHealthMaximum=ai.MaxHp ai.BossHealthCurrent=ai.CurrentHp ai.BossHealthZone=240
+		ai.MonsterSprite=ai._standRUID ai:ApplyBodySprite(ai.MonsterSprite) ai:SyncDepthOverlaySprite()
+		e.TransformComponent.Scale=Vector3(1.05,1.05,1) ai:UpdateDepth() ai:RefreshHeadMark() ai:HideDepthOverlay()
+		if revision~=self.RunRevision or _GameManager.GameOver then e:Destroy() self._loading=false return end
+		e.Visible=true ai:Resume() self._loading=false
+		if self.Owner=="" then self.Owner=_CharacterUnlockLogic:GetSoleUserId() end
+		_UIToast:ShowBossMessage("EP5_SEAL_BOSS_APPEAR") _MapManager:PlayBossBgm()
+		log("[VRF] ep5 centipede spawned ranged=true grow=.10 cap=.80 hp="..ai.MaxHp)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnDefeated(Entity entity)
+		-- Reveal the paper altar only after the complete native death animation.
+		if entity~=self.Boss or self.Defeated or self._T.dying then return end
+		self._T.dying=true local revision=self.RunRevision
+		_TimerService:SetTimerOnce(function()
+			if revision~=self.RunRevision or _GameManager.GameOver then return end
+			self.Defeated=true self.Boss=nil self._T.dying=nil
+			_MapManager:ForcePlayBgmForCurrentMap() self:RefreshScene()
+			_UIToast:ShowMessage("EP5_SEAL_ALTAR_READY",self.Owner)
+		end,2.48)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void RefreshScene()
+		-- Keep the visual driver alive after release so the freed hero stays at the authored map position.
+		local root="/maps/ep5_map5_ester/"
+		local seal=_EntityService:GetEntityByPath(root.."object-258")
+		if isvalid(seal) then seal.Enable=true end
+		for _,name in ipairs({"object-256","object-256_1","object-256_2","object-256_3","object-256_4"}) do
+			local chain=_EntityService:GetEntityByPath(root..name) if isvalid(chain) then chain.Enable=not self.RewardReady and not self.AwaitingAcquire end
+		end
+		local arrow=_EntityService:GetEntityByPath(root.."RelicArrowHint")
+		if isvalid(arrow) then arrow.Enable=self.Defeated and not self.PuzzleOpen and not self.SealOpening and not self.AwaitingAcquire and not self.RewardReady end
+		local altar=_EntityService:GetEntityByPath(root.."object-278")
+		if isvalid(altar) then altar.Enable=self.Defeated and not self.RewardReady and not self.SealOpening and not self.AwaitingAcquire end
+		local portal=_EntityService:GetEntityByPath(root.."portal-3")
+		if isvalid(portal) then portal.Enable=self.RewardReady end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnAltarTouched(Entity target, string userId)
+		-- Hide the NPC arrow while drawing and consume each paper quarter only once.
+		if not self.Defeated or self.RewardReady or self.PuzzleOpen or self.SealOpening or self.AwaitingAcquire then return end
+		if target~=_EntityService:GetEntityByPath("/maps/ep5_map5_ester/object-278") or not target.Enable then return end
+		if not self:IsArenaUser(userId) or userId~=self.Owner or _GameManager.GameOver or _MapManager._moveLocked then return end
+		if not self.PapersPlaced then
+			for _,id in ipairs(self:FragmentIds()) do if _PlayerInventory:GetItemCount(id)<1 then return end end
+			for _,id in ipairs(self:FragmentIds()) do _PlayerInventory:RemoveItem(id,1) end
+		end
+		local animate=not self.PapersPlaced self.PapersPlaced=true self.PuzzleOpen=true self.AttemptToken=self.AttemptToken+1
+		_GameManager:SetEasterEggPaused(true) self:RefreshEntrance() self:RefreshScene()
+		_Ep5SealPuzzleUI:Open(self.RunRevision,self.AttemptToken,animate,userId)
+	end
+
+	method table GetSealEdges()
+		-- The exact supplied glyph has thirteen edges and two odd-degree end vertices.
+		return {{1,2},{2,3},{3,4},{4,1},{1,5},{5,6},{6,3},{7,5},{5,8},{8,9},{9,6},{6,10},{10,7}}
+	end
+
+	method boolean IsValidRoute(table route)
+		-- Server validates a complete Euler path; no client success boolean can grant a character.
+		if #route~=14 or (route[1]~=1 and route[1]~=3) then return false end
+		local edges=self:GetSealEdges() local used={}
+		for i=2,#route do
+			local found=0
+			for j,e in ipairs(edges) do if (e[1]==route[i-1] and e[2]==route[i]) or (e[2]==route[i-1] and e[1]==route[i]) then found=j break end end
+			if found==0 or used[found] then return false end used[found]=true
+		end
+		return route[14]~=route[1] and (route[14]==1 or route[14]==3)
+	end
+
+	@ExecSpace("Server")
+	method void SubmitRoute(integer revision, integer token, table route)
+		-- Validate the stroke, then allow the chain-break and authored-size reveal to finish before acquisition.
+		if revision~=self.RunRevision or token~=self.AttemptToken or not self.PuzzleOpen or self.SealOpening then return end
+		if senderUserId~=self.Owner or not self:IsArenaUser(senderUserId) or _GameManager.GameOver then return end
+		if not self:IsValidRoute(route) then return end
+		self.PuzzleOpen=false self.SealOpening=true self:RefreshScene()
+		_Ep5SealPuzzleUI:Complete(senderUserId)
+		local run=self.RunRevision
+		_TimerService:SetTimerOnce(function()
+			if run~=self.RunRevision or _GameManager.GameOver then return end
+			self.SealOpening=false self.AwaitingAcquire=true self:RefreshScene()
+			_CharacterUnlockUI:Open("c57fed50bcba49a28b8f2d5ef880050c","BALOR_CHAR_NAME","BALOR_CHAR_DESC",self.Owner)
+		end,3.0)
+	end
+
+	@ExecSpace("Server")
+	method void ClosePuzzle(integer revision, integer token)
+		-- Closing preserves the paper and restores the arrow above the drawing NPC.
+		if revision~=self.RunRevision or token~=self.AttemptToken or senderUserId~=self.Owner or not self.PuzzleOpen then return end
+		self.PuzzleOpen=false _GameManager:SetEasterEggPaused(false) self:RefreshScene()
+	end
+
+	@ExecSpace("ServerOnly")
+	method void AcquireBalor(string userId)
+		-- Save the unlock, retire the paper entrance, and preserve the current return portal.
+		if not self.AwaitingAcquire or self.RewardReady or self._claimBusy or userId~=self.Owner or not self:IsArenaUser(userId) or _GameManager.GameOver then return end
+		self._claimBusy=true local run=self.RunRevision
+		local saved=_CharacterUnlockLogic:UnlockBalor()
+		if run~=self.RunRevision then return end self._claimBusy=false
+		if not saved then
+			_UIToast:ShowMessage("EP5_SEAL_SAVE_RETRY",userId)
+			_CharacterUnlockUI:Open("c57fed50bcba49a28b8f2d5ef880050c","BALOR_CHAR_NAME","BALOR_CHAR_DESC",userId) return
+		end
+		self.AwaitingAcquire=false self.RewardReady=true _AchievementLogic:OnEasterEgg()
+		_CompanionRescueMakerTest:CompleteRescue(5)
+		self:RefreshEntrance() self:RefreshScene() _GameManager:SetEasterEggPaused(false)
+		_UIToast:ShowMessage("EP5_SEAL_FREED",userId)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnReturnTouched(Entity target, string userId)
+		-- Return to the exact source zone after the saved acquisition.
+		if not self.RewardReady or target~=_EntityService:GetEntityByPath("/maps/ep5_map5_ester/portal-3") or not target.Enable then return end
+		if not self:IsArenaUser(userId) or _GameManager.GameOver or _GameManager:IsGamePaused() or _MapManager._moveLocked then return end
+		_MapManager:MoveToMap(240,self.ReturnZone)
+	end
+
+	@ExecSpace("Client")
+	method void CloseClientViews()
+		-- Clear only this feature's UI and pending unlock popup during restart or shutdown.
+		_Ep5SealPuzzleUI:Hide()
+		if _CharacterUnlockUI._pendingCharacterName=="BALOR_CHAR_NAME" then
+			_AcquisitionFxUI:StopTarget(_CharacterUnlockUI.iconSprite.Entity)
+			_CharacterUnlockUI.popupGroup.Enable=false _CharacterUnlockUI._pendingCharacterName=""
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		-- Invalidate delayed callbacks and remove run-only boss, pages and puzzle ownership.
+		local waiting=self.PuzzleOpen or self.SealOpening or self.AwaitingAcquire
+		self.RunRevision=self.RunRevision+1 self.AttemptToken=0
+		if isvalid(self.Boss) then self.Boss:Destroy() end
+		self.Boss=nil self.Defeated=false self.PapersPlaced=false self.PuzzleOpen=false self.SealOpening=false
+		self.AwaitingAcquire=false self.RewardReady=false self.Owner="" self._loading=false self._claimBusy=false self._T.dying=nil
+		self.ReturnZone=237 self.FragmentCount=0
+		for _,id in ipairs(self:FragmentIds()) do local count=_PlayerInventory:GetItemCount(id) if count>0 then _PlayerInventory:RemoveItem(id,count) end end
+		if waiting then _GameManager:SetEasterEggPaused(false) end
+		self:CloseClientViews() self:RefreshEntrance() self:RefreshScene()
+		local seal=_EntityService:GetEntityByPath("/maps/ep5_map5_ester/object-258")
+		if isvalid(seal) then local visual=seal:GetComponent("script.Ep5BalorSealVisual") if visual~=nil then visual:ResetVisual() end end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnEndPlay()
+		-- Release outstanding references and hide the minigame on the final world teardown.
+		self:ResetForNewRun()
+	end
+end

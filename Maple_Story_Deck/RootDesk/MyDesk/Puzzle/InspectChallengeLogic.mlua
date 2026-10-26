@@ -5,19 +5,27 @@ script InspectChallengeLogic extends Logic
 	-- 화면 UI는 하나라 한 번에 한 오브젝트만 열리게 하고, 돋보기 벡터 그림은 클라에서 한 번만 그린다.
 	property string _activePath = ""
 	property boolean _artReady = false
+	-- 2026-10-25 유저 리포트 "돋보기 이미지랑 완벽한 타이밍이 안 없어질 때가 있다": 닫는 시간을 오브젝트 컴포넌트의
+	-- OnUpdate가 셌는데, 상자는 열리고 DieDuration+0.3초 뒤 오브젝트가 꺼지고(map11 0.2 → 0.5초 < 성공 연출 0.75초)
+	-- 구역을 옮기면 구역 통째로 꺼져서 OnUpdate가 멈춘 채 UI가 남았다. 그래서 항상 도는 이 Logic이 지켜보다가 닫는다.
+	property any _activeOwner = nil      -- 서버: 도전 중인 컴포넌트(꺼지면 대신 취소해서 자리를 풀어 준다)
+	property any _uiOwner = nil          -- 클라: 지금 UI를 띄운 컴포넌트
+	property number _uiHideAt = 0        -- 클라: 결과 연출이 끝나는 시각(0 = 도전 진행 중, 시간 제한 없음)
+	property Entity _uiGroup = nil       -- 클라: 공용 UI 그룹(컴포넌트가 사라졌을 때 직접 끄려고)
 
 	@ExecSpace("ServerOnly")
-	method boolean TryClaim(string path)
+	method boolean TryClaim(string path, any owner)
 		-- 다른 오브젝트 도전이 열려 있으면 거절한다
 		if self._activePath ~= "" and self._activePath ~= path then return false end
 		self._activePath = path
+		self._activeOwner = owner
 		return true
 	end
 
 	@ExecSpace("ServerOnly")
 	method void Release(string path)
 		-- 자기 도전만 풀 수 있다
-		if self._activePath == path then self._activePath = "" end
+		if self._activePath == path then self._activePath = "" self._activeOwner = nil end
 	end
 
 	@ExecSpace("ClientOnly")
@@ -26,5 +34,48 @@ script InspectChallengeLogic extends Logic
 		if self._artReady then return false end
 		self._artReady = true
 		return true
+	end
+
+	@ExecSpace("ClientOnly")
+	method void WatchUI(any owner, Entity group, number duration)
+		-- 컴포넌트가 UI를 띄울 때 등록한다. duration > 0이면 그 시간 뒤에 무조건 닫는다(결과 연출)
+		self._uiOwner = owner
+		self._uiGroup = group
+		self._uiHideAt = duration > 0 and (_UtilLogic.ElapsedSeconds + duration) or 0
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ClearWatch(any owner)
+		-- 자기 UI를 닫은 컴포넌트가 부른다(다른 오브젝트가 이미 새로 띄웠으면 건드리지 않는다)
+		if self._uiOwner == owner then self._uiOwner = nil self._uiHideAt = 0 end
+	end
+
+	method void OnUpdate(number delta)
+		if self:IsServer() then
+			-- 도전 중인 오브젝트가 꺼지면(구역 이동 등) 그 컴포넌트 OnUpdate가 멈춰 취소를 못 해서 자리가 영영 잡혀 있었다
+			if self._activePath == "" then return end
+			local owner = self._activeOwner
+			if owner == nil or not isvalid(owner) or not owner.Entity.EnabledInHierarchy then
+				local path = self._activePath
+				if owner ~= nil and isvalid(owner) then owner:EndChallenge("cancel") end
+				self._activePath = "" self._activeOwner = nil
+				log("[VRF] inspect watchdog server released path=" .. path)
+			end
+			return
+		end
+		local owner = self._uiOwner
+		if owner == nil then return end
+		local alive = isvalid(owner) and owner.Entity.EnabledInHierarchy
+		local expired = self._uiHideAt > 0 and _UtilLogic.ElapsedSeconds >= self._uiHideAt
+		if alive and not expired then return end
+		-- 꺼진 오브젝트도 메서드 호출은 되므로 원래 닫기 경로를 탄다. 컴포넌트가 아예 사라졌으면 그룹만 끈다
+		if isvalid(owner) then
+			if not alive and owner._localOpen then owner:RequestCancel(owner._localSession) end
+			owner:HideLocal()
+		elseif isvalid(self._uiGroup) then
+			self._uiGroup.Enable = false
+		end
+		self._uiOwner = nil self._uiHideAt = 0
+		log("[VRF] inspect watchdog client hid UI alive=" .. tostring(alive) .. " expired=" .. tostring(expired))
 	end
 end

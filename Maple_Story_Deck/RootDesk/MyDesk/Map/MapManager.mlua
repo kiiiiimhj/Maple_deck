@@ -153,6 +153,8 @@ script MapManager extends Logic
 	-- 범위 안에서만 동작하게 한다. ZoneInfo 자체는 1~44(에피1)/45~88(에피2)/89~98(에피3) 항목을 항상
 	-- 같이 들고 있으므로(위 OnBeginPlay 참고) 여기서 테이블을 바꿔치기할 필요는 없다 — 순회 범위만 좁히면 된다.
 	method boolean IsLevelGateBypassed(integer mapIndex)
+		-- Let the map5 test reach the last fragment and hidden portal from level one.
+		if self:IsEp5Map5Zone(mapIndex) and _Ep5FinalSealLogic:IsMakerTestEntryEnabled() then return true end
 		-- 루디브리엄 맵5 테스트 진입은 레벨1부터 기존 이동 경로를 자유롭게 확인한다.
 		-- 정식 플레이와 다른 에피소드의 레벨 잠금에는 영향을 주지 않는다.
 		-- 테스트용(유저 지정 2026-10-06 "맵이동 풀어야함(5레벨제한)"): Maker 플레이에서만 모든 맵의 레벨5 제한을 푼다
@@ -163,6 +165,7 @@ script MapManager extends Logic
 
 	@ExecSpace("ServerOnly")
 	method void SetEpisodeRange(integer episode)
+		-- Use map5 for the temporary Maker rescue test; ordinary Episode 5 still starts at map1.
 		if episode == 2 then
 			self.MinMapIndex = 45
 			-- 84→88: ep2_map2_hidden(존1~4 = mapIndex85~88, 석상 퍼즐 보상 스퍼) 포함. 순차 진행으로는
@@ -202,9 +205,9 @@ script MapManager extends Logic
 			-- 양 끝(190의 "<", 239의 ">")은 MoveByDelta가 막는다
 			self.MinMapIndex = 190
 			self.MaxMapIndex = 239
-			-- 2026-10-25 user request: enter Folk Village directly at map4 zone1.
-			self.DesiredStartMapIndex = 220
-			log("[VRF] ep5 entry -> ep5_map4 zone1 (220)")
+			-- 시작은 ep5_map1 존1(190). 2026-10-25 테스트용 map4 직행(220)이 배포판까지 나가던 것 되돌림(유저 지정)
+			self.DesiredStartMapIndex = _Ep5FinalSealLogic:IsMakerTestEntryEnabled() and 230 or 190
+			log("[VRF] ep5 entry -> zone " .. tostring(self.DesiredStartMapIndex))
 		elseif episode == 3 then
 			-- 에피소드3(mapIndex89~128, "엘라스 산맥" 컨셉) — map1(존1~10=89~98)/map2(존1~10=99~108)/
 			-- map3(존1~10=109~118)/map4(존1~10=119~128). 98→99, 108→109, 118→119 전부 인접 mapIndex라
@@ -430,6 +433,7 @@ script MapManager extends Logic
 
 	@ExecSpace("ServerOnly")
 	method void OnBeginPlay()
+		-- Include the isolated Episode 5 seal arena without opening ordinary zone exits.
 		self.ZoneInfo = {
 			-- 그룹A(맵1~3) 병합: map01.map을 host로 map02/03을 Zone02/Zone03 자식 컨테이너로 병합.
 			-- 발판폭(14.16) + 버퍼로 spawnX를 공식 계산(15.5, 31.0 — 타일 그리드 정수 정렬을 위해
@@ -848,6 +852,7 @@ script MapManager extends Logic
             [237]={file="ep5_map5",container="Zone8",spawnX=108.5,landY=-1.32},
             [238]={file="ep5_map5",container="Zone9",spawnX=121.2312,landY=-1.32},
             [239]={file="ep5_map5",container="Zone10",spawnX=139.5,landY=-1.32},
+            [240]={file="ep5_map5_ester",container=nil,spawnX=0,landY=-1.35},
 
 		}
 		-- 몬스터 스폰/시작맵 리다이렉트는 GameStarted가 될 때까지 미룬다(BeginGameplay 참고) —
@@ -1314,8 +1319,9 @@ script MapManager extends Logic
 	-- 전부 버튼 트리거라 CurrentMapIndex는 매 이동마다 확정적으로 갱신되므로 여기서는 이게 더 정확하다.
 	@ExecSpace("ServerOnly")
 	method void MoveByDelta(integer delta)
+		-- Include the isolated Episode 5 seal arena without opening ordinary zone exits.
 		local actualIndex = self.CurrentMapIndex
-		if actualIndex==189 then return end -- 파풀 방은 좌우 이동 없음
+		if actualIndex==189 or actualIndex==240 then return end -- 파풀 방은 좌우 이동 없음
 		local targetIndex = actualIndex + delta
 
 		-- 맵6↔11 특수 분기: 맵6의 오른쪽은 7이 아니라 11(신규 해변 존)로 이어지고, 맵11의 왼쪽은
@@ -1610,12 +1616,13 @@ script MapManager extends Logic
 
 	@ExecSpace("ServerOnly")
 	method void MoveToMap(integer fromIndex, integer targetIndex)
+		-- Include the isolated Episode 5 seal arena without opening ordinary zone exits.
 		-- 범위를 벗어나면 무시 (map1에서 좌 / 마지막 맵에서 우 — 아무 반응 없음)
 		-- 129~133(ep3_map4_ester_1 히든맵, portal-3 전용 — [[project_ep3map4_ester1_portal]])은
 		-- MaxMapIndex(에피3=128) 밖이지만 유효한 목적지다(ZoneInfo엔 등록돼 있음) — 정상 진행으로는
 		-- 절대 도달 못 하고(MoveByDelta의 129/133 막다른 길 분기 참고) 오직 존1(129) 진입은
 		-- Ep3Map4Ester1PortalLogic이, 존간 이동(130~132)은 이 예외를 타고 여기까지 온다.
-		local isEsterZone = (targetIndex >= 129 and targetIndex <= 133) or self:IsEp4Map1Ester1Zone(targetIndex) or targetIndex==189
+		local isEsterZone = (targetIndex >= 129 and targetIndex <= 133) or self:IsEp4Map1Ester1Zone(targetIndex) or targetIndex==189 or targetIndex==240
 		if (targetIndex < self.MinMapIndex or targetIndex > self.MaxMapIndex) and not isEsterZone then return end
 		if targetIndex == fromIndex then return end
 
@@ -1814,6 +1821,7 @@ script MapManager extends Logic
 	property number FreeScreenCenterAbovePlayer = 1.41
 
 	method number GetFixedCameraY(integer mapIndex)
+		-- Include the isolated Episode 5 seal arena without opening ordinary zone exits.
 		-- ResetCameraConfine의 Y 고정 분기와 같은 범위. 고정이 없으면 -9999
 		if mapIndex >= 45 and mapIndex <= 54 then return self.Ep2Map1FixedCameraY end
 		if mapIndex >= 55 and mapIndex <= 64 then return self.Ep2Map2FixedCameraY end
@@ -1825,6 +1833,7 @@ script MapManager extends Logic
 		if mapIndex >= 109 and mapIndex <= 118 then return self.Ep3Map3FixedCameraY end
 		if mapIndex >= 119 and mapIndex <= 128 then return self.Ep3Map4FixedCameraY end
 		if mapIndex >= 129 and mapIndex <= 133 then return self.Ep3Map4Ester1FixedCameraY end
+		if mapIndex==240 then return -1.35 end
 		if mapIndex == 189 or self:IsEp4Map1Ester1Zone(mapIndex) or (mapIndex >= 134 and mapIndex <= 183) then return self.Ep4FixedCameraY end
 		if self:IsEp5Map1Zone(mapIndex) or self:IsEp5Map2Zone(mapIndex) or self:IsEp5Map3Zone(mapIndex) or self:IsEp5Map4Zone(mapIndex) or self:IsEp5Map5Zone(mapIndex) then return self.Ep5Map1FixedCameraY end
 		return -9999
@@ -1891,6 +1900,7 @@ script MapManager extends Logic
 
 	@ExecSpace("Multicast")
 	method void ResetCameraConfine(integer mapIndex)
+		-- Include the isolated Episode 5 seal arena without opening ordinary zone exits.
 		if not self:IsClient() then return end
 		self:ApplyDefaultZoomImmediate()
 		local cam = _CameraService:GetCurrentCameraComponent()
@@ -2003,6 +2013,11 @@ script MapManager extends Logic
 			cam.DeadZone = Vector2(self.DefaultDeadZone.x, 0)
 			cam.SoftZone = Vector2(self.DefaultSoftZone.x, 0)
 			self:LockCameraY(self.Ep3Map4Ester1FixedCameraY)
+		elseif mapIndex==240 then
+			cam.ConfineCameraArea=false cam.UseCustomBound=true
+			cam.LeftBottom=Vector2(-7.08,-1.35) cam.RightTop=Vector2(7.08,-1.35)
+			cam.DeadZone=Vector2(self.DefaultDeadZone.x,0) cam.SoftZone=Vector2(self.DefaultSoftZone.x,0)
+			self:LockCameraY(-1.35)
 		elseif mapIndex==189 then
 			-- 파풀라투스는 존1 안에서만 전투한다.
 			cam.ConfineCameraArea=false cam.UseCustomBound=true

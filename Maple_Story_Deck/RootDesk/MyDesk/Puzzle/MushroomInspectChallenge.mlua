@@ -3,6 +3,9 @@ script MushroomInspectChallenge extends Component
 
 	@MinValue(1) @MaxValue(3)
 	property integer MaxSpeedLevel = 3
+	-- 원이 줄어드는 횟수 — 이만큼 반복하는 동안 안 누르면 실패(2026-10-26 유저 지정 5번)
+	@MinValue(1)
+	property integer MaxCycles = 5
 	-- 0=random, 1=normal green band, 2=wider green band.
 	@MinValue(0) @MaxValue(2)
 	property integer TargetWidthMode = 0
@@ -56,12 +59,13 @@ script MushroomInspectChallenge extends Component
 			self._artReady = true
 			if self._touchConnection == nil then self._touchConnection = self.touchArea:ConnectEvent(UITouchDownEvent, self.OnCircleTouched) end
 			self:HideLocal()
-			log("[VRF] mushroom inspect UI boot vector=true bandWidths=18,28 speeds=3.2,2.5,1.9")
+			log("[VRF] mushroom inspect UI boot vector=true bandWidths=18,28 speeds=2.5,2.0,1.5")
 		end
 	end
 
 	method number GetDuration(integer speed)
-		local durations = {3.2, 2.5, 1.9}
+		-- 2026-10-26 유저 지정 3.2/2.5/1.9 → 2.5/2/1.5초
+		local durations = {2.5, 2.0, 1.5}
 		return durations[math.max(1, math.min(3, speed))]
 	end
 
@@ -70,12 +74,15 @@ script MushroomInspectChallenge extends Component
 	end
 
 	method number GetRadius(number elapsed, integer speed)
-		local p = math.max(0, math.min(1, elapsed / self:GetDuration(speed)))
+		-- 2026-10-26 유저 지정: 다 줄어들면 다시 커져서 또 줄어든다(MaxCycles번). 마지막 바퀴 뒤엔 끝 크기에 멈춘다
+		local duration = self:GetDuration(speed)
+		if elapsed >= duration * self.MaxCycles then return self.EndRadius end
+		local p = math.max(0, math.min(1, (math.max(0, elapsed) % duration) / duration))
 		return self.StartRadius + (self.EndRadius - self.StartRadius) * p
 	end
 
 	method boolean IsHit(number elapsed, integer speed, integer band)
-		if elapsed < 0 or elapsed > self:GetDuration(speed) then return false end
+		if elapsed < 0 or elapsed > self:GetDuration(speed) * self.MaxCycles then return false end
 		return math.abs(self:GetRadius(elapsed, speed) - self.TargetRadius) <= self:GetBandWidth(band) * 0.5
 	end
 
@@ -127,7 +134,7 @@ script MushroomInspectChallenge extends Component
 		if _GameManager.OptionPaused or _GameManager.ShopPaused or _GameManager.EasterEggPaused or _GameManager.EntryPresentationPending then return end
 		if _GameManager.TutorialPaused and not _TutorialLogic.EggActive then return end
 		-- 화면 UI가 하나라 다른 오브젝트 도전이 열려 있으면 시작하지 않는다
-		if not _InspectChallengeLogic:TryClaim(self.Entity.Path) then return end
+		if not _InspectChallengeLogic:TryClaim(self.Entity.Path, self) then return end
 		self._zone = _MapManager.CurrentMapIndex
 		self._active = true self._owner = userId self._session = self._session + 1
 		_TutorialLogic:SuspendEggGuideForInspection(self.Entity.Path)
@@ -135,7 +142,8 @@ script MushroomInspectChallenge extends Component
 		self._band = self.TargetWidthMode
 		if self._band < 1 or self._band > 2 then self._band = _UtilLogic:RandomIntegerRange(1, 2) end
 		self._startAt = _UtilLogic.ServerElapsedSeconds + 0.35
-		self._deadline = self._startAt + self:GetDuration(self._speed) + 0.25
+		-- 안 누르면 MaxCycles바퀴가 다 돈 뒤 실패
+		self._deadline = self._startAt + self:GetDuration(self._speed) * self.MaxCycles + 0.25
 		self:ShowChallenge(self._session, self._speed, self._band, self._startAt, userId)
 		log("[VRF] mushroom inspect begin session=" .. self._session .. " speed=" .. self._speed .. " band=" .. self:GetBandWidth(self._band) .. " paused=" .. tostring(_GameManager:IsGamePaused()))
 	end
@@ -196,6 +204,8 @@ script MushroomInspectChallenge extends Component
 		self.feedback.Enable = false
 		self.guide.Entity.Enable = true self.speedText.Entity.Enable = true
 		self.touchArea.Enable = true self.inspectGroup.Enable = true
+		-- 이 오브젝트가 도중에 꺼져도(구역 이동 등) Logic이 대신 닫는다
+		_InspectChallengeLogic:WatchUI(self, self.inspectGroup, 0)
 		self:UpdateObjectAnchor(0)
 		self.magnifier.UITransformComponent.UIScale = Vector3(1, 1, 1)
 		self:TintRing(Color(1, 0.81, 0.24, 1))
@@ -315,6 +325,8 @@ script MushroomInspectChallenge extends Component
 		if outcome == "cancel" or outcome == "empty" or not self:IsGameplayVisible() then self:HideLocal() log("[VRF] mushroom inspect feedback=" .. outcome) return end
 		self._success = outcome == "success"
 		self._resultRemaining = self._success and 0.75 or 1.2
+		-- 상자는 열리고 곧 오브젝트가 꺼져 아래 OnUpdate 카운트다운이 멈춘다 — 연출 시간이 지나면 Logic이 확실히 닫는다
+		_InspectChallengeLogic:WatchUI(self, self.inspectGroup, self._resultRemaining + 0.1)
 		local key = self._success and "EP5_MINING_SUCCESS" or "EP5_MINING_MISS"
 		self.feedback:GetChildByName("Label").TextGUIRendererComponent.Text = _LocalizationService:GetText(key)
 		self.feedback.Enable = true
@@ -333,6 +345,10 @@ script MushroomInspectChallenge extends Component
 	@ExecSpace("ClientOnly")
 	method void HideLocal()
 		self._localOpen = false self._pending = false self._resultRemaining = 0
+		-- UI가 하나라, 다른 오브젝트가 이미 새로 띄운 도전이면 공용 UI는 끄지 않고 내 상태만 접는다
+		local current = _InspectChallengeLogic._uiOwner
+		if current ~= nil and current ~= self and isvalid(current) then return end
+		_InspectChallengeLogic:ClearWatch(self)
 		if isvalid(self.inspectGroup) then self.inspectGroup.Enable = false end
 		if isvalid(self.touchArea) then self.touchArea.Enable = false end
 		if isvalid(self.sparkle) then self.sparkle:Stop() end

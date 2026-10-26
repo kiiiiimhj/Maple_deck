@@ -14,6 +14,8 @@ script CharacterUnlockLogic extends Logic
 	@Sync property boolean RinUnlocked = false
 	@Sync property boolean BenoaUnlocked = false
 	property boolean _benoaLoadReady = false
+	@Sync property boolean BalorUnlocked = false
+	property boolean _balorLoadReady = false
 	-- 아직 못 보여준 해금 축하 팝업(유저 지정 2026-09-30: "게임 도중에 뜨면 안 되고, 조건 완료 후 로비에 가면 떠야 한다").
 	-- "shade", "rin"을 쉼표로 이어 둔다. 진행도 JSON("pp")에 같이 저장되어 판 도중에 꺼도 다음 로비에서 뜬다.
 	-- 실제 표시는 클라(CharacterUnlockUI.TryShowPending)가 로비가 보일 때만 한다.
@@ -74,6 +76,7 @@ script CharacterUnlockLogic extends Logic
 			self.LeionUnlocked = true
 		end
 		self:LoadBenoaUnlock()
+		self:LoadBalorUnlock()
 		self:LoadProgress()
 		-- 입장 시점에 이미 목표를 넘겨 있으면 바로 해금한다(유저 리포트 2026-09-30: 목표를 낮춘 업데이트 뒤 이미
 		-- 달성한 계정이 로비에선 안 풀리고, 판에 들어가 다음 처치가 나와서야 인게임 팝업이 떴다).
@@ -104,6 +107,7 @@ script CharacterUnlockLogic extends Logic
 			self.ShadeUnlocked = true
 			self.RinUnlocked = true
 			self.BenoaUnlocked = true
+			self.BalorUnlocked = true
 			log("CharacterUnlockLogic: [TEST] all characters unlocked (not saved)")
 		end
 		-- 테스트용 실피드·레이온만 해금 — 위와 같이 실제 값을 읽은 뒤 메모리에서만 켠다(계정 저장값은 그대로)
@@ -139,6 +143,37 @@ script CharacterUnlockLogic extends Logic
 		if code~=0 then log_warning("CharacterUnlockLogic: Benoa save failed code="..tostring(code)) return false end
 		self.BenoaUnlocked=true
 		log("CharacterUnlockLogic: Benoa unlocked and saved")
+		return true
+	end
+
+	method boolean IsBalorUnlocked()
+		-- Expose the saved Episode 5 rescue unlock to the character list.
+		return self.BalorUnlocked
+	end
+
+	@ExecSpace("ServerOnly")
+	method void LoadBalorUnlock()
+		-- Load once from the owning player account, preserving failures for a retry.
+		self._balorLoadReady=false
+		if self._unlockStorage==nil then return end
+		local code,raw=self._unlockStorage:GetAndWait("Unlock.Balor")
+		if code==0 or code==1000002 then
+			self.BalorUnlocked=raw=="1" self._balorLoadReady=true
+		else log_warning("CharacterUnlockLogic: Balor load failed code="..tostring(code)) end
+		log("CharacterUnlockLogic: Balor loaded="..tostring(self.BalorUnlocked))
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean UnlockBalor()
+		-- Acknowledge the saved unlock before opening the return portal.
+		if self.BalorUnlocked then return true end
+		if not self._balorLoadReady then self:LoadBalorUnlock() end
+		if self.BalorUnlocked then return true end
+		if not self._balorLoadReady or self._unlockStorage==nil then return false end
+		local code=self._unlockStorage:SetAndWait("Unlock.Balor","1")
+		if code~=0 then log_warning("CharacterUnlockLogic: Balor save failed code="..tostring(code)) return false end
+		self.BalorUnlocked=true
+		log("CharacterUnlockLogic: Balor unlocked and saved")
 		return true
 	end
 

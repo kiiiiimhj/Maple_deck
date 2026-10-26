@@ -1,0 +1,240 @@
+@Component
+script Ep5BalorSealVisual extends Component
+	property Vector3 _base = Vector3(0,0,0)
+	property Vector3 _scale = Vector3(1,1,1)
+	property Vector3 _heroPosition = Vector3(0,0,0)
+	property Vector3 _heroScale = Vector3(1,1,1)
+	property Vector3 _center = Vector3(0,0,0)
+	property number _height = 1
+	property number _age = 0
+	property number _openAge = 0
+	property Entity _hero = nil
+	property Entity _flash = nil
+	property table _embers = {}
+	property table _ring = {}
+	property table _chains = {}
+	property table _chainShards = {}
+	property table _heroMetrics = {}
+	property table _sealMetrics = {}
+	property table _lightMetrics = {}
+	property table _sparkMetrics = {}
+	property boolean _ready = false
+	property boolean _burstPlayed = false
+	property boolean _revealPlayed = false
+	property Entity _altar = nil
+	property Entity _arrow = nil
+	property table _altarMetrics = {}
+	property table _arrowMetrics = {}
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		-- Capture the author's latest seal transform; never replace it with a fixed reveal size or offset.
+		self._base=self.Entity.TransformComponent.Position self._scale=self.Entity.TransformComponent.Scale
+		self._hero=_EntityService:GetEntityByPath("/maps/ep5_map5_ester/FreedBalor")
+		self._sealMetrics=_CardManager:GetSpriteMetrics(self.Entity.SpriteRendererComponent.SpriteRUID)
+		if isvalid(self._hero) then self._heroMetrics=_CardManager:GetSpriteMetrics(self._hero.SpriteRendererComponent.SpriteRUID) end
+		self._lightMetrics=_CardManager:GetSpriteMetrics("29b8c43f17ae45cc92390e8f2dd49676")
+		self._sparkMetrics=_CardManager:GetSpriteMetrics("ad634a77af664083955a86374558f8ee")
+		self._chains={}
+		for _,name in ipairs({"object-256","object-256_1","object-256_2","object-256_3","object-256_4"}) do
+			local e=self.Entity.CurrentMap:GetChildByName(name)
+			if isvalid(e) then table.insert(self._chains,{entity=e,position=e.TransformComponent.Position,scale=e.TransformComponent.Scale,rotation=e.TransformComponent.ZRotation}) end
+		end
+		self._altar=_EntityService:GetEntityByPath("/maps/ep5_map5_ester/object-278")
+		self._arrow=_EntityService:GetEntityByPath("/maps/ep5_map5_ester/RelicArrowHint")
+		if isvalid(self._altar) then self._altarMetrics=_CardManager:GetSpriteMetrics(self._altar.SpriteRendererComponent.SpriteRUID) end
+		if isvalid(self._arrow) then self._arrowMetrics=_CardManager:GetSpriteMetrics(self._arrow.SpriteRendererComponent.SpriteRUID) end
+		self:MatchAuthoredPlacement() self._ready=true self:ClearEffects()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void MatchAuthoredPlacement()
+		-- Match the saved image's visible center and height while preserving the freed character's aspect ratio.
+		local p=self._base local s=self._scale local m=self._sealMetrics local hm=self._heroMetrics
+		self._height=math.max(0.1,m.h*math.abs(s.y))
+		self._center=Vector3(p.x+(0.5-m.px)*m.w*s.x,p.y+(0.5-m.py)*m.h*s.y,p.z)
+		local ratio=math.max(0.1,m.h)/math.max(0.1,hm.h)
+		self._heroScale=Vector3(s.x*ratio,s.y*ratio,s.z)
+		local hs=self._heroScale local c=self._center
+		self._heroPosition=Vector3(c.x+(hm.px-0.5)*hm.w*hs.x,c.y+(hm.py-0.5)*hm.h*hs.y,p.z-0.1)
+		if isvalid(self._hero) then self._hero.TransformComponent.Position=self._heroPosition self._hero.TransformComponent.Scale=hs end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void UpdateAltarArrow()
+		-- Keep the downward arrow centered above the drawing NPC rather than the sealed hero.
+		if not isvalid(self._altar) or not isvalid(self._arrow) or not self._arrow.Enable then return end
+		local p=self._altar.TransformComponent.Position local s=self._altar.TransformComponent.Scale
+		local m=self._altarMetrics local am=self._arrowMetrics local arrowScale=2
+		local cx=p.x+(0.5-m.px)*math.max(0.1,m.w)*s.x
+		local top=p.y+(1-m.py)*math.max(0.1,m.h)*s.y
+		self._arrow.TransformComponent.Scale=Vector3(arrowScale,arrowScale,1)
+		self._arrow.TransformComponent.ZRotation=0
+		self._arrow.TransformComponent.Position=Vector3(cx,top+0.12+am.py*math.max(0.1,am.h)*arrowScale+math.sin(self._age*3)*0.04,p.z-0.15)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ClearReleaseParticles()
+		-- Destroy chain-link debris and temporary lights without hiding the freed character.
+		for _,entry in ipairs(self._chainShards) do if isvalid(entry.entity) then entry.entity:Destroy() end end self._chainShards={}
+		if isvalid(self._flash) then self._flash:Destroy() end self._flash=nil
+		for _,e in ipairs(self._embers) do if isvalid(e) then e:Destroy() end end self._embers={}
+		for _,e in ipairs(self._ring) do if isvalid(e) then e:Destroy() end end self._ring={}
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ClearEffects()
+		-- End-play, new-run and map-exit cleanup also hide the previous reveal.
+		self:ClearReleaseParticles()
+		if isvalid(self._hero) then self._hero.SpriteRendererComponent.Color=Color(1,1,1,0) end
+	end
+
+	@ExecSpace("Multicast")
+	method void ResetVisual()
+		-- Restore every original chain transform and the authored character placement for the next run.
+		if not self:IsClient() or not self._ready then return end
+		self._age=0 self._openAge=0 self._burstPlayed=false self._revealPlayed=false self:ClearEffects()
+		self.Entity.TransformComponent.Position=self._base self.Entity.TransformComponent.Scale=self._scale
+		self.Entity.SpriteRendererComponent.Color=Color(1,1,1,1)
+		self:MatchAuthoredPlacement()
+		for _,entry in ipairs(self._chains) do
+			local e=entry.entity
+			if isvalid(e) then e.TransformComponent.Position=entry.position e.TransformComponent.Scale=entry.scale e.TransformComponent.ZRotation=entry.rotation e.SpriteRendererComponent.Color=Color(1,1,1,1) end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method Entity SpawnLight(string name, string ruid, integer order)
+		-- Use the game's existing soft-alpha light and sparkle sprites, with no new character art.
+		local e=_SpawnService:SpawnByModelId("persistenteffect",name,self._center,self.Entity.CurrentMap)
+		if isvalid(e) then e.SpriteRendererComponent.SpriteRUID=ruid e.SpriteRendererComponent.SortingLayer="MapLayer0" e.SpriteRendererComponent.OrderInLayer=order e.SpriteRendererComponent.Color=Color(1,1,1,0) end
+		return e
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SpawnChainShards(integer order)
+		-- Small native pixel fragments form open purple chain links, matching the existing spectral chains.
+		local rows={"............","...ddd......","..dhhhd.....",".dh..lhd....",".dh...hd....",".dh...hd....",".dhl..hd....","..dh..hd....","...d..d.....","............",".....hd.....","......d....."}
+		local palette={d=Color(0.12,0.01,0.17,1),h=Color(0.88,0.08,1,1),l=Color(1,0.6,1,1)} local pixels={}
+		for y=12,1,-1 do for x=1,12 do table.insert(pixels,palette[string.sub(rows[y],x,x)] or Color(0,0,0,0)) end end
+		self._T.chainShardPixels=pixels
+		for i=1,12 do
+			local chain=self._chains[(i-1)%math.max(1,#self._chains)+1]
+			local p=chain~=nil and chain.position or self._center
+			local e=_SpawnService:SpawnByModelId("bosshealthbar","BrokenSealLink"..i,p,self.Entity.CurrentMap)
+			if isvalid(e) then
+				e.PixelRendererComponent:ResetWithColors(12,12,pixels) e.PixelRendererComponent.SortingLayer="MapLayer0" e.PixelRendererComponent.OrderInLayer=order
+				e.Enable=false table.insert(self._chainShards,{entity=e,origin=p,index=i,alpha=1})
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void StartRelease()
+		-- Break the chains into spinning open links, followed by a gold shock ring and the original hero.
+		self:ClearReleaseParticles() self._burstPlayed=false self._revealPlayed=false
+		local order=isvalid(self._hero) and self._hero.SpriteRendererComponent.OrderInLayer or 4
+		self:SpawnChainShards(order+2)
+		self._flash=self:SpawnLight("BalorSealFlash","29b8c43f17ae45cc92390e8f2dd49676",order-1)
+		for i=1,12 do
+			local e=self:SpawnLight("TalismanEmber"..i,"ad634a77af664083955a86374558f8ee",order+1)
+			if isvalid(e) then table.insert(self._embers,e) end
+		end
+		for i=1,16 do
+			local e=self:SpawnLight("BalorReleaseRing"..i,"29b8c43f17ae45cc92390e8f2dd49676",order-1)
+			if isvalid(e) then table.insert(self._ring,e) end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUpdate(number delta)
+		-- Preserve transparent debris pixels and keep the hero at the authored placement throughout acquisition.
+		if not self._ready then return end
+		if _MapManager.CurrentMapIndex~=240 or _GameManager.GameOver then self:ClearEffects() return end
+		self._age=self._age+delta self:UpdateAltarArrow()
+		local p=self._base local s=self._scale local c=self._center local height=self._height
+		if not _Ep5FinalSealLogic.SealOpening then
+			self._openAge=0 self._burstPlayed=false self._revealPlayed=false
+			local freed=_Ep5FinalSealLogic.AwaitingAcquire or _Ep5FinalSealLogic.RewardReady
+			self.Entity.TransformComponent.Position=p self.Entity.TransformComponent.Scale=s
+			self.Entity.SpriteRendererComponent.Color=Color(1,1,1,freed and 0 or (0.97+0.03*math.sin(self._age*2)))
+			if freed then
+				self:ClearReleaseParticles()
+				if isvalid(self._hero) then self._hero.TransformComponent.Position=self._heroPosition self._hero.TransformComponent.Scale=self._heroScale self._hero.SpriteRendererComponent.Color=Color(1,1,1,1) end
+			end
+			return
+		end
+		if self._openAge==0 then self:StartRelease() end
+		self._openAge=self._openAge+delta local t=self._openAge
+		local charge=math.max(0,math.min(1,t/0.36)) local burst=math.max(0,t-0.36)
+		local fade=math.max(0,math.min(1,burst/0.52)) local ease=1-(1-fade)^3
+		local shake=math.sin(t*65)*height*0.007*charge*(1-fade)
+		self.Entity.TransformComponent.Position=Vector3(p.x+shake,p.y,p.z)
+		self.Entity.TransformComponent.Scale=s
+		self.Entity.SpriteRendererComponent.Color=Color(1,1-0.12*charge,1-0.18*charge,1-fade)
+		if burst>0 and not self._burstPlayed then self._burstPlayed=true _SoundOptionLogic:PlaySfx("aa96c1117c634a23b56440be8de39037",0.75) end
+		if t>=0.78 and not self._revealPlayed then self._revealPlayed=true _SoundOptionLogic:PlaySfx("668564fe8e91483ebe5656e97ccee5cc",0.6) end
+		for i,entry in ipairs(self._chains) do
+			local e=entry.entity
+			if isvalid(e) then
+				local theta=i*math.pi*2/math.max(1,#self._chains) local r=height*0.5*ease
+				e.TransformComponent.Position=Vector3(entry.position.x+math.cos(theta)*r+shake,entry.position.y+math.sin(theta)*r*0.6-height*0.16*ease*ease,entry.position.z)
+				e.TransformComponent.ZRotation=entry.rotation+(i%2==0 and 22 or -22)*ease
+				e.SpriteRendererComponent.Color=Color(1,1,1,math.max(0,1-burst/0.25))
+			end
+		end
+		for _,entry in ipairs(self._chainShards) do
+			local e=entry.entity local i=entry.index
+			if isvalid(e) then
+				e.Enable=burst>0
+				local side=i%2==0 and 1 or -1 local vx=side*height*(0.35+(i%3)*0.16)
+				local vy=height*(0.50+(i%4)*0.14) local p0=entry.origin
+				e.TransformComponent.Position=Vector3(p0.x+vx*burst,p0.y+vy*burst-height*0.90*burst*burst,p0.z-0.2)
+				local size=height*(0.10+(i%3)*0.025)/0.12
+				e.TransformComponent.Scale=Vector3(size,size,1) e.TransformComponent.ZRotation=i*47+side*burst*270
+				local alpha=math.max(0,math.min(1,(1.4-burst)/0.45))
+				if alpha~=entry.alpha then
+					local pixels={}
+					for _,color in ipairs(self._T.chainShardPixels) do table.insert(pixels,Color(color.r,color.g,color.b,color.a*alpha)) end
+					e.PixelRendererComponent:SetPixels(pixels) entry.alpha=alpha
+				end
+			end
+		end
+		if isvalid(self._hero) then
+			local a=math.max(0,math.min(1,(t-0.56)/0.48)) local glow=math.max(0,math.min(1,1-(t-0.8)/0.4))
+			self._hero.TransformComponent.Position=self._heroPosition self._hero.TransformComponent.Scale=self._heroScale
+			self._hero.SpriteRendererComponent.Color=Color(1,1-0.10*glow,1-0.22*glow,a)
+		end
+		if isvalid(self._flash) then
+			local size=height*(0.25+0.30*charge+1.2*ease)/math.max(0.1,self._lightMetrics.h)
+			local alpha=burst<=0 and charge*0.22 or math.max(0,1-burst/0.8)*0.65
+			self._flash.TransformComponent.Position=Vector3(c.x,c.y,p.z-0.12) self._flash.TransformComponent.Scale=Vector3(size,size,1)
+			self._flash.SpriteRendererComponent.Color=Color(1,0.82,0.48,alpha)
+		end
+		for i,e in ipairs(self._embers) do
+			if isvalid(e) then
+				local theta=i*math.pi*2/12+t*0.5 local r=height*(0.20+burst*0.48)
+				local alpha=burst<=0 and charge*0.3 or math.max(0,1-burst/1.65)
+				local size=height*0.075/math.max(0.1,self._sparkMetrics.h)*(0.8+0.2*math.sin(t*6+i))
+				e.TransformComponent.Position=Vector3(c.x+math.cos(theta)*r,c.y+math.sin(theta)*r*0.7+burst*height*0.12,p.z-0.15)
+				e.TransformComponent.Scale=Vector3(size,size,1) e.TransformComponent.ZRotation=i*37+t*85
+				e.SpriteRendererComponent.Color=Color(1,0.76,0.35,alpha)
+			end
+		end
+		for i,e in ipairs(self._ring) do
+			if isvalid(e) then
+				local theta=i*math.pi*2/16 local r=height*(0.12+burst*1.1)
+				local alpha=burst>0 and math.max(0,1-burst/0.72)*0.65 or 0
+				local size=height*(0.16+burst*0.20)/math.max(0.1,self._lightMetrics.h)
+				e.TransformComponent.Position=Vector3(c.x+math.cos(theta)*r,c.y+math.sin(theta)*r*0.6,p.z-0.13)
+				e.TransformComponent.Scale=Vector3(size,size,1) e.SpriteRendererComponent.Color=Color(1,0.83,0.48,alpha)
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		-- Destroy local burst sprites when play ends.
+		self:ClearEffects()
+	end
+end
