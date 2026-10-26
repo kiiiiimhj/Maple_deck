@@ -76,6 +76,20 @@ script LoadingUI extends Logic
 	property number LiftDistance = 140
 	property number LiftSeconds = 0.32
 
+	-- ── 입장 미리 받기(2026-10-26 유저 지정) ──
+	-- 로비에서 새 판을 시작할 때, 서버가 보낸 그 판 핵심 그림(시작 존 몬스터·첫 엘리트·첫 보스)과
+	-- 스킬 이펙트 미리받기(CardManager)가 끝날 때까지 화면을 걷지 않는다. 늦어도 입장 후 이 시간이 지나면 걷는다
+	-- (GameManager.EntryPresentationTimeoutSeconds가 이 값 + 실루엣 연출보다 길어야 한다)
+	property number EntryPreloadMaxSeconds = 6.0
+
+	-- ── 부팅 미리 받기(2026-10-26 유저 지정 "로비도 받아야지" / "처음 시작하면 스토리 튜토리얼 이런 것도") ──
+	-- 부팅 커버가 덮고 있는 동안 로비 전체(TitleGroup)·인트로 만화·로비 튜토리얼·첫 판 튜토리얼 화면의 그림을 받는다.
+	-- 다 받으면 걷고, 늦어도 BootMaxSeconds에서 걷는다. 경로 조회는 안 열린 UI 그룹에서 예외를 던져서 루트를 UUID로 직접 잡는다
+	property Entity bootPreloadTitleRoot = "4109795c-8f3d-41f1-9403-fefcec8fbb3e"
+	property Entity bootPreloadIntroComicRoot = "ce60597f-39ed-4aa3-a52f-27e510c5d1c8"
+	property Entity bootPreloadLobbyTutorialRoot = "39161750-b585-46e3-acca-f6ca57cf1b12"
+	property Entity bootPreloadAimStageRoot = "8c356b00-ef31-4b7c-92d9-997d381f7638"
+
 	property integer _entryCharacterIndex = -1
 	property any _entryOnFinished = nil
 	property boolean _playing = false
@@ -107,6 +121,7 @@ script LoadingUI extends Logic
 		self.screenCanvas.GroupAlpha = 1
 		self._covered = true
 		self._bootElapsed = 0
+		self:PreloadBootAssets()
 		self._bootTimerId = _TimerService:SetTimerRepeat(self.TickBootCover, self.BootPollSeconds, self.BootPollSeconds)
 		self:CacheWaveChars()
 		log("LoadingUI started (boot cover on)")
@@ -159,9 +174,13 @@ script LoadingUI extends Logic
 		self._bootElapsed = self._bootElapsed + self.BootPollSeconds
 
 		-- 첫 설치 인트로 만화를 띄울지 알려면 서버가 "봤음" 값을 읽어 와야 한다 — 그것까지 기다린다(시간 초과면 안 띄움)
-		local ready = _DataLoadLogic.IsLoadEnd and _IntroComicUI:IsIntroLoaded()
+		-- 로비·만화·튜토리얼 그림 미리 받기(PreloadBootAssets)도 같이 기다린다
+		local ready = _DataLoadLogic.IsLoadEnd and _IntroComicUI:IsIntroLoaded() and self._T.bootPreloadDone == true
 		local timedOut = self._bootElapsed >= self.BootMaxSeconds
 		if not ready and not timedOut then return end
+		log(string.format("[VRF] boot cover ready=%s data=%s images=%s at %.1fs", tostring(ready), tostring(_DataLoadLogic.IsLoadEnd), tostring(self._T.bootPreloadDone == true), self._bootElapsed))
+		-- 이제부터 로비·만화를 보는 동안 몬스터·레이드 그림을 뒤에서 계속 받는다(GameManager.RequestLobbyPreload)
+		_GameManager:RequestLobbyPreload()
 
 		_TimerService:ClearTimer(self._bootTimerId)
 		self._bootTimerId = 0
@@ -179,7 +198,7 @@ script LoadingUI extends Logic
 		end
 
 		if timedOut and not ready then
-			log_warning(string.format("LoadingUI: boot cover timed out after %.1fs (data load not finished), revealing anyway", self._bootElapsed))
+			log_warning(string.format("LoadingUI: boot cover timed out after %.1fs (data load or image preload not finished), revealing anyway", self._bootElapsed))
 		else
 			log(string.format("LoadingUI: data load finished at %.1fs", self._bootElapsed))
 		end
@@ -196,6 +215,51 @@ script LoadingUI extends Logic
 			if not isvalid(self) then return end
 			self:PlayReveal()
 		end, settle)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PreloadBootAssets()
+		-- 로비·인트로 만화·로비 튜토리얼·에임 시연 화면 아래 SpriteGUIRenderer 그림 전부 + 에임 시연용 그림/소리를 받는다
+		self._T.bootPreloadDone = false
+		-- 엔진 기본 스프라이트는 미리 받으면 [LEA-3015] CannotLoad를 찍는다(기기에선 로그 콘솔이 튀어나옴) — RaidUI.PreloadRaidImages의
+		-- 제외 목록 + 로비에서 실측된 2개(3d355ae7…, 7d614552…, 2026-10-26)
+		local seen = { ["2860136c06ab075439721c027de365af"] = true, ["4fea64a3307cda641809ad8be0d4890b"] = true,
+			["3d355ae7efc15cd4eb036ee178a6b277"] = true, ["7d614552ba7843049bb48ebd4509fb8f"] = true }
+		local ruids = {}
+		local function add(id)
+			if id ~= nil and id ~= "" and seen[id] == nil then
+				seen[id] = true
+				table.insert(ruids, id)
+			end
+		end
+		local roots = { self.bootPreloadTitleRoot, self.bootPreloadIntroComicRoot, self.bootPreloadLobbyTutorialRoot, self.bootPreloadAimStageRoot }
+		for _, root in ipairs(roots) do
+			if isvalid(root) then
+				local stack = { root }
+				while #stack > 0 do
+					local e = table.remove(stack)
+					local sp = e.SpriteGUIRendererComponent
+					if sp ~= nil and sp.ImageRUID ~= nil then add(sp.ImageRUID.DataId) end
+					for _, c in ipairs(e.Children) do table.insert(stack, c) end
+				end
+			end
+		end
+		for _, id in ipairs(_TutorialGuideUI:GetPreloadRuids()) do add(id) end
+		if #ruids == 0 then
+			self._T.bootPreloadDone = true
+			return
+		end
+		local startedAt = _UtilLogic.ElapsedSeconds
+		_ResourceService:PreloadAsync(ruids, function(results)
+			if not isvalid(self) then return end
+			local failed = 0
+			for _, status in pairs(results) do
+				if status ~= PreloadResultStatus.Success then failed = failed + 1 end
+			end
+			self._T.bootPreloadDone = true
+			log(string.format("[VRF] boot preload done count=%d failed=%d in %.2fs", #ruids, failed, _UtilLogic.ElapsedSeconds - startedAt))
+		end)
+		log("[VRF] boot preload requested count=" .. #ruids)
 	end
 
 	@ExecSpace("ClientOnly")
@@ -236,6 +300,10 @@ script LoadingUI extends Logic
 		end
 
 		self._playing = true
+		-- 새 판 입장(로비)만 미리 받기를 기다린다 — 다시하기는 이미 받은 그림이라 예전처럼 바로 걷는다
+		self._T.entryPreloadWaiting = entryCharacter >= 0
+		self._T.entryPreloadDone = false
+		self._T.entryPreloadStartedAt = _UtilLogic.ElapsedSeconds
 		self:ResetLiftTransform()
 		-- 게임 입장 로딩은 항상 기본 그림으로. 레이드 로딩 그림 예열(WarmImage, 로비에서 약 1초) 도중에
 		-- "게임 시작"을 누르면 예열 쪽 복구가 건너뛰어져 레이드 그림·제목이 그대로 떴다(2026-09-24 유저 리포트)
@@ -271,18 +339,165 @@ script LoadingUI extends Logic
 			if entryCharacter >= 0 then _GameEntryFxUI:ShowWakeVision() end
 		end, fadeIn)
 
-		-- 3) 유지 후 다시 밝히기
+		-- 3) 유지 후(새 판이면 미리 받기가 끝날 때까지) 다시 밝히기
 		_TimerService:SetTimerOnce(function()
 			if not isvalid(self) then return end
-			self:PlayReveal()
+			self:RevealAfterPreload(entryCharacter, entryDone)
 		end, totalCovered)
-		-- 로딩이 완전히 걷힌 게임 화면에 실루엣을 입힌다. 끝나면 호출자가 전투를 해제한다.
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RevealAfterPreload(integer entryCharacter, any entryDone)
+		-- 미리 받기가 끝났거나 EntryPreloadMaxSeconds를 넘기면 화면을 걷고, 새 판이면 걷힌 화면에 실루엣을 입힌다
+		-- (실루엣이 끝나면 호출자가 서버에 알려 전투를 해제한다)
+		local waited = _UtilLogic.ElapsedSeconds - (self._T.entryPreloadStartedAt or 0)
+		if self._T.entryPreloadWaiting == true then
+			local ready = self._T.entryPreloadDone == true and _CardManager:IsEffectPreloadDone()
+			if not ready and waited < self.EntryPreloadMaxSeconds then
+				_TimerService:SetTimerOnce(function()
+					if isvalid(self) then self:RevealAfterPreload(entryCharacter, entryDone) end
+				end, 0.1)
+				return
+			end
+			log(string.format("[VRF] entry preload reveal monsters=%s effects=%s waited=%.2fs", tostring(self._T.entryPreloadDone == true), tostring(_CardManager:IsEffectPreloadDone()), waited))
+			self._T.entryPreloadWaiting = false
+		end
+		self:PlayReveal()
 		if entryCharacter >= 0 then
 			_TimerService:SetTimerOnce(function()
 				if not isvalid(self) then return end
 				if not _GameEntryFxUI:PlayWithCompletion(entryCharacter, entryDone) and entryDone ~= nil then entryDone() end
-			end, totalCovered + self.FadeOutSeconds)
+			end, self.FadeOutSeconds)
 		end
+	end
+
+	@ExecSpace("Client")
+	method void BeginEntryPreload(string csv)
+		-- 서버(GameManager.SendEntryPreload)가 보낸 그 판 핵심 그림 RUID(쉼표 목록)를 받는다.
+		-- 직접 그린 프레임 몬스터(에피5 등)는 클립 대신 프레임 그림들을 받는다
+		if self._T.entryPreloadWaiting ~= true then return end
+		local token = self._T.entryPreloadStartedAt
+		local ruids = {}
+		for r in string.gmatch(csv, "[^,]+") do
+			table.insert(ruids, r)
+			local clip = _GameManager:GetCustomMonsterAnimation(r)
+			if clip ~= nil then
+				for _, f in ipairs(clip.frames) do table.insert(ruids, f) end
+			end
+		end
+		if #ruids == 0 then
+			self._T.entryPreloadDone = true
+			return
+		end
+		local startedAt = _UtilLogic.ElapsedSeconds
+		_ResourceService:PreloadAsync(ruids, function(results)
+			if not isvalid(self) or self._T.entryPreloadStartedAt ~= token then return end
+			local failed = 0
+			for _, status in pairs(results) do
+				if status ~= PreloadResultStatus.Success then failed = failed + 1 end
+			end
+			self._T.entryPreloadDone = true
+			log(string.format("[VRF] entry preload done count=%d failed=%d in %.2fs", #ruids, failed, _UtilLogic.ElapsedSeconds - startedAt))
+		end)
+		-- 뒤에서 받기 줄이 같은 그림을 다시 받지 않게 받은 목록에 올려 둔다
+		if self._T.bgSeen == nil then self._T.bgSeen = {} end
+		for _, r in ipairs(ruids) do self._T.bgSeen[r] = true end
+	end
+
+	-- ── 뒤에서 계속 받기(2026-10-26 유저 지정 "그냥 계속 리소스를 받고 있으면 되잖아, 게임에 영향 안 가는 선에서") ──
+	-- 게임을 켠 순간부터 그림을 조금씩 계속 받는 다운로드 줄. 무엇을 어떤 순서로 넣는지는 서버(GameManager의
+	-- RequestLobbyPreload / SendEpisodeBackgroundPreload / SendNeighborZonePreload)가 정한다.
+	-- 줄은 lane 3개: 1 = 지금 존 이웃(제일 먼저) / 2 = 곧 볼 것(지금 에피소드·레이드) / 3 = 나머지 전부(에피1→5).
+	-- 한 번에 BackgroundBatchSize개만 받고, 끝나면 BackgroundBatchGapSeconds 쉬었다 다음 묶음 — 전투에 부담을 덜 준다.
+	-- 입장 로딩(entryPreloadWaiting) 중엔 그쪽에 대역폭을 몰아주려고 쉰다. 이미 넣은 그림은 다시 넣지 않는다
+	property integer BackgroundBatchSize = 6
+	property number BackgroundBatchGapSeconds = 0.25
+	-- 끄기 스위치 — 저사양 기기에서 메모리/발열 문제가 보이면 false(입장·부팅 미리 받기와 이웃 존은 그대로, 나머지 줄만 멈춘다)
+	-- 2026-10-27 출시판은 false(유저 동의) — 폰에서 메모리/발열 확인 후 다음 업데이트에서 켤 것
+	property boolean BackgroundPreloadEnabled = false
+
+	@ExecSpace("Client")
+	method void BeginZonePreload(string csv)
+		-- 서버에서 온 이웃 존 그림 목록(쉼표 문자열) — 줄 맨 앞(lane 1)
+		self:EnqueueBackground(csv, 1)
+	end
+
+	@ExecSpace("Client")
+	method void BeginBackgroundPreload(string csv, integer lane)
+		-- 서버에서 온 뒤에서 받을 목록(쉼표 문자열)
+		self:EnqueueBackground(csv, lane)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void EnqueueBackground(string csv, integer lane)
+		-- 목록을 lane 줄 끝에 붙인다. 직접 그린 프레임 몬스터(에피5 등)는 프레임 그림까지 펼친다
+		if not self.BackgroundPreloadEnabled and lane >= 2 then return end
+		if self._T.bgSeen == nil then self._T.bgSeen = {} end
+		if self._T.bgLanes == nil then self._T.bgLanes = { {}, {}, {} } end
+		local seen = self._T.bgSeen
+		local queue = self._T.bgLanes[math.max(1, math.min(3, lane))]
+		local added = 0
+		for r in string.gmatch(csv, "[^,]+") do
+			if seen[r] == nil then
+				seen[r] = true
+				table.insert(queue, r)
+				added = added + 1
+				local clip = _GameManager:GetCustomMonsterAnimation(r)
+				if clip ~= nil then
+					for _, f in ipairs(clip.frames) do
+						if seen[f] == nil then
+							seen[f] = true
+							table.insert(queue, f)
+							added = added + 1
+						end
+					end
+				end
+			end
+		end
+		if Environment:IsMakerPlay() and added > 0 then log("[VRF] background enqueue lane=" .. lane .. " added=" .. added) end
+		self:PumpBackground()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PumpBackground()
+		-- 앞 묶음이 끝났으면 가장 급한 lane에서 다음 묶음을 꺼내 받는다
+		if self._T.bgBusy == true then return end
+		local lanes = self._T.bgLanes
+		if lanes == nil then return end
+		local queue = nil
+		for i = 1, 3 do
+			if #lanes[i] > 0 then
+				queue = lanes[i]
+				break
+			end
+		end
+		if queue == nil then
+			if Environment:IsMakerPlay() and (self._T.bgDone or 0) > 0 and self._T.bgIdleLogged ~= self._T.bgDone then
+				self._T.bgIdleLogged = self._T.bgDone
+				log("[VRF] background idle downloaded=" .. tostring(self._T.bgDone))
+			end
+			return
+		end
+		self._T.bgBusy = true
+		if self._T.entryPreloadWaiting == true then
+			_TimerService:SetTimerOnce(function()
+				if not isvalid(self) then return end
+				self._T.bgBusy = false
+				self:PumpBackground()
+			end, 0.5)
+			return
+		end
+		local batch = {}
+		while #batch < self.BackgroundBatchSize and #queue > 0 do table.insert(batch, table.remove(queue, 1)) end
+		_ResourceService:PreloadAsync(batch, function(results)
+			if not isvalid(self) then return end
+			self._T.bgDone = (self._T.bgDone or 0) + #batch
+			_TimerService:SetTimerOnce(function()
+				if not isvalid(self) then return end
+				self._T.bgBusy = false
+				self:PumpBackground()
+			end, self.BackgroundBatchGapSeconds)
+		end)
 	end
 
 	@ExecSpace("ClientOnly")

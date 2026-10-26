@@ -1321,7 +1321,16 @@ script MapManager extends Logic
 	method void MoveByDelta(integer delta)
 		-- Include the isolated Episode 5 seal arena without opening ordinary zone exits.
 		local actualIndex = self.CurrentMapIndex
-		if actualIndex==189 or actualIndex==240 then return end -- 파풀 방은 좌우 이동 없음
+		local targetIndex = self:ResolveDeltaTarget(actualIndex, delta)
+		if targetIndex < 0 then return end
+		self:MoveToMap(actualIndex, targetIndex)
+	end
+
+	-- 좌/우 이동 버튼의 목적지 계산(2026-10-26 MoveByDelta에서 분리 — 다음 존 그림 미리 받기가 같은 규칙으로 이웃 존을 찾는다).
+	-- 막다른 길이면 -1. 범위(Min/MaxMapIndex) 검사는 MoveToMap 담당이라 여기선 하지 않는다
+	@ExecSpace("ServerOnly")
+	method integer ResolveDeltaTarget(integer actualIndex, integer delta)
+		if actualIndex==189 or actualIndex==240 then return -1 end -- 파풀 방은 좌우 이동 없음
 		local targetIndex = actualIndex + delta
 
 		-- 맵6↔11 특수 분기: 맵6의 오른쪽은 7이 아니라 11(신규 해변 존)로 이어지고, 맵11의 왼쪽은
@@ -1333,13 +1342,13 @@ script MapManager extends Logic
 		elseif actualIndex == 10 and delta == 1 then
 			-- MaxMapIndex를 11로 올린 부작용 방지: 맵10 오른쪽은 여전히 막다른 길이어야 한다
 			-- (11은 맵6 전용 분기이지 맵10의 다음 단계가 아님)
-			return
+			return -1
 		elseif actualIndex == 18 and delta == 1 then
 			-- 존18(그림자 상점)은 막다른 길이다 — MapMoveUI가 ">"를 아예 숨기지만(UpdateButtonVisibility),
 			-- 서버 쪽에서도 동일하게 막아 어떤 경로로 호출되든 존19 이상으로 못 넘어가게 한다. 존18은
 			-- 존15에서 횟불 3개를 켜야 풀리는 ">" 정공법(15→16→17→18)으로만 들어갈 수 있어야 하는데,
 			-- 여기서 존19로 계속 진행할 수 있으면 그 퍼즐 게이트를 무의미하게 만든다.
-			return
+			return -1
 		-- 존19↔27 특수 분기: 그룹D(맵6↔11)와 동일한 패턴. 존19의 기본 "<"는 더 이상 존18(그림자
 		-- 상점)로 돌아가지 않고 그룹I(존27~30, map19.map)로 진입한다. 존18 복귀 경로는 의도적으로
 		-- 만들지 않았다 — 그림자 상점(존18)은 존15에서 횟불 3개를 켜야 풀리는 ">" 정공법(순차 진행
@@ -1369,12 +1378,12 @@ script MapManager extends Logic
 			-- 존29의 "아래로" 버튼(RequestMoveToZone40) 전용 경로로만 가능해야 한다. MaxMapIndex를
 			-- 43으로 올린 부작용으로 존39+1(=40)이 더 이상 상한 밖이 아니게 됐으므로(맵10과 동일한
 			-- 이유로) 여기서 명시적으로 막아 존39가 계속 막다른 길로 남게 한다.
-			return
+			return -1
 		elseif actualIndex == 43 and delta == 1 then
 			-- 존44(map24)는 존35(map21)와 동일하게 일반 순차 이동으로 들어가면 안 된다 — 존43의
 			-- 포탈(portal-12)을 통해서만 진입 가능. MaxMapIndex를 44로 올린 부작용으로 존43+1이
 			-- 더 이상 상한 밖이 아니게 됐으므로 여기서 명시적으로 막는다(존39와 동일한 차단 패턴).
-			return
+			return -1
 		elseif actualIndex == 54 and delta == 1 then
 			-- map4(존1~10=mapIndex75~84) 추가로 map1 존10(54)의 ">"가 더 이상 막다른 길이 아니게 됐다
 			-- (유저 지정 — "맵1 존10에서 오른쪽 누르면 맵4 존1이동"). map2 진입은 여전히 오직 map1 존5의
@@ -1400,22 +1409,22 @@ script MapManager extends Logic
 			-- map3 존1(mapIndex65)은 map3의 왼쪽 끝단이다 — map3 진입은 오직 map4 존5의 "위로" 버튼
 			-- (RequestMoveToMap3Zone5, mapIndex69 스퍼) 또는 map2 존1의 "<"(74로 직행)로만 가능하므로,
 			-- 존65 자신의 "<"는 막다른 길이어야 한다(존10/존39/존43과 동일한 차단 패턴).
-			return
+			return -1
 		elseif actualIndex == 84 and delta == 1 then
 			-- map4 존10(mapIndex84)도 동일하게 막다른 길이다 — map4 진입/진행은 map1 존10의 ">"(75로
 			-- 직행)와 map3 존5의 스퍼(69↔79)뿐이다. 85(ep2_map2_hidden 존1)는 이제 존재하지만
 			-- 순차 진행 대상이 아니라 존61 전용 스퍼(RequestMoveToEp2Map2Hidden)로만 들어가야 하므로
 			-- 여기서는 여전히 막다른 길로 남겨둔다(그룹L의 존39/43과 동일한 차단 패턴).
-			return
+			return -1
 		elseif actualIndex == 88 and delta == 1 then
 			-- ep2_map2_hidden 존4(mapIndex88)는 히든존의 끝 — 그 다음(89)은 존재하지 않는다.
-			return
+			return -1
 		elseif actualIndex == 85 and delta == -1 then
 			-- 유저 지정(2026-08-24): "여기 나가는길은 없고 시간이 끝나면 자동으로 복귀" — 히든존은
 			-- 나가는 경로 자체가 없다. 3분 타이머가 끝나면 Ep2Map2HiddenExpBoostLogic이 존61로 직접
 			-- MoveToMap을 호출해 자동 복귀시킨다(일반 "<" 이동이 아님). 그래서 존85의 "<"는 항상
 			-- 막다른 길이어야 한다(MapMoveUI에서 버튼 자체도 숨김).
-			return
+			return -1
 		elseif actualIndex == 128 and delta == 1 then
 			-- ⚠ 버그 수정(2026-09-14, 유저 리포트 "히든맵도 그냥 들어가지고 뭔가 이상한디?!?!").
 			-- 존128(ep3_map4 존10)은 에피소드3의 마지막 존이라 ">"는 막다른 길이어야 하는데, 막는 분기가
@@ -1423,14 +1432,14 @@ script MapManager extends Logic
 			-- `isEsterZone`(129~133) 예외를 갖고 있어서 MaxMapIndex(=128)로도 못 막는다 —
 			-- 그래서 포탈/자격의 증표 없이 화살표 버튼만으로 히든맵에 들어가졌다.
 			-- 히든맵 진입은 오직 Ep3Map4Ester1PortalLogic(포탈 + 자격의 증표)뿐이다.
-			return
+			return -1
 		elseif actualIndex == 129 and delta == -1 then
 			-- ep3_map4_ester_1 존1(입구, portal-3으로만 입장) — 왼쪽은 막다른 길. 나가는 건 오직
 			-- Ep3Map4Ester1PortalLogic의 60초 타이머 자동퇴장뿐이다(유저 지정, [[project_ep3map4_ester1_portal]]).
-			return
+			return -1
 		elseif actualIndex == 133 and delta == 1 then
 			-- ep3_map4_ester_1 존5(마지막) — 오른쪽은 막다른 길.
-			return
+			return -1
 		elseif actualIndex == 89 and delta == -1 then
 			-- 에피소드3 map1 존1(mapIndex89)의 "<" 특수 분기(유저 지정, 2026-08-25 — "맵1의 1존에서
 			-- 왼쪽 버튼누르면 맵3의 1존 나오게"). 델타 그대로 두면 88(ep2_map2_hidden 존4, 전혀 다른
@@ -1441,25 +1450,25 @@ script MapManager extends Logic
 			targetIndex = 109
 		elseif actualIndex == 134 and delta == -1 then
 			-- map1 존1 왼쪽은 막다른 길. 이동 버튼도 숨긴다.
-			return
+			return -1
 		elseif actualIndex == 173 and delta == 1 then
 			-- map5는 슈피겔만 퀘스트 포탈 전용. 일반 오른쪽 이동으로 입장하지 않는다.
-			return
+			return -1
 		elseif actualIndex == 184 and delta == -1 then
 			-- 히든맵 입구 왼쪽은 맵1의 기부 포탈이 있는 존3으로 복귀한다.
 			targetIndex = 136
 		elseif actualIndex == 188 and delta == 1 then
 			-- 히든맵은 존5가 끝이다.
-			return
+			return -1
 		elseif actualIndex == 183 and delta == 1 then
 			-- map5 존10 오른쪽은 막다른 길.
-			return
+			return -1
 		elseif (actualIndex == 190 and delta == -1) or (actualIndex == 239 and delta == 1) then
 			-- 에피5 map1 양 끝은 아직 다음 맵이 없다(189는 파풀 방이라 범위 예외로 새지 않게 막는다)
-			return
+			return -1
 		end
 
-		self:MoveToMap(actualIndex, targetIndex)
+		return targetIndex
 	end
 
 	-- map 위의 모든 몬스터를 일괄 일시정지/재개
@@ -1612,6 +1621,8 @@ script MapManager extends Logic
 		-- 엉뚱한 다음 존 스폰에 적용되는 누수가 생긴다. 3단계는 2단계(스탯 강화)를 포함한다.
 		_MonsterSpawner._pendingRushPenalty = (tier >= 2) and 2 or ((tier >= 1) and 1 or 0)
 		self._zoneEnterTime = now
+		-- 다음 존 그림을 지금 존에 있는 동안 뒤에서 받아 둔다(GameManager.SendNeighborZonePreload)
+		_GameManager:SendNeighborZonePreload(targetIndex)
 	end
 
 	@ExecSpace("ServerOnly")
