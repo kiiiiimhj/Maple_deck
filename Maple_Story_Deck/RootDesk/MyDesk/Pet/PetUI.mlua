@@ -283,7 +283,8 @@ script PetUI extends Logic
 			-- 펫이 있으면 장비가 없어도 눌러서 살 수 있다.
 			-- 캐릭터 장비 칸(EquipInfoGrid)과 똑같이: 칸 바탕은 항상 원색, 착용 중이면 장비 그림, 아니면 부위 실루엣만(유저 지정 2026-10-22)
 			e.ButtonComponent.Enable=dog
-			_ButtonPressFxLogic:SetSuppressed(e,not worn)
+			-- 눌림 연출: 입은 칸(해제)·안 가진 칸(구매창)만. 가졌는데 안 입은 칸은 눌러도 아무 일 없음
+			_ButtonPressFxLogic:SetSuppressed(e,owned and not worn)
 			local icon=e:GetChildByName("Icon")
 			icon.SpriteGUIRendererComponent.ImageRUID=DataRef(worn and def.icon or self:GetPetGearSlotSilhouette(slot))
 			icon.SpriteGUIRendererComponent.Color=Color(1,1,1,1)
@@ -423,13 +424,15 @@ script PetUI extends Logic
 
 	@ExecSpace("ClientOnly")
 	method void OnPetGearSlotClicked(string slot)
-		-- An occupied slot may unequip. Empty slots never auto-equip or buy gear.
+		-- 입은 칸 → 해제 / 안 가진 칸 → 다이아 구매창 / 가졌는데 안 입은 칸 → 아무 일 없음
+		-- (장비가 2종 이상인 펫은 어느 걸 입힐지 애매해서 자동 착용은 안 한다 — 유저 지정 2026-10-28)
 		local e=self:GetShownEntry() local pet=e.progress
 		if _PetLogic:GetPetGearDefinitionForPet(e.id,slot)==nil or pet==nil or not pet.Owned then return end
 		local def=_PetLogic:GetSelectedPetGearDefinition(e.id,slot,pet) local variant=def.variant or 1
-		if not _PetLogic:HasPetGearBit(pet.GearEquippedMask or 0,def.bit) then return end
 		local ownedMask=variant>1 and (pet.GearVariantOwnedMask or 0) or (pet.GearOwnedMask or 0)
-		if not _PetLogic:HasPetGearBit(ownedMask,_PetLogic:GetPetGearOwnershipBit(def.bit,variant)) then return end
+		local owned=_PetLogic:HasPetGearBit(ownedMask,_PetLogic:GetPetGearOwnershipBit(def.bit,variant))
+		if not owned then self:OpenBuyGear(e.id,slot,variant,def) return end
+		if not _PetLogic:HasPetGearBit(pet.GearEquippedMask or 0,def.bit) then return end
 		_PetLogic:RequestPetGearToggle(slot,e.id,variant)
 	end
 
