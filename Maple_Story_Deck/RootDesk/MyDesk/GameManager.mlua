@@ -37,6 +37,7 @@ script GameManager extends Logic
 
 	@Sync
 	property integer TotalCoins = 0
+	property boolean ThanksgivingCoinPurchasePending = false
 
 	-- 메인화면 우측 상단에 표시되는 누적 코인 — 런이 끝나도 리셋되지 않고 전역 저장소에 영구 저장됨
 	property any _coinStorage = nil
@@ -450,6 +451,7 @@ script GameManager extends Logic
 	-- 비율 유지로 그려야 하는 잡템 아이콘 RUID 집합(PlayerInventory 정의의 keepAspect=true) — IsKeepAspectLootIcon이
 	-- 첫 호출 때 한 번 모아 캐시한다
 	property any _keepAspectLootIcons = nil
+	property any _lootIconScales = nil
 	-- 드롭 연출 아이콘 슬롯별 .ui 원래 RectSize(keepAspect 잡템이 비율대로 줄였다가 다음 드롭 때 되돌린다)
 	property table _lootIconBaseSize = {}
 
@@ -3076,6 +3078,8 @@ script GameManager extends Logic
 
 	@ExecSpace("ServerOnly")
 	method void FlushCoinsIfDirty()
+		-- Event gold and its acorn charge share one atomic transaction.
+		if self.ThanksgivingCoinPurchasePending then return end
 		-- SetAndWait를 쓴다 — Async 콜백을 기다리지 않고 OnEndPlay가 먼저 끝나버리면(에디터/월드 종료 시)
 		-- 저장이 씹힐 수 있어서, 드물게 호출되는 이 경로는 블로킹 저장으로 확실히 반영되게 한다
 		if not self._coinDirty or self._coinStorage == nil then return end
@@ -3713,7 +3717,7 @@ script GameManager extends Logic
 			amount = amount * 0.5
 		end
 		amount = amount * self.ExpBoostMultiplier
-		-- 경험치 포션(BuffPotionLogic, 30초 +20%) 중이면 곱한다
+		-- 경험치 포션(BuffPotionLogic, 기본 20초·강화 성공 +10초, +20%) 중이면 곱한다
 		amount = amount * _BuffPotionLogic:GetExpMult()
 		-- 기존 2배 이벤트와 같은 런 경험치 계산. 히든맵 밖이나 별도 관전맵에는 배율이 새지 않는다.
 		if _MapManager:IsEp4Map1Ester1Zone(_MapManager.CurrentMapIndex) and _Ep4Map1HiddenExpLogic.Active and not _MapManager.AwayOnSideMap then
@@ -8897,6 +8901,18 @@ script GameManager extends Logic
 		return self._keepAspectLootIcons[iconRuid] == true
 	end
 
+	method number GetLootIconScale(string iconRuid)
+		-- 잡템 정의의 iconScale(그림 여백이 커서 작아 보이는 아이콘 보정, 기본 1). 드롭 연출·가방·결과 칸이 같이 쓴다
+		if self._lootIconScales == nil then
+			local map = {}
+			for _, def in pairs(_PlayerInventory:GetAllItemDefs()) do
+				if def.iconScale ~= nil then map[def.icon] = def.iconScale end
+			end
+			self._lootIconScales = map
+		end
+		return self._lootIconScales[iconRuid] or 1
+	end
+
 	@ExecSpace("Multicast")
 	method void PlayLootDropVisual(Vector2 worldPos, string iconRuid, number groundDelay, number fallHeight, number groundWorldY, number dropScale, boolean freezeOnFly)
 		-- 사망 위치에 잡템이 떨어진 것처럼 보여준 뒤, 잠시 멈췄다가 가방 아이콘으로 날아간다.
@@ -8969,7 +8985,7 @@ script GameManager extends Logic
 			if self:IsKeepAspectLootIcon(iconRuid) then
 				local m = _CardManager:GetSpriteMetrics(iconRuid)
 				if m.w > 0 and m.h > 0 then
-					local fit = math.min(baseSize.x / m.w, baseSize.y / m.h)
+					local fit = math.min(baseSize.x / m.w, baseSize.y / m.h) * self:GetLootIconScale(iconRuid)
 					iconTf.RectSize = Vector2(m.w * fit, m.h * fit)
 				end
 			end

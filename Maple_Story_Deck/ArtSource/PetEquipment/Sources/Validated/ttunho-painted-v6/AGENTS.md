@@ -1,0 +1,9 @@
+# Current Ttunho directly painted frames v6
+
+Use Maps/ttunho-painted-used-v6.json and this folder. V1–V5 equipment positioning/warping is rejected by the user. Do not restore those builders or old artwork. Every used original pose is painted directly in that frame; editable full-frame SVG sources, original native anatomy, per-frame final clothing pixel masks and built-in image_gen prompts are preserved here. The masks are technical independent-slot exports, never reusable accessory templates to shift onto another pose. Identical whole original frames may share a complete painting only after exact normalized body/pivot equality.
+
+13 actual-used motions,56 references,47 unique original frames. Excluded stand1/hang/roll remain unpainted and are not invoked in current game paths. Keep original clips, delays, pivots and all body pixels outside the painted garment region. Do not resize padded official previews. Keep the lowered rounded upper cape collar behind the right ear, continuous gold trim, original ear foreground, moving chest pendant and natural occlusion in low poses.
+
+Independent Cap/Coat/Necklace price500 and stats remain unchanged. UI renders one atomic body-and-equipment sheet per selected combination; world skill uses standalone complete frames. Layout192x176,8x8,density2,code0,1,3,4,9,10,12,13. For cap jump height use actual painted nontransparent top, not the full-mask canvas top.
+
+Portable rebuild: node Workflow/TtunhoPaintedV6/rebuild-ttunho-painted-v6.cjs Sources/Validated/ttunho-painted-v6 <output-folder>. Reads original pixels and final per-frame paint masks, requires Sharp, no network or generation. All80 assets must match SHA. Real Maker checks cover all56 used frames,8 slot combinations, five care actions, needs-driven reactions, inventory, wardrobe and first/repeated drop. Preserve current user/Claude changes by reading fresh and patching only the three Ttunho art mappings.

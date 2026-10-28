@@ -180,4 +180,29 @@ script PlayerDBManager extends Component
 		return false
 	end
 
+	@ExecSpace("ServerOnly")
+	method boolean SaveThanksgivingPurchaseAndWait(boolean includeInventory, boolean includeCoins)
+		-- One atomic write prevents a charged event purchase from losing its item or account stock.
+		if not self.IsLoadSuccess then return false end
+		while self.SavingBatch do wait(0.05) end
+		self.SavingBatch=true
+		local data={} local generations={}
+		local ok,code,keys=pcall(function()
+			_PetLogic:SaveFor(self.Entity,data,generations)
+			if includeInventory then self.Entity.PkgPlayerInventory:SaveToDB(data) end
+			if includeCoins then data["Wallet.TotalCoins"]=tostring(_GameManager.TotalCoins) end
+			if data[_PetLogic.StorageKey]==nil then return -1,nil end
+			local storage=_DataStorageService:GetUserDataStorage(self.Entity.PlayerComponent.ProfileCode)
+			return storage:TransactSetAndWait(data)
+		end)
+		self.SavingBatch=false
+		if not ok or code~=0 or keys==nil then return false end
+		local confirmed={} local count=0 local expected=0
+		for key,_ in pairs(data) do expected=expected+1 end
+		for _,key in ipairs(keys) do table.insert(confirmed,key) if data[key]~=nil then count=count+1 end end
+		if count~=expected then return false end
+		_PetLogic:ConfirmSaveFor(self.Entity,confirmed,generations)
+		return true
+	end
+
 end

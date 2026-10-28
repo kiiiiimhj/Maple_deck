@@ -30,3 +30,18 @@ The final art was compared against actual Maker captures for every original/new 
 +
 
 Guri/Bugi anatomy repair v12: Maps/guri-bugi-anatomy-v12.json supersedes the affected v11 coat exports and motion sheets; validated-native-equipment-inputs-v11.json and native-equipment-v11.json are updated in place. Guri's four move frames must use the original animated paws: the old garment export contained a stationary paw, which must not be composited over the native foot stride. Garment rows at/below native source y=30 are transparent, retaining the original anatomy beneath. Bugi's original torso is opaque below the head; the former shell eraser cut this chest/belly material out. Restore the corresponding native body pixels, respecting left/right facing direction; do not erase orange/brown body material as if it were shell. Existing world skill shell frames are intentionally shell-only and unchanged. Evidence in Previews/GuriBugiAnatomyV12 includes actual care playback for both designs plus every Bugi body frame and independent gear combinations. These are technical recovery of original pixels, with no new creative image generation.
+
+Ttunho equipment fit v2: current portable source is Sources/Validated/ttunho-fit-v2 and Maps/ttunho-harvest-fit-v2.json. V1 has been superseded. Official preview PNGs have padding; use the 64 Maker-verified crops in native-originals, never resize a padded preview to native dimensions. Torso coverage, necklace attachment and walking sway must be judged per frame and in normal-speed playback. Keep original body ink, ears, paws, tail and all motion timings.
+
+Ttunho reference v3 supersedes the v2 artwork: use Maps/ttunho-harvest-reference-v3.json and Sources/Validated/ttunho-reference-v3. Keep the tall beret, shoulder cape/sloped gold hem, continuous gold front trim and visible acorn pendant from the approved reference. Do not restore v2 torso-fill/straight-hem code. Native body crops, all timings, atomic sheets and independent slot stats are preserved.
+
+Ttunho seam v4 is the current artwork mapping: Maps/ttunho-harvest-seam-v4.json and Sources/Validated/ttunho-seam-v4. It retains the approved v3 design while correcting cheek overlap and the broken front gold trim using one continuous fitted curve. Never restore v3 per-row ribbon relocation/head clipping. The front seam stays intact while seated poses fold only the rear cape.
+
+Ttunho collar v5 is current: Maps/ttunho-harvest-collar-v5.json and Sources/Validated/ttunho-collar-v5. It fixes the v4 opaque black shoulder bar: absent/transparent texture samples must retain alpha, never become opaque black. The fitted seam, original body, cap, necklace and timings are unchanged.
+
+
+Ttunho directly painted v6 is current: Maps/ttunho-painted-used-v6.json and Sources/Validated/ttunho-painted-v6. Supersedes V1–V5 art. User rejected reusable accessory positioning/warping: paint each actually used original frame directly, preserve native anatomy, round/lower the upper collar behind the right ear. Read the current source AGENTS.md before changing Ttunho.
+
+Ttunho junction gap repair v7 is current: Maps/ttunho-gap-repair-v7.json and Sources/Validated/ttunho-gap-repair-v7. Only fills the reported cape/head and walking cap/ear gaps in approved v6 art. Preserve all other art, UI and logic.
+
+Ttunho care junction v8 is current: Maps/ttunho-care-junction-v8.json and Sources/Validated/ttunho-care-junction-v8. Fills the remaining feed/injection/sleep junctions and audits all56 used frame entries. Preserve all other approved artwork and current UI changes.

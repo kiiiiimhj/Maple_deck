@@ -1,11 +1,14 @@
 @Logic
 script BuffPotionLogic extends Logic
 
-	-- 필드 버프 포션 3종(유저 지정 2026-09-18).
-	--   · 흡혈 포션   15초(2026-10-08 30→20, 2026-10-22 20→15) — 몬스터를 때릴 때마다 체력 1 회복(타격당 고정, 유저 지정 2026-09-18)
-	--   · 크리티컬 포션 20초 — 크리티컬 확률 100%
-	--   · 파워 포션   30초 — 공격력 50% 증가
-	--   · 경험치 포션 30초 — 킬 경험치 20% 증가(2026-10-08 추가, potionType 4)
+	-- 2026-10-28: base durations 10/15/20/20s; timing success adds 5/5/10/10s.
+	-- Drop rates and combat effects are unchanged.
+
+	-- 필드 버프 포션 4종. 기본 지속시간 + 타이밍 미니게임 성공 보너스(2026-10-28).
+	--   · 흡혈 포션   기본 10초, 성공 +5초 — 몬스터를 때릴 때마다 체력 1 회복(타격당 고정, 유저 지정 2026-09-18)
+	--   · 크리티컬 포션 기본 15초, 성공 +5초 — 크리티컬 확률 100%
+	--   · 파워 포션   기본 20초, 성공 +10초 — 공격력 50% 증가
+	--   · 경험치 포션 기본 20초, 성공 +10초 — 킬 경험치 20% 증가(2026-10-08 추가, potionType 4)
 	-- 일반 몬스터 처치 시 확률 드롭(흡혈 0.05%, 크리티컬·파워 0.1% — 2026-10-08 0.2%에서 하향, MonsterAI 드롭 체인에서 호출) → 톡 튀어나와 바닥에
 	-- 안착 → 기본 공격 버튼으로 날아가 흡수되는 순간 효과 발동 + 토스트 메시지 + 하단 패시브 버프 줄에 시간제 아이콘.
 	-- 시간이 끝나면 아이콘이 사라지고 뒤쪽 아이콘이 앞으로 당겨진다(CardManager._activeBuffOrder/RepositionBuffIcons).
@@ -26,11 +29,14 @@ script BuffPotionLogic extends Logic
 	-- 경험치 포션(4번째, 유저 지정 2026-10-08) — 드롭률은 미지정이라 크리·파워와 같은 0.1%
 	property number ExpDropChance = 0.001
 
-	-- 흡혈 30초 → 20초(유저 지정 2026-10-08) → 15초(유저 지정 2026-10-22)
-	property number VampireDuration = 15
-	property number CritDuration = 20
-	property number PowerDuration = 30
-	property number ExpDuration = 30
+	-- 기본(최소) 지속시간. 흡혈 30초 → 20초(2026-10-08) → 15초(2026-10-22) → 기본 10초 + 강화 성공 +5초(2026-10-28)
+	property number VampireDuration = 10
+	property number CritDuration = 15
+	property number PowerDuration = 20
+	property number ExpDuration = 20
+	property table HarvestBonusSeconds = {5,5,10,10}
+	property table _harvestGenerations = {0,0,0,0}
+	property integer _harvestRunSerial = 0
 	-- 경험치 포션 중 킬 경험치 배율(+20%) — GameManager.GetExpPerKill이 곱한다
 	property number ExpGainMult = 1.2
 	-- 타격 1번당 회복량(유저 지정 2026-09-18: 대미지 1% → 고정 1)
@@ -108,9 +114,10 @@ script BuffPotionLogic extends Logic
 		local fallDuration = 0
 		if fallHeight > 0 then fallDuration = math.min(0.6, 0.15 + fallHeight / 500) end
 		local arrivalDelay = fallDuration + self.PopDuration + self.GroundWaitSeconds + self.FlyDuration
+		local dropRun=self._harvestRunSerial
 		log(string.format("BuffPotionLogic: dropped type=%d (arrive in %.2fs)", potionType, arrivalDelay))
 		_TimerService:SetTimerOnce(function()
-			if isvalid(self) then self:ApplyBuffPotion(potionType) end
+			if isvalid(self) and self._harvestRunSerial==dropRun then self:ApplyBuffPotion(potionType) end
 		end, arrivalDelay)
 		self:PlayBuffPotionDropVisual(Vector2(worldPos.x, worldPos.y), potionType, fallHeight, groundWorldY, dropScale)
 	end
@@ -143,12 +150,16 @@ script BuffPotionLogic extends Logic
 		-- 업적: 버프 포션 획득 수 + 3종 수집
 		_AchievementLogic:OnBuffPotion(potionType)
 		self:NotifyPotionBuffOn(potionType, duration)
+		self._harvestGenerations[potionType]=(self._harvestGenerations[potionType] or 0)+1
+		_PotionHarvestLogic:QueuePotion(potionType,self._harvestGenerations[potionType],self._harvestRunSerial)
 		log("BuffPotionLogic: buff applied type=" .. potionType .. " for " .. duration .. "s")
 	end
 
 	@ExecSpace("ServerOnly")
 	method void ResetRun()
 		-- 새 판 시작(StartGame/RestartGame) — 효과와 아이콘 모두 끈다
+		self._harvestRunSerial=self._harvestRunSerial+1 self._harvestGenerations={0,0,0,0}
+		_PotionHarvestLogic:ResetForNewRun()
 		self._vampireLeft = 0
 		self._critLeft = 0
 		self._powerLeft = 0
@@ -216,6 +227,24 @@ script BuffPotionLogic extends Logic
 		end
 	end
 
+	@ExecSpace("ServerOnly")
+	method boolean HarvestPotionMatches(integer potionType, integer generation, integer runSerial)
+		return potionType>=1 and potionType<=4 and runSerial==self._harvestRunSerial and generation==self._harvestGenerations[potionType]
+	end
+	@ExecSpace("ServerOnly")
+	method boolean ExtendHarvestPotion(integer potionType, integer generation, integer runSerial)
+		if _GameManager.GameOver or not _GameManager.GameStarted or not self:HarvestPotionMatches(potionType,generation,runSerial) then return false end
+		local bonus=self.HarvestBonusSeconds[potionType] local left=0
+		if potionType==1 then self._vampireLeft=math.max(0,self._vampireLeft)+bonus left=self._vampireLeft
+		elseif potionType==2 then self._critLeft=math.max(0,self._critLeft)+bonus left=self._critLeft
+		elseif potionType==3 then self._powerLeft=math.max(0,self._powerLeft)+bonus left=self._powerLeft
+		else self._expLeft=math.max(0,self._expLeft)+bonus left=self._expLeft end
+		-- A generation can award exactly one bonus, even if an old session is replayed.
+		self._harvestGenerations[potionType]=generation+1
+		self:NotifyPotionBuffOn(potionType,left)
+		log("[VRF] POTION HARVEST bonus type="..potionType.." bonus="..bonus.." left="..left)
+		return true
+	end
 	-- ── 클라이언트: 흡혈 회복 연출(HP바) ──────────────────────────────────────────
 	@ExecSpace("Multicast")
 	method void PlayVampireHealVisual(integer amount)
@@ -388,6 +417,35 @@ script BuffPotionLogic extends Logic
 		if #users == 0 then return end
 		local pos = users[1].TransformComponent.WorldPosition
 		self:ScheduleBuffPotion(potionType, Vector3(pos.x + 1.5, pos.y, pos.z), 0, pos.y, 1.0)
+	end
+
+	-- 메이커 전용: F5 흡혈 / F6 크리티컬 / F7 파워 / F8 경험치. 실제 드롭·흡수·강화 경로를 사용한다.
+	@ExecSpace("ClientOnly")
+	@EventSender("Service", "InputService")
+	handler HandlePotionTestKey(KeyDownEvent event)
+		if not Environment:IsMakerPlay() or not _GameManager.GameStarted or _GameManager.GameOver or _GameManager:IsGamePaused() then return end
+		if isvalid(_TitleUI.titleGroup) and _TitleUI.titleGroup.Enable then return end
+		local kind=0
+		if event.key==KeyboardKey.F5 then kind=1
+		elseif event.key==KeyboardKey.F6 then kind=2
+		elseif event.key==KeyboardKey.F7 then kind=3
+		elseif event.key==KeyboardKey.F8 then kind=4 end
+		if kind>0 then self:CheatRequestBuffPotion(kind) end
+	end
+
+	@ExecSpace("Server")
+	method void CheatRequestBuffPotion(integer potionType)
+		if not Environment:IsMakerPlay() or not _GameManager.GameStarted or _GameManager.GameOver or _GameManager:IsGamePaused() then return end
+		if potionType<1 or potionType>4 then return end
+		if senderUserId==nil or senderUserId=="" then return end
+		local player=_UserService:GetUserEntityByUserId(senderUserId)
+		if not isvalid(player) or player.CurrentMap.Name~=_MapManager:GetMapName(_MapManager.CurrentMapIndex) then return end
+		local now=_UtilLogic.ServerElapsedSeconds
+		if now-(self._T.lastPotionCheatAt or -100)<1.8 then return end
+		self._T.lastPotionCheatAt=now
+		local pos=player.TransformComponent.WorldPosition
+		self:ScheduleBuffPotion(potionType,Vector3(pos.x+1.5,pos.y,pos.z),0,pos.y,1)
+		log("[VRF] POTION CHEAT key=F"..(potionType+4).." type="..potionType)
 	end
 
 end

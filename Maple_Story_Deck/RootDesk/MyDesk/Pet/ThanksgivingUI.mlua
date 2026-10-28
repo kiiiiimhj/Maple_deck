@@ -1,0 +1,683 @@
+@Logic
+script ThanksgivingUI extends Logic
+	property Entity Root = "f08cf621-80fd-4498-972a-337c74585ac4"
+	-- 로비 입장 버튼은 TitleGroup 안(EventEntry)에 둔다 — 이 그룹에 두면 GroupOrder가 커서 다른 팝업 위에 떴다(2026-10-27)
+	property Entity EntryButton = "c21c6587-d565-4c88-8241-93f9f2f02286"
+	-- 입장 버튼 느낌표 — 이용 안내를 아직 안 본 계정에만(유저 지정 2026-10-28)
+	property Entity EntryRedDot = "0db9fdfe-2eb0-40f5-883d-c86bdb1541ca"
+	property Entity TitleGroup = "4109795c-8f3d-41f1-9403-fefcec8fbb3e"
+	property table Handlers = {}
+	property boolean Opened = false
+	property boolean Pending = false
+	property boolean WaitingForTest = false
+	property number NextRefresh = 0
+	property number PendingSince = 0
+	property string LocaleOverride = ""
+	property string Notice = ""
+	property integer SelectedProduct = 1
+	property integer PurchaseQuantity = 1
+	property boolean QuantityInputSync = false
+	property any QuantityChangeHandler = nil
+	property any QuantityEndHandler = nil
+	property any EventScrollHandler = nil
+	property any EventSliderHandler = nil
+	property boolean SyncingEventScroll = false
+	property number EventScrollAt = 0
+	property table AcornGuideImages = {"9d9e0e3f1144473c9174c8bf977e399c","4c6676876a0c4dd08d00de739d704ca8","1195fbf93035492f97815b98e7e137b7"}
+	property table AcornGuideArrows = {"6643f10005754442948e6e60629b9359","6643f10005754442948e6e60629b9359"}
+	property boolean AcornGuideBound = false
+	property boolean AcornGuideOpen = false
+	property number AcornGuideTime = 0
+	property integer AcornGuideStage = 0
+	property table AcornGuideAges = {}
+	property Vector2 AcornGuideCanvas = Vector2(0,0)
+	property Vector2 AcornGuideScreen = Vector2(0,0)
+	-- 이벤트 종료 뒤 도토리→골드 환산 요청(세션당 1회)
+	property boolean ConversionRequested = false
+	-- 상품 칸을 잡고 끌어서 스크롤(업적 팝업처럼). 드래그로 판정되면 그 손가락의 클릭은 무시한다
+	property table DragHandlers = {}
+	property boolean DragMoved = false
+	property number DragDistance = 0
+
+	@ExecSpace("ClientOnly")
+	method table Labels()
+		-- Real text components receive localized strings; the artwork contains no lettering.
+		local locale=string.lower(self.LocaleOverride~="" and self.LocaleOverride or (_LocalizationService.CurrentLocaleId or "ko"))
+		local language=locale=="zh-tw" and "tw" or string.sub(locale,1,2)
+		local text={
+			ko={"도토리 교환소","풍성한 가을, 새로운 친구","2026.11.01 — 11.30  ·  한국 시간","한정 펫","뚠호","도토리","계정당 1회 교환","뚠호 낙하","적이 가장 많은\n곳으로 낙하해\n경로의 모든 적을\n한 번씩 공격합니다.","피해 100 +\n유저 레벨 × 10\n60초마다 발동","교환하기","펫하우스","보유 중","도토리가 부족해요","이벤트 시작 전","이벤트가 종료됐어요","교환 확인","도토리 1,000개로 뚠호를 교환할까요?","취소","교환 성공! 펫하우스에서 만나보세요.","저장하지 못했어요. 잠시 후 다시 시도해 주세요.","교환 중…","전용 재화로 한정 친구를 만나보세요.","메이커 미리보기","임시 부화","구매 제한 1 / 1"},
+			tw={"橡果兌換所","豐收之秋，迎接新夥伴","2026.11.01 — 11.30  ·  韓國時間","限定寵物","胖虎","橡果","每個帳號限兌換一次","胖虎墜落","朝敵人最密集的\n位置墜落，攻擊\n路徑上的所有敵人，\n各造成一次傷害。","傷害 100 +\n玩家等級 × 10\n每60秒施放","兌換","寵物小屋","已擁有","橡果不足","活動尚未開始","活動已結束","確認兌換","要使用1,000枚橡果兌換胖虎嗎？","取消","兌換成功！前往寵物小屋看看吧。","儲存失敗，請稍後再試。","兌換中…","用橡果迎接限定夥伴。","製作工具預覽","暫時孵化","限購 1 / 1"},
+			en={"Acorn Exchange","A harvest season. A new friend.","NOV 01 — NOV 30, 2026  ·  KST","LIMITED PET","Ttunho","Acorns","One exchange per account","Ttunho Drop","Fall into the densest\nenemy group. Hit each\nenemy in the path\nonce.","Damage 100 +\nplayer level x 10\nEvery 60s","Exchange","Pet House","Owned","Not enough acorns","Event starts soon","Event has ended","Confirm exchange","Exchange 1,000 Acorns for Ttunho?","Cancel","Ttunho is yours! Meet your friend in the Pet House.","Could not save. Please try again shortly.","Exchanging…","Meet a limited friend with event currency.","Maker preview","Test hatch","Limit 1 / 1"},
+			ja={"どんぐり交換所","実りの秋、新しい友だち","2026.11.01 — 11.30  ·  韓国時間","限定ペット","トゥンホ","どんぐり","アカウントごとに1回交換","トゥンホ落下","敵が最も多い\n場所へ落下し、\n経路上の全敵を\n1回ずつ攻撃します。","ダメージ 100 +\nプレイヤーレベル × 10\n60秒ごと","交換する","ペットハウス","所持済み","どんぐり不足","開始前","イベント終了","交換確認","どんぐり1,000枚でトゥンホと交換しますか？","キャンセル","交換成功！ペットハウスで会いましょう。","保存できませんでした。再度お試しください。","交換中…","どんぐりで限定の友だちを迎えよう。","メーカープレビュー","仮ふ化","交換上限 1 / 1"},
+			zh={"橡果兑换所","丰收之秋，迎接新伙伴","2026.11.01 — 11.30  ·  韩国时间","限定宠物","胖虎","橡果","每个账号限兑换一次","胖虎坠落","朝敌人最密集的\n位置坠落，攻击\n路径上的所有敌人，\n各造成一次伤害。","伤害 100 +\n玩家等级 × 10\n每60秒施放","兑换","宠物小屋","已拥有","橡果不足","活动尚未开始","活动已结束","确认兑换","要使用1,000枚橡果兑换胖虎吗？","取消","兑换成功！前往宠物小屋看看吧。","保存失败，请稍后再试。","兑换中…","用橡果迎接限定伙伴。","制作工具预览","临时孵化","限购 1 / 1"},
+			es={"Canje de bellotas","Una cosecha y un nuevo amigo.","01 NOV — 30 NOV 2026  ·  KST","MASCOTA LIMITADA","Ttunho","Bellotas","Un canje por cuenta","Caída de Ttunho","Cae sobre el grupo\nmás numeroso.\nGolpea una vez a cada\nenemigo en su camino.","Daño 100 +\nnivel del jugador x 10\nCada 60 s","Canjear","Casa de mascotas","En propiedad","Faltan bellotas","Próximamente","Evento finalizado","Confirmar canje","¿Canjear 1.000 bellotas por Ttunho?","Cancelar","¡Canje completado! Ve a la casa de mascotas.","No se pudo guardar. Inténtalo de nuevo.","Canjeando…","Consigue un amigo con bellotas.","Vista previa del editor","Eclosión de prueba","Límite 1 / 1"}
+		}
+		return text[language] or text.en
+	end
+
+	@ExecSpace("ClientOnly")
+	method table GridLabels()
+		-- A second translation table covers catalog controls without baking lettering into sprites.
+		local locale=string.lower(self.LocaleOverride~="" and self.LocaleOverride or (_LocalizationService.CurrentLocaleId or "ko"))
+		local key=locale=="zh-tw" and "tw" or string.sub(locale,1,2)
+		local labels={
+			ko={"전체","펫","강화","재화·재료","재고: %d","구매","품절","이벤트 종료 후 남은 도토리는 1개당 10골드로 환산돼요.","일반 상품의 가격·교환 횟수는 시안용 임시값입니다.","상세 정보","장비 강화에 사용하는 주문서입니다.","골드를 획득합니다.","펫 성장에 사용하는 재료입니다.","교환 수량","준비 중"},
+			tw={"全部","寵物","強化","貨幣·材料","庫存: %d","購買","售完","活動結束後，剩餘的橡果每1個將換算為10金幣。","一般商品的價格和次數為示意暫定值。","詳細資訊","用於裝備強化的卷軸。","獲得金幣。","用於寵物成長的材料。","兌換數量","準備中"},
+			en={"All","Pets","Enhancement","Currency & Materials","Stock: %d","Buy","Sold out","After the event, each remaining acorn converts to 10 gold.","Regular item prices and limits are provisional for this preview.","Item details","A scroll used to enhance equipment.","Receive gold.","A material used for pet growth.","Quantity","Coming soon"},
+			ja={"すべて","ペット","強化","通貨・素材","在庫: %d","購入","売り切れ","イベント終了後、残ったどんぐりは1個につき10ゴールドに換算されます。","通常商品の価格と交換回数はプレビュー用の仮設定です。","詳細情報","装備強化に使う書です。","ゴールドを獲得します。","ペットの成長に使う素材です。","交換数","準備中"},
+			zh={"全部","宠物","强化","货币·材料","库存: %d","购买","售完","活动结束后，剩余的橡果每1个将换算为10金币。","普通商品的价格和次数为示意暂定值。","详细信息","用于装备强化的卷轴。","获得金币。","用于宠物成长的材料。","兑换数量","准备中"},
+			es={"Todos","Mascotas","Mejora","Moneda y materiales","Stock: %d","Comprar","Agotado","Al terminar el evento, cada bellota restante se convierte en 10 de oro.","Los precios y límites normales son provisionales para esta vista.","Detalles","Un pergamino para mejorar equipo.","Recibe oro.","Un material para el crecimiento de mascotas.","Cantidad","Próximamente"}}
+		return labels[key] or labels.en
+	end
+
+	@ExecSpace("ClientOnly")
+	method table Catalog()
+		-- The pet is live; ordinary rewards can be purchased in Maker for event testing.
+		return {
+			-- 순서(유저 지정 2026-10-28): 펫 → 스킬 뽑기권 → 유물 뽑기권 → 성장석 → 골드 → 강화 주문서("무료" 표기는 빼기로 함)
+			{id="ttunho",category=2,price=1000,limit=1,amount=1,icon="5429147d026142ff8f2931892f9d2f4a",live=true,names={ko="뚠호",tw="胖虎",en="Ttunho",ja="トゥンホ",zh="胖虎",es="Ttunho"}},
+			{id="skillPull",category=4,price=100,limit=10,amount=1,icon="38f5f4b9b8a342bf931b71298d60bb84",names={ko="스킬 뽑기권",tw="技能抽獎券",en="Skill Pull Ticket",ja="スキルガチャ券",zh="技能抽奖券",es="Boleto de habilidad"},
+				desc={ko="스킬 뽑기를 1회 할 수 있어요.",tw="可進行1次技能抽獎。",en="Use for one skill pull.",ja="スキルガチャを1回引けます。",zh="可进行1次技能抽奖。",es="Sirve para una tirada de habilidad."}},
+			{id="relicPull",category=4,price=100,limit=10,amount=1,icon="3fccc38bffbd45b68cd1fc049809de54",names={ko="유물 뽑기권",tw="遺物抽獎券",en="Relic Pull Ticket",ja="遺物ガチャ券",zh="遗物抽奖券",es="Boleto de reliquia"},
+				desc={ko="유물 뽑기를 1회 할 수 있어요.",tw="可進行1次遺物抽獎。",en="Use for one relic pull.",ja="遺物ガチャを1回引けます。",zh="可进行1次遗物抽奖。",es="Sirve para una tirada de reliquia."}},
+			{id="520001",category=4,price=200,limit=5,amount=10,icon="b239798f5a8d4129ae1c086e7069f7fc",names={ko="펫 성장석 ×10",tw="寵物成長石 ×10",en="Pet Growth Stone x10",ja="ペット成長石 ×10",zh="宠物成长石 ×10",es="Piedra de mascota x10"}},
+			{id="gold",category=4,price=100,limit=10,amount=10000,icon="",names={ko="골드 10,000",tw="金幣 10,000",en="10,000 Gold",ja="10,000 ゴールド",zh="金币 10,000",es="10.000 de oro"}},
+			{id="510001",category=3,price=50,limit=20,amount=1,icon="52df3f22bb014921a232021a48a1279b",names={ko="무기 강화 주문서",tw="武器強化卷軸",en="Weapon Scroll",ja="武器強化の書",zh="武器强化卷轴",es="Pergamino de arma"}},
+			{id="510002",category=3,price=50,limit=20,amount=1,icon="2f9a8db2d118401f847acf20e3684d0d",names={ko="갑옷 강화 주문서",tw="鎧甲強化卷軸",en="Armor Scroll",ja="鎧強化の書",zh="铠甲强化卷轴",es="Pergamino de armadura"}},
+			{id="510003",category=3,price=50,limit=20,amount=1,icon="0ad04f9af12b49469cb49848e9f90f05",names={ko="모자 강화 주문서",tw="帽子強化卷軸",en="Hat Scroll",ja="帽子強化の書",zh="帽子强化卷轴",es="Pergamino de sombrero"}},
+			{id="510004",category=3,price=50,limit=20,amount=1,icon="31e0a48942154e50b5cff7be26bcd900",names={ko="장갑 강화 주문서",tw="手套強化卷軸",en="Glove Scroll",ja="手袋強化の書",zh="手套强化卷轴",es="Pergamino de guantes"}},
+			{id="510005",category=3,price=50,limit=20,amount=1,icon="938e79e26e7b4407a113b938b0a9461c",names={ko="망토 강화 주문서",tw="披風強化卷軸",en="Cape Scroll",ja="マント強化の書",zh="披风强化卷轴",es="Pergamino de capa"}},
+			{id="510006",category=3,price=100,limit=10,amount=1,icon="0c918aba18864e68bb83ba7caf7b8cb6",names={ko="반지 강화 주문서",tw="戒指強化卷軸",en="Ring Scroll",ja="指輪強化の書",zh="戒指强化卷轴",es="Pergamino de anillo"}},
+			{id="510007",category=3,price=100,limit=10,amount=1,icon="4415d4ee9b124440befed8eb78101d42",names={ko="목걸이 강화 주문서",tw="項鍊強化卷軸",en="Necklace Scroll",ja="ネックレス強化の書",zh="项链强化卷轴",es="Pergamino de collar"}}
+		}
+	end
+
+	@ExecSpace("ClientOnly")
+	method string ProductName(table row)
+		-- Product names follow the same locale as the rest of the event preview.
+		local locale=string.lower(self.LocaleOverride~="" and self.LocaleOverride or (_LocalizationService.CurrentLocaleId or "ko"))
+		local key=locale=="zh-tw" and "tw" or string.sub(locale,1,2)
+		return row.names[key] or row.names.en
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean IsEventPreloadWanted()
+		-- 부팅 미리 받기(LoadingUI.PreloadBootAssets)에 이벤트 그림을 넣을지 — 메이커 또는 이벤트 기간
+		return Environment:IsMakerPlay() or _PetLogic:IsThanksgivingActive()
+	end
+
+	@ExecSpace("ClientOnly")
+	method table GetPreloadRuids()
+		-- 코드에서 바꿔 끼우는 그림(상품 아이콘·뚠호 정지 모습·안내 그림·화살표·정보 버튼)
+		local ids={}
+		for _,row in ipairs(self:Catalog()) do if row.icon~="" then table.insert(ids,row.icon) end end
+		table.insert(ids,_PetLogic.TtunhoMotions.stand)
+		for _,id in ipairs(self.AcornGuideImages) do table.insert(ids,id) end
+		for _,id in ipairs(self.AcornGuideArrows) do table.insert(ids,id) end
+		table.insert(ids,"78d254b94ee54616ab1d6038e131ec8a")
+		return ids
+	end
+
+	@ExecSpace("ClientOnly")
+	method string ProductDesc(table row, table g)
+		-- 상품별 설명(desc)이 있으면 그걸, 없으면 분류별 공통 설명
+		if row.desc~=nil then
+			local locale=string.lower(self.LocaleOverride~="" and self.LocaleOverride or (_LocalizationService.CurrentLocaleId or "ko"))
+			local key=locale=="zh-tw" and "tw" or string.sub(locale,1,2)
+			return row.desc[key] or row.desc.en
+		end
+		return row.category==3 and g[11] or (row.id=="gold" and g[12] or g[13])
+	end
+
+	@ExecSpace("ClientOnly")
+	method Entity Node(string path)
+		-- Find a component inside the single event overlay.
+		local current=self.Root
+		for name in string.gmatch(path,"[^/]+") do current=current:GetChildByName(name) end
+		return current
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Text(string path, string value)
+		-- All visible labels are actual localized text, independent of artwork.
+		local entity=self:Node(path) local child=entity:GetChildByName("Label") local label=child~=nil and child.TextGUIRendererComponent or entity.TextGUIRendererComponent if label.Text~=value then label.Text=value end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Bind(Entity entity, any callback)
+		-- Keep cleanup handles for all catalog, detail and purchase buttons.
+		local click=entity:ConnectEvent(ButtonClickEvent,function() if self.DragMoved then return end _SoundOptionLogic:PlaySfx("972843e759204d3e9ad84e7d3fa94f83",0.4) callback() end)
+		local hover=entity:ConnectEvent(UITouchEnterEvent,function() _SoundOptionLogic:PlaySfx("159bf70a74634bfc8e91a29e527a4be5",0.25) end)
+		table.insert(self.Handlers,{entity=entity,click=click,hover=hover})
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnBeginPlay()
+		-- Initialize the catalog outside its hidden popup group.
+		if not isvalid(self.Root) or not isvalid(self.EntryButton) then return end
+		self.Root.Enable=false self.Handlers={} self.AcornGuideBound=false self:InitializeAcornGuide()
+		self:Bind(self.EntryButton,function() self:Open() end)
+		self:Bind(self:Node("Window/Close"),function() self:Close() end)
+		self.DragHandlers={}
+		self:BindScrollDrag(self:Node("Window/Goods"))
+		for i,_ in ipairs(self:Catalog()) do
+			local index=i
+			self:Bind(self:Node(self:ProductPath(i).."/Info"),function() self:ShowDetail(index) end)
+			self:Bind(self:Node(self:ProductPath(i).."/Buy"),function() self:AskPurchase(index) end)
+			for _,part in ipairs({"","/Info","/Buy"}) do self:BindScrollDrag(self:Node(self:ProductPath(i)..part)) end
+		end
+		self:Bind(self:Node("Detail/Window/Close"),function() self:Node("Detail").Enable=false end)
+		self:Bind(self:Node("Detail/Window/Test"),function() if Environment:IsMakerPlay() then self.WaitingForTest=true _PetLogic:RequestPetAction("ttunho","test") end end)
+		self:Bind(self:Node("Detail/Window/House"),function() self:OpenHouse() end)
+		self:Bind(self:Node("Confirm/Window/Yes"),function() self:ConfirmPurchase() end)
+		self:Bind(self:Node("Confirm/Window/No"),function() self:Node("Confirm").Enable=false end)
+		self:Bind(self:Node("Confirm/Window/Close"),function() self:Node("Confirm").Enable=false end)
+		self:Bind(self:Node("Confirm/Window/Minus"),function() self:ChangeQuantity(-1) end)
+		self:Bind(self:Node("Confirm/Window/Plus"),function() self:ChangeQuantity(1) end)
+		self:Bind(self:Node("Confirm/Window/Maximum"),function() self:SelectMaximumQuantity() end)
+		local input=self:Node("Confirm/Window/Quantity")
+		self.QuantityChangeHandler=input:ConnectEvent(TextInputValueChangeEvent,function(event) self:OnQuantityInput(event.text,false) end)
+		self.QuantityEndHandler=input:ConnectEvent(TextInputEndEditEvent,function(event) self:OnQuantityInput(event.text,true) end)
+		self.EventSliderHandler=self:Node("Window/ScrollBar"):ConnectEvent(SliderValueChangedEvent,function(event) self:OnEventScrollSlider(event.Value) end)
+		self.EventScrollHandler=self:Node("Window/Goods"):ConnectEvent(ScrollPositionChangedEvent,function(event) self:SyncEventScroll(event.NormalizedPosition.y) end)
+		log("[VRF] THANKSGIVING featured shop initialized products=10 tabs=0 realText=true")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Open()
+		-- Maker can preview outside November; the server never bypasses the actual period.
+		if _GameManager.GameStarted and not _GameManager.GameOver then return end
+		if not Environment:IsMakerPlay() and not _PetLogic:IsThanksgivingActive() then return end
+		_PetHouseUI:Close() self.Notice="" self.Opened=true self.Root.Enable=true
+		self:Node("Detail").Enable=false self:Node("Confirm").Enable=false
+		self.EventScrollAt=0 self:Refresh() self:Node("Window/Goods").ScrollLayoutGroupComponent:ResetScrollPosition(UITransformAxis.Vertical)
+		self.SyncingEventScroll=true self:Node("Window/ScrollBar").SliderComponent.Value=0 self.SyncingEventScroll=false
+		_TimerService:SetTimerOnce(function() self:PrepareEventScroll() end,.1)
+		_PetLogic:RequestState()
+		_UILogic:SetSiblingIndex(self:Node("Window/Close").UITransformComponent,100005)
+		-- 처음 들어온 계정은 상점보다 이용 안내를 먼저 보여 준다(유저 지정 2026-10-28). 본 기록은 펫 계정 저장에 남긴다
+		if _PetLogic.ClientReady and not _PetLogic.ClientTest and not _PetLogic.ClientThanksgivingGuideSeen then
+			self:OpenAcornGuide()
+			_PetLogic.ClientThanksgivingGuideSeen=true
+			if isvalid(self.EntryRedDot) then self.EntryRedDot.Enable=false end
+			_PetLogic:RequestThanksgivingGuideSeen()
+		end
+		log("[VRF] THANKSGIVING catalog opened")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Close()
+		-- A normal close only hides the catalog and its nested popups.
+		self:CloseAcornGuide() self.Opened=false if isvalid(self.Root) then self.Root.Enable=false end
+	end
+
+
+	@ExecSpace("ClientOnly")
+	method string ProductIcon(table row)
+		-- Gold uses its existing icon only as an offered item; all costs use the distinct acorn.
+		if row.id=="gold" then
+			local icon=_EntityService:GetEntityByPath("/ui/TitleGroup/CoinBadge/Icon")
+			return isvalid(icon) and tostring(icon.SpriteGUIRendererComponent.ImageRUID.DataId) or ""
+		end
+		return row.icon
+	end
+
+	@ExecSpace("ClientOnly")
+	method void Refresh()
+		-- Product descriptions stay out of cards; each card shows stock, price and its own buy button.
+		local t=self:Labels() local g=self:GridLabels()
+		self:Text("Window/Header/Title",t[1]) self:Text("Window/Header/Period",t[3])
+		self:Text("Window/Wallet/Label",t[6]) self:Text("Window/Wallet/Amount",tostring(_PetLogic.ClientThanksgivingAcorns))
+		self:Text("Window/Timer/Label",self:RemainingTimeAt(_DateTimeLogic:GetTimeElapsedWithoutOffset()))
+		local pet=_PetLogic.ClientPets.ttunho local owned=pet~=nil and pet.Owned
+		for i,row in ipairs(self:Catalog()) do
+			local base=self:ProductPath(i) local card=self:Node(base)
+			local enabled=row.live or Environment:IsMakerPlay() if card.Enable~=enabled then card.Enable=enabled end
+			self:Text(base.."/Info/Name",self:ProductName(row))
+			local icon=self:Node(base.."/Info/Icon").SpriteGUIRendererComponent local ruid=row.id=="ttunho" and _PetLogic.TtunhoMotions.stand or self:ProductIcon(row) if tostring(icon.ImageRUID.DataId)~=ruid then icon.ImageRUID=DataRef(ruid) end
+			local remaining=self:RemainingStock(row)
+			self:Text(base.."/Limit",string.format(g[5],remaining))
+			self:Text(base.."/Price/Value",row.price==1000 and "1,000" or tostring(row.price))
+			local buy=self:Node(base.."/Buy") self:Text(base.."/Buy",remaining==0 and g[7] or g[6])
+			self:SetPurchaseButton(buy,self:CanOpenPurchase(row,1))
+			-- Maker test offers use the same quantity, stock and balance checks as the live pet.
+			-- Button opacity stays one in both purchase states.
+		end
+		self:Text("Window/Hint",self.Notice~="" and self.Notice or g[8])
+		local p=self:ProductPath(1).."/Info/"
+		-- "한정 펫" 배지는 Info 버튼 밖(카드 바로 아래)에 둔다 — 버튼 눌림 연출에 같이 줄어들지 않게(2026-10-27)
+		self:Text(self:ProductPath(1).."/Badge/Label",t[4]) self:Text(p.."SkillName",t[8]) self:Text(p.."SkillDescription",t[9]) self:Text(p.."SkillFormula",t[10])
+		for row=1,math.ceil(math.max(0,#self:Catalog()-5)/8) do
+			local any=false for i=6+(row-1)*8,math.min(#self:Catalog(),5+row*8) do if self:Node(self:ProductPath(i)).Enable then any=true end end
+			local entity=self:Node("Window/Goods/Row"..row) if entity.Enable~=any then entity.Enable=any end
+		end
+		if self:Node("Detail").Enable then self:FillDetail() end
+		if self:Node("Confirm").Enable then self:FillPurchase(false) end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ShowDetail(integer index)
+		-- Clicking the item opens a separate description instead of permanently occupying shop space.
+		-- 일반 상품은 설명창을 띄우지 않는다(유저 지정 2026-10-27). 펫(뚠호)만 스킬·펫하우스 안내가 있어 유지
+		if self:Catalog()[index].id~="ttunho" then return end
+		self.SelectedProduct=index self:FillDetail() self:Node("Detail").Enable=true
+		log("[VRF] THANKSGIVING details product="..self:Catalog()[index].id)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void FillDetail()
+		-- Descriptions use the same active locale as the catalog.
+		local row=self:Catalog()[self.SelectedProduct] local t=self:Labels() local g=self:GridLabels()
+		self:Text("Detail/Window/Title",self:ProductName(row))
+		self:Node("Detail/Window/Icon").SpriteGUIRendererComponent.ImageRUID=DataRef(self:ProductIcon(row))
+		local description=row.id=="ttunho" and (t[8].."\n\n"..string.gsub(t[9],"\n"," ").."\n\n"..string.gsub(t[10],"\n"," ")) or self:ProductDesc(row,g)
+		self:Text("Detail/Window/Description",description)
+		self:Node("Detail/Window/Test").Enable=row.id=="ttunho" and Environment:IsMakerPlay() and _PetLogic.TtunhoReady and _PetLogic.ClientReady and not (_PetLogic.ClientPets.ttunho~=nil and _PetLogic.ClientPets.ttunho.Owned)
+		self:Text("Detail/Window/Test",t[25]) self:Text("Detail/Window/House",t[12])
+		self:Node("Detail/Window/House").Enable=row.id=="ttunho"
+	end
+
+	@ExecSpace("ClientOnly")
+	method void AskPurchase(integer index)
+		-- Maker catalog examples can open their quantity window; only live offers can submit payment.
+		local row=self:Catalog()[index] if row==nil or not self:CanOpenPurchase(row,1) then return end
+		self.SelectedProduct=index self.PurchaseQuantity=1 self:Node("Confirm").Enable=true self:FillPurchase(true)
+		log("[VRF] THANKSGIVING quantity window opened product="..row.id)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ConfirmPurchase()
+		-- The authoritative server checks dates, stock and acorn balance again.
+		local row=self:Catalog()[self.SelectedProduct]
+		if not self:CanPurchaseOffer(row,self.PurchaseQuantity) then self:FillPurchase(false) return end
+		self:Node("Confirm").Enable=false self.Pending=true self.PendingSince=_UtilLogic.ElapsedSeconds
+		_PetLogic:RequestThanksgivingPurchase(row.id,self.PurchaseQuantity) self:Refresh()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OpenHouse()
+		-- Pick the tiger in the existing owned-pet list after a successful server hatch.
+		self:Close() _PetHouseUI:Open()
+		for i,entry in ipairs(_PetHouseUI:GetVisiblePets()) do if entry.id=="ttunho" then _PetHouseUI.SelectedPetIndex=i end end
+		_PetHouseUI:Refresh()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnPurchaseResult(string result)
+		-- Keep feedback localized and preserve it across catalog refreshes.
+		self.Pending=false local t=self:Labels()
+		local row=self:Catalog()[self.SelectedProduct]
+		self.Notice=result=="success" and (row.id=="ttunho" and t[20] or self:PurchaseFeedback(result)) or (result=="save" and t[21] or (result=="short" and t[14] or (result=="owned" and t[13] or ((result=="inventory" or result=="stock" or result=="invalid" or result=="battle") and self:PurchaseFeedback(result) or t[16]))))
+		if self.Opened then self:Refresh() end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnUpdate(number delta)
+		-- Refresh only at 2 Hz, and keep the event entry on the lobby battle tab.
+		if not isvalid(self.Root) or not isvalid(self.EntryButton) then return end
+		if not self.AcornGuideBound then self:InitializeAcornGuide() end
+		self:TickAcornGuide(delta)
+		if _UtilLogic.ElapsedSeconds<self.NextRefresh then return end self.NextRefresh=_UtilLogic.ElapsedSeconds+.5
+		if not self.ConversionRequested and _PetLogic.ClientReady and not _PetLogic.ClientTest and _PetLogic.ClientThanksgivingAcorns>0 and _DateTimeLogic:GetTimeElapsedWithoutOffset()>=_PetLogic:GetThanksgivingEndElapsed() then
+			self.ConversionRequested=true _PetLogic:RequestThanksgivingConversion()
+		end
+		local lobby=isvalid(self.TitleGroup) and self.TitleGroup.Enable and isvalid(_TitleUI.battlePanel) and _TitleUI.battlePanel.Enable and not (_GameManager.GameStarted and not _GameManager.GameOver)
+		self.EntryButton.Enable=lobby and (Environment:IsMakerPlay() or _PetLogic:IsThanksgivingActive())
+		if isvalid(self.EntryRedDot) then
+			local dot=_PetLogic.ClientReady and not _PetLogic.ClientTest and not _PetLogic.ClientThanksgivingGuideSeen
+			if self.EntryRedDot.Enable~=dot then self.EntryRedDot.Enable=dot end
+		end
+		local entryLabel=self.EntryButton:GetChildByName("Label").TextGUIRendererComponent local value=self:GetEventEntryLabel() if entryLabel.Text~=value then entryLabel.Text=value end
+		if self.Opened and not lobby then self:Close() end
+		if self.Pending and _UtilLogic.ElapsedSeconds-self.PendingSince>15 then self.Pending=false end
+		if self.WaitingForTest then local pet=_PetLogic.ClientPets.ttunho if pet~=nil and pet.Owned and _PetLogic.ClientTest then self.WaitingForTest=false self:OpenHouse() end end
+		if self.Opened then self:Refresh() end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEndPlay()
+		-- Unsubscribe everything before the next Maker run.
+		for _,h in ipairs(self.Handlers) do if isvalid(h.entity) then h.entity:DisconnectEvent(ButtonClickEvent,h.click) h.entity:DisconnectEvent(UITouchEnterEvent,h.hover) end end
+		local input=self:Node("Confirm/Window/Quantity")
+		if isvalid(input) then
+			if self.QuantityChangeHandler~=nil then input:DisconnectEvent(TextInputValueChangeEvent,self.QuantityChangeHandler) end
+			if self.QuantityEndHandler~=nil then input:DisconnectEvent(TextInputEndEditEvent,self.QuantityEndHandler) end
+		end
+		if self.EventSliderHandler~=nil then self:Node("Window/ScrollBar"):DisconnectEvent(SliderValueChangedEvent,self.EventSliderHandler) end
+		if self.EventScrollHandler~=nil then self:Node("Window/Goods"):DisconnectEvent(ScrollPositionChangedEvent,self.EventScrollHandler) end
+		for _,h in ipairs(self.DragHandlers) do if isvalid(h.entity) then h.entity:DisconnectEvent(UITouchBeginDragEvent,h.begin) h.entity:DisconnectEvent(UITouchDragEvent,h.drag) h.entity:DisconnectEvent(UITouchEndDragEvent,h.finish) end end
+		self.DragHandlers={}
+		self.EventSliderHandler=nil self.EventScrollHandler=nil self.QuantityChangeHandler=nil self.QuantityEndHandler=nil self.Handlers={} self:Close()
+	end
+
+	@ExecSpace("ClientOnly")
+	method string ProductPath(integer index)
+		-- The first offer spans two columns and two rows; all products share one scroll view.
+		if index==1 then return "Window/Goods/Featured/Pet" end
+		if index<=5 then return "Window/Goods/Featured/Card"..index end
+		return "Window/Goods/Row"..(math.floor((index-6)/8)+1).."/Card"..index
+	end
+
+	@ExecSpace("ClientOnly")
+	method string RemainingTimeAt(integer elapsed)
+		-- Countdown ends at the exclusive Dec 1 00:00 Korea-time boundary.
+		local locale=string.lower(self.LocaleOverride~="" and self.LocaleOverride or (_LocalizationService.CurrentLocaleId or "ko"))
+		local key=locale=="zh-tw" and "tw" or string.sub(locale,1,2)
+		local labels={ko={"종료","종료"},tw={"結束","已結束"},en={"Ends","Ended"},ja={"終了","終了"},zh={"结束","已结束"},es={"Fin","Finalizado"}}
+		local t=labels[key] or labels.en
+		local left=DateTime(2026,12,1,0,0,0).Elapsed-32400000-elapsed
+		if left<=0 then return t[2] end
+		if left>=86400000 then return t[1].." D-"..math.ceil(left/86400000) end
+		local seconds=math.floor(left/1000)
+		return t[1].." "..string.format("%02d:%02d:%02d",math.floor(seconds/3600),math.floor(seconds/60)%60,seconds%60)
+	end
+
+	@ExecSpace("ClientOnly")
+	method table PurchaseLabels()
+		local locale=string.lower(self.LocaleOverride~="" and self.LocaleOverride or (_LocalizationService.CurrentLocaleId or "ko"))
+		local key=locale=="zh-tw" and "tw" or string.sub(locale,1,2)
+		local labels={ko={"구매","수량","총 가격","보유 도토리: %s","1회 구매 시 %d개 획득","최대"},tw={"購買","數量","總價","持有橡果: %s","每次購買可獲得%d個","最大"},en={"Purchase","Quantity","Total price","Acorns owned: %s","Receive %d per purchase","Max"},ja={"購入","数量","合計金額","所持どんぐり: %s","1回の購入で%d個獲得","最大"},zh={"购买","数量","总价","持有橡果: %s","每次购买可获得%d个","最大"},es={"Comprar","Cantidad","Precio total","Bellotas: %s","Recibes %d por compra","Máx."}}
+		return labels[key] or labels.en
+	end
+
+	@ExecSpace("ClientOnly")
+	method string FormatAmount(integer amount)
+		local value=string.gsub(string.reverse(tostring(math.max(0,amount))),"(%d%d%d)","%1,")
+		local formatted=string.gsub(string.reverse(value),"^,","") return formatted
+	end
+
+	@ExecSpace("ClientOnly")
+	method integer RemainingStock(table row)
+		if row.id=="ttunho" then local pet=_PetLogic.ClientPets.ttunho return pet~=nil and pet.Owned and 0 or 1 end
+		return math.max(0,(row.limit or 0)-(_PetLogic.ClientThanksgivingPurchases[row.id] or 0))
+	end
+
+	@ExecSpace("ClientOnly")
+	method integer MaximumQuantity(integer price, integer stock, integer balance)
+		if price<=0 or stock<=0 or balance<price then return 0 end
+		return math.min(stock,math.floor(balance/price))
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean CanOpenPurchase(table row, integer quantity)
+		-- Preview every visible offer in Maker; keep live-world opening restricted to the event dates.
+		return (row.live==true or Environment:IsMakerPlay()) and quantity>=1 and quantity<=self:MaximumQuantity(row.price,self:RemainingStock(row),_PetLogic.ClientThanksgivingAcorns) and not self.Pending and _PetLogic.ClientReady and (Environment:IsMakerPlay() or _PetLogic:IsThanksgivingActive())
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean CanPurchaseOffer(table row, integer quantity)
+		-- Maker can test every configured reward; the pet also needs its resources and real account.
+		return self:CanOpenPurchase(row,quantity) and (row.id~="ttunho" or _PetLogic.TtunhoReady) and not _PetLogic.ClientTest
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetPurchaseButton(Entity button, boolean available)
+		button.ButtonComponent.Enable=available
+		local renderer=button:GetChildByName("Visual").SpriteGUIRendererComponent
+		renderer.Color=available and Color(.34,.78,.18,1) or Color(.56,.56,.56,1)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SetQuantityButton(string control, boolean available)
+		-- Match the button color to its interaction state, with a contrasting maximum-quantity glyph.
+		local button=self:Node("Confirm/Window/"..control)
+		self:SetPurchaseButton(button,available)
+		button:GetChildByName("Label").TextGUIRendererComponent.FontColor=available and Color(1,1,1,1) or Color(.65,.65,.65,1)
+		if control=="Maximum" then
+			local glyph=available and Color(1,1,1,1) or Color(.62,.62,.62,1)
+			for _,name in ipairs({"Arrow1","Arrow2","Stop"}) do
+				local renderer=button:GetChildByName(name).SpriteGUIRendererComponent
+				local ruid=available and (name=="Stop" and "01d9870c531842c3833eeac3834a7d9a" or "d9377e3171b64399885f4a316ae4d092") or (name=="Stop" and "a1ffa8916b1b46b5bf3860d1525c3c4d" or "0c25f4ba834745aba5ec24fe38d0bc1e")
+				if tostring(renderer.ImageRUID.DataId)~=ruid then renderer.ImageRUID=DataRef(ruid) end
+				renderer.Color=glyph
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void FillPurchase(boolean syncInput)
+		local row=self:Catalog()[self.SelectedProduct] local t=self:Labels() local g=self:GridLabels() local q=self:PurchaseLabels()
+		local stock=self:RemainingStock(row) local maximum=self:MaximumQuantity(row.price,stock,_PetLogic.ClientThanksgivingAcorns)
+		local quantity=math.max(0,math.min(math.max(1,maximum),self.PurchaseQuantity))
+		if quantity~=self.PurchaseQuantity then self.PurchaseQuantity=quantity syncInput=true end
+		self:Text("Confirm/Window/Title",q[1]) self:Text("Confirm/Window/ProductName",self:ProductName(row))
+		self:Text("Confirm/Window/Stock",string.format(g[5],stock))
+		local icon=self:Node("Confirm/Window/Icon").SpriteGUIRendererComponent local ruid=self:ProductIcon(row)
+		if tostring(icon.ImageRUID.DataId)~=ruid then icon.ImageRUID=DataRef(ruid) end
+		local description=row.id=="ttunho" and (t[8].."\n"..string.gsub(t[9],"\n"," ").."\n"..string.gsub(t[10],"\n"," ")) or self:ProductDesc(row,g)
+		self:Text("Confirm/Window/Description/Label",description)
+		self:Node("Confirm/Window/Message").Enable=false
+		self:Text("Confirm/Window/QuantityLabel",q[2])
+		self:Text("Confirm/Window/TotalLabel",q[3])
+		self:Text("Confirm/Window/Price/Value",self:FormatAmount(row.price*self.PurchaseQuantity))
+		self:Text("Confirm/Window/Wallet/Amount",self:FormatAmount(_PetLogic.ClientThanksgivingAcorns))
+		self:Text("Confirm/Window/Yes",g[6]) self:Text("Confirm/Window/No",t[19])
+		local input=self:Node("Confirm/Window/Quantity").TextGUIRendererInputComponent
+		input.Enable=row.id~="ttunho" and maximum>0
+		if syncInput and input.Text~=tostring(self.PurchaseQuantity) then self.QuantityInputSync=true input.Text=tostring(self.PurchaseQuantity) self.QuantityInputSync=false end
+		self:SetQuantityButton("Minus",self.PurchaseQuantity>1 and maximum>0 and not self.Pending)
+		self:SetQuantityButton("Plus",self.PurchaseQuantity<maximum and not self.Pending)
+		self:SetQuantityButton("Maximum",self.PurchaseQuantity<maximum and not self.Pending)
+		self:Node("Confirm/Window/No/Visual").SpriteGUIRendererComponent.Color=Color(.95,.28,.24,1)
+		self:SetPurchaseButton(self:Node("Confirm/Window/Yes"),self:CanPurchaseOffer(row,self.PurchaseQuantity))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ChangeQuantity(integer delta)
+		local row=self:Catalog()[self.SelectedProduct]
+		local maximum=math.max(1,self:MaximumQuantity(row.price,self:RemainingStock(row),_PetLogic.ClientThanksgivingAcorns))
+		self.PurchaseQuantity=math.max(1,math.min(maximum,self.PurchaseQuantity+delta)) self:FillPurchase(true)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SelectMaximumQuantity()
+		local row=self:Catalog()[self.SelectedProduct]
+		self.PurchaseQuantity=math.max(1,self:MaximumQuantity(row.price,self:RemainingStock(row),_PetLogic.ClientThanksgivingAcorns)) self:FillPurchase(true)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnQuantityInput(string value, boolean final)
+		if self.QuantityInputSync then return end
+		if value=="" and not final then self.PurchaseQuantity=0 self:FillPurchase(false) return end
+		local number=string.match(value,"^%d+$")~=nil and tonumber(value) or 1
+		local row=self:Catalog()[self.SelectedProduct]
+		local maximum=math.max(1,self:MaximumQuantity(row.price,self:RemainingStock(row),_PetLogic.ClientThanksgivingAcorns))
+		self.PurchaseQuantity=math.max(1,math.min(maximum,number or 1)) self:FillPurchase(true)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PrepareEventScroll()
+		-- The native scroll rect creates its internal scrollbar after the visible layout pass.
+		if not self.Opened or not isvalid(self.Root) or not self.Root.Enable then return end
+		local layout=self:Node("Window/Goods").ScrollLayoutGroupComponent
+		layout.ScrollBarVisible=ScrollBarVisibility.AlwaysShow
+		layout.ScrollBarThickness=16
+		layout.ScrollBarHandleColor=Color(1,1,1,0)
+		layout.ScrollBarBackgroundColor=Color(1,1,1,0)
+		self.EventScrollAt=0 layout:ResetScrollPosition(UITransformAxis.Vertical)
+		self.SyncingEventScroll=true self:Node("Window/ScrollBar").SliderComponent.Value=0 self.SyncingEventScroll=false
+		log("[VRF] THANKSGIVING event scroll initialized after layout")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnEventScrollSlider(number value)
+		if self.SyncingEventScroll then return end
+		local position=math.max(0,math.min(1,value))
+		self.EventScrollAt=DateTime.UtcNow.Elapsed
+		self:Node("Window/Goods").ScrollLayoutGroupComponent:SetScrollNormalizedPosition(UITransformAxis.Vertical,position)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void SyncEventScroll(number position)
+		-- Match the lobby shop's 200ms asynchronous scroll-echo guard.
+		if DateTime.UtcNow.Elapsed-self.EventScrollAt<200 then return end
+		local slider=self:Node("Window/ScrollBar").SliderComponent
+		if math.abs(slider.Value-position)<.0001 then return end
+		self.SyncingEventScroll=true slider.Value=math.max(0,math.min(1,position)) self.SyncingEventScroll=false
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnAcornsConverted(integer acorns, integer gold)
+		-- 이벤트 종료 뒤 남은 도토리가 골드로 바뀌었다고 알린다
+		local locale=string.lower(self.LocaleOverride~="" and self.LocaleOverride or (_LocalizationService.CurrentLocaleId or "ko"))
+		local key=locale=="zh-tw" and "tw" or string.sub(locale,1,2)
+		local fmt={ko="이벤트가 끝나 남은 도토리 %s개가 %s골드로 바뀌었어요!",tw="活動結束，剩餘的%s個橡果已換算為%s金幣！",en="The event has ended. Your %s remaining acorns became %s gold!",ja="イベント終了により、残りのどんぐり%s個が%sゴールドになりました！",zh="活动结束，剩余的%s个橡果已换算为%s金币！",es="El evento terminó: tus %s bellotas restantes se convirtieron en %s de oro."}
+		_UIToast:ShowMessage(string.format(fmt[key] or fmt.en,self:FormatAmount(acorns),self:FormatAmount(gold)))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void BindScrollDrag(Entity entity)
+		-- 상품 칸·버튼 위에서 끌어도 목록이 스크롤되게 한다(버튼이 드래그를 먹어 기본 스크롤이 안 됐다)
+		if not isvalid(entity) or entity.UITouchReceiveComponent==nil then return end
+		local begin=entity:ConnectEvent(UITouchBeginDragEvent,function(event) self.DragMoved=false self.DragDistance=0 end)
+		local drag=entity:ConnectEvent(UITouchDragEvent,function(event) self:OnScrollDrag(event.TouchDelta) end)
+		local finish=entity:ConnectEvent(UITouchEndDragEvent,function(event) _TimerService:SetTimerOnce(function() self.DragMoved=false end,0.15) end)
+		table.insert(self.DragHandlers,{entity=entity,begin=begin,drag=drag,finish=finish})
+	end
+
+	@ExecSpace("ClientOnly")
+	method number ScrollRange()
+		-- 내용 전체 높이 - 보이는 높이(UI 단위). 칸 높이·간격·여백은 레이아웃 값 그대로
+		local goods=self:Node("Window/Goods") local layout=goods.ScrollLayoutGroupComponent
+		local rows=0 for _,name in ipairs({"Featured","Row1"}) do local e=goods:GetChildByName(name) if isvalid(e) and e.Enable then rows=rows+1 end end
+		local content=rows*layout.CellSize.y+math.max(0,rows-1)*layout.GridSpacing.y+layout.Padding.top+layout.Padding.bottom
+		return content-goods.UITransformComponent.RectSize.y
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnScrollDrag(Vector2 delta)
+		-- 화면 픽셀 이동량을 UI 단위로 바꿔 스크롤 위치(0=맨 위)를 옮기고, 오른쪽 스크롤바도 같이 맞춘다
+		local sh=_UILogic.ScreenHeight if sh<=0 then return end
+		local dy=delta.y*self.Root.UITransformComponent.RectSize.y/sh
+		self.DragDistance=self.DragDistance+math.abs(dy) if self.DragDistance>12 then self.DragMoved=true end
+		local range=self:ScrollRange() if range<=0 then return end
+		local slider=self:Node("Window/ScrollBar").SliderComponent
+		local value=math.max(0,math.min(1,slider.Value+dy/range))
+		self.SyncingEventScroll=true slider.Value=value self.SyncingEventScroll=false
+		self.EventScrollAt=DateTime.UtcNow.Elapsed
+		self:Node("Window/Goods").ScrollLayoutGroupComponent:SetScrollNormalizedPosition(UITransformAxis.Vertical,value)
+	end
+
+	@ExecSpace("ClientOnly")
+	method string GetEventEntryLabel()
+		local locale=string.lower(self.LocaleOverride~="" and self.LocaleOverride or (_LocalizationService.CurrentLocaleId or "ko"))
+		local key=locale=="zh-tw" and "tw" or string.sub(locale,1,2)
+		local labels={ko="이벤트",tw="活動",en="Event",ja="イベント",zh="活动",es="Evento"}
+		return labels[key] or labels.en
+	end
+
+	@ExecSpace("ClientOnly")
+	method string PurchaseFeedback(string result)
+		-- Keep success and rejection messages localized for the regular event rewards.
+		local locale=string.lower(self.LocaleOverride~="" and self.LocaleOverride or (_LocalizationService.CurrentLocaleId or "ko"))
+		local key=locale=="zh-tw" and "tw" or string.sub(locale,1,2)
+		local texts={
+			ko={success="구매 완료!",inventory="인벤토리에 빈칸이 부족해요.",stock="남은 재고를 확인해 주세요.",invalid="구매 수량을 확인해 주세요.",battle="로비에서 구매해 주세요."},
+			tw={success="購買成功！",inventory="背包空間不足。",stock="請確認剩餘庫存。",invalid="請確認購買數量。",battle="請在大廳購買。"},
+			en={success="Purchase complete!",inventory="Not enough inventory space.",stock="Please check the remaining stock.",invalid="Please check the quantity.",battle="Please purchase in the lobby."},
+			ja={success="購入しました！",inventory="所持品の空きが不足しています。",stock="残りの在庫を確認してください。",invalid="購入数を確認してください。",battle="ロビーで購入してください。"},
+			zh={success="购买成功！",inventory="背包空间不足。",stock="请确认剩余库存。",invalid="请确认购买数量。",battle="请在大厅购买。"},
+			es={success="¡Compra completada!",inventory="No hay espacio en el inventario.",stock="Comprueba el stock restante.",invalid="Comprueba la cantidad.",battle="Compra desde la sala principal."}}
+		return (texts[key] or texts.en)[result] or texts.en.invalid
+	end
+
+
+	@ExecSpace("ClientOnly")
+	method table AcornGuideLabels()
+		-- Keep every guide sentence localizable and separate from the illustrations.
+		local locale=string.lower(self.LocaleOverride~="" and self.LocaleOverride or (_LocalizationService.CurrentLocaleId or "ko"))
+		local key=locale=="zh-tw" and "tw" or string.sub(locale,1,2)
+		local text={
+			ko={"도토리 교환소 이용 안내","화면을 누르면 닫혀요.","모험에서 등장하는\n칠면조를 잡으세요","칠면조가 떨어트린\n도토리를 모으세요","도토리 상점에서\n아이템을 교환하세요"},
+			tw={"橡果兌換所指南","點擊畫面即可關閉。","擊敗冒險中\n出現的火雞","收集火雞\n掉落的橡果","到橡果商店\n兌換道具"},
+			en={"Acorn Exchange Guide","Tap anywhere to close.","Defeat the turkeys\nthat appear on adventures","Collect the acorns\nthat the turkeys drop","Exchange acorns for items\nat the Acorn Exchange"},
+			ja={"どんぐり交換所ガイド","画面をタップすると閉じます。","冒険に現れる\n七面鳥を倒そう","七面鳥が落とした\nどんぐりを集めよう","どんぐりのお店で\nアイテムと交換しよう"},
+			zh={"橡果兑换所指南","点击画面即可关闭。","击败冒险中\n出现的火鸡","收集火鸡\n掉落的橡果","到橡果商店\n兑换道具"},
+			es={"Guía del canje de bellotas","Toca la pantalla para cerrar.","Derrota a los pavos\nque aparecen en la aventura","Recoge las bellotas\nque dejan los pavos","Canjea bellotas por objetos\nen la tienda de bellotas"}}
+		return text[key] or text.en
+	end
+
+	@ExecSpace("ClientOnly")
+	method void InitializeAcornGuide()
+		-- Reuse the pet-house information button and close gesture in this shop.
+		if self.AcornGuideBound then return end
+		local root=self.Root:GetChildByName("Tutorial") local help=self:Node("Window"):GetChildByName("Help")
+		if not isvalid(root) or not isvalid(help) then return end
+		self.AcornGuideBound=true root.Enable=false self.AcornGuideOpen=false
+		self:Bind(self:Node("Window/Help"),function() self:OpenAcornGuide() end)
+		self:Bind(self:Node("Tutorial/Dim"),function() self:CloseAcornGuide() end)
+		_ResourceService:PreloadAsync({self.AcornGuideImages[1],self.AcornGuideImages[2],self.AcornGuideImages[3],self.AcornGuideArrows[1],self.AcornGuideArrows[2],"78d254b94ee54616ab1d6038e131ec8a"},function(results)
+			local ready=true for _,status in pairs(results) do if status~=PreloadResultStatus.Success then ready=false end end
+			log("[VRF] ACORN-GUIDE resources ready="..tostring(ready))
+		end)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void FitAcornGuide()
+		-- One fitted canvas preserves the reference zigzag positions and illustration endpoints.
+		local root=self:Node("Tutorial") local canvas=root.Parent.UITransformComponent.RectSize
+		local w=canvas.x local h=canvas.y local cx=0 local cy=0
+		local sw=_UILogic.ScreenWidth local sh=_UILogic.ScreenHeight
+		if sw>0 and sh>0 then
+			local p0=_UILogic:ScreenToLocalUIPosition(Vector2(0,0),root.UITransformComponent)
+			local p1=_UILogic:ScreenToLocalUIPosition(Vector2(sw,sh),root.UITransformComponent)
+			if p0~=nil and p1~=nil then
+				local mw=math.abs(p1.x-p0.x) local mh=math.abs(p1.y-p0.y)
+				if mw>canvas.x*.5 and mw<canvas.x*2 and mh>canvas.y*.5 and mh<canvas.y*2 then w=math.min(w,mw) h=math.min(h,mh) cx=(p0.x+p1.x)*.5 cy=(p0.y+p1.y)*.5 end
+			end
+		end
+		local scale=math.max(.05,math.min(1,(w-80)/1520,(h-80)/1040))
+		self.AcornGuideCanvas=Vector2(canvas.x,canvas.y) self.AcornGuideScreen=Vector2(sw,sh)
+		local content=self:Node("Tutorial/Content").UITransformComponent
+		content.UIScale=Vector3(scale,scale,1) content.anchoredPosition=Vector2(cx,cy)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OpenAcornGuide()
+		-- Show only on an open catalog, without replacing an active purchase dialog.
+		if not self.Opened or self.Pending or self.AcornGuideOpen or self:Node("Confirm").Enable or self:Node("Detail").Enable then return end
+		self.AcornGuideOpen=true self.AcornGuideTime=0 self.AcornGuideStage=0 self.AcornGuideAges={}
+		local text=self:AcornGuideLabels() self:Text("Tutorial/Content/Title",text[1]) self:Text("Tutorial/Content/Hint",text[2])
+		for i=1,3 do
+			self:Text("Tutorial/Content/Step"..i.."/Label",text[i+2])
+			local step=self:Node("Tutorial/Content/Step"..i) step.Enable=false step.CanvasGroupComponent.GroupAlpha=0
+		end
+		for i=1,2 do local arrow=self:Node("Tutorial/Content/Arrow"..i) arrow.Enable=false arrow.CanvasGroupComponent.GroupAlpha=0 end
+		for i=1,3 do self:Node("Tutorial/Content/Step"..i.."/Img").SpriteGUIRendererComponent.ImageRUID=DataRef(self.AcornGuideImages[i]) end
+		self:Node("Tutorial").Enable=true _UILogic:SetSiblingIndex(self:Node("Tutorial").UITransformComponent,100010)
+		self:FitAcornGuide() self:RevealAcornGuideStage(1)
+		log("[VRF] ACORN-GUIDE opened stages=3 localized=true")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RevealAcornGuideStage(integer index)
+		-- An arrow appears with its destination illustration and caption.
+		if index<1 or index>3 then return end
+		self.AcornGuideStage=index self.AcornGuideAges[index]=0 self:Node("Tutorial/Content/Step"..index).Enable=true
+		if index>1 then self:Node("Tutorial/Content/Arrow"..(index-1)).Enable=true end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void TickAcornGuide(number delta)
+		-- Fade without scaling individual illustrations, keeping every arrow on its painted target.
+		if not self.AcornGuideOpen then return end
+		if not self.Opened then self:CloseAcornGuide() return end
+		local canvas=self:Node("Tutorial").Parent.UITransformComponent.RectSize
+		if canvas.x~=self.AcornGuideCanvas.x or canvas.y~=self.AcornGuideCanvas.y or _UILogic.ScreenWidth~=self.AcornGuideScreen.x or _UILogic.ScreenHeight~=self.AcornGuideScreen.y then self:FitAcornGuide() end
+		self.AcornGuideTime=self.AcornGuideTime+delta
+		while self.AcornGuideStage<3 and self.AcornGuideTime>=self.AcornGuideStage*.65 do self:RevealAcornGuideStage(self.AcornGuideStage+1) end
+		for i=1,self.AcornGuideStage do
+			local age=(self.AcornGuideAges[i] or 0)+delta self.AcornGuideAges[i]=age local alpha=math.min(1,age/.15)
+			self:Node("Tutorial/Content/Step"..i).CanvasGroupComponent.GroupAlpha=alpha
+			if i>1 then self:Node("Tutorial/Content/Arrow"..(i-1)).CanvasGroupComponent.GroupAlpha=alpha end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void CloseAcornGuide()
+		-- Closing the guide returns to the same catalog and scroll position.
+		self.AcornGuideOpen=false self.AcornGuideStage=0 self.AcornGuideTime=0 self.AcornGuideAges={}
+		local root=self.Root:GetChildByName("Tutorial") if isvalid(root) then root.Enable=false end
+	end
+
+end

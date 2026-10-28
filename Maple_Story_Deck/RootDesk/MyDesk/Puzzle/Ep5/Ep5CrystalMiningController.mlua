@@ -6,6 +6,7 @@ script Ep5CrystalMiningController extends Component
 	@MinValue(1) @MaxValue(3)
 	property integer MaxSpeedLevel = 3
 	property number TrackLength = 704
+	property number ChallengeSeconds = 10
 	property string CrystalRUID = "d5d290cfd3f6426bb9dfff5a09e59a94"
 	property string OreItemId = "blue_ore"
 	property integer MinZone = 190
@@ -107,7 +108,7 @@ script Ep5CrystalMiningController extends Component
 	@ExecSpace("ClientOnly")
 	method void OnCrystalTouched(string crystalName, TouchEvent event)
 		-- 전투 중 오브젝트 겹침, 로비, 다른 모달, 빠른 중복 요청을 걸러낸다.
-		if self._localOpen or self._requestCooldown > 0 or self._resultRemaining > 0 then return end
+		if self._localOpen or self._requestCooldown > 0 or self._resultRemaining > 0 or _PotionHarvestLogic:IsClientBusy() then return end
 		if not _GameManager.GameStarted or _GameManager.GameOver or _GameManager:IsGamePaused() then return end
 		if isvalid(_TitleUI.titleGroup) and _TitleUI.titleGroup.Enable then return end
 		if _CardManager:IsMonsterUnderTouch(event.TouchPoint) then return end
@@ -132,7 +133,7 @@ script Ep5CrystalMiningController extends Component
 	@ExecSpace("Server")
 	method void RequestBegin(string crystalName)
 		-- 서버가 성공 횟수와 속도를 각각 1~3 범위에서 정한다.
-		if self._open or _GameManager:IsGamePaused() or not self:ValidCrystal(crystalName, senderUserId) then return end
+		if self._open or _PotionHarvestLogic:HasActiveChallenge() or _GameManager:IsGamePaused() or not self:ValidCrystal(crystalName, senderUserId) then return end
 		if self.Entity.Name == "ep5_map3" then _Ep5Map3CollectLogic:EnsureHarvestPlan() end
 		self._session = self._session + 1 self._round = 1
 		self._required = _UtilLogic:RandomIntegerRange(1, math.max(1, math.min(3, self.MaxRequiredHits)))
@@ -144,7 +145,7 @@ script Ep5CrystalMiningController extends Component
 		log("[VRF] mining begin crystal=" .. crystalName .. " hits=" .. self._required .. " speed=" .. self._speed)
 		self:BuildTargets()
 		self._roundAt = _UtilLogic.ServerElapsedSeconds + 0.5
-		self._deadline = self._roundAt + 6.5
+		self._deadline = self._roundAt + self.ChallengeSeconds
 		self:SendChallenge()
 	end
 
@@ -178,6 +179,7 @@ script Ep5CrystalMiningController extends Component
 		if not self._open or self._owner ~= senderUserId or self._session ~= session or self._round ~= round then return end
 		if not isvalid(self._object) or not self:ValidCrystal(self._object.Name, senderUserId) or self._zone ~= _MapManager.CurrentMapIndex then self:EndMining("cancel") return end
 		local now = _UtilLogic.ServerElapsedSeconds
+		if now >= self._deadline then self:EndMining("miss") return end
 		if pressedAt ~= pressedAt or pressedAt < self._roundAt or pressedAt > now + 0.1 or pressedAt < now - 0.75 then self:EndMining("miss") return end
 		local fraction = self:GetCursorFraction(pressedAt - self._roundAt, self._speed)
 		local hitIndex = 0
@@ -264,6 +266,7 @@ script Ep5CrystalMiningController extends Component
 		end
 		self.miningCursor.UITransformComponent.UIRotation = Vector3(0, 0, 0)
 		self.miningPanel.Enable = true self.miningShield.Enable = true
+		self:RenderCountdown()
 		self:RenderCursor()
 		if previousHit then self._feedbackKey = "EP5_MINING_HIT" self:PlayHitEffect(hitIndex) end
 		self:RefreshTexts()
@@ -517,7 +520,7 @@ script Ep5CrystalMiningController extends Component
 		-- 평소 안내 문구 뒤에도 반투명 검은 배경을 깐다(2026-10-24 유저 지정, 맵 위에서 글씨가 안 보여서) — .ui 값과 같게 유지
 		toast.UITransformComponent.RectSize = Vector2(640,40)
 		toast.UITransformComponent.UIScale = Vector3(1,1,1)
-		toast.SpriteGUIRendererComponent.Color = Color(0,0,0,0.55)
+		toast.SpriteGUIRendererComponent.Color = Color(0,0,0,0.65)
 		self.miningGuide.UITransformComponent.RectSize = Vector2(620,30)
 		local text = self.miningGuide.TextGUIRendererComponent
 		text.FontSize = 20 text.MinSize = 18 text.MaxSize = 20 text.BestFit = true
@@ -597,7 +600,7 @@ script Ep5CrystalMiningController extends Component
 			self:HideLocal() return
 		end
 		if self._localOpen then
-			self:RenderCursor()
+			self:RenderCursor() self:RenderCountdown()
 			if not self._pending and self._renderAt >= self._localStartAt and self._swingRemaining <= 0 and self._feedbackKey ~= "EP5_MINING_GUIDE" then self._feedbackKey = "EP5_MINING_GUIDE" self:RefreshTexts() end
 		end
 		if self._swingRemaining > 0 then
@@ -623,6 +626,16 @@ script Ep5CrystalMiningController extends Component
 		self:EndMining("cancel") self._depleted = {}
 		for _, obj in pairs(self._crystals) do if isvalid(obj) then obj.Enable = true end end
 		log("[VRF] mining reset")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RenderCountdown()
+		local label=self.miningPanel:GetChildByName("Countdown"):GetChildByName("Value")
+		local left=math.max(0,math.min(self.ChallengeSeconds,self._localStartAt+self.ChallengeSeconds-_UtilLogic.ServerElapsedSeconds))
+		local locale=string.sub(_LocalizationService.CurrentLocaleId,1,2)
+		local suffix=locale=="ko" and "초" or ((locale=="zh" or locale=="ja") and "秒" or "s")
+		label.TextGUIRendererComponent.Text=tostring(math.ceil(left))..suffix
+		label.TextGUIRendererComponent.FontColor=left<=3 and Color(1,.40,.32,1) or Color(1,.95,.78,1)
 	end
 
 	method void OnEndPlay()

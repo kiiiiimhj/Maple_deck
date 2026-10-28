@@ -1,0 +1,3 @@
+# Potion Harvest current visuals: V2
+
+Read V2/README.md. The in-bar cursor/targets use one shared simple bottle, not four different outlines. Preserve original item art in heading/drop/absorption/success popup. Bonus text is64px Maple bold with cream fill, dark outline, minimum flight scale0.78, a low quadratic arc and a soft procedural golden halo. Current native implementation is Item/PotionHarvestLogic.mlua and ui/PotionHarvestGroup.ui; always read fresh sources and use UIBuilder. Do not restore full snapshots. BuffPotionLogic.mlua holds Maker-only F5-F8 cheats and authoritative durations/bonuses. Do not overwrite concurrent event or Pet House edits.

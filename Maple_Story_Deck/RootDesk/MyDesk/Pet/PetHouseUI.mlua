@@ -1,6 +1,8 @@
 @Logic
 script PetHouseUI extends Logic
 	property Entity TutorialHelp = "dbca0ee3-1780-4ebc-a82b-2194319f4a73"
+	-- 로비 펫하우스 버튼 느낌표(돌봄 필요할 때)
+	property Entity CareRedDot = "3f95c587-9553-4dc4-a763-a5286f6f151b"
 	property Entity TutorialRoot = "bf3d9ae0-9c34-4c9e-97d1-81612dfa7fcf"
 	property Entity TutorialContent = "44554687-fafb-4c55-884c-69116e2d2f37"
 	property boolean PetTutorialOpen = false
@@ -333,7 +335,7 @@ script PetHouseUI extends Logic
 		local pet=entry.progress or PetProgress()
 		ready=entry.ready and pet~=nil
 		local owned=ready and pet.Owned
-		local name=_LocalizationService:GetText(entry.nameKey)
+		local name=_PetLogic:GetPetDisplayName(entry.id)
 		self.PetDisplay:GetChildByName("Name").TextGUIRendererComponent.Text = _LocalizationService:GetTextFormat("PET_HOUSE_NAME_FORMAT",owned and pet.Level or 1,name)
 		self.PetDisplay:GetChildByName("State").TextGUIRendererComponent.Text = _LocalizationService:GetText(owned and "PET_OWNED" or "PET_PREVIEW")
 		local portrait = self.PetDisplay:GetChildByName("Portrait").SpriteGUIRendererComponent
@@ -353,7 +355,7 @@ script PetHouseUI extends Logic
 		local need = _PetLogic:GetXPNeeded(level)
 		local bonus = _PetLogic:GetBonusPercent(entry.id,level,owned and pet.Rank or 0)
 		self:SetText("Level", _LocalizationService:GetTextFormat("PET_LEVEL_FORMAT", level, maxLevel))
-		self:SetText("Bonus", _LocalizationService:GetTextFormat(entry.bonusKey,string.format("%.2f",bonus)))
+		self:SetText("Bonus", entry.id=="ttunho" and _PetLogic:GetPetSkillInfo(entry.id).name or _LocalizationService:GetTextFormat(entry.bonusKey,string.format("%.2f",bonus)))
 		if isvalid(self.StatPopup) and self.StatPopup.Enable then self:FillStatPopup() end
 		self:SetText("XP", _LocalizationService:GetTextFormat("PET_XP_FORMAT", xp, need))
 		self:RefreshGrowthProgress(xp,need,owned and level>=maxLevel)
@@ -519,6 +521,29 @@ script PetHouseUI extends Logic
 				particle.TextGUIRendererComponent.FontColor=Color(0.54,1,0.69,math.sin(age/2.2*math.pi)*0.85)
 			end
 		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method boolean AnyPetNeedsCare()
+		-- 보유 펫 중 하나라도 돌봄이 필요하면 true — 기준은 펫 표정(PlayIdle)과 같다: 피로 80 이상, 포만·기분·청결·건강 30 미만
+		if not _PetLogic.ClientReady or _PetLogic.ClientTest then return false end
+		for _,pet in pairs(_PetLogic.ClientPets or {}) do
+			if pet~=nil and pet.Owned then
+				if (pet.Fatigue or 0)>=80 or (pet.Fullness or 100)<30 or (pet.Mood or 100)<30 or (pet.Cleanliness or 100)<30 or (pet.Health or 100)<30 then return true end
+			end
+		end
+		return false
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RefreshCareRedDot()
+		-- 로비 펫하우스 버튼 느낌표(유저 지정 2026-10-28 "펫이 케어가 필요하면 느낌표"). 0.5초마다만 확인
+		if not isvalid(self.CareRedDot) then return end
+		local now=_UtilLogic.ElapsedSeconds
+		if now<(self._T.careDotAt or 0) then return end
+		self._T.careDotAt=now+0.5
+		local show=self:AnyPetNeedsCare()
+		if self.CareRedDot.Enable~=show then self.CareRedDot.Enable=show end
 	end
 
 	@ExecSpace("ClientOnly")
@@ -1062,6 +1087,8 @@ script PetHouseUI extends Logic
 	 self:ClosePetTutorial()
 	 self:CloseStatPopup()
 	 if self.Motion == "walk" then self:ShowWalkLoot() end
+	 -- 연출 중에 닫으면 서버의 연출 대기(busyUntil)도 풀어야 다시 열고 바로 돌봄이 먹힌다(효과는 이미 서버 반영됨)
+	 if self.Motion ~= "" or self.PendingAction ~= "" or self.MotionUntil > 0 or self.WaitingUntil > 0 then _PetLogic:RequestPetHouseClosed() end
 	 self:SetWalking(false,0)
 	 self:SetActionScenery("",0)
 	 self.PetDisplay:GetChildByName("Portrait").UITransformComponent.UIRotation = Vector3(0,0,0)
@@ -1113,6 +1140,7 @@ script PetHouseUI extends Logic
 				if entry.frames~=nil then self:RenderCustomAction(action,0)
 				elseif action=="feed" and entry.id=="5002617" then self.FeedingFrame=1 self:PlayPortrait(entry.motions.eat)
 				else self:PlayPortrait(entry.motions[motion]) end
+				if entry.id=="ttunho" then local sound=_PetLogic.TtunhoSounds[motion] or _PetLogic.TtunhoSounds.what _SoundOptionLogic:PlaySfx(sound,0.5) end
 				self:SetInjection(action=="inject",0) self:SetFeedingMotion(action=="feed",0)
 				self:SetWalking(action=="walk",0) self:SetActionScenery(action,0)
 				log("[VRF] PET-HOUSE care "..action.." species="..entry.id)
@@ -1131,7 +1159,7 @@ script PetHouseUI extends Logic
 			portrait.UITransformComponent.RectSize=Vector2(entry.canvas*scale,entry.canvas*scale)
 		else local scale=entry.pixelScale or self.PortraitPixelScale image.PreserveSprite=PreserveSpriteType.NativeSize image.LocalScale=Vector2(scale,scale) end
 		image.PlayRate=1 image.AnimClipPlayType=SpriteAnimClipPlayType.Loop image.ImageRUID=DataRef(ruid)
-		image.Enable=entry.frames~=nil or not _PetLogic.NativePetGearReady
+		image.Enable=entry.id=="ttunho" or entry.frames~=nil or not _PetLogic.NativePetGearReady
 		self.CustomImageRUID=entry.frames~=nil and ruid or ""
 	end
 
@@ -1210,6 +1238,7 @@ script PetHouseUI extends Logic
 	@ExecSpace("ClientOnly")
 	method void OnUpdate(number delta)
 	 self:TickPetTutorial(delta)
+	 self:RefreshCareRedDot()
 	 if not self.PetMode then return end
 	 self:AnimateNeeds(delta)
 	 self:AnimateAffinity(delta)
@@ -1489,7 +1518,8 @@ script PetHouseUI extends Logic
 		for _,ruid in ipairs(ids) do
 			local m=_PetLogic.NativePetGearSpriteMetrics[ruid]
 			if m~=nil then
-				local top=0;local layers=_PetLogic.NativePetGearOverlays[entry.id][ruid]
+				-- 장비 겹침 표에 없는 펫(뚠호 등)은 겹침 없음으로 본다 — 없으면 걷기마다 nil 인덱싱 에러가 매 프레임 쌓였다(2026-10-27)
+				local gear=_PetLogic.NativePetGearOverlays[entry.id];local top=0;local layers=gear~=nil and gear[ruid] or nil
 				if _PetLogic:HasPetGearBit(mask,1) and layers~=nil and layers.hat~=nil then top=math.min(top,layers.hat.y) end
 				local py=native and (1-m.py)*m.h or m.h*0.5
 				local sy=native and scale or (entry.canvas or 36)*scale/m.h
@@ -1612,7 +1642,7 @@ script PetHouseUI extends Logic
 		q.button.ButtonComponent.Enable=q.button.Enable and _UtilLogic.ElapsedSeconds>=math.max(self.MotionUntil,self.WaitingUntil)
 		if not q.open then return end
 		if not self.PetMode or entry.id~=q.petId or pet==nil or not pet.Owned then self:CloseWardrobe()return end
-		q.title.TextGUIRendererComponent.Text=_LocalizationService:GetTextFormat("PET_WARDROBE_TITLE",_LocalizationService:GetText(entry.nameKey))
+		q.title.TextGUIRendererComponent.Text=_LocalizationService:GetTextFormat("PET_WARDROBE_TITLE",_PetLogic:GetPetDisplayName(entry.id))
 		local labels=_PetUI.InventoryRoot.UIInventory:GetPetGearPurchaseLabels()
 		for index,c in ipairs(q.cards)do
 			local variant=math.floor((index-1)/3)+1;local slot=({"Cap","Coat","Necklace"})[(index-1)%3+1]

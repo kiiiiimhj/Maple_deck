@@ -1,0 +1,95 @@
+	@ExecSpace("ClientOnly")
+	method table AcornGuideLabels()
+		-- Keep every guide sentence localizable and separate from the illustrations.
+		local locale=string.lower(self.LocaleOverride~="" and self.LocaleOverride or (_LocalizationService.CurrentLocaleId or "ko"))
+		local key=locale=="zh-tw" and "tw" or string.sub(locale,1,2)
+		local text={
+			ko={"도토리 교환소 이용 안내","화면을 누르면 닫혀요.","모험에서 등장하는\n칠면조를 잡으세요","칠면조가 떨어트린\n도토리를 모으세요","도토리 상점에서\n아이템을 교환하세요"},
+			tw={"橡果兌換所指南","點擊畫面即可關閉。","擊敗冒險中\n出現的火雞","收集火雞\n掉落的橡果","到橡果商店\n兌換道具"},
+			en={"Acorn Exchange Guide","Tap anywhere to close.","Defeat the turkeys\nthat appear on adventures","Collect the acorns\nthat the turkeys drop","Exchange acorns for items\nat the Acorn Exchange"},
+			ja={"どんぐり交換所ガイド","画面をタップすると閉じます。","冒険に現れる\n七面鳥を倒そう","七面鳥が落とした\nどんぐりを集めよう","どんぐりのお店で\nアイテムと交換しよう"},
+			zh={"橡果兑换所指南","点击画面即可关闭。","击败冒险中\n出现的火鸡","收集火鸡\n掉落的橡果","到橡果商店\n兑换道具"},
+			es={"Guía del canje de bellotas","Toca la pantalla para cerrar.","Derrota a los pavos\nque aparecen en la aventura","Recoge las bellotas\nque dejan los pavos","Canjea bellotas por objetos\nen la tienda de bellotas"}}
+		return text[key] or text.en
+	end
+
+	@ExecSpace("ClientOnly")
+	method void InitializeAcornGuide()
+		-- Reuse the pet-house information button and close gesture in this shop.
+		self:Node("Tutorial").Enable=false self.AcornGuideOpen=false
+		self:Bind(self:Node("Window/Help"),function() self:OpenAcornGuide() end)
+		self:Bind(self:Node("Tutorial/Dim"),function() self:CloseAcornGuide() end)
+		_ResourceService:PreloadAsync({"668fcf8d519b40a8a6cc866b5ea34c99","78d254b94ee54616ab1d6038e131ec8a","5a135ad45278413db5d6c903a983d1ca",_ThanksgivingMonsterLogic.IdleFrames[1],_ThanksgivingMonsterLogic.AcornIconRUID,"52df3f22bb014921a232021a48a1279b","b239798f5a8d4129ae1c086e7069f7fc"},function(results)
+			local ready=true for _,status in pairs(results) do if status~=PreloadResultStatus.Success then ready=false end end
+			log("[VRF] ACORN-GUIDE resources ready="..tostring(ready))
+		end)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void FitAcornGuide()
+		-- A single fitted canvas keeps image, label, card and arrow endpoints together.
+		local root=self:Node("Tutorial") local canvas=root.Parent.UITransformComponent.RectSize
+		local w=canvas.x local h=canvas.y local cx=0 local cy=0
+		local sw=_UILogic.ScreenWidth local sh=_UILogic.ScreenHeight
+		if sw>0 and sh>0 then
+			local p0=_UILogic:ScreenToLocalUIPosition(Vector2(0,0),root.UITransformComponent)
+			local p1=_UILogic:ScreenToLocalUIPosition(Vector2(sw,sh),root.UITransformComponent)
+			if p0~=nil and p1~=nil then
+				local mw=math.abs(p1.x-p0.x) local mh=math.abs(p1.y-p0.y)
+				if mw>canvas.x*.5 and mw<canvas.x*2 and mh>canvas.y*.5 and mh<canvas.y*2 then w=math.min(w,mw) h=math.min(h,mh) cx=(p0.x+p1.x)*.5 cy=(p0.y+p1.y)*.5 end
+			end
+		end
+		local scale=math.max(.05,math.min(1,(w-80)/1520,(h-80)/760))
+		self.AcornGuideCanvas=Vector2(canvas.x,canvas.y) self.AcornGuideScreen=Vector2(sw,sh)
+		local content=self:Node("Tutorial/Content").UITransformComponent
+		content.UIScale=Vector3(scale,scale,1) content.anchoredPosition=Vector2(cx,cy)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OpenAcornGuide()
+		-- Show only on an open catalog, without replacing an active purchase dialog.
+		if not self.Opened or self.Pending or self.AcornGuideOpen or self:Node("Confirm").Enable or self:Node("Detail").Enable then return end
+		self.AcornGuideOpen=true self.AcornGuideTime=0 self.AcornGuideStage=0 self.AcornGuideAges={}
+		local text=self:AcornGuideLabels() self:Text("Tutorial/Content/Title",text[1]) self:Text("Tutorial/Content/Hint",text[2])
+		for i=1,3 do
+			self:Text("Tutorial/Content/Step"..i.."/Label",text[i+2])
+			local step=self:Node("Tutorial/Content/Step"..i) step.Enable=false step.CanvasGroupComponent.GroupAlpha=0
+		end
+		for i=1,2 do local arrow=self:Node("Tutorial/Content/Arrow"..i) arrow.Enable=false arrow.CanvasGroupComponent.GroupAlpha=0 end
+		self:Node("Tutorial/Content/Step1/Turkey").SpriteGUIRendererComponent.ImageRUID=DataRef(_ThanksgivingMonsterLogic.IdleFrames[1])
+		local gold=self:ProductIcon(self:Catalog()[7]) if gold~="" then self:Node("Tutorial/Content/Step3/Gold").SpriteGUIRendererComponent.ImageRUID=DataRef(gold) end
+		self:Node("Tutorial").Enable=true _UILogic:SetSiblingIndex(self:Node("Tutorial").UITransformComponent,100010)
+		self:FitAcornGuide() self:RevealAcornGuideStage(1)
+		log("[VRF] ACORN-GUIDE opened stages=3 localized=true")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RevealAcornGuideStage(integer index)
+		-- An arrow appears with its destination card; it never points at an empty stage.
+		if index<1 or index>3 then return end
+		self.AcornGuideStage=index self.AcornGuideAges[index]=0 self:Node("Tutorial/Content/Step"..index).Enable=true
+		if index>1 then self:Node("Tutorial/Content/Arrow"..(index-1)).Enable=true end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void TickAcornGuide(number delta)
+		-- Fade without scaling individual cards, keeping every arrow tip on its target.
+		if not self.AcornGuideOpen then return end
+		if not self.Opened then self:CloseAcornGuide() return end
+		local canvas=self:Node("Tutorial").Parent.UITransformComponent.RectSize
+		if canvas.x~=self.AcornGuideCanvas.x or canvas.y~=self.AcornGuideCanvas.y or _UILogic.ScreenWidth~=self.AcornGuideScreen.x or _UILogic.ScreenHeight~=self.AcornGuideScreen.y then self:FitAcornGuide() end
+		self.AcornGuideTime=self.AcornGuideTime+delta
+		while self.AcornGuideStage<3 and self.AcornGuideTime>=self.AcornGuideStage*.65 do self:RevealAcornGuideStage(self.AcornGuideStage+1) end
+		for i=1,self.AcornGuideStage do
+			local age=(self.AcornGuideAges[i] or 0)+delta self.AcornGuideAges[i]=age local alpha=math.min(1,age/.15)
+			self:Node("Tutorial/Content/Step"..i).CanvasGroupComponent.GroupAlpha=alpha
+			if i>1 then self:Node("Tutorial/Content/Arrow"..(i-1)).CanvasGroupComponent.GroupAlpha=alpha end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void CloseAcornGuide()
+		-- Closing the guide returns to the same catalog and scroll position.
+		self.AcornGuideOpen=false self.AcornGuideStage=0 self.AcornGuideTime=0 self.AcornGuideAges={}
+		self:Node("Tutorial").Enable=false
+	end

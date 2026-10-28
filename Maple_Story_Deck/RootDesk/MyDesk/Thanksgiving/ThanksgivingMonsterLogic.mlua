@@ -1,0 +1,312 @@
+@Logic
+script ThanksgivingMonsterLogic extends Logic
+
+	-- 칠면조 등장 간격 2~3분(유저 지정 2026-10-28, 이전 1~3분)
+	property number MinimumSpawnSeconds = 120
+	property number MaximumSpawnSeconds = 180
+	-- 칠면조 1마리당 도토리 = AcornsPerTurkeyMin ~ AcornsPerTurkey 사이 무작위(유저 지정 2026-10-28 "5~10개")
+	property integer AcornsPerTurkeyMin = 5
+	property integer AcornsPerTurkey = 10
+	-- 체력 대신 남은 도토리 수만큼 유효 타격을 받는다.
+	-- 칠면조 크기(유저 지정 2026-10-28 "15% 키우자": 1.32 → 1.52)
+	property number TurkeyScale = 1.52
+	-- 걷는 범위 반폭(존 중심 기준, 월드 단위) — 화면 밖으로 몸이 나가면 줄일 것
+	property number PatrolHalfWidth = 4.0
+	property any _cheatKeyHandler = nil
+	property string AcornItemId = "thanksgiving_acorn"
+	property string AcornIconRUID = "44a17ff88d9f41f191095a1746a29c6c"
+	property number FleeSeconds = 3
+	property number WalkSpeed = 0.5
+	property number FleeSpeedMultiplier = 3.5
+	property table IdleFrames = {"8b790d8d85d146b280f769cb146dc534"}
+	property table WalkFrames = {"7e564fb51be849999f19b3be3f26d720","1eb17b8527e34438b35fac0d756905f0"}
+	property table DieFrames = {"17fd505f73ae4a12a6c2df8d09141149","9bcb2745e34746358064e11262c00b7f","2ee3915d869942a8b86e9c7a7a915504","d95f41cd1ac043f494a5b9814f1efa9a","f2ea3ff839394d6792617fe09d4976f6","020d8c517c1d4ac9b606e4fc09af66f1"}
+	property boolean ArtworkReady = false
+
+	method void OnBeginPlay()
+		-- Register this seasonal actor without rewriting the shared monster roster or UI.
+		self._T.active={} self._T.rewards={} self._T.run=-1
+		self:RegisterArtwork()
+		if self:IsClient() then
+			self:PreloadArtwork()
+			if Environment:IsMakerPlay() then
+				self._cheatKeyHandler=_InputService:ConnectEvent(KeyDownEvent,function(event)
+					if event.key==KeyboardKey.T then self:CheatRequestSpawnTurkey() end
+				end)
+				log("[VRF] THANKSGIVING TURKEY cheat ready key=T Maker only")
+			end
+		end
+	end
+
+	method void RegisterArtwork()
+		-- Walking and fleeing reuse the same native pixels with separate playback speeds.
+		_GameManager.CustomMonsterClips[self.IdleFrames[1]]={frames=self.IdleFrames,step=.15,loop=true}
+		_GameManager.CustomMonsterClips[self.WalkFrames[1]]={frames=self.WalkFrames,step=.24,loop=true}
+		_GameManager.CustomMonsterClips[self.WalkFrames[2]]={frames=self.WalkFrames,step=.07,loop=true}
+		_GameManager.CustomMonsterClips[self.DieFrames[1]]={frames=self.DieFrames,step=.13,loop=false,fadeOut=.28}
+		local index=#_GameManager.CustomMonsterVisibleShapes+1
+		table.insert(_GameManager.CustomMonsterVisibleShapes,{.125,.098,.857,.705})
+		for _,frames in ipairs({self.IdleFrames,self.WalkFrames,self.DieFrames}) do
+			for _,ruid in ipairs(frames) do _GameManager.CustomMonsterVisibleFrames[ruid]=index end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PreloadArtwork()
+		-- Warm all poses before the first timed appearance; retry briefly on a cold connection.
+		if self.ArtworkReady or self._T.loading then return end
+		self._T.loading=true local assets={}
+		for _,frames in ipairs({self.IdleFrames,self.WalkFrames,self.DieFrames}) do
+			for _,ruid in ipairs(frames) do table.insert(assets,ruid) end
+		end
+		table.insert(assets,"98262e9a441d41abb19a6d519f74aec7")
+		table.insert(assets,"44a17ff88d9f41f191095a1746a29c6c")
+		_ResourceService:PreloadAsync(assets,function(results)
+			if not isvalid(self) then return end
+			local count=0 local ready=true
+			for _,status in pairs(results) do count=count+1 if status~=PreloadResultStatus.Success then ready=false end end
+			self.ArtworkReady=ready and count==#assets self._T.loading=false
+			self._T.retryAt=_UtilLogic.ElapsedSeconds+2
+			if Environment:IsMakerPlay() then log("[VRF] THANKSGIVING TURKEY artwork ready="..tostring(self.ArtworkReady).." resources="..count) end
+		end)
+	end
+
+	method boolean IsSeasonOpen()
+		-- Maker can test the event before November; published worlds use the real event dates.
+		return Environment:IsMakerPlay() or _PetLogic:IsThanksgivingActive()
+	end
+
+	method number RollSpawnDelay()
+		-- One active-play countdown survives zone changes so travel cannot reroll appearances.
+		return self.MinimumSpawnSeconds+_UtilLogic:RandomDouble()*math.max(0,self.MaximumSpawnSeconds-self.MinimumSpawnSeconds)
+	end
+
+	method void OnUpdate(number delta)
+		-- Pause event time in menus, safe areas and side maps, matching the combat clock.
+		if self:IsClient() then
+			if not self.ArtworkReady and _UtilLogic.ElapsedSeconds>=(self._T.retryAt or 0) then self:PreloadArtwork() end
+			return
+		end
+		self:ProcessRewards()
+		if self._T.run~=_PetLogic.RunToken then
+			self:ClearActors() self._T.run=_PetLogic.RunToken self._T.remaining=self:RollSpawnDelay()
+		end
+		if not _GameManager.GameStarted or _GameManager.GameOver or not self:IsSeasonOpen() then
+			self:ClearActors() return
+		end
+		if _GameManager:IsGamePaused() or _GameManager.SafeAreaFrozen or _MapManager.AwayOnSideMap then return end
+		local zone=_MapManager.CurrentMapIndex
+		if not self:IsEligibleZone(zone) then return end
+		self._T.remaining=math.max(0,(self._T.remaining or self:RollSpawnDelay())-math.max(0,delta))
+		if self._T.remaining>0 then return end
+		local actor=self._T.active[zone]
+		if isvalid(actor) and not actor._dead then return end
+		if self:SpawnTurkey(zone,_PetLogic.RunUserId)~=nil then self._T.remaining=self:RollSpawnDelay() end
+	end
+
+	@ExecSpace("Server")
+	method void CheatRequestSpawnTurkey()
+		-- T is a Maker-only shortcut; validate the run owner again on the server.
+		if not Environment:IsMakerPlay() or not _GameManager.GameStarted or _GameManager.GameOver then return end
+		if _GameManager:IsGamePaused() or _GameManager.SafeAreaFrozen or _MapManager.AwayOnSideMap then return end
+		if senderUserId==nil or senderUserId=="" or senderUserId~=_PetLogic.RunUserId then return end
+		local player=_UserService:GetUserEntityByUserId(senderUserId)
+		if not isvalid(player) or self._T.cheatSpawnBusy then return end
+		local now=_UtilLogic.ServerElapsedSeconds
+		if now-(self._T.lastCheatSpawnAt or -100)<.5 then return end
+		local zone=_MapManager.CurrentMapIndex if not self:IsEligibleZone(zone) then return end
+		self._T.lastCheatSpawnAt=now self._T.cheatSpawnBusy=true
+		local old=self._T.active[zone]
+		if isvalid(old) and isvalid(old.Entity) then old.Entity:Destroy() end
+		self._T.active[zone]=nil
+		local ai=self:SpawnTurkey(zone,senderUserId)
+		if isvalid(ai) then
+			local m=ai._T.thanksgivingTurkey local p=ai.Entity.TransformComponent.Position
+			local localPlayer=_MonsterSpawner:ToLocalSpawnPos(ai.Entity.Parent,player.TransformComponent.WorldPosition)
+			ai.Entity.TransformComponent.Position=Vector3(math.max(m.lo,math.min(m.hi,localPlayer.x+2)),m.ground,p.z)
+			m.direction=-1
+			self._T.remaining=self:RollSpawnDelay()
+			log("[VRF] THANKSGIVING TURKEY cheat spawned key=T acorns="..m.remainingAcorns)
+		end
+		self._T.cheatSpawnBusy=false
+	end
+
+	@ExecSpace("ServerOnly")
+	method boolean IsEligibleZone(integer zone)
+		-- Every episode shares the event; dedicated peaceful quest rooms keep their usual policy.
+		return _GameManager.SelectedEpisode>=1 and _GameManager.SelectedEpisode<=5
+			and _MapManager:GetZoneInfo(zone)~=nil and not _MonsterSpawner:IsNoMonsterZone(zone)
+	end
+
+	@ExecSpace("ServerOnly")
+	method any FindPatrol(integer zone)
+		-- Pick a real continuous bottom foothold within the visible zone, including offset containers.
+		local info=_MapManager:GetZoneInfo(zone) if info==nil then return nil end
+		-- 걷는 범위 = 존 중심 ±PatrolHalfWidth(칠면조 "중심" 기준). 예전 ±5.5는 몸 반폭이 더해져 좌우 화면 끝을 살짝 넘었다
+		-- (유저 리포트 2026-10-28, 크기 1.52배 이후 더 두드러짐). 모바일 가시 반폭 ~4.8 안에 몸까지 들어오게 줄였다
+		local center=info.spawnX or 0 local lo=center-self.PatrolHalfWidth local hi=center+self.PatrolHalfWidth
+		local bounds=_MonsterSpawner:GetZoneXBounds(zone)
+		if bounds~=nil then
+			if bounds.minX~=nil then lo=math.max(lo,bounds.minX+.65) end
+			if bounds.maxX~=nil then hi=math.min(hi,bounds.maxX-.65) end
+		end
+		local best=nil
+		for _,run in ipairs(_MonsterSpawner:GetFlatRunsCached(zone)) do
+			local a=math.max(lo,run.xMin+.6) local b=math.min(hi,run.xMax-.6)
+			if not run.noSpawn and b-a>=2 and (best==nil or run.y<best.y or (run.y==best.y and b-a>best.hi-best.lo)) then
+				best={lo=a,hi=b,y=run.y,center=center}
+			end
+		end
+		return best
+	end
+
+	@ExecSpace("ServerOnly")
+	method any SpawnTurkey(integer zone, string userId)
+		-- Use the existing targetable monster model while keeping the turkey completely passive.
+		if not self:IsSeasonOpen() or not self:IsEligibleZone(zone) or userId=="" then return nil end
+		local owner=_UserService:GetUserEntityByUserId(userId)
+		local record=_PetLogic.States[userId]
+		if not isvalid(owner) or record==nil or record.test then return nil end
+		local old=self._T.active[zone] if isvalid(old) and not old._dead then return nil end
+		local patrol=self:FindPatrol(zone) if patrol==nil then return nil end
+		local parent=_MonsterSpawner:GetZoneEntity(zone) if not isvalid(parent) then return nil end
+		local x=patrol.lo+(patrol.hi-patrol.lo)*_UtilLogic:RandomDouble()
+		local pos=_MonsterSpawner:ToLocalSpawnPos(parent,Vector3(x,patrol.y+.015,0))
+		local actor=_SpawnService:SpawnByModelId(_MonsterSpawner.MonsterModelId,"ThanksgivingTurkey",pos,parent)
+		if not isvalid(actor) then return nil end
+		local ai=actor:GetComponent("script.MonsterAI")
+		if ai==nil then actor:Destroy() return nil end
+		local hp=1
+		ai:InitializeBossEscort(zone,hp,self.WalkSpeed,self.IdleFrames[1],self.WalkFrames[1],"",self.DieFrames[1],.78,pos.x,pos.y)
+		ai._isBoss=false ai._currentScale=self.TurkeyScale ai:SetScaleMultiplier(1)
+		ai:SetAlienInvaderSounds("","","3ebfed8497364b95845c3454304e2011")
+		ai._T.thanksgivingTurkey={owner=userId,zone=zone,run=_PetLogic.RunToken,bagId=tostring(actor.Id),lo=patrol.lo-x+pos.x,hi=patrol.hi-x+pos.x,
+			ground=pos.y,direction=_UtilLogic:RandomDouble()<.5 and -1 or 1,flee=0,dust=0,phase=1.2,walking=true,remainingAcorns=_UtilLogic:RandomIntegerRange(math.min(self.AcornsPerTurkeyMin,self.AcornsPerTurkey),self.AcornsPerTurkey),dropsCreated=0,rewarded=false}
+		ai:UpdateDepth() self._T.active[zone]=ai
+		if zone~=_MapManager.CurrentMapIndex then ai:Pause() end
+		-- 등장 알림(유저 지정 2026-10-28) — 그 칠면조 주인에게만
+		_UIToast:ShowMessage("THANKSGIVING_TURKEY_APPEAR",userId)
+		if Environment:IsMakerPlay() then log("[VRF] THANKSGIVING TURKEY spawned zone="..zone.." passive=true acorns="..tostring(ai._T.thanksgivingTurkey.remainingAcorns)) end
+		return ai
+	end
+
+	@ExecSpace("ServerOnly")
+	method void UpdateTurkey(any ai, number delta)
+		-- Any damage source triggers a short fast escape, with no attack or separate impact effect.
+		local m=ai._T.thanksgivingTurkey if m==nil then return end
+		if m.zone~=_MapManager.CurrentMapIndex or _MapManager.AwayOnSideMap or _GameManager.SafeAreaFrozen then return end
+		if ai._isStunned or ai._isHardFrozen or ai._isLevitating then return end
+		local dt=math.max(0,math.min(delta,.1)) local fleeing=m.flee>0
+		m.flee=math.max(0,m.flee-dt)
+		if not fleeing then
+			m.phase=m.phase-dt
+			if m.phase<=0 then m.walking=not m.walking m.phase=m.walking and (1+_UtilLogic:RandomDouble()*2) or (.5+_UtilLogic:RandomDouble()) end
+		end
+		local key=self.IdleFrames[1]
+		if fleeing then key=self.WalkFrames[2] elseif m.walking then key=self.WalkFrames[1] end
+		if ai.MonsterSprite~=key then ai.MonsterSprite=key end
+		ai.IsStanding=not m.walking
+		if not m.walking then return end
+		local tf=ai.Entity.TransformComponent local p=tf.Position
+		local speed=ai.ApproachSpeed*(fleeing and self.FleeSpeedMultiplier or 1)
+		local nextX=p.x+m.direction*speed*dt
+		if nextX>m.hi then nextX=m.hi m.direction=-1 elseif nextX<m.lo then nextX=m.lo m.direction=1 end
+		tf.Position=Vector3(nextX,m.ground,p.z)
+		local renderer=ai.Entity.SpriteRendererComponent
+		if renderer~=nil then renderer.FlipX=m.direction>0 end
+		local overlay=ai:GetDepthOverlayRenderer() if overlay~=nil then overlay.FlipX=m.direction>0 end
+		ai:UpdateDepth()
+		if fleeing and math.abs(nextX-p.x)>.0001 then
+			m.dust=m.dust-dt
+			if m.dust<=0 then m.dust=.22 self:ShowRunDust(ai.Entity,m.zone,m.direction,m.owner) end
+		end
+	end
+
+	@ExecSpace("Client")
+	method void ShowRunDust(Entity actor, integer zone, integer direction)
+		-- Small short-lived puffs stay behind the feet rather than covering the actor.
+		if not isvalid(actor) or zone~=_MapManager.CurrentMapIndex or _GameManager:IsGamePaused() then return end
+		local map=actor.CurrentMap if not isvalid(map) then return end
+		local p=actor.TransformComponent.WorldPosition
+		local dust=_SpawnService:SpawnByModelId("skilleffect","TurkeyFootDust",Vector3(p.x-direction*.2,p.y+.02,p.z-.01),map)
+		if not isvalid(dust) then return end
+		local r=dust.SpriteRendererComponent
+		r.SpriteRUID="98262e9a441d41abb19a6d519f74aec7" r.FlipX=direction<0
+		r.SortingLayer=actor.SpriteRendererComponent.SortingLayer r.OrderInLayer=actor.SpriteRendererComponent.OrderInLayer+1
+		dust.TransformComponent.Scale=Vector3(.22,.22,1) dust:Destroy(.45)
+		self._T.dustCount=(self._T.dustCount or 0)+1
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnTurkeyHit(any ai, number damage)
+		local m=ai._T.thanksgivingTurkey
+		if m==nil or ai._dead or m.remainingAcorns<=0 or damage~=damage or damage<=0 then return end
+		if not _GameManager.GameStarted or _GameManager.GameOver or _GameManager:IsGamePaused() or _GameManager.SafeAreaFrozen or _MapManager.AwayOnSideMap then return end
+		if m.zone~=_MapManager.CurrentMapIndex or m.run~=_PetLogic.RunToken then return end
+		-- Reserve this hit before any yielding service call; even simultaneous hits spend only one acorn each.
+		m.remainingAcorns=m.remainingAcorns-1 m.dropsCreated=m.dropsCreated+1
+		local dropIndex=m.dropsCreated local run=m.run
+		m.flee=self.FleeSeconds m.dust=0 m.walking=true
+		local player=_UserService:GetUserEntityByUserId(m.owner)
+		if isvalid(player) then m.direction=ai.Entity.TransformComponent.WorldPosition.x>=player.TransformComponent.WorldPosition.x and 1 or -1 end
+		local pos=ai.Entity.TransformComponent.WorldPosition
+		local fall=_GameManager:GetGroundFallFor(ai.Entity,pos)
+		local scale=_CardManager:GetEffectScaleRatio(ai)
+		_PlayerInventory:ReserveAcquisitionOrder(self.AcornItemId)
+		_GameManager:ScheduleLootDrop(pos,self.AcornIconRUID,fall.x,fall.y,function()
+			table.insert(self._T.rewards,{owner=m.owner,amount=1,zone=m.zone,pos=pos,run=run,bagId=m.bagId,dropIndex=dropIndex})
+			self:ProcessRewards()
+		end,scale)
+		_BuffPotionLogic:OnPlayerDamageDealt(1)
+		if not ai._dead then
+			if m.remainingAcorns<=0 then ai.CurrentHp=0 ai:Die() else ai.CurrentHp=1 end
+		end
+		if Environment:IsMakerPlay() then log("[VRF] THANKSGIVING TURKEY hit drop=1 remaining="..m.remainingAcorns) end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnTurkeyKilled(any ai)
+		-- Every acorn already has its own hit drop. Death must never award a second lump sum.
+		local m=ai._T.thanksgivingTurkey if m==nil or m.rewarded or m.remainingAcorns>0 then return end
+		m.rewarded=true
+		if self._T.active[m.zone]==ai then self._T.active[m.zone]=nil end
+		_GameManager:AddKillCount()
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ProcessRewards()
+		-- A shop transaction can briefly hold the balance; retry the pending reward after it releases.
+		if self._T.rewards==nil or self._T.flushing then return end
+		self._T.flushing=true
+		for i=#self._T.rewards,1,-1 do
+			local reward=self._T.rewards[i]
+			if _PetLogic:AddThanksgivingCurrency(reward.owner,reward.amount) then
+				table.remove(self._T.rewards,i)
+				if reward.run==_PetLogic.RunToken then
+					_PlayerInventory:AddItem(self.AcornItemId,reward.amount)
+					_RunLootLogic:AddAcorns(self.AcornIconRUID,reward.amount)
+				end
+				local player=_UserService:GetUserEntityByUserId(reward.owner)
+				local saved=false
+				if isvalid(player) and player.PlayerDBManager~=nil then saved=player.PlayerDBManager:SavePetPurchaseAndWait() end
+				if Environment:IsMakerPlay() then log("[VRF] THANKSGIVING TURKEY reward="..reward.amount.." saved="..tostring(saved)) end
+			end
+		end
+		self._T.flushing=false
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ClearActors()
+		-- A run reset removes only this feature's actors and never touches the player's shop edits.
+		for _,ai in pairs(self._T.active or {}) do if isvalid(ai) and isvalid(ai.Entity) then ai.Entity:Destroy() end end
+		self._T.active={}
+	end
+
+	method void OnEndPlay()
+		-- Release the Maker key handler and remove this feature's actors.
+		if self:IsServer() then self:ClearActors()
+		elseif self._cheatKeyHandler~=nil then
+			_InputService:DisconnectEvent(KeyDownEvent,self._cheatKeyHandler) self._cheatKeyHandler=nil
+		end
+	end
+end

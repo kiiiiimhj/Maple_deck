@@ -116,6 +116,12 @@ script TutorialLogic extends Logic
 	-- 테스트 전용(Maker에서만): 플레이할 때마다 로비 튜토리얼을 다시 띄운다. 저장·다이아 지급은 안 한다(2026-10-25 유저 "펫 부분 추가하게 볼 수 있게"). ⚠ 출시 전 false
 	property boolean TestReplayLobbyTutorialInMaker = false
 
+	-- ── 버프 포션 강화 튜토리얼(유저 지정 2026-10-28) ─────────────────────────────────
+	-- 버프 포션 4종 중 아무거나 처음 먹으면 강화 미니게임이 뜰 때 한 번만 딤 + 안내 문구(PotionHarvestLogic이 띄운다).
+	-- 서버 전용 값, 로드 전 기본값 true(봤음). 유저별 저장소 Tutorial.PotionHarvestSeen
+	property boolean PotionTutorialSeen = true
+	property string PotionStorageKey = "Tutorial.PotionHarvestSeen"
+
 	@ExecSpace("ServerOnly")
 	@EventSender("Service", "UserService")
 	handler HandleUserEnterEvent(UserEnterEvent event)
@@ -140,6 +146,9 @@ script TutorialLogic extends Logic
 		if self:IsLobbyReplayTest() then self.LobbySeen = false end
 		self.LobbyLoaded = true
 		log("TutorialLogic: lobby tutorial seen=" .. tostring(self.LobbySeen))
+		-- 읽기 실패면 본 것으로 둔다(이미 하던 유저도 처음 먹을 때 한 번은 보게 저장값만 본다)
+		local potionCode, potionRaw = self._storage:GetAndWait(self.PotionStorageKey)
+		self.PotionTutorialSeen = (potionCode ~= 0) or (potionRaw == "1")
 		log("TutorialLogic started (seen=" .. tostring(self.TutorialSeen) .. ", eggSeen=" .. tostring(self.EggTutorialSeen) .. ")")
 	end
 
@@ -316,6 +325,15 @@ script TutorialLogic extends Logic
 		self.TutorialSeen = true
 		if self._storage ~= nil then self._storage:SetAndWait(self.StorageKey, "1") end
 		log("TutorialLogic: marked as seen")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void MarkPotionTutorialSeen()
+		-- 포션 강화 튜토리얼을 한 번 보여 줬다 — 다시는 안 뜬다
+		if self.PotionTutorialSeen then return end
+		self.PotionTutorialSeen = true
+		if self._storage ~= nil then self._storage:SetAndWait(self.PotionStorageKey, "1") end
+		log("TutorialLogic: potion harvest tutorial marked as seen")
 	end
 
 	@ExecSpace("Server")

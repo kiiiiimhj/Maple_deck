@@ -72,4 +72,39 @@ script EasterEggMessageLogic extends Logic
 		self:ShowThen("PUZZLE", followKey)
 	end
 
+	-- ── 존 입장 힌트(유저 지정 2026-10-28) ─────────────────────────────────────────────
+	-- 캐릭터 해금 이스터에그가 있는 존에 들어가면 한 판에 한 번 힌트 토스트를 띄운다. 해금했거나 퍼즐을 이미 풀었으면 안 띄운다.
+	--   존35(map21, 실피드 나무 퍼즐)     : 실피드 해금 전
+	--   존58(ep2_map2 Zone4, 석상 퍼즐)   : 레이온 해금 전 + 석상 퍼즐 미해결
+	--   존65(ep2_map3, 지친 기사 소환)    : 레이온 해금 전 + 지친 기사 미발동
+	property integer _hintLastZone = -1
+	property any _hintShown = nil
+	property integer _hintRun = -1
+
+	@ExecSpace("ServerOnly")
+	method void OnUpdate(number delta)
+		if not _GameManager.GameStarted or _GameManager.GameOver then self._hintLastZone = -1 return end
+		local run = _PetLogic.RunToken
+		if self._hintShown == nil or self._hintRun ~= run then self._hintShown = {} self._hintRun = run end
+		local zone = _MapManager.CurrentMapIndex
+		if zone == self._hintLastZone then return end
+		self._hintLastZone = zone
+		local key = self:GetZoneHintKey(zone)
+		if key == "" or self._hintShown[zone] then return end
+		self._hintShown[zone] = true
+		-- 존 이동 연출(와이프)이 걷힌 뒤 보이게 조금 늦춘다
+		_TimerService:SetTimerOnce(function()
+			if _MapManager.CurrentMapIndex == zone and not _GameManager.GameOver then _UIToast:ShowMessage(key) end
+		end, 1.0)
+		log("EasterEggMessage: zone hint zone=" .. zone .. " key=" .. key)
+	end
+
+	@ExecSpace("ServerOnly")
+	method string GetZoneHintKey(integer zone)
+		if zone == 35 and not _CharacterUnlockLogic.SylphUnlocked then return "ZONE_HINT_SYLPH_TREE" end
+		if zone == 58 and not _CharacterUnlockLogic.LeionUnlocked and not _Ep2Map2StatuePuzzleLogic.Solved then return "ZONE_HINT_LEION_TORCH" end
+		if zone == 65 and not _CharacterUnlockLogic.LeionUnlocked and not _Ep2Map3TiredKnightLogic.Triggered then return "ZONE_HINT_TIRED_KNIGHT" end
+		return ""
+	end
+
 end

@@ -1,0 +1,674 @@
+@Logic
+script PotionHarvestLogic extends Logic
+	-- ep5_map1의 기존 파란 수정에만 적용하는 런 단위 타이밍 채굴.
+	@MinValue(1) @MaxValue(3)
+	property integer MaxRequiredHits = 3
+	@MinValue(1) @MaxValue(3)
+	property integer MaxSpeedLevel = 3
+	property number TrackLength = 704
+	property number ChallengeSeconds = 10
+	property string CrystalRUID = "d5d290cfd3f6426bb9dfff5a09e59a94"
+	property string OreItemId = "blue_ore"
+	property integer MinZone = 190
+	property integer MaxZone = 199
+	-- 0 = crystal pickaxe; 1 = flower sickle.
+	property integer ToolStyle = 0
+	property string HarvestTitleKey = "MAP19_HARVEST_TITLE"
+	property string HarvestSuccessKey = "EP5_MINING_SUCCESS"
+	property string StrikeSoundRUID = "6dc40825bdbd4184a1bac3d0868389b2"
+	property string SuccessSoundRUID = "972843e759204d3e9ad84e7d3fa94f83"
+	property string SuccessEffectRUID = "a18f1b1d47694977844032e98e54cbc5"
+	property Entity miningGroup = "e98897c3-b8a4-4a88-9392-0e9e89d9dcb9"
+	property Entity miningShield = "c02bf1f0-42c8-4bc3-baab-79a836abdbe7"
+	property Entity miningPanel = "8a01b0cb-4a6c-4b0f-9821-f00a24c7e133"
+	property Entity miningTrack = "2bd8a750-9f22-4c60-b86a-dea7e719fb3e"
+	property Entity miningTarget = "bdef4a50-e348-471e-9a99-49f8ddfeb1ac"
+	property Entity miningCursor = "e5003b95-6922-40a7-9d1d-f14bb715b0b0"
+	property Entity miningTitle = "52487b92-3a78-451d-bb41-68295d2755cc"
+	property Entity miningProgress = "593aa45f-1015-4271-a2b5-648d593f9d38"
+	property Entity miningGuide = "8647fd96-67a4-4966-ad10-9f632f36cb73"
+	property Entity miningPickaxe = "4b767201-7ee4-46dd-ab83-1b35392ca699"
+	property table _crystals = {}
+	property table _connections = {}
+	property table _depleted = {}
+	property table _targets = {}
+	property table _localTargets = {}
+	property table _targetViews = {}
+	property table _hitFx = {}
+	property table _sparkles = {}
+	property table _fxRemaining = {}
+	property table _pickaxePixels = {}
+	property table _targetLit = {}
+	property boolean _open = false
+	property integer _session = 0
+	property integer _round = 0
+	property integer _required = 1
+	property integer _speed = 1
+	property integer _hits = 0
+	property integer _lastHitIndex = 0
+	property integer _zone = 0
+	property string _owner = ""
+	property Entity _object = nil
+	property number _roundAt = 0
+	property Vector3 _rewardPos = Vector3(0, 0, 0)
+	property number _deadline = 0
+	property boolean _localOpen = false
+	property boolean _pending = false
+	property integer _localSession = 0
+	property integer _localRound = 0
+	property integer _localRequired = 1
+	property integer _localSpeed = 1
+	property number _localStartAt = 0
+	property number _renderAt = 0
+	property number _resultRemaining = 0
+	property number _missEffectRemaining = 0
+	property number _swingRemaining = 0
+	property number _requestCooldown = 0
+	property integer _worldFxSerial = 0
+	property number _worldFxRemaining = 0
+	property string _feedbackKey = ""
+	property string _locale = ""
+	property table _queue = {}
+	property boolean _starting = false
+	property number _bonusFxTime = -1
+	property integer _bonusFxType = 1
+	property Vector2 _bonusFxStart = Vector2(0,0)
+	property Entity _bonusPulsePanel = nil
+	property Vector3 _bonusPulseScale = Vector3(1,1,1)
+	property boolean _bonusArrived = false
+	property table _bonusHaloPixels = {}
+	property integer _potionType = 1
+	property integer _generation = 0
+	property integer _runSerial = 0
+	property number _nextStartAt = 0
+	property Entity _serverMap = nil
+	property Entity _localMap = nil
+
+
+	method void OnBeginPlay()
+		self._connections={} self._queue={}
+		if self:IsClient() then
+			if isvalid(self.miningTrack) then
+				local h=self.miningTrack:ConnectEvent(UITouchDownEvent,self.OnBarTouched)
+				table.insert(self._connections,{entity=self.miningTrack,eventType=UITouchDownEvent,eventHandler=h})
+			end
+			self:PreparePresentation() self:HideLocal()
+		end
+		log("[VRF] POTION HARVEST ready client="..tostring(self:IsClient()))
+	end
+
+	method number GetCursorFraction(number elapsed, integer speedLevel)
+		-- 서버 판정과 실제 곡괭이 표시가 같은 왕복 곡선을 사용한다.
+		local durations = {2.8, 1.6, 0.95}
+		local speed = math.max(1, math.min(3, speedLevel))
+		local phase = (math.max(0, elapsed) / durations[speed]) % 2
+		if phase > 1 then return 2 - phase end
+		return phase
+	end
+
+
+
+
+
+
+
+	@ExecSpace("ServerOnly")
+	method void BuildTargets()
+		-- 동일한 곡괭이 뒤의 노란 보정 구간과 서버 판정 폭을 정확히 맞춘다.
+		self._targets = {}
+		local matchWidths = {72, 92, 112}
+		local unused = {1, 2, 3}
+		for i = 1, self._required do
+			local pick = _UtilLogic:RandomIntegerRange(1, #unused)
+			local widthTier = table.remove(unused, pick)
+			local width = matchWidths[widthTier] / self.TrackLength
+			local center = i / (self._required + 1) + (_UtilLogic:RandomDouble() - 0.5) * 0.03
+			if self._required == 1 then center = 0.30 + _UtilLogic:RandomDouble() * 0.48 end
+			table.insert(self._targets, {center=center, width=width, hit=false})
+			log("[VRF] mining target=" .. i .. " widthTier=" .. widthTier .. " pixels=" .. width * self.TrackLength)
+		end
+	end
+
+
+	@ExecSpace("ServerOnly")
+	method void SendChallenge()
+		self:ShowRound(self._session,self._round,self._required,self._speed,self._targets,self._roundAt,self._lastHitIndex,self._potionType,self._owner)
+	end
+
+
+	@ExecSpace("Server")
+	method void RequestStrike(integer session, integer round, number pressedAt)
+		if not self._open or self._owner~=senderUserId or self._session~=session or self._round~=round then return end
+		if not self:ValidOwner() then self:EndMining("cancel") return end
+		local now=_UtilLogic.ServerElapsedSeconds
+		if now>=self._deadline then self:EndMining("timeout") return end
+		if _GameManager:IsGamePaused() then return end
+		if pressedAt~=pressedAt or pressedAt<self._roundAt or pressedAt>now+.1 or pressedAt<now-.75 then self:EndMining("miss") return end
+		local fraction=self:GetCursorFraction(pressedAt-self._roundAt,self._speed)
+		local hitIndex=0
+		for i,target in ipairs(self._targets) do if not target.hit and math.abs(fraction-target.center)<=target.width*.5 then hitIndex=i break end end
+		if hitIndex==0 then self:EndMining("miss") return end
+		self._targets[hitIndex].hit=true self._hits=self._hits+1 self._lastHitIndex=hitIndex
+		if self._hits<self._required then self._round=self._round+1 self:SendChallenge() return end
+		local granted=_BuffPotionLogic:ExtendHarvestPotion(self._potionType,self._generation,self._runSerial)
+		self:EndMining(granted and "success" or "cancel")
+	end
+
+	@ExecSpace("Server")
+	method void RequestCancel(integer session)
+		-- ESC와 맵 이탈은 자기 세션만 취소한다.
+		if self._open and self._owner == senderUserId and self._session == session then self:EndMining("cancel") end
+	end
+
+
+	@ExecSpace("ServerOnly")
+	method void EndMining(string result)
+		if not self._open then return end
+		local owner=self._owner local session=self._session
+		self._open=false self._owner="" self._deadline=0 self._nextStartAt=_UtilLogic.ServerElapsedSeconds+1.3
+		if owner~="" and isvalid(_UserService:GetUserEntityByUserId(owner)) then self:ShowResult(session,result,self._lastHitIndex,Vector3(0,0,0),owner) end
+		log("[VRF] POTION HARVEST close result="..result.." type="..self._potionType)
+	end
+
+	@ExecSpace("Client")
+	method void ShowRound(integer session, integer round, integer required, integer speed, table targets, number startAt, integer hitIndex, integer potionType)
+		-- 딤 없이 작은 채굴 바만 보이며 낡은 응답은 새 입력을 덮지 않는다.
+		if session < self._localSession or (session == self._localSession and round <= self._localRound) then return end
+		local player = _UserService.LocalPlayer
+		if not _GameManager.GameStarted or _GameManager.GameOver or not isvalid(player) or (isvalid(_TitleUI.titleGroup) and _TitleUI.titleGroup.Enable) then
+			self:HideLocal() self:RequestCancel(session)
+			log("[VRF] mining ui ignored outside gameplay") return
+		end
+		if not isvalid(self.miningGroup) then self:RequestCancel(session) return end
+		self.miningGroup.Enable = true
+		if not isvalid(self.miningTarget) or not isvalid(self.miningCursor) or not isvalid(self.miningPickaxe) or not isvalid(self.miningTrack) or not isvalid(self.miningTitle) or not isvalid(self.miningGuide) or not isvalid(self.miningProgress) or not isvalid(self.miningPanel) or not isvalid(self.miningShield) then
+			self:RequestCancel(session) log_warning("[VRF] mining UI is not ready") return
+		end
+		local previousHit = self._localOpen and self._localSession == session
+		self._potionType=potionType self._localMap=player.CurrentMap
+		local art=self.miningPanel:GetChildByName("PotionIcon").SpriteGUIRendererComponent
+		art.ImageRUID=DataRef(self:PotionIcon(potionType)) art.Color=Color(1,1,1,1)
+		self._localSession = session self._localRound = round self._localRequired = required self._localSpeed = speed
+		self._localStartAt = startAt self._localTargets = targets
+		self._localOpen = true self._pending = false self._resultRemaining = 0
+		if not previousHit then
+			self:ResetResultPresentation()
+			self._feedbackKey = "EP5_MINING_READY" self._swingRemaining = 0
+			self.miningPickaxe.UITransformComponent.UIRotation = Vector3(0, 0, 0)
+		end
+		for i = 1, 3 do
+			local view = self._targetViews[i] local target = targets[i]
+			if not isvalid(view) then self:RequestCancel(session) return end
+			view.Enable = target ~= nil and not target.hit
+			if target ~= nil then
+				view.UITransformComponent.anchoredPosition = Vector2((target.center - 0.5) * self.TrackLength, 0)
+				view.UITransformComponent.RectSize = Vector2(target.width * self.TrackLength, 80)
+				local icon = view:GetChildByName("Crystal")
+				local size = 56
+				local fill = view:GetChildByName("Fill")
+				fill.UITransformComponent.RectSize = Vector2(target.width * self.TrackLength, 80)
+				fill.SpriteGUIRendererComponent.Color = Color(1, 0.79, 0.28, 0.24)
+				icon.UITransformComponent.RectSize = Vector2(size, size)
+				self:DrawPotion(icon, size, 0)
+				self._targetLit[i] = false
+			end
+		end
+		self.miningCursor.UITransformComponent.UIRotation = Vector3(0, 0, 0)
+		local canvas=self.miningGroup.UITransformComponent.RectSize local fit=math.min(1,math.max(.1,(canvas.x-40)/1000))
+		self.miningPanel.UITransformComponent.UIScale=Vector3(fit,fit,1)
+		self.miningPanel.Enable = true self.miningShield.Enable = true
+		self:RenderCountdown()
+		self:RenderCursor()
+		if previousHit then self._feedbackKey = "EP5_MINING_HIT" self:PlayHitEffect(hitIndex) end
+		self:RefreshTexts()
+		log("[VRF] mining ui show session=" .. session .. " round=" .. round .. " dim=false match=true targetHeight=80 correction=true speed=" .. speed)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PreparePresentation()
+		-- 같은 벡터 도형을 작은 텍스처로 한 번씩 그려 고정/이동 곡괭이를 맞춘다.
+		self._targetViews = {} self._hitFx = {} self._sparkles = {} self._fxRemaining = {}
+		self._pickaxePixels = {} self._targetLit = {}
+		if not isvalid(self.miningTrack) or not isvalid(self.miningPickaxe) then return end
+		for i = 1, 3 do
+			self._targetViews[i] = self.miningTrack:GetChildByName("Target" .. tostring(i))
+			self._hitFx[i] = self.miningTrack:GetChildByName("HitFx" .. tostring(i))
+			self._sparkles[i] = self.miningTrack:GetChildByName("Sparkle" .. tostring(i))
+			self._fxRemaining[i] = 0 self._targetLit[i] = false
+			if i == 1 then
+				self:DrawPotion(self._targetViews[i]:GetChildByName("Crystal"), 56, 3)
+				self:DrawPotion(self._targetViews[i]:GetChildByName("Crystal"), 56, 1)
+			end
+			self:DrawPotion(self._targetViews[i]:GetChildByName("Crystal"), 56, 0)
+		end
+		self:DrawPotion(self.miningPickaxe, 56, 2)
+		log("[VRF] mining tools ready style=" .. self.ToolStyle .. " icons=4 insideBar=true")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void DrawPotion(Entity icon, integer size, integer style)
+		if not isvalid(icon) or icon.PixelGUIRendererComponent==nil then return end
+		local key="common:"..size..":"..style local pixels=self._pickaxePixels[key]
+		local resolution=size*2
+		if pixels==nil then
+			pixels={}
+			-- All four potion challenges share this simple bottle; original item art stays in the heading and drop.
+			local liquid=Color(.99,.40,.49,1)
+			local shape={{12,27},{12,32},{24,32},{24,27},{22,27},{22,24},{27.5,20},{30,14},{29,8},{25,4},{11,4},{7,8},{6,14},{8.5,20},{14,24},{14,27}}
+			local function inside(poly,x,y)
+				local yes=false
+				for i=1,#poly do local a=poly[i] local b=poly[i%#poly+1] if (a[2]>y)~=(b[2]>y) and x<(b[1]-a[1])*(y-a[2])/(b[2]-a[2])+a[1] then yes=not yes end end
+				return yes
+			end
+			for y=1,resolution do for x=1,resolution do
+				local r,g,b,a=0,0,0,0
+				for sy=0,1 do for sx=0,1 do
+					local px=(x-1+(sx+.5)*.5)*36/resolution local py=(y-1+(sy+.5)*.5)*36/resolution
+					local c=Color(0,0,0,0)
+					if inside(shape,px,py) then
+						local edge=not inside(shape,px-.65,py) or not inside(shape,px+.65,py) or not inside(shape,px,py-.65) or not inside(shape,px,py+.65)
+						c=style==2 and Color(.79,.96,1,.82) or Color(.75,.89,1,.07)
+						if style==2 and py<17 then c=liquid end
+						if py>27 and px>13 and px<23 then c=style==2 and Color(.72,.43,.20,1) or Color(.95,.90,.72,.12) end
+						if style==2 and py<7 then c=Color(.77,.20,.34,1) end
+						if style==2 and px>10 and px<12 and py>9 and py<21 then c=Color(1,1,1,.94) end
+						if edge then c=style==3 and Color(1,.23,.19,1) or (style==2 and Color(.13,.09,.12,1) or (style==1 and Color(1,.94,.66,1) or Color(.84,.94,1,.8))) end
+					end
+					r=r+c.r*c.a*.25 g=g+c.g*c.a*.25 b=b+c.b*c.a*.25 a=a+c.a*.25
+				end end
+				table.insert(pixels,a>0 and Color(r/a,g/a,b/a,a) or Color(0,0,0,0))
+			end end
+			self._pickaxePixels[key]=pixels
+		end
+		icon.PixelGUIRendererComponent:ResetWithColors(resolution,resolution,pixels)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RenderCursor()
+		-- 실제 겹침과 같은 시각으로 표시하고 목표가 겹칠 때만 윤곽을 밝힌다.
+		self._renderAt = _UtilLogic.ServerElapsedSeconds
+		local fraction = self:GetCursorFraction(self._renderAt - self._localStartAt, self._localSpeed)
+		self.miningCursor.UITransformComponent.anchoredPosition = Vector2((fraction - 0.5) * self.TrackLength, 0)
+		for i, target in ipairs(self._localTargets) do
+			local view = self._targetViews[i]
+			if not target.hit and isvalid(view) then
+				local inRange = self._renderAt >= self._localStartAt and math.abs(fraction - target.center) <= target.width * 0.5
+				if self._targetLit[i] ~= inRange then
+					local icon = view:GetChildByName("Crystal")
+					view:GetChildByName("Fill").SpriteGUIRendererComponent.Color = inRange and Color(1,0.88,0.48,0.42) or Color(1,0.79,0.28,0.24)
+					self:DrawPotion(icon, math.floor(icon.UITransformComponent.RectSize.x+0.5), inRange and 1 or 0)
+					self._targetLit[i] = inRange
+				end
+			end
+		end
+	end
+	@ExecSpace("ClientOnly")
+	method void PlayHitEffect(integer hitIndex)
+		-- 맞춘 곡괭이 중심에서 별빛과 작은 금빛 반짝임을 원형으로 퍼뜨린다.
+		local target = self._localTargets[hitIndex]
+		if target == nil then return end
+		local pos = Vector2((target.center - 0.5) * self.TrackLength, 0)
+		local fx = self._hitFx[hitIndex] local sparkle = self._sparkles[hitIndex]
+		if isvalid(fx) then
+			fx.UITransformComponent.anchoredPosition = pos
+			fx.UISpriteParticleComponent:Stop() fx.UISpriteParticleComponent:Play()
+		end
+		if isvalid(sparkle) then
+			sparkle.UITransformComponent.anchoredPosition = pos
+			sparkle.UIBasicParticleComponent:Stop() sparkle.UIBasicParticleComponent:Play()
+		end
+		self._fxRemaining[hitIndex] = 0.75 self._swingRemaining = 0.28
+		_SoundService:PlaySound(self.StrikeSoundRUID, 0.5)
+		log("[VRF] mining hit fx target=" .. hitIndex)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void StopHitEffect(integer hitIndex)
+		-- 짧은 타격 파편도 완료/취소 시 확실히 정리한다.
+		local fx = self._hitFx[hitIndex] local sparkle = self._sparkles[hitIndex]
+		if isvalid(fx) then fx.UISpriteParticleComponent:Stop() end
+		if isvalid(sparkle) then sparkle.UIBasicParticleComponent:Stop() end
+		if (self._fxRemaining[hitIndex] or 0) > 0 then log("[VRF] mining hit fx end target=" .. hitIndex) end
+		self._fxRemaining[hitIndex] = 0
+	end
+
+
+
+
+
+
+	@ExecSpace("ClientOnly")
+	method void RefreshTexts()
+		self._locale=_LocalizationService.CurrentLocaleId local locale=string.lower(self._locale) local k=string.sub(locale,1,2)
+		if k=="zh" then k=string.find(locale,"tw")~=nil and "tw" or "zh" end
+		local labels={
+			ko={"포션 강화","흡혈 포션","크리티컬 포션","파워 포션","경험치 포션","SPACE 또는 바를 터치","바를 터치하세요","성공! 지속시간 +%d초","실패! 기본 효과는 유지돼요","시간 초과! 기본 효과는 유지돼요"},
+			en={"Potion boost","Vampire Potion","Critical Potion","Power Potion","EXP Potion","Press SPACE or tap the bar","Tap the bar","Success! +%ds duration","Miss! Base effect remains","Time up! Base effect remains"},
+			tw={"藥水強化","吸血藥水","爆擊藥水","力量藥水","經驗值藥水","按空白鍵或點擊橫條","點擊橫條","成功！持續時間 +%d秒","失敗！保留基本效果","時間到！保留基本效果"},
+			zh={"药水强化","吸血药水","暴击药水","力量药水","经验值药水","按空格键或点击横条","点击横条","成功！持续时间 +%d秒","失败！保留基础效果","时间到！保留基础效果"},
+			ja={"ポーション強化","吸血ポーション","クリティカルポーション","パワーポーション","経験値ポーション","SPACEかバーをタップ","バーをタップ","成功！効果時間 +%d秒","失敗！基本効果は継続","時間切れ！基本効果は継続"},
+			es={"Mejorar poción","Poción vampírica","Poción crítica","Poción de poder","Poción de EXP","Pulsa ESPACIO o toca la barra","Toca la barra","¡Éxito! Duración +%ds","¡Fallo! El efecto base continúa","¡Tiempo agotado! El efecto base continúa"}}
+		local t=labels[k] or labels.en
+		self.miningTitle.TextGUIRendererComponent.Text=t[self._potionType+1]
+		local completed=math.max(0,self._localRound-1) if self._feedbackKey==self.HarvestSuccessKey then completed=self._localRequired end
+		self.miningProgress.TextGUIRendererComponent.Text=completed.." / "..self._localRequired
+		local text=_MobileScreenFitLogic:IsActive() and t[7] or t[6]
+		if self._feedbackKey==self.HarvestSuccessKey then text=string.format(t[8],self._potionType<=2 and 5 or 10)
+		elseif self._feedbackKey=="EP5_MINING_MISS" then text=t[9]
+		elseif self._feedbackKey=="POTION_HARVEST_TIMEOUT" then text=t[10] end
+		self.miningGuide.TextGUIRendererComponent.Text=text
+		for i=1,3 do local arrow=self.miningPanel:GetChildByName("Speed"..i,true) if isvalid(arrow) then arrow.TextGUIRendererComponent.FontColor=i<=self._localSpeed and Color(.65,.88,1,1) or Color(.35,.35,.35,.7) end end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PressStrike()
+		-- 키보드/터치는 정확히 같은 1회 입력 경로를 사용한다.
+		if not self._localOpen or self._pending or _GameManager:IsGamePaused() then return end
+		if self._renderAt < self._localStartAt then return end
+		self._pending = true
+		self._swingRemaining = 0.28
+		self:RequestStrike(self._localSession, self._localRound, self._renderAt)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnBarTouched(UITouchDownEvent event)
+		-- PC는 왼쪽 버튼, 모바일은 터치 시작 순간에 판정한다.
+		if event.TouchId == -1 or event.TouchId > 0 then self:PressStrike() end
+	end
+
+	@ExecSpace("ClientOnly")
+	@EventSender("Service", "InputService")
+	handler HandleKeyDown(KeyDownEvent event)
+		-- 길게 누르기는 반복 성공으로 처리하지 않고 키를 누르는 순간만 받는다.
+		if not self._localOpen then return end
+		if event.key == KeyboardKey.Space then self:PressStrike()
+		elseif event.key == KeyboardKey.Escape then self:CancelLocal() end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void CancelLocal()
+		-- 서버 응답을 기다리는 동안 취소 연타를 막는다.
+		if not self._localOpen then return end
+		self._pending = true self:RequestCancel(self._localSession)
+	end
+
+	@ExecSpace("Client")
+	method void ShowResult(integer session, string result, integer hitIndex, Vector3 worldPos)
+		-- 실패 안내는 잠깐 표시하고 닫으며, 게임 조작은 즉시 돌려준다.
+		if session ~= self._localSession then return end
+		local player = _UserService.LocalPlayer
+		if not _GameManager.GameStarted or _GameManager.GameOver or not isvalid(player) or (isvalid(_TitleUI.titleGroup) and _TitleUI.titleGroup.Enable) then self:HideLocal() log("[VRF] mining result ignored outside gameplay") return end
+		self._localOpen = false self._pending = false
+		if result ~= "success" then
+			if result ~= "miss" and result ~= "timeout" then self:HideLocal() return end
+			for i = 1, 3 do self:StopHitEffect(i) end
+			self._feedbackKey = result == "timeout" and "POTION_HARVEST_TIMEOUT" or "EP5_MINING_MISS"
+			if result=="timeout" then self:RenderCountdown() end
+			self._resultRemaining = 1.2 self._swingRemaining = 0
+			self._missEffectRemaining = 0.32
+			self:DrawPotion(self.miningPickaxe, 56, 3)
+			self.miningShield.Enable = false
+			_SoundService:PlaySound(self.StrikeSoundRUID, 0.28)
+			self:RefreshTexts()
+			self:RenderFailurePresentation()
+			log("[VRF] mining miss toast font=40 duration=1.2 shake=0.32")
+			return
+		end
+		if self._localTargets[hitIndex] ~= nil then self._localTargets[hitIndex].hit = true end
+		if isvalid(self._targetViews[hitIndex]) then self._targetViews[hitIndex].Enable = false end
+		self:PlayHitEffect(hitIndex)
+		self:PlayBonusFly(self._potionType)
+		self._feedbackKey = self.HarvestSuccessKey
+		self._resultRemaining = 0.85 self._swingRemaining = 0.28
+		self.miningShield.Enable = false
+		_SoundService:PlaySound(self.SuccessSoundRUID, 0.5)
+		self:RefreshTexts()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ResetResultPresentation()
+		-- 실패용 토스트와 흔들림을 닫기/재시도/맵 이탈 때 원래 UI로 돌린다.
+		self._missEffectRemaining = 0
+		if not isvalid(self.miningPanel) or not isvalid(self.miningTrack) then return end
+		self.miningTrack.UITransformComponent.anchoredPosition = Vector2(0, 0)
+		local well = self.miningTrack:GetChildByName("Well").SpriteGUIRendererComponent
+		well.Color = self.ToolStyle == 1 and Color(0.035,0.10,0.075,0.78) or Color(0.035,0.075,0.12,0.74)
+		well.OutlineColor = self.ToolStyle == 1 and Color(0.64,0.95,0.50,1) or Color(0.38,0.8,0.95,0.98)
+		local toast = self.miningPanel:GetChildByName("Guide")
+		toast.UITransformComponent.anchoredPosition = Vector2(0,-64)
+		-- 평소 안내 문구 뒤에도 반투명 검은 배경을 깐다(2026-10-24 유저 지정, 맵 위에서 글씨가 안 보여서) — .ui 값과 같게 유지
+		toast.UITransformComponent.RectSize = Vector2(760,44)
+		toast.UITransformComponent.UIScale = Vector3(1,1,1)
+		toast.SpriteGUIRendererComponent.Color = Color(0,0,0,0.65)
+		self.miningGuide.UITransformComponent.RectSize = Vector2(736,36)
+		local text = self.miningGuide.TextGUIRendererComponent
+		text.FontSize = 20 text.MinSize = 18 text.MaxSize = 20 text.BestFit = true
+		-- 안내 문구가 맵 위에서 잘 안 보여 진하게(2026-10-24 유저 지정) — .ui 값과 같게 유지
+		text.FontColor = Color(1,1,1,1)
+		text.OutlineWidth = 0.3 text.OutlineColor = Color(0.02,0.04,0.07,1)
+		for _, name in ipairs({"Heading","Counter","SpeedLevels"}) do self.miningPanel:GetChildByName(name).Enable = true end
+		if isvalid(self.miningPickaxe) and self.miningPickaxe.PixelGUIRendererComponent ~= nil then self:DrawPotion(self.miningPickaxe,56,2) end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RenderFailurePresentation()
+		-- 안내는 바 위에서 작게 튀어나오고, 바/곡괭이만 짧게 붉게 흔들린다.
+		local elapsed = math.max(0, 1.2-self._resultRemaining)
+		local entrance = math.min(1,elapsed/0.14)
+		local pop = 1-(1-entrance)*(1-entrance)*(1-entrance)
+		local alpha = math.min(1,self._resultRemaining/0.18)
+		local toast = self.miningPanel:GetChildByName("Guide")
+		toast.UITransformComponent.anchoredPosition = Vector2(0,102+8*pop)
+		toast.UITransformComponent.RectSize = Vector2(760,84)
+		toast.UITransformComponent.UIScale = Vector3(0.94+0.06*pop,0.94+0.06*pop,1)
+		toast.SpriteGUIRendererComponent.Color = Color(0,0,0,0.82*alpha)
+		self.miningGuide.UITransformComponent.RectSize = Vector2(720,64)
+		local text = self.miningGuide.TextGUIRendererComponent
+		text.FontSize = 30 text.MinSize = 22 text.MaxSize = 30 text.BestFit = true
+		text.FontColor = Color(1,0.97,0.93,alpha)
+		for _, name in ipairs({"Heading","Counter","SpeedLevels"}) do self.miningPanel:GetChildByName(name).Enable = false end
+		local well = self.miningTrack:GetChildByName("Well").SpriteGUIRendererComponent
+		if self._missEffectRemaining > 0 then
+			local strength = self._missEffectRemaining/0.32
+			self.miningTrack.UITransformComponent.anchoredPosition = Vector2(math.sin(elapsed*70)*8*strength,0)
+			well.Color = Color(0.18,0.035,0.04,0.8)
+			well.OutlineColor = Color(1,0.34,0.25,0.7+0.3*strength)
+		else
+			self.miningTrack.UITransformComponent.anchoredPosition = Vector2(0,0)
+			well.Color = self.ToolStyle == 1 and Color(0.035,0.10,0.075,0.78) or Color(0.035,0.075,0.12,0.74)
+		well.OutlineColor = self.ToolStyle == 1 and Color(0.64,0.95,0.50,1) or Color(0.38,0.8,0.95,0.98)
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void HideLocal()
+		-- 숨겨진 입력 방패도 함께 꺼서 게임 조작을 가로막지 않는다.
+		self._localOpen = false self._pending = false self._resultRemaining = 0 self._feedbackKey = ""
+		self._swingRemaining = 0 self._requestCooldown = 0
+		self:ResetResultPresentation()
+		for i = 1, 3 do self:StopHitEffect(i) end
+		if isvalid(self.miningPickaxe) then self.miningPickaxe.UITransformComponent.UIRotation = Vector3(0, 0, 0) end
+		if isvalid(self.miningPanel) then self.miningPanel.Enable = false end
+		if isvalid(self.miningShield) then self.miningShield.Enable = false end
+	end
+
+
+	method void OnUpdate(number delta)
+		if self:IsServer() then
+			if self._starting then return end
+			if not _GameManager.GameStarted or _GameManager.GameOver then if self._open or #self._queue>0 then self:ResetForNewRun() end return end
+			if self._open then
+				if not self:ValidOwner() then self:EndMining("cancel")
+				elseif _UtilLogic.ServerElapsedSeconds>=self._deadline then self:EndMining("timeout") end
+			elseif #self._queue>0 and _UtilLogic.ServerElapsedSeconds>=self._nextStartAt and not _GameManager:IsGamePaused() then self:StartNextPotion() end
+			return
+		end
+		self:TickBonusFly(delta)
+		for i=1,3 do local left=self._fxRemaining[i] or 0 if left>0 then self._fxRemaining[i]=math.max(0,left-delta) if self._fxRemaining[i]<=0 then self:StopHitEffect(i) end end end
+		if not self._localOpen and self._resultRemaining<=0 then return end
+		local player=_UserService.LocalPlayer
+		if not isvalid(player) or player.CurrentMap~=self._localMap or _GameManager.GameOver or not _GameManager.GameStarted or (isvalid(_TitleUI.titleGroup) and _TitleUI.titleGroup.Enable) then
+			if self._localOpen then self:RequestCancel(self._localSession) end self:HideLocal() return
+		end
+		if self._localOpen then self:RenderCursor() self:RenderCountdown() end
+		if self._swingRemaining>0 then self._swingRemaining=math.max(0,self._swingRemaining-delta) local p=1-self._swingRemaining/.28 local s=p<.35 and p/.35 or (1-p)/.65 self.miningPickaxe.UITransformComponent.UIRotation=Vector3(0,0,-10*s) end
+		if (self._feedbackKey=="EP5_MINING_MISS" or self._feedbackKey=="POTION_HARVEST_TIMEOUT") and self._resultRemaining>0 then self:RenderFailurePresentation() end
+		if self._locale~=_LocalizationService.CurrentLocaleId then self:RefreshTexts() end
+		if self._resultRemaining>0 then self._resultRemaining=self._resultRemaining-delta if self._resultRemaining<=0 then self:HideLocal() end end
+	end
+
+
+	@ExecSpace("ServerOnly")
+	method void ResetForNewRun()
+		self._queue={} self:EndMining("cancel") self._nextStartAt=0 self:ResetBonusPresentation()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RenderCountdown()
+		local label=self.miningPanel:GetChildByName("Countdown"):GetChildByName("Value")
+		local left=math.max(0,math.min(self.ChallengeSeconds,self._localStartAt+self.ChallengeSeconds-_UtilLogic.ServerElapsedSeconds))
+		local locale=string.sub(_LocalizationService.CurrentLocaleId,1,2)
+		local suffix=locale=="ko" and "초" or ((locale=="zh" or locale=="ja") and "秒" or "s")
+		label.TextGUIRendererComponent.Text=tostring(math.ceil(left))..suffix
+		label.TextGUIRendererComponent.FontColor=left<=3 and Color(1,.40,.32,1) or Color(1,.95,.78,1)
+	end
+
+	method boolean IsClientBusy()
+		return self._localOpen or self._resultRemaining>0
+	end
+	method boolean HasActiveChallenge()
+		return self._open or #self._queue>0 or _UtilLogic.ServerElapsedSeconds<self._nextStartAt
+	end
+	method string PotionIcon(integer potionType)
+		local icons={_BuffPotionLogic.VampireItemRUID,_BuffPotionLogic.CritItemRUID,_BuffPotionLogic.PowerItemRUID,_BuffPotionLogic.ExpItemRUID}
+		return icons[potionType] or icons[1]
+	end
+	@ExecSpace("ServerOnly")
+	method boolean ValidOwner()
+		local user=_UserService:GetUserEntityByUserId(self._owner)
+		return isvalid(user) and user.CurrentMap==self._serverMap and _GameManager.GameStarted and not _GameManager.GameOver and _BuffPotionLogic:HarvestPotionMatches(self._potionType,self._generation,self._runSerial)
+	end
+	@ExecSpace("ServerOnly")
+	method void QueuePotion(integer potionType, integer generation, integer runSerial)
+		local owner="" for _,user in ipairs(_UserService.UserEntities.Values) do if isvalid(user) then owner=user.PlayerComponent.UserId break end end
+		if owner=="" then return end
+		if self._open and self._potionType==potionType then self:EndMining("cancel") end
+		local queue={} for _,v in ipairs(self._queue) do if v.kind~=potionType then table.insert(queue,v) end end
+		table.insert(queue,{kind=potionType,generation=generation,runSerial=runSerial,owner=owner}) self._queue=queue
+		self:StartNextPotion()
+	end
+	@ExecSpace("ServerOnly")
+	method void StartNextPotion()
+		if self._starting or self._open or #self._queue==0 or _GameManager:IsGamePaused() or _UtilLogic.ServerElapsedSeconds<self._nextStartAt then return end
+		self._starting=true
+		local v=table.remove(self._queue,1) if v==nil then self._starting=false return end
+		local user=_UserService:GetUserEntityByUserId(v.owner)
+		if not isvalid(user) or not _BuffPotionLogic:HarvestPotionMatches(v.kind,v.generation,v.runSerial) then self._starting=false return end
+		local ore=user.CurrentMap:GetComponent("script.Ep5CrystalMiningController") if ore~=nil and ore._open then table.insert(self._queue,1,v) self._starting=false return end
+		self._session=self._session+1 self._round=1 self._required=_UtilLogic:RandomIntegerRange(2,3) self._speed=_UtilLogic:RandomIntegerRange(1,3)
+		self._potionType=v.kind self._generation=v.generation self._runSerial=v.runSerial self._owner=v.owner self._serverMap=user.CurrentMap
+		self._hits=0 self._lastHitIndex=0 self:BuildTargets()
+		self._roundAt=_UtilLogic.ServerElapsedSeconds+.5 self._deadline=self._roundAt+self.ChallengeSeconds self._open=true self._starting=false self:SendChallenge()
+		log("[VRF] POTION HARVEST begin type="..v.kind.." targets="..self._required.." limit="..self.ChallengeSeconds)
+	end
+	@ExecSpace("Multicast")
+	method void ResetBonusPresentation()
+		if self:IsClient() then self:StopBonusFly() end
+	end
+
+	@ExecSpace("ClientOnly")
+	method Entity BonusTarget(integer potionType)
+		local icons={_CardManager.vampirePotionBuff,_CardManager.critPotionBuff,_CardManager.powerPotionBuff,_CardManager.expPotionBuff}
+		return icons[potionType]
+	end
+	@ExecSpace("ClientOnly")
+	method Vector2 BonusUIPosition(Entity entity)
+		return _UILogic:ScreenToUIPosition(_UILogic:WorldToScreenPosition(_UILogic:LocalUIToWorldPosition(Vector2(0,0),entity.UITransformComponent)))
+	end
+	@ExecSpace("ClientOnly")
+	method void StopBonusFly()
+		if isvalid(self._bonusPulsePanel) then self._bonusPulsePanel.UITransformComponent.UIScale=self._bonusPulseScale end
+		self._bonusPulsePanel=nil self._bonusFxTime=-1
+		if isvalid(self.miningGroup) then local fx=self.miningGroup:GetChildByName("BonusFx") if isvalid(fx) then fx.Enable=false fx:GetChildByName("Sparkles").UIBasicParticleComponent:Stop() end end
+	end
+	@ExecSpace("ClientOnly")
+	method void PrepareBonusHalo()
+		local halo=self.miningGroup:GetChildByName("BonusFx"):GetChildByName("Halo")
+		if #self._bonusHaloPixels==0 then
+			local pixels={} local resolution=96
+			for y=1,resolution do for x=1,resolution do
+				local dx=(x-.5)/resolution*2-1 local dy=(y-.5)/resolution*2-1 local radius=math.sqrt(dx*dx+dy*dy)
+				local alpha=radius<1 and (.36*math.exp(-radius*radius*4.8)+.16*math.exp(-((radius-.46)/.14)^2))*math.max(0,1-radius)^.35 or 0
+				table.insert(pixels,Color(1,.77,.22,alpha))
+			end end
+			self._bonusHaloPixels=pixels
+		end
+		halo.PixelGUIRendererComponent:ResetWithColors(96,96,self._bonusHaloPixels)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void PlayBonusFly(integer potionType)
+		self:StopBonusFly()
+		local fx=self.miningGroup:GetChildByName("BonusFx") if not isvalid(fx) then return end
+		self:PrepareBonusHalo()
+		local halo=fx:GetChildByName("Halo") halo.UITransformComponent.RectSize=Vector2(210,132) halo.UITransformComponent.UIScale=Vector3(1,1,1) halo.UITransformComponent.anchoredPosition=Vector2(28,0) halo.CanvasGroupComponent.GroupAlpha=.75
+		self._bonusFxType=potionType self._bonusFxTime=0 self._bonusArrived=false
+		self._bonusFxStart=self:BonusUIPosition(self.miningTrack)
+		fx.UITransformComponent.anchoredPosition=self._bonusFxStart fx.Enable=true
+		local potion=fx:GetChildByName("Potion") potion.Enable=true potion.SpriteGUIRendererComponent.ImageRUID=DataRef(self:PotionIcon(potionType))
+		potion.SpriteGUIRendererComponent.Color=Color(1,1,1,1)
+		local label=fx:GetChildByName("Amount") local locale=string.sub(_LocalizationService.CurrentLocaleId,1,2)
+		local suffix=locale=="ko" and "초" or ((locale=="zh" or locale=="ja") and "秒" or "s")
+		label.TextGUIRendererComponent.Text="+"..tostring(potionType<=2 and 5 or 10)..suffix
+		label.TextGUIRendererComponent.FontColor=Color(1,.98,.84,1)
+		label.UITransformComponent.anchoredPosition=Vector2(28,0) label.UITransformComponent.UIScale=Vector3(1,1,1)
+		fx:GetChildByName("Backplate").SpriteGUIRendererComponent.Color=Color(0,0,0,.72)
+		fx:GetChildByName("Sparkles").UIBasicParticleComponent:Stop() fx:GetChildByName("Sparkles").UIBasicParticleComponent:Play()
+		log("[VRF] POTION BONUS FX start type="..potionType.." seconds="..(potionType<=2 and 5 or 10))
+	end
+	@ExecSpace("ClientOnly")
+	method void TickBonusFly(number delta)
+		if self._bonusFxTime<0 then return end
+		local player=_UserService.LocalPlayer
+		if _GameManager.GameOver or not _GameManager.GameStarted or not isvalid(player) or player.CurrentMap~=self._localMap or (isvalid(_TitleUI.titleGroup) and _TitleUI.titleGroup.Enable) then self:StopBonusFly() return end
+		self._bonusFxTime=self._bonusFxTime+math.max(0,delta)
+		local age=self._bonusFxTime local fx=self.miningGroup:GetChildByName("BonusFx") local label=fx:GetChildByName("Amount")
+		local target=self:BonusTarget(self._bonusFxType)
+		local halo=fx:GetChildByName("Halo")
+		if not isvalid(target) then self:StopBonusFly() return end
+		if age<.25 then
+			local pop=1+.18*math.sin(age/.25*math.pi)
+			label.UITransformComponent.UIScale=Vector3(pop,pop,1) fx:GetChildByName("Potion").UITransformComponent.UIScale=Vector3(pop,pop,1)
+			halo.UITransformComponent.UIScale=Vector3(pop,pop,1) halo.CanvasGroupComponent.GroupAlpha=.70+.12*math.sin(age/.25*math.pi)
+		elseif age<1 then
+			local progress=math.min(1,(age-.25)/.75) local t=1-(1-progress)*(1-progress)
+			local endPos=self:BonusUIPosition(target)-self._bonusFxStart
+			local u=1-t
+			local controlX=28+(endPos.x-28)*.48
+			-- A low quadratic arc: about 20-35px rise toward the lower HUD, never a tall lob.
+			label.UITransformComponent.anchoredPosition=Vector2(u*u*28+2*u*t*controlX+t*t*endPos.x,2*u*t*90+t*t*endPos.y)
+			local size=1-.62*t label.UITransformComponent.UIScale=Vector3(size,size,1)
+			halo.UITransformComponent.anchoredPosition=label.UITransformComponent.anchoredPosition halo.UITransformComponent.UIScale=Vector3(size,size,1) halo.CanvasGroupComponent.GroupAlpha=.65
+			fx:GetChildByName("Backplate").SpriteGUIRendererComponent.Color=Color(0,0,0,.72*math.max(0,1-progress*5))
+			fx:GetChildByName("Potion").SpriteGUIRendererComponent.Color=Color(1,1,1,math.max(0,1-progress*4))
+		else
+			label.TextGUIRendererComponent.FontColor=Color(1,.98,.84,0)
+			local settle=math.min(1,(age-1)/.25)
+			halo.UITransformComponent.anchoredPosition=self:BonusUIPosition(target)-self._bonusFxStart halo.UITransformComponent.RectSize=Vector2(112,112) halo.UITransformComponent.UIScale=Vector3(1+settle*.38,1+settle*.38,1) halo.CanvasGroupComponent.GroupAlpha=.82*(1-settle)
+			if not self._bonusArrived then
+				self._bonusArrived=true self._bonusPulsePanel=target self._bonusPulseScale=target.UITransformComponent.UIScale
+				log("[VRF] POTION BONUS FX arrived type="..self._bonusFxType.." icon="..target.Name)
+			end
+			local pulse=1+.16*math.sin(math.min(1,(age-1)/.25)*math.pi)
+			target.UITransformComponent.UIScale=Vector3(self._bonusPulseScale.x*pulse,self._bonusPulseScale.y*pulse,self._bonusPulseScale.z)
+			if age>=1.25 then self:StopBonusFly() log("[VRF] POTION BONUS FX end") end
+		end
+	end
+
+	method void OnEndPlay()
+		-- 이 맵의 이벤트 연결과 자기 일시정지 소유권을 해제한다.
+		if self:IsServer() then self:EndMining("cancel") return end
+		for _, rec in ipairs(self._connections) do if isvalid(rec.entity) then rec.entity:DisconnectEvent(rec.eventType, rec.eventHandler) end end
+		self._connections = {} self:HideLocal() self:StopBonusFly() 
+	end
+end

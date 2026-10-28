@@ -1,0 +1,5 @@
+# Current Ttunho care-junction v8
+
+Use Maps/ttunho-care-junction-v8.json. Supersedes v7, which missed feed/eat, injection what/cry/love and sleep. V8 audits all13 used motions/56 references, and adds only missing cloth backing or exact empty pixels at the cap/ear junction in each original frame. Preserve existing painted pixels, native ears/face/paws/tail/effects, original timings, independent gear prices/stats and atomic rendering. No attachment templates or whole-pet redraws. Read the per-frame SVG and final pixel masks here; the original v6 generation provenance remains historical. Never restore v7 masks over these care frames.
+
+Rebuild with Workflow/TtunhoCareV8/rebuild-ttunho-painted-v6.cjs using this source folder. All80 textures must match SHA. Frozen real Maker tests cover56 poses+8 combinations; actual care, condition reactions, inventory, wardrobe and first/repeated drop were checked. The same turn adds an authorized acorn guide to ThanksgivingUI, preserving all220 existing UI nodes. Keep future user/Claude changes and patch only current mappings.
