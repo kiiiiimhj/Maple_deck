@@ -63,18 +63,31 @@ script LocText extends Logic
 		return table.concat(out, sep)
 	end
 
-	@ExecSpace("Multicast")
 	method void LocalizeWorldText(Entity fx)
 		-- 서버가 스폰한 월드 텍스트(damagenumber 모델)의 Text에는 키가 들어 있다 — 각 클라가 자기 언어로 바꿔 쓴다.
-		-- 스폰 복제보다 이 호출이 먼저 도착할 수 있어서, 아직 엔티티가 없으면 잠깐 뒤에 한 번 더 본다
-		if not self:IsClient() then return end
-		if isvalid(fx) then
-			self:ApplyWorldText(fx)
-			return
-		end
-		_TimerService:SetTimerOnce(function()
+		-- 버그 수정(2026-10-29, 폰에서 키 이름이 그대로 크게 뜸): 엔티티를 그대로 넘기면 폰처럼 느린 기기에선
+		-- 스폰 복제보다 이 호출이 먼저 도착해 매개변수가 nil로 와서 끝내 못 바꿨다. 이제 Id 문자열로 넘기고
+		-- 클라가 엔티티가 생길 때까지 짧게 여러 번 찾아본다.
+		if not isvalid(fx) then return end
+		self:LocalizeWorldTextById(fx.Id)
+	end
+
+	@ExecSpace("Multicast")
+	method void LocalizeWorldTextById(string fxId)
+		-- 클라: 0.1초마다 최대 3초 동안 엔티티를 찾아, Text가 아직 키면 현재 언어로 바꾼다.
+		-- 서버가 Text를 나중에 다시 키로 덮어써도 시간 안이면 또 바꾼다
+		if self:IsServer() then return end
+		if fxId == nil or fxId == "" then return end
+		local tries = 0
+		local timerId = 0
+		timerId = _TimerService:SetTimerRepeat(function()
+			tries = tries + 1
+			local fx = _EntityService:GetEntity(fxId)
 			if isvalid(fx) then self:ApplyWorldText(fx) end
-		end, 0.2)
+			if tries >= 30 then
+				_TimerService:ClearTimer(timerId)
+			end
+		end, 0.1, 0)
 	end
 
 	@ExecSpace("ClientOnly")
@@ -82,6 +95,7 @@ script LocText extends Logic
 		-- 월드 텍스트 한 개를 현재 언어로 바꾼다
 		local r = fx.TextRendererComponent
 		if r == nil then return end
-		r.Text = self:Resolve(r.Text)
+		local resolved = self:Resolve(r.Text)
+		if resolved ~= r.Text then r.Text = resolved end
 	end
 end
