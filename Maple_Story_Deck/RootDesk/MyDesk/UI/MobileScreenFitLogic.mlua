@@ -90,6 +90,16 @@ script MobileScreenFitLogic extends Logic
 			end, self.ApplyDelay)
 			return
 		end
+		-- 로딩 화면 배경은 기다리지 않고 바로 맞춘다 — ApplyDelay 동안 16:9 원본 크기로 작게 보였다(2026-10-29 유저 실기 리포트)
+		-- 레이아웃이 아직이면 아주 짧게 한 번 더 시도한다
+		if not self:FitToScreen("/ui/LoadingGroup/Screen/Bg", true) then
+			_TimerService:SetTimerOnce(function()
+				if isvalid(self) then
+					local ok = self:FitToScreen("/ui/LoadingGroup/Screen/Bg", true)
+					log("[VRF] MobileScreenFitLogic: loading bg early fit retry ok=" .. tostring(ok))
+				end
+			end, 0.05)
+		end
 		log(string.format("MobileScreenFitLogic: mobile fit scheduled (screen %dx%d)", _UILogic.ScreenWidth, _UILogic.ScreenHeight))
 		_TimerService:SetTimerOnce(function()
 			if isvalid(self) then self:ApplyAll() end
@@ -376,6 +386,12 @@ script MobileScreenFitLogic extends Logic
 			-- 2026-10-14 딤 전수 점검에서 목록에 빠져 있던 것들 — 폰에선 안전영역까지만 덮여 가장자리가 밝게 남았다
 			"/ui/PetHouseGroup/Overlay/Dim",
 			"/ui/PetHouseGroup/Tutorial/Dim",
+			-- 도토리 교환소 + 포션 강화 튜토리얼(2026-10-29 유저 "이번에 추가된 딤드 모바일 최적화됨?") — 목록에 빠져 있었다
+			"/ui/ThanksgivingGroup/Overlay/Dim",
+			"/ui/ThanksgivingGroup/Overlay/Confirm/Dim",
+			"/ui/ThanksgivingGroup/Overlay/Detail/Dim",
+			"/ui/ThanksgivingGroup/Overlay/Tutorial/Dim",
+			"/ui/PotionHarvestGroup/TutorialDim",
 			"/ui/Ep4BalloonPuzzleGroup/Dimmer",
 			-- 결과창 루트 자신이 딤(검정 0.58). 자식은 전부 가운데 기준이라 넓혀도 제자리
 			"/ui/GalleryArenaUI/ResultGroup",
@@ -609,6 +625,12 @@ script MobileScreenFitLogic extends Logic
 		if self._T.orig == nil then self._T.orig = {} end
 		local o = self._T.orig[path]
 		if o == nil then
+			-- 레이아웃이 아직 안 잡혀 크기가 0이면 원본으로 기억하지 않는다 — 기억해 버리면 이후 맞춤이 전부 실패한다
+			-- (2026-10-29 로딩 배경을 OnBeginPlay에서 바로 맞추게 하면서 생긴 위험)
+			if t.RectSize.x <= 0 or t.RectSize.y <= 0 then
+				log(string.format("[VRF] MobileScreenFitLogic: %s not laid out yet, skip", path))
+				return false
+			end
 			o = {
 				offMin = t.OffsetMin, offMax = t.OffsetMax,
 				size = t.RectSize, pos = t.anchoredPosition,
