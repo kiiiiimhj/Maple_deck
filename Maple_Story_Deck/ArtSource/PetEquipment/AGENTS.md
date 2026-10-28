@@ -45,3 +45,5 @@ Ttunho directly painted v6 is current: Maps/ttunho-painted-used-v6.json and Sour
 Ttunho junction gap repair v7 is current: Maps/ttunho-gap-repair-v7.json and Sources/Validated/ttunho-gap-repair-v7. Only fills the reported cape/head and walking cap/ear gaps in approved v6 art. Preserve all other art, UI and logic.
 
 Ttunho care junction v8 is current: Maps/ttunho-care-junction-v8.json and Sources/Validated/ttunho-care-junction-v8. Fills the remaining feed/injection/sleep junctions and audits all56 used frame entries. Preserve all other approved artwork and current UI changes.
+
+Ttunho hungry cape v9 is current for the four hungry frames: Maps/ttunho-hungry-cape-v9.json and Sources/Validated/ttunho-hungry-cape-v9. The native perched maple beret is preserved pixel-for-pixel, upper cape coverage is redrawn, and naturally hidden necklace remains hidden. Every other native pose, timing, price/stat and atomic rendering is unchanged. Inventory-only illustrated icons are in InventoryIconsV3Ttunho (80px / 160px); do not restore old cropped wearable sprites as inventory icons. Keep current user/Claude UI geometry and live source edits.

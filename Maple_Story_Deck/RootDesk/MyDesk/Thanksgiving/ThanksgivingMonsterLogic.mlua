@@ -286,13 +286,37 @@ script ThanksgivingMonsterLogic extends Logic
 					_PlayerInventory:AddItem(self.AcornItemId,reward.amount)
 					_RunLootLogic:AddAcorns(self.AcornIconRUID,reward.amount)
 				end
-				local player=_UserService:GetUserEntityByUserId(reward.owner)
-				local saved=false
-				if isvalid(player) and player.PlayerDBManager~=nil then saved=player.PlayerDBManager:SavePetPurchaseAndWait() end
-				if Environment:IsMakerPlay() then log("[VRF] THANKSGIVING TURKEY reward="..reward.amount.." saved="..tostring(saved)) end
+				-- 도토리마다 저장하면 한 마리에 저장이 5~10번 몰린다(유저 지정 2026-10-28) → 마지막 도토리가 들어오고
+				-- SaveDelaySeconds 뒤 최종 개수만 한 번 저장한다. 그 사이 나가도 PlayerDBManager 퇴장 저장이 펫 기록을 같이 저장한다
+				if self._T.saveAt==nil then self._T.saveAt={} end
+				self._T.saveAt[reward.owner]=_UtilLogic.ServerElapsedSeconds+self.SaveDelaySeconds
+				if Environment:IsMakerPlay() then log("[VRF] THANKSGIVING TURKEY reward="..reward.amount.." save queued") end
 			end
 		end
 		self._T.flushing=false
+		self:FlushRewardSaves()
+	end
+
+	property number SaveDelaySeconds = 2
+
+	@ExecSpace("ServerOnly")
+	method void FlushRewardSaves()
+		-- 마지막 도토리 뒤 SaveDelaySeconds가 지난 계정만 한 번 저장한다
+		if self._T.saveAt==nil or self._T.saving then return end
+		local now=_UtilLogic.ServerElapsedSeconds
+		for owner,at in pairs(self._T.saveAt) do
+			if now>=at then
+				self._T.saveAt[owner]=nil
+				local player=_UserService:GetUserEntityByUserId(owner)
+				if isvalid(player) and player.PlayerDBManager~=nil then
+					self._T.saving=true
+					local saved=player.PlayerDBManager:SavePetPurchaseAndWait()
+					self._T.saving=false
+					if Environment:IsMakerPlay() then log("[VRF] THANKSGIVING TURKEY acorns saved once saved="..tostring(saved)) end
+				end
+				return
+			end
+		end
 	end
 
 	@ExecSpace("ServerOnly")
