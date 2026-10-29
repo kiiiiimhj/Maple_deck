@@ -38,6 +38,19 @@ script EndlessBurstLogic extends Logic
 	property SpriteGUIRendererComponent fill = "cea6e844-7de6-41b4-bcbe-ac548f19a85c"
 	property string BurstSoundRUID = "588c952ab8fe429f9463895ed3ffc176"
 
+	-- Display-only adapter: gameplay calculations remain owned by the invasion rules.
+	@Sync property string HudModifierData = ""
+	property table ModifierIcons = {fortitude = "83c2296ed4fa484fa3fb93f7eae9effa", frenzy = "b89515445923420ba2eadbad1b1a99d2", haste = "c4f7c47560ca481da6e7c705f07a959c", swarm = "79a38ab3b9804bcf8a71f67431793ac2", onslaught = "9207acbc69d44db3b9463b74baaadac4", curse = "e974dd4ce49441489587305ece25c00b"}
+	property Entity modifierSlot1 = "2944d245-2e7e-4071-9912-253dcdbcf851"
+	property Entity modifierSlot2 = "223ca369-e546-4433-9379-4d824d1f5593"
+	property Entity modifierSlot3 = "c6134272-0018-4609-8351-8965093fd0cf"
+	property Entity modifierTooltip = "6c0d1543-bb11-44dd-8bbf-a36797f0e0a4"
+	property TextGUIRendererComponent modifierTooltipTitle = "d9e96c04-ec68-4261-8615-86bf78407b97"
+	property TextGUIRendererComponent modifierTooltipBody = "eccfc6ef-5440-44c9-b62e-1ae42c3d1b18"
+	property integer _tooltipIndex = 0
+	property number _tooltipRemaining = 0
+	property string UiClickSoundRUID = "972843e759204d3e9ad84e7d3fa94f83"
+
 	method void OnBeginPlay()
 		-- Invasion revision: monster reinforcement only.
 		-- Each Maker play starts with fresh run state and stopped local particles.
@@ -48,6 +61,7 @@ script EndlessBurstLogic extends Logic
 		self._clientPhase = 0
 		self._lastHudText = ""
 		self._lastMapName = ""
+		self:BindHudButtons()
 		self:HidePresentation()
 		log("[VRF] endless invasion client boot scene=" .. tostring(isvalid(self.scene)) .. " hud=" .. tostring(isvalid(self.hud)) .. " cap=" .. tostring(self.MaxVisualStage) .. " masks=" .. tostring(#self.EdgeMasks))
 	end
@@ -60,6 +74,7 @@ script EndlessBurstLogic extends Logic
 		self.RemainingSeconds = 0
 		self.ChargeKills = 0
 		self.ActiveClearRecord = ""
+		self.HudModifierData = ""
 		self._remaining = 0
 		self._lastKills = _GameManager.KillCount
 		log("[VRF] endless burst reset")
@@ -154,6 +169,7 @@ script EndlessBurstLogic extends Logic
 		-- Stop the presets explicitly so reopening the world cannot leave live emitters.
 		if isvalid(self.scene) then self.scene.Enable = false end
 		if isvalid(self.hud) then self.hud.Enable = false end
+		self:CloseModifierTooltip()
 		if isvalid(self.ambient) then self.ambient:Stop() end
 		if isvalid(self.aura) then self.aura:Stop() end
 		if isvalid(self.nova) then self.nova:Stop() end
@@ -161,32 +177,180 @@ script EndlessBurstLogic extends Logic
 		self._flashRemaining = 0
 	end
 
+	@ExecSpace("ServerOnly")
+	method void SetHudModifiers(string data)
+		-- Accept display records only; the caller must separately apply matching gameplay effects.
+		local accepted = {}
+		local seen = {}
+		for entry in string.gmatch(data, "([^|]+)") do
+			local key, raw = string.match(entry, "^([a-z]+):([%+%-]?[%d%.]+)$")
+			local value = tonumber(raw)
+			local known = key == "fortitude" or key == "frenzy" or key == "haste" or key == "swarm" or key == "onslaught" or key == "curse"
+			if known and value ~= nil and value == value and math.abs(value) <= 999999 and not seen[key] and #accepted < 3 then
+				seen[key] = true
+				table.insert(accepted, key .. ":" .. tostring(value))
+			end
+		end
+		self.HudModifierData = table.concat(accepted, "|")
+		log("[VRF] invasion HUD data=" .. self.HudModifierData .. " count=" .. tostring(#accepted))
+	end
+
+	@ExecSpace("ClientOnly")
+	method string FormatHudPercent(number value)
+		-- Compact signed percentages remain readable beside a passive-sized square icon.
+		return (value < 0 and "-" or "+") .. string.format("%g", math.abs(value)) .. "%"
+	end
+
+	@ExecSpace("ClientOnly")
+	method table GetHudModifierDefinition(string key)
+		-- Six icon/locale definitions share the approved round purple monster design.
+		local definitions = {
+			fortitude = {name = "ENDLESS_MOD_FORTITUDE", description = "ENDLESS_MOD_HP", color = Color(0.58, 0.8, 1, 1)},
+			frenzy = {name = "ENDLESS_MOD_FRENZY", description = "ENDLESS_MOD_ATTACK", color = Color(1, 0.62, 0.49, 1)},
+			haste = {name = "ENDLESS_MOD_HASTE", description = "ENDLESS_MOD_MOVE", color = Color(0.45, 0.95, 1, 1)},
+			swarm = {name = "ENDLESS_MOD_SWARM", description = "ENDLESS_MOD_COUNT", color = Color(0.84, 0.68, 1, 1)},
+			onslaught = {name = "ENDLESS_MOD_ONSLAUGHT", description = "ENDLESS_MOD_SPEED", color = Color(1, 0.85, 0.45, 1)},
+			curse = {name = "ENDLESS_MOD_CURSE", description = "ENDLESS_MOD_HEAL", color = Color(1, 0.6, 0.85, 1)}
+		}
+		return definitions[key]
+	end
+
+	@ExecSpace("ClientOnly")
+	method table GetHudModifiers()
+		-- Until six-effect gameplay lands, show the current real HP/attack reinforcement.
+		local result = {}
+		if self.Phase <= 1 or self.InvasionLevel <= 0 then return result end
+		if self.HudModifierData ~= "" then
+			local seen = {}
+			for entry in string.gmatch(self.HudModifierData, "([^|]+)") do
+				local key, raw = string.match(entry, "^([a-z]+):([%+%-]?[%d%.]+)$")
+				local value = tonumber(raw)
+				if key ~= nil and value ~= nil and self:GetHudModifierDefinition(key) ~= nil and not seen[key] and #result < 3 then
+					seen[key] = true
+					table.insert(result, {key = key, value = value})
+				end
+			end
+		else
+			if self.MonsterHpPerLevel ~= 0 then table.insert(result, {key = "fortitude", value = math.floor(self.MonsterHpPerLevel * self.InvasionLevel * 1000 + 0.5) / 10}) end
+			if self.MonsterAttackPerLevel ~= 0 then table.insert(result, {key = "frenzy", value = math.floor(self.MonsterAttackPerLevel * self.InvasionLevel * 1000 + 0.5) / 10}) end
+		end
+		return result
+	end
+
+	@ExecSpace("ClientOnly")
+	method void BindHudButtons()
+		-- Bind once per play; only the three local slot rectangles consume clicks.
+		self._T.hudSlots = {}
+		self._T.hudConnections = {}
+		self._T.hudModifierKey = ""
+		self._T.hudModifiers = {}
+		local entities = {self.modifierSlot1, self.modifierSlot2, self.modifierSlot3}
+		for i, entity in ipairs(entities) do
+			if isvalid(entity) then
+				local index = i
+				local root = "/ui/EndlessBurstGroup/Hud/Effects/Slot" .. tostring(i)
+				local slot = {entity = entity, icon = _EntityService:GetEntityByPath(root .. "/Icon"), value = _EntityService:GetEntityByPath(root .. "/Value"), selected = _EntityService:GetEntityByPath(root .. "/Selected")}
+				table.insert(self._T.hudSlots, slot)
+				local eventHandler = entity:ConnectEvent(ButtonClickEvent, function() self:ToggleModifierTooltip(index) end)
+				table.insert(self._T.hudConnections, {entity = entity, eventHandler = eventHandler})
+			end
+		end
+		if isvalid(self.modifierTooltip) then
+			local eventHandler = self.modifierTooltip:ConnectEvent(ButtonClickEvent, function() self:CloseModifierTooltip() end)
+			table.insert(self._T.hudConnections, {entity = self.modifierTooltip, eventHandler = eventHandler})
+		end
+		log("[VRF] invasion HUD bound slots=" .. tostring(#self._T.hudSlots))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void UnbindHudButtons()
+		-- Release every callback on stop/reload so clicks cannot accumulate handlers.
+		for _, connection in ipairs(self._T.hudConnections or {}) do
+			if isvalid(connection.entity) then connection.entity:DisconnectEvent(ButtonClickEvent, connection.eventHandler) end
+		end
+		self._T.hudConnections = {}
+		self._T.hudSlots = {}
+	end
+
+	@ExecSpace("ClientOnly")
+	method void CloseModifierTooltip()
+		-- Tapping the same icon/tooltip or leaving the HUD clears the selected frame.
+		if isvalid(self.modifierTooltip) then self.modifierTooltip.Enable = false end
+		for _, slot in ipairs(self._T.hudSlots or {}) do
+			if isvalid(slot.selected) then slot.selected.Enable = false end
+		end
+		self._tooltipIndex = 0
+		self._tooltipRemaining = 0
+	end
+
+	@ExecSpace("ClientOnly")
+	method void ToggleModifierTooltip(integer index)
+		-- Click/tap opens a localized description using exactly the displayed value.
+		if not isvalid(self.hud) or not self.hud.Enable then return end
+		if self._tooltipIndex == index then self:CloseModifierTooltip() return end
+		local item = (self._T.hudModifiers or {})[index]
+		if item == nil or not isvalid(self.modifierTooltip) then return end
+		local definition = self:GetHudModifierDefinition(item.key)
+		if definition == nil then return end
+		self:CloseModifierTooltip()
+		self._tooltipIndex = index
+		self._tooltipRemaining = 7
+		self.modifierTooltipTitle.Text = _LocalizationService:GetText(definition.name)
+		self.modifierTooltipTitle.FontColor = definition.color
+		self.modifierTooltipBody.Text = _LocalizationService:GetTextFormat(definition.description, self:FormatHudPercent(item.value))
+		self.modifierTooltip.Enable = true
+		local slot = self._T.hudSlots[index]
+		if slot ~= nil and isvalid(slot.selected) then slot.selected.Enable = true end
+		_SoundOptionLogic:PlaySfx(self.UiClickSoundRUID, 0.45)
+		log("[VRF] invasion HUD tooltip index=" .. tostring(index) .. " key=" .. item.key .. " value=" .. self:FormatHudPercent(item.value))
+	end
+
 	@ExecSpace("ClientOnly")
 	method void UpdateHud()
-		-- Resolve new text through the existing six-language table only when it changes.
-		local hudKey = tostring(self.InvasionLevel) .. "|" .. tostring(self.Phase) .. "|" .. tostring(self.RemainingSeconds) .. "|" .. tostring(self.ChargeKills) .. "|" .. _LocalizationService.CurrentLocaleId
+		-- Keep stage/progress text, while replacing the generic message with effect icons.
+		local locale = _LocalizationService.CurrentLocaleId
+		local hudKey = tostring(self.InvasionLevel) .. "|" .. tostring(self.Phase) .. "|" .. tostring(self.RemainingSeconds) .. "|" .. tostring(self.ChargeKills) .. "|" .. self.HudModifierData .. "|" .. locale
 		if self._lastHudText == hudKey then return end
 		self._lastHudText = hudKey
-		local title = ""
-		local description = ""
 		local ratio = 0
-		if self.Phase == 2 then
-			title = _LocalizationService:GetTextFormat("ENDLESS_INVASION_STAGE", self.InvasionLevel)
-			description = _LocalizationService:GetText("ENDLESS_INVASION_SURGE")
-			ratio = self.RemainingSeconds / math.max(1, self.BurstSeconds)
-		elseif self.Phase == 3 then
-			title = _LocalizationService:GetTextFormat("ENDLESS_INVASION_STAGE", self.InvasionLevel)
-			description = _LocalizationService:GetTextFormat("ENDLESS_INVASION_CHARGE", self.ChargeKills, self.KillsPerBurst)
-			ratio = self.ChargeKills / math.max(1, self.KillsPerBurst)
+		if self.Phase > 1 then
+			self.heading.Text = _LocalizationService:GetTextFormat("ENDLESS_INVASION_STAGE", self.InvasionLevel)
+			if self.Phase == 2 then
+				self.detail.Text = _LocalizationService:GetTextFormat("ENDLESS_INVASION_SURGE_TIME", self.RemainingSeconds)
+				ratio = self.RemainingSeconds / math.max(1, self.BurstSeconds)
+			else
+				self.detail.Text = _LocalizationService:GetTextFormat("ENDLESS_INVASION_CHARGE", self.ChargeKills, self.KillsPerBurst)
+				ratio = self.ChargeKills / math.max(1, self.KillsPerBurst)
+			end
 		else
-			title = _LocalizationService:GetText("ENDLESS_INVASION_TITLE")
-			description = _LocalizationService:GetText("ENDLESS_INVASION_BEGIN")
+			self.heading.Text = _LocalizationService:GetText("ENDLESS_INVASION_TITLE")
+			self.detail.Text = _LocalizationService:GetText("ENDLESS_INVASION_BEGIN")
 		end
-		self.heading.Text = title self.detail.Text = description
+		local modifierKey = tostring(self.InvasionLevel) .. "|" .. tostring(self.Phase <= 1) .. "|" .. self.HudModifierData .. "|" .. locale
+		if self._T.hudModifierKey ~= modifierKey then
+			self._T.hudModifierKey = modifierKey
+			self:CloseModifierTooltip()
+			local items = self:GetHudModifiers()
+			self._T.hudModifiers = items
+			local count = #items
+			for i, slot in ipairs(self._T.hudSlots or {}) do
+				local item = items[i]
+				slot.entity.Enable = item ~= nil
+				if item ~= nil then
+					local definition = self:GetHudModifierDefinition(item.key)
+					slot.entity.UITransformComponent.anchoredPosition = Vector2((i - (count + 1) / 2) * 140, 0)
+					slot.icon.SpriteGUIRendererComponent.ImageRUID = DataRef(self.ModifierIcons[item.key])
+					slot.icon.SpriteGUIRendererComponent.Color = Color.white
+					slot.value.TextGUIRendererComponent.Text = self:FormatHudPercent(item.value)
+					slot.value.TextGUIRendererComponent.FontColor = definition.color
+				end
+			end
+			log("[VRF] invasion HUD layout count=" .. tostring(count) .. " data=" .. self.HudModifierData)
+		end
 		local surge = self.Phase == 2
-		self.heading.FontColor = surge and Color(0.95, 0.77, 1, 1) or Color(0.86, 0.75, 1, 1)
+		self.heading.FontColor = surge and Color(0.97, 0.84, 1, 1) or Color(0.9, 0.8, 1, 1)
 		self.fill.Color = surge and Color(0.83, 0.45, 1, 1) or Color(0.65, 0.4, 1, 1)
-		self.fill.Entity.UITransformComponent.RectSize = Vector2(math.max(0.01, 280 * math.min(1, math.max(0, ratio))), 5)
+		self.fill.Entity.UITransformComponent.RectSize = Vector2(math.max(0.01, 432 * math.min(1, math.max(0, ratio))), 8)
 	end
 
 	@ExecSpace("ClientOnly")
@@ -207,6 +371,10 @@ script EndlessBurstLogic extends Logic
 		if paused then
 			if self._particlesPlaying then self:HidePresentation() end
 			return
+		end
+		if self._tooltipRemaining > 0 then
+			self._tooltipRemaining = math.max(0, self._tooltipRemaining - delta)
+			if self._tooltipRemaining == 0 then self:CloseModifierTooltip() end
 		end
 		self._clientClock = self._clientClock + delta
 		self._visualAlpha = math.min(1, self._visualAlpha + delta / 1.4)
@@ -258,6 +426,6 @@ script EndlessBurstLogic extends Logic
 
 	method void OnEndPlay()
 		-- This singleton owns no repeating timers or subscriptions across play sessions.
-		if self:IsServer() then self:ResetForRun() else self:HidePresentation() end
+		if self:IsServer() then self:ResetForRun() else self:HidePresentation() self:UnbindHudButtons() end
 	end
 end
