@@ -1,0 +1,263 @@
+@Logic
+script EndlessBurstLogic extends Logic
+
+	-- Branch trial: only episode 1, unlimited runs, after the existing clear milestone.
+	property boolean Enabled = true
+	property number BurstSeconds = 20
+	property integer KillsPerBurst = 100
+	property number MonsterHpPerLevel = 0.20
+	property number MonsterAttackPerLevel = 0.10
+	property integer MaxVisualStage = 5
+	@Sync property integer InvasionLevel = 0
+	property integer _visualLevel = -1
+	property table EdgeMasks = {"b4527c708aef43a1add204c172b1c09a", "6163f9cb43524f1fa797ea3c46d6bea4", "3d6bf913768749d29e98d5a400729704", "fbe04a817c2b4185aee8881d670c87be", "5eae0aa6eba04260b5b2e969a78416c4"}
+	@Sync property integer Phase = 0
+	@Sync property integer RemainingSeconds = 0
+	@Sync property integer ChargeKills = 0
+	@Sync property string ActiveClearRecord = ""
+	property number _remaining = 0
+	property integer _lastKills = 0
+	property number _clientClock = 0
+	property number _visualAlpha = 0
+	property integer _clientPhase = 0
+	property number _flashRemaining = 0
+	property boolean _particlesPlaying = false
+	property string _lastHudText = ""
+	property string _lastMapName = ""
+	property Entity scene = "c797ec1f-1241-462d-8202-3bbbf67bb4fa"
+	property SpriteGUIRendererComponent edge = "5bd791e9-c870-49d9-a565-3ddd8c985895"
+	property UIAreaParticleComponent ambient = "40264c03-a543-4111-a48f-41162a0b0d33"
+	property Entity auraEntity = "2f024565-f8a4-4209-9a07-2e8f6e893569"
+	property UIBasicParticleComponent aura = "2f024565-f8a4-4209-9a07-2e8f6e893569"
+	property Entity novaEntity = "4a80e6d7-4df0-4c96-a086-ae6156592afc"
+	property UIBasicParticleComponent nova = "4a80e6d7-4df0-4c96-a086-ae6156592afc"
+	property SpriteGUIRendererComponent flash = "157e2d32-2a15-4a75-8b1e-70a65cfcd32d"
+	property Entity hud = "e947ad85-25ee-4349-9285-6cd71a317d3b"
+	property TextGUIRendererComponent heading = "bdabd25b-6a8a-4ef5-95a9-65c1f6f752ff"
+	property TextGUIRendererComponent detail = "53969710-5d79-422d-97b7-4b1ec75237e5"
+	property SpriteGUIRendererComponent fill = "cea6e844-7de6-41b4-bcbe-ac548f19a85c"
+	property string BurstSoundRUID = "588c952ab8fe429f9463895ed3ffc176"
+
+	method void OnBeginPlay()
+		-- Invasion revision: monster reinforcement only.
+		-- Each Maker play starts with fresh run state and stopped local particles.
+		if self:IsServer() then self:ResetForRun() return end
+		self._clientClock = 0
+		self._visualAlpha = 0
+		self._visualLevel = -1
+		self._clientPhase = 0
+		self._lastHudText = ""
+		self._lastMapName = ""
+		self:HidePresentation()
+		log("[VRF] endless burst client boot scene=" .. tostring(isvalid(self.scene)) .. " hud=" .. tostring(isvalid(self.hud)))
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ResetForRun()
+		-- Reset alongside RunClear so retry cannot inherit an old burst or kill charge.
+		self.Phase = 0
+		self.InvasionLevel = 0
+		self.RemainingSeconds = 0
+		self.ChargeKills = 0
+		self.ActiveClearRecord = ""
+		self._remaining = 0
+		self._lastKills = _GameManager.KillCount
+		log("[VRF] endless burst reset")
+	end
+
+	method boolean IsEligibleRun()
+		-- The trial never changes time attack, other episodes, title, or an uncleared run.
+		return self.Enabled and _GameManager.GameStarted and not _GameManager.TimeAttackMode
+			and _GameManager.SelectedEpisode == 1 and _RunClearLogic.ClearRecord ~= ""
+	end
+
+	method boolean CanInvadeZone(integer zoneIndex)
+		-- Only episode-1 combat zones receive the extra monster stats.
+		return self.InvasionLevel > 0 and self:IsEligibleRun() and self.ActiveClearRecord == _RunClearLogic.ClearRecord
+			and zoneIndex >= 1 and zoneIndex <= 43 and zoneIndex ~= 18 and zoneIndex ~= 35
+	end
+
+	method number GetMonsterHpMultiplier(integer zoneIndex)
+		-- Corruption persists between surges; later waves grow linearly without a stat cap.
+		if self:CanInvadeZone(zoneIndex) then return 1 + self.MonsterHpPerLevel * self.InvasionLevel end
+		return 1
+	end
+
+	method number GetMonsterAttackMultiplier(integer zoneIndex)
+		-- Apply at the monster-to-player damage consumer, never to player skills.
+		if self:CanInvadeZone(zoneIndex) then return 1 + self.MonsterAttackPerLevel * self.InvasionLevel end
+		return 1
+	end
+
+	@ExecSpace("ServerOnly")
+	method void StartInvasionWave()
+		-- Advance the corruption level; the following surge is presentation, not a player buff.
+		self.InvasionLevel = self.InvasionLevel + 1
+		self._remaining = self.BurstSeconds
+		self.RemainingSeconds = math.ceil(self._remaining)
+		self.ChargeKills = 0
+		self._lastKills = _GameManager.KillCount
+		self.Phase = 2
+		log("[VRF] endless invasion wave=" .. tostring(self.InvasionLevel) .. " monsterHp=" .. tostring(self:GetMonsterHpMultiplier(_MapManager.CurrentMapIndex)) .. " monsterAttack=" .. tostring(self:GetMonsterAttackMultiplier(_MapManager.CurrentMapIndex)))
+	end
+
+	@ExecSpace("ServerOnly")
+	method void TickServer(number delta)
+		-- One existing run record drives invasion; map travel does not create a new run.
+		if not self:IsEligibleRun() then
+			if self.Phase ~= 0 or self.ActiveClearRecord ~= "" then self:ResetForRun() end
+			return
+		end
+		if self.ActiveClearRecord ~= _RunClearLogic.ClearRecord then
+			self.ActiveClearRecord = _RunClearLogic.ClearRecord
+			self._remaining = _RunClearLogic.BannerHoldSeconds + _RunClearLogic.BannerExitSeconds + 0.6
+			self._lastKills = _GameManager.KillCount
+			self.ChargeKills = 0
+			self.Phase = 1
+			log("[VRF] endless burst unlocked record=" .. self.ActiveClearRecord)
+		end
+		if _GameManager.GameOver then
+			if self.Phase == 2 then
+				self.Phase = 3 self._remaining = 0 self.RemainingSeconds = 0 self.ChargeKills = 0
+				log("[VRF] endless burst interrupted by game over")
+			end
+			self._lastKills = _GameManager.KillCount
+			return
+		end
+		if _GameManager:IsGamePaused() or _GameManager:IsPlayClockFrozen() then
+			self._lastKills = _GameManager.KillCount
+			return
+		end
+		if self.Phase == 1 or self.Phase == 2 then
+			self._lastKills = _GameManager.KillCount
+			self._remaining = math.max(0, self._remaining - delta)
+			if self.Phase == 2 then self.RemainingSeconds = math.ceil(self._remaining) end
+			if self._remaining <= 0 then
+				if self.Phase == 1 then self:StartInvasionWave()
+				else
+					self.Phase = 3 self.ChargeKills = 0
+					log("[VRF] endless burst finished; charge target=" .. tostring(self.KillsPerBurst))
+				end
+			end
+		elseif self.Phase == 3 then
+			local gained = math.max(0, _GameManager.KillCount - self._lastKills)
+			self._lastKills = _GameManager.KillCount
+			if gained > 0 then
+				self.ChargeKills = math.min(self.KillsPerBurst, self.ChargeKills + gained)
+				if self.ChargeKills >= self.KillsPerBurst then self:StartInvasionWave() end
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void HidePresentation()
+		-- Stop the presets explicitly so reopening the world cannot leave live emitters.
+		if isvalid(self.scene) then self.scene.Enable = false end
+		if isvalid(self.hud) then self.hud.Enable = false end
+		if isvalid(self.ambient) then self.ambient:Stop() end
+		if isvalid(self.aura) then self.aura:Stop() end
+		if isvalid(self.nova) then self.nova:Stop() end
+		self._particlesPlaying = false
+		self._flashRemaining = 0
+	end
+
+	@ExecSpace("ClientOnly")
+	method void UpdateHud()
+		-- Resolve new text through the existing six-language table only when it changes.
+		local hudKey = tostring(self.InvasionLevel) .. "|" .. tostring(self.Phase) .. "|" .. tostring(self.RemainingSeconds) .. "|" .. tostring(self.ChargeKills) .. "|" .. _LocalizationService.CurrentLocaleId
+		if self._lastHudText == hudKey then return end
+		self._lastHudText = hudKey
+		local title = ""
+		local description = ""
+		local ratio = 0
+		if self.Phase == 2 then
+			title = _LocalizationService:GetTextFormat("ENDLESS_INVASION_STAGE", self.InvasionLevel)
+			description = _LocalizationService:GetText("ENDLESS_INVASION_SURGE")
+			ratio = self.RemainingSeconds / math.max(1, self.BurstSeconds)
+		elseif self.Phase == 3 then
+			title = _LocalizationService:GetTextFormat("ENDLESS_INVASION_STAGE", self.InvasionLevel)
+			description = _LocalizationService:GetTextFormat("ENDLESS_INVASION_CHARGE", self.ChargeKills, self.KillsPerBurst)
+			ratio = self.ChargeKills / math.max(1, self.KillsPerBurst)
+		else
+			title = _LocalizationService:GetText("ENDLESS_INVASION_TITLE")
+			description = _LocalizationService:GetText("ENDLESS_INVASION_BEGIN")
+		end
+		self.heading.Text = title self.detail.Text = description
+		local surge = self.Phase == 2
+		self.heading.FontColor = surge and Color(0.95, 0.77, 1, 1) or Color(0.86, 0.75, 1, 1)
+		self.fill.Color = surge and Color(0.83, 0.45, 1, 1) or Color(0.65, 0.4, 1, 1)
+		self.fill.Entity.UITransformComponent.RectSize = Vector2(math.max(0.01, 280 * math.min(1, math.max(0, ratio))), 5)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void TickClient(number delta)
+		-- Screen-space haze survives all episode-1 maps and leaves the center clear.
+		local show = self.Phase > 0 and self:IsEligibleRun() and not _GameManager.GameOver
+			and not _GameManager.EntryPresentationPending
+			and not (isvalid(_TitleUI.titleGroup) and _TitleUI.titleGroup.Enable)
+		if not show or not isvalid(self.scene) or not isvalid(self.hud) then
+			if self._particlesPlaying or self._visualAlpha > 0 then self:HidePresentation() end
+			self._visualAlpha = 0 self._clientPhase = self.Phase
+			return
+		end
+		local paused = _GameManager:IsGamePaused() or _GameManager.SafeAreaFrozen
+			or _MapManager:IsInColosseum() or _MapManager.CurrentMapIndex == 44
+		self.scene.Enable = not paused
+		self.hud.Enable = not paused
+		if paused then
+			if self._particlesPlaying then self:HidePresentation() end
+			return
+		end
+		self._clientClock = self._clientClock + delta
+		self._visualAlpha = math.min(1, self._visualAlpha + delta / 1.4)
+		if not self._particlesPlaying then
+			self.ambient:Play()
+			if self.Phase == 2 then self.aura:Play() end
+			self._particlesPlaying = true
+		end
+		if self.Phase ~= self._clientPhase then
+			self._clientPhase = self.Phase
+			if self.Phase == 2 then
+				self.aura:Stop() self.aura:Play()
+				self.nova:Stop() self.nova:Play()
+				self._flashRemaining = 0.45
+				_SoundOptionLogic:PlaySfx(self.BurstSoundRUID, 0.65)
+				log("[VRF] endless invasion surge and nova started")
+			else self.aura:Stop() end
+		end
+		local visualLevel = math.max(1, math.min(self.MaxVisualStage, self.InvasionLevel))
+		if self._visualLevel ~= visualLevel then
+			self._visualLevel = visualLevel
+			self.edge.ImageRUID = DataRef(self.EdgeMasks[visualLevel])
+			log("[VRF] endless invasion mask=" .. tostring(visualLevel))
+		end
+		local pulse = 0.88 + 0.12 * math.sin(self._clientClock * 0.8)
+		if self.Phase == 2 then self.edge.Color = Color(0.43, 0.1, 0.63, 0.84 * self._visualAlpha * pulse)
+		else self.edge.Color = Color(0.3, 0.08, 0.5, 0.78 * self._visualAlpha * pulse) end
+		self._flashRemaining = math.max(0, self._flashRemaining - delta)
+		self.flash.Color = Color(0.83, 0.55, 1, 0.10 * self._flashRemaining / 0.45)
+		local player = _UserService.LocalPlayer
+		if isvalid(player) and player.TransformComponent ~= nil then
+			-- The native avatar is intentionally hidden in this auto-battle game.
+			-- Anchor the invasion surge in the visible battle area, above the card row.
+			self.auraEntity.UITransformComponent.anchoredPosition = Vector2(0, -120)
+			self.novaEntity.UITransformComponent.anchoredPosition = Vector2(0, 0)
+			local current = player.CurrentMap
+			if isvalid(current) and current.Name ~= self._lastMapName then
+				self._lastMapName = current.Name
+				log("[VRF] endless atmosphere map=" .. current.Name .. " phase=" .. tostring(self.Phase))
+			end
+		end
+		self:UpdateHud()
+	end
+
+	method void OnUpdate(number delta)
+		-- Keep combat state authoritative; all rendering remains client-only.
+		if self:IsServer() then self:TickServer(delta) else self:TickClient(delta) end
+	end
+
+	method void OnEndPlay()
+		-- This singleton owns no repeating timers or subscriptions across play sessions.
+		if self:IsServer() then self:ResetForRun() else self:HidePresentation() end
+	end
+end
