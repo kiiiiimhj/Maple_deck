@@ -3637,6 +3637,8 @@ script GameManager extends Logic
 	method void OnBossDefeated(Vector3 worldPos, number fallHeight, number groundWorldY, number dropScale)
 		self.BossDefeated = true
 		_AchievementLogic:OnBossDefeated()
+		-- [CF2026] 크리에이터 페스티벌 이벤트(에피1 보스) — 이벤트 종료 후 삭제
+		_CreatorFestivalLogic:OnBossDefeated()
 		if _MapManager.CurrentMapIndex~=189 then _MonsterSpawner:ClearCurrentBoss() end
 		-- 보스 처치는 큰 보상으로 확정 레벨업 1회를 보장한다(그 시점 누적 Exp와 무관하게). 뺄셈이 아니라
 		-- 필요경험치만큼을 그대로 더해서(기존에 쌓아둔 Exp는 보존) 문턱을 확실히 넘기고, 그 뒤로는 일반
@@ -6751,7 +6753,8 @@ script GameManager extends Logic
 		-- 2026-09-11: 공격력은 체력과 계단 경계가 달라져서 GetAtkTimeStep(1분→2분→3분→5분 격자)을 쓴다.
 		-- GetWaveAttack의 attacks 테이블은 1부터 시작하는 기존 인덱싱을 그대로 쓰므로 +1 보정한다.
 		local timeStep = self:GetAtkTimeStep()
-		local dmg = math.floor(self:GetWaveAttack(timeStep + 1) * dmgMultiplier * _EndlessBurstLogic:GetMonsterAttackMultiplier(_MapManager.CurrentMapIndex))
+		-- 침식 광폭: 버림한 뒤 고정 +N(유저 확정 2026-10-30 — % 배율은 1~9 정수 공격력에서 버림에 묻혔다)
+		local dmg = math.floor(self:GetWaveAttack(timeStep + 1) * dmgMultiplier) + _EndlessBurstLogic:GetMonsterAttackBonus(_MapManager.CurrentMapIndex)
 		local armorReduction = _CardManager:GetMagicArmorReduction()
 		if armorReduction > 0 then dmg = math.floor(dmg * (1.0 - armorReduction)) end
 		
@@ -6850,6 +6853,8 @@ script GameManager extends Logic
 	method void LevelUp()
 		self.Level = self.Level + 1
 		_AchievementLogic:OnLevelUp(self.Level)
+		-- [CF2026] 크리에이터 페스티벌 이벤트(레벨 5) — 이벤트 종료 후 삭제
+		_CreatorFestivalLogic:OnLevelUp(self.Level)
 		-- OnBossDefeated()는 그 시점의 누적 경험치가 ExpNeeded 미만이어도 강제로 LevelUp()을 호출한다.
 		-- 그냥 빼기만 하면 음수 Exp가 남는데, 경험치 바 갱신(NotifyExpChanged)의 ratio 계산이
 		-- math.max(0, ...)로 음수를 0에 고정시켜서, 그 뒤로 몬스터를 잡아 조금씩 채워도 다시 0을
@@ -7716,6 +7721,8 @@ script GameManager extends Logic
 		-- 에피3 map4 히든맵 포탈(portal-3)도 초기화 — 새 런에서는 다시 숨겨지고 오브젝트 4개를 다시 눌러야 함
 		_Ep3Map4Ester1PortalLogic:ResetForNewRun()
 		_MonsterSpawner:ResetEliteTracking()
+		-- 보스 랜덤 순서 가방도 새 런 기준으로(한 런 안에서 모든 보스가 한 번씩 나와야 다시 섞인다)
+		_MonsterSpawner:ResetBossOrder()
 		-- 지쳐버린 기사(Tired Knight) 존별 스폰 여부도 초기화 — 새 런에서 존마다 다시 1마리씩 등장한다
 		_MonsterSpawner:ResetTiredKnightTracking()
 		-- 맵10 보너스 스테이지(발록) — _map10Visited가 남아 새 런에서도 "재방문"(30%)으로 판정되던
@@ -7761,6 +7768,15 @@ script GameManager extends Logic
 	method void HealPlayer(integer amount)
 		-- 포션 사용 시 체력 회복 (최대 HP 초과 불가)
 		if self.GameOver then return end
+		-- 침식 저주(2026-10-30): 모든 회복이 이 한 곳을 지난다(흡혈·포션·장비·스킬·그림자 상점 전체 회복).
+		-- 흡혈은 타격당 1이라 배율을 곱하면 버림에 0이 되므로, 남는 소수점을 모아 1이 넘을 때 회복한다.
+		local healMult = _EndlessBurstLogic:GetPlayerHealMultiplier()
+		if healMult < 1 then
+			local scaled = amount * healMult + (self._T.curseHealCarry or 0)
+			amount = math.floor(scaled)
+			self._T.curseHealCarry = scaled - amount
+			if amount <= 0 then return end
+		end
 		self.PlayerHp = math.min(self.PlayerHp + amount, self.PlayerMaxHp)
 		log("Player healed " .. amount .. " -> HP:" .. self.PlayerHp)
 	end
@@ -8023,6 +8039,8 @@ script GameManager extends Logic
 		end
 		-- 게임오버 결과창에 "이번 판에 얻은 주문서"로 표시(실제로 들어간 것만)
 		_RunLootLogic:AddScroll(iconRUID)
+		-- [CF2026] 크리에이터 페스티벌 이벤트(아이템 획득) — 이벤트 종료 후 삭제
+		_CreatorFestivalLogic:OnItemAcquired()
 
 		self:PlayLobbyDropVisual(Vector2(worldPos.x, worldPos.y), fallHeight, groundWorldY, dropScale, iconRUID)
 	end
@@ -8071,6 +8089,8 @@ script GameManager extends Logic
 		-- 쉐이드 해금 조건(누적 장비 250개) — 인벤에 실제로 들어간 것만 센다(위 정원 초과 분기는 이미 return)
 		_CharacterUnlockLogic:AddGearCollected(1)
 		_AchievementLogic:OnGearAcquired()
+		-- [CF2026] 크리에이터 페스티벌 이벤트(아이템 획득) — 이벤트 종료 후 삭제
+		_CreatorFestivalLogic:OnItemAcquired()
 		-- 무기가 실제로 들어왔으면 신규 유저 첫 무기 보장은 더 필요 없다
 		_FirstWeaponGuaranteeLogic:OnGearGranted(itemId)
 

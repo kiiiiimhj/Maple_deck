@@ -3705,6 +3705,12 @@ script MonsterAI extends Component
 	end
 
 	@ExecSpace("ServerOnly")
+	method void ResetEndlessHpMult()
+		-- 외부에서 MaxHp를 고정값으로 덮어쓴 직후 호출(엘리트 승급) — 다음 갱신 때 침식 강인 배율을 처음부터 다시 곱한다
+		self._T.endlessHpMult = 1
+	end
+
+	@ExecSpace("ServerOnly")
 	method void UpdateEndlessInvasionHealth()
 		-- Existing and newly spawned enemies scale once per level, preserving missing HP.
 		if self._dead or self.MaxHp <= 0 or self.CurrentHp <= 0 then return end
@@ -3885,7 +3891,9 @@ script MonsterAI extends Component
 				self._swarmRushTimer = self._swarmRushTimer - delta
 				rushMult = self._swarmRushMult
 			end
-			self._currentScale = self._currentScale + self.ApproachSpeed * rushMult * delta
+			-- 침식 질주(이동속도) — 매 프레임 읽으므로 단계가 바뀌면 살아있는 몬스터에도 바로 반영/해제된다
+			local hasteMult = _EndlessBurstLogic:GetMonsterMoveMultiplier(self._spawnZoneIndex)
+			self._currentScale = self._currentScale + self.ApproachSpeed * rushMult * hasteMult * delta
 		end
 		
 		-- 닌자/재규어 지그재그: 전진(스케일)과 독립적으로 X만 사인파로 좌우 흔들되, 중심(_zigzagBaseX)에서
@@ -4099,6 +4107,8 @@ script MonsterAI extends Component
 		if self._customAttackInterval > 0 then base = self._customAttackInterval end
 		-- 에피4 북치는 토끼 공속 버프(없으면 1.0이라 무영향)
 		base = base / self:GetAttackSpeedBuffMult()
+		-- 침식 맹공(모든 몬스터 공격속도)
+		base = base / _EndlessBurstLogic:GetMonsterAttackSpeedMultiplier(self._spawnZoneIndex)
 		local projectileProfile=_MonsterProjectileFx:GetProfile(self._standRUID)
 		if not self._isBoss and not self._isElite and projectileProfile~=nil then
 			base=base/(projectileProfile.attackSpeed or 1)
@@ -4872,6 +4882,8 @@ script MonsterAI extends Component
 			end
 			-- 에피4 북치는 토끼 공속 버프(없으면 1.0이라 무영향)
 			self._attackTimer = self._attackTimer / self:GetAttackSpeedBuffMult()
+			-- 침식 맹공(비행형도 같은 배율)
+			self._attackTimer = self._attackTimer / _EndlessBurstLogic:GetMonsterAttackSpeedMultiplier(self._spawnZoneIndex)
 		end
 	end
 
@@ -6178,6 +6190,8 @@ script MonsterAI extends Component
 		if self._phase2Revived then achLoot = _GameManager:GetMonsterLootItemIdPhase2(self:GetLootZone(), self._speciesIdx) end
 		if achLoot == "" then achLoot = _GameManager:GetMonsterLootItemId(self:GetLootZone(), self._speciesIdx) end
 		_AchievementLogic:OnMonsterKilled(self._isElite and not self._isEp1BossSplit and not self._isBoss, self._isFlying, achLoot)
+		-- [CF2026] 크리에이터 페스티벌 이벤트(처치 수/엘리트) — 이벤트 종료 후 삭제
+		_CreatorFestivalLogic:OnMonsterKilled(self._isElite and not self._isEp1BossSplit and not self._isBoss)
 		-- 몬스터 도감 — 지금 에피소드 도감에 있는 키만 MonsterBookLogic이 센다(엔젤 슬라임 분열체는 보스의 일부라 제외)
 		if not self._isEp1BossSplit then
 			local bookKey = self._bookKey

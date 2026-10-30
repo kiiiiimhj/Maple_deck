@@ -1,12 +1,15 @@
 @Logic
 script EndlessBurstLogic extends Logic
 
-	-- Branch trial: only episode 1, unlimited runs, after the existing clear milestone.
+	-- 무제한 모드 전 에피소드, 기존 클리어(10/15분) 뒤에 시작한다(2026-10-30 에피1 한정 → 전체로 확장).
 	property boolean Enabled = true
 	property number BurstSeconds = 20
+	-- 클리어 순간부터 첫 침식까지(유저 지정 2026-10-30 "5초에 시작") — 클리어 배너(1.8초)와 "신기록에 도전하세요!"
+	-- 토스트(1.8~4.0초)가 끝난 뒤에 침식이 오게 한다. 그 사이(Phase 1)엔 침식 HUD·테두리를 숨긴다.
+	property number FirstSurgeDelay = 5
 	property integer KillsPerBurst = 100
-	property number MonsterHpPerLevel = 0.20
-	property number MonsterAttackPerLevel = 0.10
+	-- 2026-10-30 유저 지정: 단계마다 6종(강인/광폭/질주/범람/맹공/저주) 중 1단계 1개, 2~5단계 2개, 6단계~ 3개를
+	-- 새로 뽑는다(앞 단계 효과는 빠진다). 수치는 GetModifierValue의 단계표.
 	property integer MaxVisualStage = 10
 	@Sync property integer InvasionLevel = 0
 	property integer _visualLevel = -1
@@ -40,6 +43,8 @@ script EndlessBurstLogic extends Logic
 
 	-- Display-only adapter: gameplay calculations remain owned by the invasion rules.
 	@Sync property string HudModifierData = ""
+	-- 다음 단계와 효과를 한 레코드로 동기화한다. 미리보기는 현재 전투 효과와 분리한다.
+	@Sync property string NextModifierRecord = ""
 	property table ModifierIcons = {fortitude = "83c2296ed4fa484fa3fb93f7eae9effa", frenzy = "b89515445923420ba2eadbad1b1a99d2", haste = "c4f7c47560ca481da6e7c705f07a959c", swarm = "79a38ab3b9804bcf8a71f67431793ac2", onslaught = "9207acbc69d44db3b9463b74baaadac4", curse = "e974dd4ce49441489587305ece25c00b"}
 	property Entity modifierSlot1 = "2944d245-2e7e-4071-9912-253dcdbcf851"
 	property Entity modifierSlot2 = "223ca369-e546-4433-9379-4d824d1f5593"
@@ -50,6 +55,25 @@ script EndlessBurstLogic extends Logic
 	property integer _tooltipIndex = 0
 	property number _tooltipRemaining = 0
 	property string UiClickSoundRUID = "972843e759204d3e9ad84e7d3fa94f83"
+
+	-- 첫 침식 안내(유저 지정 2026-10-30): 계정당 1번, 첫 침식이 발동하기 직전에 게임을 멈추고 그림 3장을 차례로 보여 준다.
+	-- 화면을 누르면 닫히고(열린 직후 0.5초는 실수 터치 방지로 무시) 그 순간 첫 침식이 한 번 시작된다.
+	-- 정지는 퍼즐과 같은 EasterEggPaused, 본 기록은 TutorialLogic의 유저별 저장소 Tutorial.InvasionSeen.
+	-- 화면 배치·그림은 Docs/EndlessInvasionTutorial-Handoff.md(V4) 그대로.
+	@Sync property boolean TutorialOpen = false
+	-- 클라가 끝내 닫기를 못 보내도(리소스 실패 등) 게임이 영영 멈추지 않게 하는 안전장치
+	property number TutorialFailSafeSeconds = 120
+	property number TutorialTapGuardSeconds = 0.5
+	property integer _tutorialFailSafeTimerId = 0
+	property Entity tutorialRoot = "3167257f-5942-45ca-bd19-d7461a2c8617"
+	property Entity tutorialDim = "b91d57b5-1765-4bc2-9ca8-6c317ad02633"
+	property table TutorialImages = {"14ace51fa62d4572ab8bc578114839b0", "34ff4f9102bf487fa36e18f3da6721e6", "63473c3f64cb4b99b45ff47106fa3600", "07aa9cff54be44a48f14b9cc911fd251", "0fc12801fd404b5090ec060ce816e536"}
+	property boolean _tutorialShown = false
+	property number _tutorialTime = 0
+	property integer _tutorialStage = 0
+	property table _tutorialAges = {}
+	property Vector2 _tutorialCanvas = Vector2(0, 0)
+	property Vector2 _tutorialScreen = Vector2(0, 0)
 
 	method void OnBeginPlay()
 		-- Invasion revision: monster reinforcement only.
@@ -62,6 +86,7 @@ script EndlessBurstLogic extends Logic
 		self._lastHudText = ""
 		self._lastMapName = ""
 		self:BindHudButtons()
+		self:BindTutorial()
 		self:HidePresentation()
 		log("[VRF] endless invasion client boot scene=" .. tostring(isvalid(self.scene)) .. " hud=" .. tostring(isvalid(self.hud)) .. " cap=" .. tostring(self.MaxVisualStage) .. " masks=" .. tostring(#self.EdgeMasks))
 	end
@@ -75,45 +100,234 @@ script EndlessBurstLogic extends Logic
 		self.ChargeKills = 0
 		self.ActiveClearRecord = ""
 		self.HudModifierData = ""
+		self.NextModifierRecord = ""
+		self._T.mods = {}
 		self._remaining = 0
 		self._lastKills = _GameManager.KillCount
+		-- 안내가 열린 채 타이틀로 나가면 안내가 건 정지만 풀어 준다
+		if self.TutorialOpen then
+			self.TutorialOpen = false
+			_GameManager:SetEasterEggPaused(false)
+		end
+		self:ClearTutorialFailSafe()
 		log("[VRF] endless burst reset")
 	end
 
 	method boolean IsEligibleRun()
-		-- The trial never changes time attack, other episodes, title, or an uncleared run.
+		-- 무제한 모드면 모든 에피소드(유저 지정 2026-10-30). 타임어택·타이틀·클리어 전 판은 제외
 		return self.Enabled and _GameManager.GameStarted and not _GameManager.TimeAttackMode
-			and _GameManager.SelectedEpisode == 1 and _RunClearLogic.ClearRecord ~= ""
+			and _RunClearLogic.ClearRecord ~= ""
 	end
 
 	method boolean CanInvadeZone(integer zoneIndex)
-		-- Only episode-1 combat zones receive the extra monster stats.
-		return self.InvasionLevel > 0 and self:IsEligibleRun() and self.ActiveClearRecord == _RunClearLogic.ClearRecord
-			and zoneIndex >= 1 and zoneIndex <= 43 and zoneIndex ~= 18 and zoneIndex ~= 35
+		-- 지금 에피소드의 전투 존만 강화한다. 범위는 GameManager.GetEpisodeZoneRange, 제외 존은
+		-- MonsterSpawner.IsNoMonsterZone(그림자 상점 18·택시 35·보물상자 44·지네 아레나 240)과 같은 값 —
+		-- 둘 다 ServerOnly라 클라에서도 불릴 수 있는 이 함수에는 숫자로 옮겨 둔다(그쪽이 바뀌면 같이 고칠 것)
+		if self.InvasionLevel <= 0 or not self:IsEligibleRun() or self.ActiveClearRecord ~= _RunClearLogic.ClearRecord then return false end
+		if zoneIndex == 18 or zoneIndex == 35 or zoneIndex == 44 or zoneIndex == 240 or _MapManager:IsInColosseum() then return false end
+		local ep = _GameManager.SelectedEpisode
+		local first, last = 1, 44
+		if ep == 2 then first, last = 45, 88
+		elseif ep == 3 then first, last = 89, 128
+		elseif ep == 4 then first, last = 134, 189
+		elseif ep == 5 then first, last = 190, 239 end
+		return zoneIndex >= first and zoneIndex <= last
 	end
 
+	method number GetModifierValue(string key, integer level)
+		-- 단계표(유저 확정 2026-10-30). 10단계 뒤로는 강인 +15%p·광폭 +1씩 계속 오르고 나머지는 고정.
+		-- 광폭만 공격력 고정 가산(+N), 나머지는 %(저주는 음수 = 회복 감소).
+		if level <= 0 then return 0 end
+		local tables = {
+			fortitude = {20, 25, 30, 35, 40, 50, 60, 70, 80, 95},
+			frenzy = {1, 1, 2, 2, 3, 3, 4, 4, 5, 6},
+			haste = {15, 15, 20, 20, 25, 25, 30, 30, 30, 30},
+			swarm = {20, 20, 25, 25, 30, 30, 35, 35, 40, 40},
+			onslaught = {10, 15, 15, 20, 20, 25, 25, 30, 30, 35},
+			curse = {-15, -20, -25, -30, -35, -40, -45, -50, -55, -60}
+		}
+		local row = tables[key]
+		if row == nil then return 0 end
+		if level <= #row then return row[level] end
+		local extra = level - #row
+		if key == "fortitude" then return row[#row] + 15 * extra end
+		if key == "frenzy" then return row[#row] + extra end
+		if key == "onslaught" then return 40 end
+		return row[#row]
+	end
+
+	method integer GetModifierCount(integer level)
+		-- 이번 단계에 걸리는 효과 개수: 1단계 1개 / 2~5단계 2개 / 6단계부터 3개
+		if level <= 1 then return 1 end
+		if level <= 5 then return 2 end
+		return 3
+	end
+
+	@ExecSpace("ServerOnly")
+	method number GetActiveModifier(string key, integer zoneIndex)
+		-- 지금 걸려 있는 효과의 수치(안 걸렸거나 침식 대상 존이 아니면 0)
+		if not self:CanInvadeZone(zoneIndex) then return 0 end
+		local mods = self._T.mods
+		if mods == nil then return 0 end
+		return mods[key] or 0
+	end
+
+	@ExecSpace("ServerOnly")
 	method number GetMonsterHpMultiplier(integer zoneIndex)
-		-- Corruption persists between surges; later waves grow linearly without a stat cap.
-		if self:CanInvadeZone(zoneIndex) then return 1 + self.MonsterHpPerLevel * self.InvasionLevel end
-		return 1
+		-- 강인: 몬스터 체력 배율(MonsterAI.UpdateEndlessInvasionHealth가 비율로 반영 — 빠지면 원래대로 돌아간다)
+		return 1 + self:GetActiveModifier("fortitude", zoneIndex) / 100
 	end
 
-	method number GetMonsterAttackMultiplier(integer zoneIndex)
-		-- Apply at the monster-to-player damage consumer, never to player skills.
-		if self:CanInvadeZone(zoneIndex) then return 1 + self.MonsterAttackPerLevel * self.InvasionLevel end
-		return 1
+	@ExecSpace("ServerOnly")
+	method integer GetMonsterAttackBonus(integer zoneIndex)
+		-- 광폭: 몬스터 공격력 고정 가산. 피격 대미지를 버림한 **뒤에** 더한다(% 배율은 1~9 정수에서 버림에 묻혔다)
+		return math.floor(self:GetActiveModifier("frenzy", zoneIndex) + 0.5)
+	end
+
+	@ExecSpace("ServerOnly")
+	method number GetMonsterMoveMultiplier(integer zoneIndex)
+		-- 질주: 지상 몬스터 접근 속도 배율
+		return 1 + self:GetActiveModifier("haste", zoneIndex) / 100
+	end
+
+	@ExecSpace("ServerOnly")
+	method number GetSwarmMultiplier(integer zoneIndex)
+		-- 범람: 한 번에 나오는 수 + 존 동시 상한 배율
+		return 1 + self:GetActiveModifier("swarm", zoneIndex) / 100
+	end
+
+	@ExecSpace("ServerOnly")
+	method number GetMonsterAttackSpeedMultiplier(integer zoneIndex)
+		-- 맹공: 모든 몬스터 공격속도 배율(공격 주기를 이 값으로 나눈다)
+		return 1 + self:GetActiveModifier("onslaught", zoneIndex) / 100
+	end
+
+	@ExecSpace("ServerOnly")
+	method number GetPlayerHealMultiplier()
+		-- 저주: 플레이어 회복량 배율(GameManager.HealPlayer 한 곳에서 모든 회복에 적용)
+		return math.max(0, 1 + self:GetActiveModifier("curse", _MapManager.CurrentMapIndex) / 100)
+	end
+
+	@ExecSpace("ServerOnly")
+	method string CreateModifierData(integer level)
+		-- 지정 단계의 효과를 중복 없이 뽑는다. 이 함수만으로 현재 전투 수치는 바뀌지 않는다.
+		local keys = {"fortitude", "frenzy", "haste", "swarm", "onslaught", "curse"}
+		for i = #keys, 2, -1 do
+			local j = _UtilLogic:RandomIntegerRange(1, i)
+			keys[i], keys[j] = keys[j], keys[i]
+		end
+		local parts = {}
+		for i = 1, self:GetModifierCount(level) do
+			table.insert(parts, keys[i] .. ":" .. tostring(self:GetModifierValue(keys[i], level)))
+		end
+		return table.concat(parts, "|")
+	end
+
+	method table ParseModifierData(string data)
+		-- 서버 적용과 클라 표시가 같은 검증을 사용한다(알려진 효과, 유한 수치, 중복 없이 최대 세 개).
+		local result = {}
+		local seen = {}
+		for entry in string.gmatch(data, "([^|]+)") do
+			local key, raw = string.match(entry, "^([a-z]+):([%+%-]?[%d%.]+)$")
+			local value = tonumber(raw)
+			local known = key == "fortitude" or key == "frenzy" or key == "haste" or key == "swarm" or key == "onslaught" or key == "curse"
+			if known and value ~= nil and value == value and math.abs(value) <= 999999 and not seen[key] and #result < 3 then
+				seen[key] = true
+				table.insert(result, {key = key, value = value})
+			end
+		end
+		return result
+	end
+
+	@ExecSpace("ServerOnly")
+	method void PrepareNextModifiers()
+		-- 확산 종료 때 한 번 미리 추첨한다. 100마리를 잡는 동안 이 결과는 바뀌지 않는다.
+		local nextLevel = self.InvasionLevel + 1
+		local level, data = string.match(self.NextModifierRecord, "^(%d+);(.+)$")
+		if tonumber(level) == nextLevel and #self:ParseModifierData(data or "") == self:GetModifierCount(nextLevel) then return end
+		self.NextModifierRecord = tostring(nextLevel) .. ";" .. self:CreateModifierData(nextLevel)
+		log("[VRF] invasion next reserved=" .. self.NextModifierRecord .. " active=" .. self.HudModifierData)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void RollModifiers()
+		-- 첫 침식 또는 디버그 건너뛰기용 추첨. 보통 다음 침식은 예약한 레코드를 그대로 적용한다.
+		self:SetHudModifiers(self:CreateModifierData(self.InvasionLevel))
+		self._T.mods = {}
+		for _, item in ipairs(self:ParseModifierData(self.HudModifierData)) do self._T.mods[item.key] = item.value end
 	end
 
 	@ExecSpace("ServerOnly")
 	method void StartInvasionWave()
-		-- Advance the corruption level; the following surge is presentation, not a player buff.
-		self.InvasionLevel = self.InvasionLevel + 1
+		-- 100마리 달성 시 미리 보인 효과를 재추첨 없이 적용한다. 연출 중인 가짜 슬롯 값은 전투에 쓰지 않는다.
+		local nextLevel = self.InvasionLevel + 1
+		local level, data = string.match(self.NextModifierRecord, "^(%d+);(.+)$")
+		local reserved = tonumber(level) == nextLevel and #self:ParseModifierData(data or "") == self:GetModifierCount(nextLevel)
+		self.InvasionLevel = nextLevel
+		if reserved then
+			self:SetHudModifiers(data)
+			self._T.mods = {}
+			for _, item in ipairs(self:ParseModifierData(self.HudModifierData)) do self._T.mods[item.key] = item.value end
+		else self:RollModifiers() end
+		self.NextModifierRecord = ""
 		self._remaining = self.BurstSeconds
 		self.RemainingSeconds = math.ceil(self._remaining)
 		self.ChargeKills = 0
 		self._lastKills = _GameManager.KillCount
 		self.Phase = 2
-		log("[VRF] endless invasion wave=" .. tostring(self.InvasionLevel) .. " monsterHp=" .. tostring(self:GetMonsterHpMultiplier(_MapManager.CurrentMapIndex)) .. " monsterAttack=" .. tostring(self:GetMonsterAttackMultiplier(_MapManager.CurrentMapIndex)))
+		log("[VRF] endless invasion wave=" .. tostring(self.InvasionLevel) .. " reserved=" .. tostring(reserved) .. " mods=" .. self.HudModifierData)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OpenTutorial()
+		-- 첫 침식 직전: 게임을 멈추고 클라에 안내를 띄운다(TutorialOpen @Sync를 클라가 보고 연다)
+		if self.TutorialOpen then return end
+		self.TutorialOpen = true
+		_GameManager:SetEasterEggPaused(true)
+		self:ClearTutorialFailSafe()
+		self._tutorialFailSafeTimerId = _TimerService:SetTimerOnce(function()
+			if not isvalid(self) then return end
+			self._tutorialFailSafeTimerId = 0
+			log_warning("[VRF] invasion tutorial fail-safe fired — resuming")
+			self:FinishTutorial()
+		end, self.TutorialFailSafeSeconds)
+		log("[VRF] invasion tutorial opened")
+	end
+
+	@ExecSpace("ServerOnly")
+	method void ClearTutorialFailSafe()
+		-- 안전장치 타이머 정리(중복 등록 방지)
+		if self._tutorialFailSafeTimerId ~= 0 then
+			_TimerService:ClearTimer(self._tutorialFailSafeTimerId)
+			self._tutorialFailSafeTimerId = 0
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void FinishTutorial()
+		-- 정상 닫기와 안전장치가 같이 쓰는 경로: 봤음 저장 → 정지 해제 → 첫 침식을 딱 한 번 시작
+		if not self.TutorialOpen then return end
+		self.TutorialOpen = false
+		self:ClearTutorialFailSafe()
+		_TutorialLogic:MarkInvasionTutorialSeen()
+		_GameManager:SetEasterEggPaused(false)
+		if self.Phase == 1 and self:IsEligibleRun() and not _GameManager.GameOver then self:StartInvasionWave() end
+		log("[VRF] invasion tutorial closed phase=" .. tostring(self.Phase) .. " level=" .. tostring(self.InvasionLevel))
+	end
+
+	@ExecSpace("ServerOnly")
+	method void CheatAdvanceInvasion()
+		-- [DEBUG] P키(클리어 뒤): 첫 침식 대기 중이면 대기만 끝내고(처음 보는 계정은 안내부터), 그 뒤로는 바로 다음 단계
+		if not self:IsEligibleRun() or self.TutorialOpen or self.Phase == 0 then return end
+		if self.Phase == 1 then self._remaining = 0
+		else self:StartInvasionWave() end
+		log("[DEBUG] invasion advanced by cheat phase=" .. tostring(self.Phase) .. " level=" .. tostring(self.InvasionLevel))
+	end
+
+	@ExecSpace("Server")
+	method void RequestCloseTutorial()
+		-- 클라가 화면을 눌러 안내를 닫았다
+		self:FinishTutorial()
 	end
 
 	@ExecSpace("ServerOnly")
@@ -125,7 +339,7 @@ script EndlessBurstLogic extends Logic
 		end
 		if self.ActiveClearRecord ~= _RunClearLogic.ClearRecord then
 			self.ActiveClearRecord = _RunClearLogic.ClearRecord
-			self._remaining = _RunClearLogic.BannerHoldSeconds + _RunClearLogic.BannerExitSeconds + 0.6
+			self._remaining = self.FirstSurgeDelay
 			self._lastKills = _GameManager.KillCount
 			self.ChargeKills = 0
 			self.Phase = 1
@@ -148,13 +362,18 @@ script EndlessBurstLogic extends Logic
 			self._remaining = math.max(0, self._remaining - delta)
 			if self.Phase == 2 then self.RemainingSeconds = math.ceil(self._remaining) end
 			if self._remaining <= 0 then
-				if self.Phase == 1 then self:StartInvasionWave()
+				if self.Phase == 1 then
+					-- 처음 침식을 맞는 계정이면 발동 직전에 멈추고 안내부터(닫으면 RequestCloseTutorial이 침식을 시작한다)
+					if not _TutorialLogic:IsInvasionTutorialSeen() then self:OpenTutorial()
+					else self:StartInvasionWave() end
 				else
+					self:PrepareNextModifiers()
 					self.Phase = 3 self.ChargeKills = 0
 					log("[VRF] endless burst finished; charge target=" .. tostring(self.KillsPerBurst))
 				end
 			end
 		elseif self.Phase == 3 then
+			self:PrepareNextModifiers()
 			local gained = math.max(0, _GameManager.KillCount - self._lastKills)
 			self._lastKills = _GameManager.KillCount
 			if gained > 0 then
@@ -179,26 +398,19 @@ script EndlessBurstLogic extends Logic
 
 	@ExecSpace("ServerOnly")
 	method void SetHudModifiers(string data)
-		-- Accept display records only; the caller must separately apply matching gameplay effects.
+		-- 현재 적용되는 효과 레코드만 보관한다. 다음 침식 미리보기는 NextModifierRecord에 따로 둔다.
 		local accepted = {}
-		local seen = {}
-		for entry in string.gmatch(data, "([^|]+)") do
-			local key, raw = string.match(entry, "^([a-z]+):([%+%-]?[%d%.]+)$")
-			local value = tonumber(raw)
-			local known = key == "fortitude" or key == "frenzy" or key == "haste" or key == "swarm" or key == "onslaught" or key == "curse"
-			if known and value ~= nil and value == value and math.abs(value) <= 999999 and not seen[key] and #accepted < 3 then
-				seen[key] = true
-				table.insert(accepted, key .. ":" .. tostring(value))
-			end
-		end
+		for _, item in ipairs(self:ParseModifierData(data)) do table.insert(accepted, item.key .. ":" .. tostring(item.value)) end
 		self.HudModifierData = table.concat(accepted, "|")
 		log("[VRF] invasion HUD data=" .. self.HudModifierData .. " count=" .. tostring(#accepted))
 	end
 
 	@ExecSpace("ClientOnly")
-	method string FormatHudPercent(number value)
-		-- Compact signed percentages remain readable beside a passive-sized square icon.
-		return (value < 0 and "-" or "+") .. string.format("%g", math.abs(value)) .. "%"
+	method string FormatHudValue(string key, number value)
+		-- Compact signed values; 광폭은 공격력 고정 가산이라 % 없이 "+N"
+		local text = (value < 0 and "-" or "+") .. string.format("%g", math.abs(value))
+		if key == "frenzy" then return text end
+		return text .. "%"
 	end
 
 	@ExecSpace("ClientOnly")
@@ -216,25 +428,21 @@ script EndlessBurstLogic extends Logic
 	end
 
 	@ExecSpace("ClientOnly")
+	method string GetNextModifierData()
+		-- 단계 번호까지 일치할 때만 미리보기로 인정한다. 동기화 도중 이전 단계 예약이 잠깐 보여도 잘못 적용하지 않는다.
+		if self.Phase ~= 3 then return "" end
+		local level, data = string.match(self.NextModifierRecord, "^(%d+);(.+)$")
+		if tonumber(level) ~= self.InvasionLevel + 1 then return "" end
+		if #self:ParseModifierData(data or "") ~= self:GetModifierCount(self.InvasionLevel + 1) then return "" end
+		return data
+	end
+
+	@ExecSpace("ClientOnly")
 	method table GetHudModifiers()
-		-- Until six-effect gameplay lands, show the current real HP/attack reinforcement.
-		local result = {}
-		if self.Phase <= 1 or self.InvasionLevel <= 0 then return result end
-		if self.HudModifierData ~= "" then
-			local seen = {}
-			for entry in string.gmatch(self.HudModifierData, "([^|]+)") do
-				local key, raw = string.match(entry, "^([a-z]+):([%+%-]?[%d%.]+)$")
-				local value = tonumber(raw)
-				if key ~= nil and value ~= nil and self:GetHudModifierDefinition(key) ~= nil and not seen[key] and #result < 3 then
-					seen[key] = true
-					table.insert(result, {key = key, value = value})
-				end
-			end
-		else
-			if self.MonsterHpPerLevel ~= 0 then table.insert(result, {key = "fortitude", value = math.floor(self.MonsterHpPerLevel * self.InvasionLevel * 1000 + 0.5) / 10}) end
-			if self.MonsterAttackPerLevel ~= 0 then table.insert(result, {key = "frenzy", value = math.floor(self.MonsterAttackPerLevel * self.InvasionLevel * 1000 + 0.5) / 10}) end
-		end
-		return result
+		-- 확산 중에는 현재 효과, 처치 대기 중에는 다음 침식의 예약 효과를 보여 준다.
+		if self.Phase <= 1 or self.InvasionLevel <= 0 then return {} end
+		local nextData = self:GetNextModifierData()
+		return self:ParseModifierData(nextData ~= "" and nextData or self.HudModifierData)
 	end
 
 	@ExecSpace("ClientOnly")
@@ -244,6 +452,10 @@ script EndlessBurstLogic extends Logic
 		self._T.hudConnections = {}
 		self._T.hudModifierKey = ""
 		self._T.hudModifiers = {}
+		self._T.previewRecord = ""
+		self._T.modifierRolling = false
+		self._T.modifierRollAge = 0
+		self._T.modifierRollKeys = {}
 		local entities = {self.modifierSlot1, self.modifierSlot2, self.modifierSlot3}
 		for i, entity in ipairs(entities) do
 			if isvalid(entity) then
@@ -286,7 +498,7 @@ script EndlessBurstLogic extends Logic
 	@ExecSpace("ClientOnly")
 	method void ToggleModifierTooltip(integer index)
 		-- Click/tap opens a localized description using exactly the displayed value.
-		if not isvalid(self.hud) or not self.hud.Enable then return end
+		if not isvalid(self.hud) or not self.hud.Enable or self._T.modifierRolling then return end
 		if self._tooltipIndex == index then self:CloseModifierTooltip() return end
 		local item = (self._T.hudModifiers or {})[index]
 		if item == nil or not isvalid(self.modifierTooltip) then return end
@@ -294,27 +506,91 @@ script EndlessBurstLogic extends Logic
 		if definition == nil then return end
 		self:CloseModifierTooltip()
 		self._tooltipIndex = index
-		self._tooltipRemaining = 7
+		self._tooltipRemaining = 3
 		self.modifierTooltipTitle.Text = _LocalizationService:GetText(definition.name)
 		self.modifierTooltipTitle.FontColor = definition.color
-		self.modifierTooltipBody.Text = _LocalizationService:GetTextFormat(definition.description, self:FormatHudPercent(item.value))
+		self.modifierTooltipBody.Text = _LocalizationService:GetTextFormat(definition.description, self:FormatHudValue(item.key, item.value))
 		self.modifierTooltip.Enable = true
 		local slot = self._T.hudSlots[index]
 		if slot ~= nil and isvalid(slot.selected) then slot.selected.Enable = true end
 		_SoundOptionLogic:PlaySfx(self.UiClickSoundRUID, 0.45)
-		log("[VRF] invasion HUD tooltip index=" .. tostring(index) .. " key=" .. item.key .. " value=" .. self:FormatHudPercent(item.value))
+		log("[VRF] invasion HUD tooltip index=" .. tostring(index) .. " key=" .. item.key .. " value=" .. self:FormatHudValue(item.key, item.value))
+	end
+
+	@ExecSpace("ClientOnly")
+	method void DrawModifierSlot(integer index, string key, number value, number offset, number alpha)
+		-- 짧은 세로 이동과 알파 변화로 슬롯 회전을 표현한다. 정지하면 원래 좌표·선명도로 정확히 돌아온다.
+		local slot = (self._T.hudSlots or {})[index]
+		if slot == nil then return end
+		local definition = self:GetHudModifierDefinition(key)
+		if definition == nil then return end
+		slot.icon.SpriteGUIRendererComponent.ImageRUID = DataRef(self.ModifierIcons[key])
+		slot.icon.SpriteGUIRendererComponent.Color = Color(1, 1, 1, alpha)
+		slot.icon.UITransformComponent.anchoredPosition = Vector2(-35, offset)
+		slot.value.UITransformComponent.anchoredPosition = Vector2(34, offset)
+		slot.value.TextGUIRendererComponent.Text = self:FormatHudValue(key, value)
+		local color = definition.color
+		slot.value.TextGUIRendererComponent.FontColor = Color(color.r, color.g, color.b, alpha)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RenderModifierSlots()
+		-- 최대 세 개의 슬롯을 가운데 정렬한다. 표시 항목은 툴팁과 회전 정착값이 함께 사용한다.
+		local items = self._T.hudModifiers or {}
+		for i, slot in ipairs(self._T.hudSlots or {}) do
+			local item = items[i]
+			slot.entity.Enable = item ~= nil
+			if item ~= nil then
+				slot.entity.UITransformComponent.anchoredPosition = Vector2((i - (#items + 1) / 2) * 140, 0)
+				self:DrawModifierSlot(i, item.key, item.value, 0, 1)
+			end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void TickModifierRoll(number delta)
+		-- 아이콘을 빠르게 교대하다 왼쪽부터 예약값에 정착한다(0.72/0.90/1.08초). 연출 값은 전투와 무관하다.
+		if not self._T.modifierRolling then return end
+		if self:GetNextModifierData() == "" or self._T.previewRecord ~= self.NextModifierRecord then
+			self._T.modifierRolling = false self:RenderModifierSlots() return
+		end
+		self._T.modifierRollAge = self._T.modifierRollAge + delta
+		local age = self._T.modifierRollAge
+		local keys = {"fortitude", "frenzy", "haste", "swarm", "onslaught", "curse"}
+		local items = self._T.hudModifiers or {}
+		local tick = math.floor(age / 0.085)
+		for i, item in ipairs(items) do
+			local stopAt = 0.72 + (i - 1) * 0.18
+			if age >= stopAt then self:DrawModifierSlot(i, item.key, item.value, 0, 1)
+			else
+				if self._T.modifierRollTick ~= tick or self._T.modifierRollKeys[i] == nil then
+					self._T.modifierRollKeys[i] = keys[_UtilLogic:RandomIntegerRange(1, #keys)]
+				end
+				local key = self._T.modifierRollKeys[i]
+				local cycle = (age / 0.085) % 1
+				self:DrawModifierSlot(i, key, self:GetModifierValue(key, self.InvasionLevel + 1), (0.5 - cycle) * 22, 0.65 + 0.35 * math.sin(cycle * math.pi))
+			end
+		end
+		self._T.modifierRollTick = tick
+		if age >= 0.72 + math.max(0, #items - 1) * 0.18 then
+			self._T.modifierRolling = false self:RenderModifierSlots()
+			log("[VRF] invasion slot settled=" .. self.NextModifierRecord)
+		end
 	end
 
 	@ExecSpace("ClientOnly")
 	method void UpdateHud()
-		-- Keep stage/progress text, while replacing the generic message with effect icons.
+		-- 대기 중에는 다음 단계 번호와 효과를 명시한다. 처치 카운트·언어 변경으로 슬롯을 재추첨하지 않는다.
 		local locale = _LocalizationService.CurrentLocaleId
-		local hudKey = tostring(self.InvasionLevel) .. "|" .. tostring(self.Phase) .. "|" .. tostring(self.RemainingSeconds) .. "|" .. tostring(self.ChargeKills) .. "|" .. self.HudModifierData .. "|" .. locale
+		local nextData = self:GetNextModifierData()
+		local preview = nextData ~= ""
+		local hudKey = tostring(self.InvasionLevel) .. "|" .. tostring(self.Phase) .. "|" .. tostring(self.RemainingSeconds) .. "|" .. tostring(self.ChargeKills) .. "|" .. self.HudModifierData .. "|" .. self.NextModifierRecord .. "|" .. locale
 		if self._lastHudText == hudKey then return end
 		self._lastHudText = hudKey
 		local ratio = 0
 		if self.Phase > 1 then
-			self.heading.Text = _LocalizationService:GetTextFormat("ENDLESS_INVASION_STAGE", self.InvasionLevel)
+			if preview then self.heading.Text = _LocalizationService:GetTextFormat("ENDLESS_INVASION_NEXT_STAGE", self.InvasionLevel + 1)
+			else self.heading.Text = _LocalizationService:GetTextFormat("ENDLESS_INVASION_STAGE", self.InvasionLevel) end
 			if self.Phase == 2 then
 				self.detail.Text = _LocalizationService:GetTextFormat("ENDLESS_INVASION_SURGE_TIME", self.RemainingSeconds)
 				ratio = self.RemainingSeconds / math.max(1, self.BurstSeconds)
@@ -326,26 +602,21 @@ script EndlessBurstLogic extends Logic
 			self.heading.Text = _LocalizationService:GetText("ENDLESS_INVASION_TITLE")
 			self.detail.Text = _LocalizationService:GetText("ENDLESS_INVASION_BEGIN")
 		end
-		local modifierKey = tostring(self.InvasionLevel) .. "|" .. tostring(self.Phase <= 1) .. "|" .. self.HudModifierData .. "|" .. locale
+		local modifierKey = tostring(self.InvasionLevel) .. "|" .. tostring(self.Phase) .. "|" .. self.HudModifierData .. "|" .. self.NextModifierRecord .. "|" .. locale
 		if self._T.hudModifierKey ~= modifierKey then
 			self._T.hudModifierKey = modifierKey
 			self:CloseModifierTooltip()
-			local items = self:GetHudModifiers()
-			self._T.hudModifiers = items
-			local count = #items
-			for i, slot in ipairs(self._T.hudSlots or {}) do
-				local item = items[i]
-				slot.entity.Enable = item ~= nil
-				if item ~= nil then
-					local definition = self:GetHudModifierDefinition(item.key)
-					slot.entity.UITransformComponent.anchoredPosition = Vector2((i - (count + 1) / 2) * 140, 0)
-					slot.icon.SpriteGUIRendererComponent.ImageRUID = DataRef(self.ModifierIcons[item.key])
-					slot.icon.SpriteGUIRendererComponent.Color = Color.white
-					slot.value.TextGUIRendererComponent.Text = self:FormatHudPercent(item.value)
-					slot.value.TextGUIRendererComponent.FontColor = definition.color
+			self._T.hudModifiers = self:GetHudModifiers()
+			self:RenderModifierSlots()
+			if preview then
+				if self._T.previewRecord ~= self.NextModifierRecord then
+					self._T.previewRecord = self.NextModifierRecord
+					self._T.modifierRollAge = 0 self._T.modifierRollTick = -1 self._T.modifierRollKeys = {}
+					self._T.modifierRolling = true
+					log("[VRF] invasion slot rolling=" .. self.NextModifierRecord)
 				end
-			end
-			log("[VRF] invasion HUD layout count=" .. tostring(count) .. " data=" .. self.HudModifierData)
+			else self._T.modifierRolling = false end
+			log("[VRF] invasion HUD layout count=" .. tostring(#self._T.hudModifiers) .. " preview=" .. tostring(preview))
 		end
 		local surge = self.Phase == 2
 		self.heading.FontColor = surge and Color(0.97, 0.84, 1, 1) or Color(0.9, 0.8, 1, 1)
@@ -356,12 +627,17 @@ script EndlessBurstLogic extends Logic
 	@ExecSpace("ClientOnly")
 	method void TickClient(number delta)
 		-- Screen-space haze survives all episode-1 maps and leaves the center clear.
-		local show = self.Phase > 0 and self:IsEligibleRun() and not _GameManager.GameOver
+		-- Phase 1(클리어 후 첫 침식 대기)엔 숨긴다 — 클리어 배너·토스트와 겹치지 않게(첫 발동 순간 충격파와 함께 등장)
+		self:TickTutorial(delta)
+		local show = self.Phase > 1 and self:IsEligibleRun() and not _GameManager.GameOver
 			and not _GameManager.EntryPresentationPending
 			and not (isvalid(_TitleUI.titleGroup) and _TitleUI.titleGroup.Enable)
 		if not show or not isvalid(self.scene) or not isvalid(self.hud) then
 			if self._particlesPlaying or self._visualAlpha > 0 then self:HidePresentation() end
 			self._visualAlpha = 0 self._clientPhase = self.Phase
+			if self.Phase <= 1 then
+				self._T.previewRecord = "" self._T.modifierRolling = false self._T.hudModifierKey = "" self._lastHudText = ""
+			end
 			return
 		end
 		local paused = _GameManager:IsGamePaused() or _GameManager.SafeAreaFrozen
@@ -417,6 +693,7 @@ script EndlessBurstLogic extends Logic
 			end
 		end
 		self:UpdateHud()
+		self:TickModifierRoll(delta)
 	end
 
 	method void OnUpdate(number delta)
@@ -426,6 +703,129 @@ script EndlessBurstLogic extends Logic
 
 	method void OnEndPlay()
 		-- This singleton owns no repeating timers or subscriptions across play sessions.
-		if self:IsServer() then self:ResetForRun() else self:HidePresentation() self:UnbindHudButtons() end
+		if self:IsServer() then self:ResetForRun() else self:HidePresentation() self:UnbindHudButtons() self:UnbindTutorial() end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void BindTutorial()
+		-- 딤(전체 화면 버튼) 한 곳만 닫기를 받는다. 그림 5장은 미리 받아 둔다
+		self._T.tutorialHandler = nil
+		self._tutorialShown = false
+		if isvalid(self.tutorialRoot) then self.tutorialRoot.Enable = false end
+		if isvalid(self.tutorialDim) then
+			self._T.tutorialHandler = self.tutorialDim:ConnectEvent(ButtonClickEvent, function() self:OnTutorialTapped() end)
+		end
+		_ResourceService:PreloadAsync(self.TutorialImages, function(results)
+			local ready = true
+			for _, status in pairs(results) do if status ~= PreloadResultStatus.Success then ready = false end end
+			log("[VRF] invasion tutorial resources ready=" .. tostring(ready))
+		end)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void UnbindTutorial()
+		-- 재생 종료 시 닫기 콜백을 풀어 다음 재생에서 겹치지 않게 한다
+		if self._T.tutorialHandler ~= nil and isvalid(self.tutorialDim) then self.tutorialDim:DisconnectEvent(ButtonClickEvent, self._T.tutorialHandler) end
+		self._T.tutorialHandler = nil
+		self:CloseTutorialView()
+	end
+
+	@ExecSpace("ClientOnly")
+	method Entity TutorialNode(string path)
+		-- 안내 화면 하위 엔티티(Content/StepN 등)
+		return _EntityService:GetEntityByPath("/ui/InvasionTutorialGroup/Tutorial/" .. path)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OpenTutorialView()
+		-- 1번 그림부터 다시 시작한다. 문구는 번역표 키(INVASION_TUTORIAL_*)
+		if not isvalid(self.tutorialRoot) then return end
+		self._tutorialShown = true self._tutorialTime = 0 self._tutorialStage = 0 self._tutorialAges = {}
+		self:TutorialNode("Content/Title").TextGUIRendererComponent.Text = _LocalizationService:GetText("INVASION_TUTORIAL_TITLE")
+		self:TutorialNode("Content/Hint").TextGUIRendererComponent.Text = _LocalizationService:GetText("INVASION_TUTORIAL_HINT")
+		for i = 1, 3 do
+			self:TutorialNode("Content/Step" .. i .. "/Label").TextGUIRendererComponent.Text = _LocalizationService:GetText("INVASION_TUTORIAL_STEP" .. i)
+			local step = self:TutorialNode("Content/Step" .. i)
+			step.Enable = false step.CanvasGroupComponent.GroupAlpha = 0
+		end
+		for i = 1, 2 do
+			local arrow = self:TutorialNode("Content/Arrow" .. i)
+			arrow.Enable = false arrow.CanvasGroupComponent.GroupAlpha = 0
+		end
+		self.tutorialRoot.Enable = true
+		self:FitTutorial()
+		self:RevealTutorialStage(1)
+		log("[VRF] invasion tutorial view opened")
+	end
+
+	@ExecSpace("ClientOnly")
+	method void FitTutorial()
+		-- 도토리 안내(ThanksgivingUI.FitAcornGuide)와 같은 방식: 콘텐츠 전체를 한 부모로 같은 비율 축소(화살표 끝점 유지)
+		local canvas = self.tutorialRoot.Parent.UITransformComponent.RectSize
+		local w = canvas.x local h = canvas.y local cx = 0 local cy = 0
+		local sw = _UILogic.ScreenWidth local sh = _UILogic.ScreenHeight
+		if sw > 0 and sh > 0 then
+			local p0 = _UILogic:ScreenToLocalUIPosition(Vector2(0, 0), self.tutorialRoot.UITransformComponent)
+			local p1 = _UILogic:ScreenToLocalUIPosition(Vector2(sw, sh), self.tutorialRoot.UITransformComponent)
+			if p0 ~= nil and p1 ~= nil then
+				local mw = math.abs(p1.x - p0.x) local mh = math.abs(p1.y - p0.y)
+				if mw > canvas.x * 0.5 and mw < canvas.x * 2 and mh > canvas.y * 0.5 and mh < canvas.y * 2 then
+					w = math.min(w, mw) h = math.min(h, mh) cx = (p0.x + p1.x) * 0.5 cy = (p0.y + p1.y) * 0.5
+				end
+			end
+		end
+		local scale = math.max(0.05, math.min(1, (w - 80) / 1520, (h - 80) / 1040))
+		self._tutorialCanvas = Vector2(canvas.x, canvas.y) self._tutorialScreen = Vector2(sw, sh)
+		local content = self:TutorialNode("Content").UITransformComponent
+		content.UIScale = Vector3(scale, scale, 1) content.anchoredPosition = Vector2(cx, cy)
+	end
+
+	@ExecSpace("ClientOnly")
+	method void RevealTutorialStage(integer index)
+		-- 화살표는 도착할 그림과 함께 나타난다
+		if index < 1 or index > 3 then return end
+		self._tutorialStage = index self._tutorialAges[index] = 0
+		self:TutorialNode("Content/Step" .. index).Enable = true
+		if index > 1 then self:TutorialNode("Content/Arrow" .. (index - 1)).Enable = true end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void TickTutorial(number delta)
+		-- 서버 TutorialOpen을 따라 열고 닫는다. 0초·0.65초·1.3초에 1→2→3번, 각각 0.15초 페이드
+		if self.TutorialOpen and not self._tutorialShown and not self._T.tutorialClosing then self:OpenTutorialView() end
+		if not self.TutorialOpen then
+			self._T.tutorialClosing = false
+			if self._tutorialShown then self:CloseTutorialView() end
+			return
+		end
+		if not self._tutorialShown then return end
+		local canvas = self.tutorialRoot.Parent.UITransformComponent.RectSize
+		if canvas.x ~= self._tutorialCanvas.x or canvas.y ~= self._tutorialCanvas.y or _UILogic.ScreenWidth ~= self._tutorialScreen.x or _UILogic.ScreenHeight ~= self._tutorialScreen.y then self:FitTutorial() end
+		self._tutorialTime = self._tutorialTime + delta
+		while self._tutorialStage < 3 and self._tutorialTime >= self._tutorialStage * 0.65 do self:RevealTutorialStage(self._tutorialStage + 1) end
+		for i = 1, self._tutorialStage do
+			local age = (self._tutorialAges[i] or 0) + delta self._tutorialAges[i] = age
+			local alpha = math.min(1, age / 0.15)
+			self:TutorialNode("Content/Step" .. i).CanvasGroupComponent.GroupAlpha = alpha
+			if i > 1 then self:TutorialNode("Content/Arrow" .. (i - 1)).CanvasGroupComponent.GroupAlpha = alpha end
+		end
+	end
+
+	@ExecSpace("ClientOnly")
+	method void OnTutorialTapped()
+		-- 화면 아무 데나 누르면 닫힌다. 전투 중 몬스터를 누르던 손가락에 바로 닫히지 않게 처음 0.5초는 무시
+		if not self._tutorialShown or self._tutorialTime < self.TutorialTapGuardSeconds then return end
+		log("[VRF] invasion tutorial tapped close t=" .. string.format("%.2f", self._tutorialTime))
+		_SoundOptionLogic:PlaySfx(self.UiClickSoundRUID, 1)
+		self._T.tutorialClosing = true
+		self:CloseTutorialView()
+		self:RequestCloseTutorial()
+	end
+
+	@ExecSpace("ClientOnly")
+	method void CloseTutorialView()
+		-- 화면만 닫는다(봤음 저장·침식 시작은 서버 FinishTutorial)
+		self._tutorialShown = false self._tutorialStage = 0 self._tutorialTime = 0 self._tutorialAges = {}
+		if isvalid(self.tutorialRoot) then self.tutorialRoot.Enable = false end
 	end
 end

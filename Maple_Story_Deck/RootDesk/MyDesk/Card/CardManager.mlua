@@ -24744,6 +24744,11 @@ script CardManager extends Logic
 						_MonsterSpawner:CheatRequestSpawnElite()
 					end
 				end)
+			elseif Environment:IsMakerPlay() then
+				-- 메이커에서는 DebugMode가 꺼져 있어도 P키(클리어 3초 전) 치트만은 항상 켠다(2026-10-30 유저 지정). 배포판에는 안 붙는다
+				self._debugKeyHandler = _InputService:ConnectEvent(KeyDownEvent, function(e)
+					if e.key == KeyboardKey.P then self:DebugForceTimeAttackNear() end
+				end)
 			end
 		end
 	end
@@ -32802,6 +32807,8 @@ script CardManager extends Logic
 		-- 그대로 적용하면 플레이어가 누른 선택이 통째로 무효가 되므로 드롭과 같은 대체 규칙을 탄다
 		-- (ApplyUpgradeOrSubstitute 주석 참고)
 		self:ApplyUpgradeOrSubstitute(cardIdx, upgradeType, "choice")
+		-- [CF2026] 크리에이터 페스티벌 이벤트(스킬/포션/패시브 카드 선택, 6 = 포션) — 이벤트 종료 후 삭제
+		_CreatorFestivalLogic:OnLevelUpChoice(cardIdx == 6, self:IsPassiveCard(cardIdx))
 		self._choiceCard1 = 0 ; self._choiceCard2 = 0 ; self._choiceCard3 = 0
 		self:HideLevelUpChoices()
 		-- 고른 카드가 실제로 들어간 슬롯으로 아이콘을 날린다(2026-09-24 유저 지정 "그냥 카드가 열려서 인지가
@@ -32844,6 +32851,8 @@ script CardManager extends Logic
 		self:ApplyCardUpgradeInner(cardIdx, upgradeType)
 		-- 업적: 스킬이 이번 강화로 Lv5에 막 도달
 		if levelBefore < 5 and self:GetSlotLevelNum(cardIdx) >= 5 then _AchievementLogic:OnSkillMaxLevel() end
+		-- [CF2026] 크리에이터 페스티벌 이벤트(스킬 Lv.3 도달, 포션·패시브 제외) — 이벤트 종료 후 삭제
+		if levelBefore < 3 and self:GetSlotLevelNum(cardIdx) >= 3 and cardIdx ~= 6 and not self:IsPassiveCard(cardIdx) then _CreatorFestivalLogic:OnSkillLevel3() end
 		self:NotifyCardLevelUpdated(cardIdx)
 		-- 조합 결과 카드를 처음 얻었으면 옵션 조합식 목록에서 공개(FusionDiscoveryLogic 주석 참고)
 		_FusionDiscoveryLogic:NotifyCardAcquired(cardIdx)
@@ -37128,13 +37137,19 @@ script CardManager extends Logic
 	-- DebugMode가 꺼져 있으면(배포 빌드 기준) 아무 동작도 하지 않는다.
 	@ExecSpace("Server")
 	method void DebugForceTimeAttackNear()
-		if not self.DebugMode then return end
+		if not self.DebugMode and not Environment:IsMakerPlay() then return end
 		if _GameManager.TimeAttackMode then
 			_GameManager:CheatSetTimeAttackRemaining(10)
 			log("[DEBUG] TimeAttackRemaining forced to 10s")
 			return
 		end
-		local target = math.max(0, _RunClearLogic:GetGoalSeconds() - 3)
+		-- 이미 클리어한 무제한 판이면 침식 1단계 올리기(2026-10-30 유저 지정 "또 누르면 침식 1단계씩 플러스")
+		if _RunClearLogic.ClearRecord ~= "" then
+			_EndlessBurstLogic:CheatAdvanceInvasion()
+			return
+		end
+		-- 2026-10-30 유저 지정: 누르면 바로 클리어(예전엔 3초 전으로 당겨서 연타하면 계속 밀렸다)
+		local target = _RunClearLogic:GetGoalSeconds()
 		_MonsterSpawner:CheatSetElapsedPlayTime(target)
 		log("[DEBUG] elapsed play time forced to " .. tostring(target) .. "s")
 	end

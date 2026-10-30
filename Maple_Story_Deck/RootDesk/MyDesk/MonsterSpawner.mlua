@@ -357,7 +357,7 @@ script MonsterSpawner extends Logic
 		self._timer = self.EarlyPhaseSpawnInterval
 		self._elapsedPlayTime = 0
 		self._nextBossTimer = self.FirstBossTime
-		self._bossIndex = 1
+		self:ResetBossOrder()
 		self._firstBossDone = false
 		self._nextEliteClockTime = self.EliteClockInterval
 		self._eliteSpawnCount = 0
@@ -713,6 +713,8 @@ script MonsterSpawner extends Logic
 	method void CheatCycleBossNow()
 		self._bossIndex = self._bossIndex + 1
 		if self._bossIndex > _GameManager:GetBossCount() then self._bossIndex = 1 end
+		-- 치트로 고른 번호를 그대로 쓰게 랜덤 추첨은 건너뛴다
+		self._bossDrawPending = false
 		log("CHEAT: cycle to ep1 boss #" .. self._bossIndex)
 		self:CheatSpawnBossNow()
 	end
@@ -1381,18 +1383,68 @@ script MonsterSpawner extends Logic
 		-- 동반 보스 파티 추적도 여기서 정리한다(둘 다 죽어야 이 경로로 들어온다)
 		self._bossPartner = nil
 		self._bossPartyAlive = 0
+		-- 2026-10-30 유저 지정: 순서는 랜덤, 단 한 런 안에서 모든 보스가 한 번씩 나오기 전엔 같은 보스가 다시 안 나온다.
+		-- 다음 번호는 여기서 바로 뽑지 않고 다음 보스 스폰 직전(TrySpawnPersistentBoss)에 뽑는다 —
+		-- OnBossDefeated(업적 ep5bossbits 등)가 이 뒤에 GetBossIndex를 읽어도 "방금 잡은 보스" 번호가 남아 있게.
 		if _GameManager:HasBossRoster() then
-			self._bossIndex = self._bossIndex + 1
-			if self._bossIndex > _GameManager:GetBossCount() then self._bossIndex = 1 end
-			log("MonsterSpawner: next boss index = " .. self._bossIndex)
+			self._bossDrawPending = true
 		end
 	end
 
-	-- 에피소드1 보스 순번(1부터). "다음에 나올 보스"이자 "지금 떠 있는 보스"의 번호 —
-	-- 보스를 잡는 순간(ClearCurrentBoss)에만 올라가므로, 살아있는 동안은 값이 고정이다.
+	-- 보스 순번(1부터). "지금 떠 있는 보스"(없으면 마지막으로 나온 보스)의 번호 —
+	-- 새 보스를 스폰하기 직전(DrawNextBossIndex)에만 바뀌므로, 살아있는 동안은 값이 고정이다.
 	-- (RelocateBossToCurrentZone이 보스를 파괴 후 재소환하면서 InitializeStats를 다시 부르는데,
 	--  그때도 같은 번호를 읽어야 존을 옮겼다고 보스 외형이 바뀌지 않는다.)
 	property integer _bossIndex = 1
+	-- 이번 바퀴에 아직 안 나온 보스 번호들. 비면 전부 다시 넣고 섞는다(한 바퀴 = 모든 보스 1회씩)
+	property any _bossBag = nil
+	-- true면 다음 보스 스폰 직전에 가방에서 새 번호를 뽑는다(런 시작 / 보스 처치 후)
+	property boolean _bossDrawPending = true
+	-- 바퀴가 넘어갈 때 직전 보스가 바로 또 나오지 않게 기억해 둔다(0 = 런 첫 보스라 제한 없음)
+	property integer _bossLastIndex = 0
+
+	@ExecSpace("ServerOnly")
+	method void ResetBossOrder()
+		-- 새 런 기준으로 보스 가방을 비운다. 실제 추첨은 첫 보스 스폰 직전(에피소드가 확정된 뒤)에 한다.
+		self._bossIndex = 1
+		self._bossBag = {}
+		self._bossDrawPending = true
+		self._bossLastIndex = 0
+	end
+
+	@ExecSpace("ServerOnly")
+	method void DrawNextBossIndex()
+		-- 가방에서 다음 보스 번호를 하나 꺼낸다. 가방이 비었으면 1~N을 다시 넣고 섞는다.
+		local count = _GameManager:GetBossCount()
+		if count < 1 then return end
+		if self._bossBag == nil then self._bossBag = {} end
+		-- 다른 에피소드 로스터로 채워진 가방이면 버린다(런 중 에피소드가 바뀌는 일은 없지만 방어)
+		for _, v in ipairs(self._bossBag) do
+			if v > count then
+				self._bossBag = {}
+				break
+			end
+		end
+		if #self._bossBag == 0 then
+			local bag = {}
+			for i = 1, count do bag[i] = i end
+			for i = count, 2, -1 do
+				local j = _UtilLogic:RandomIntegerRange(1, i)
+				bag[i], bag[j] = bag[j], bag[i]
+			end
+			-- 새 바퀴 첫 보스가 직전 보스와 같으면 뒤쪽과 바꾼다(바퀴 경계에서 같은 보스 연속 방지)
+			if count > 1 and bag[count] == self._bossLastIndex then
+				local j = _UtilLogic:RandomIntegerRange(1, count - 1)
+				bag[count], bag[j] = bag[j], bag[count]
+			end
+			self._bossBag = bag
+		end
+		-- 맨 뒤에서 꺼낸다
+		self._bossIndex = table.remove(self._bossBag)
+		self._bossLastIndex = self._bossIndex
+		self._bossDrawPending = false
+		if Environment:IsMakerPlay() then log("[VRF] MonsterSpawner: boss drawn #" .. self._bossIndex .. " left=" .. #self._bossBag .. " count=" .. count) end
+	end
 
 	@ExecSpace("ServerOnly")
 	method integer GetBossIndex()
@@ -1412,6 +1464,8 @@ script MonsterSpawner extends Logic
 		if currentMap == nil then return end
 		local mapIndex = _MapManager.CurrentMapIndex
 		if self:IsNoMonsterZone(mapIndex) then return end
+		-- 이번에 나올 보스를 가방에서 뽑는다(런 첫 보스 / 직전 보스 처치 후에만)
+		if self._bossDrawPending and _GameManager:HasBossRoster() then self:DrawNextBossIndex() end
 		local spawned = self:SpawnBatchOnMap(currentMap, _GameManager.Wave, true, false, mapIndex, false, 0)
 		if #spawned > 0 then
 			self._currentBoss = spawned[1]
@@ -1616,6 +1670,9 @@ script MonsterSpawner extends Logic
 			-- 개수(최대 10개)만큼 반복 호출되던 게(SpawnWave가 활성 존마다 이 메서드를 부른다) O(공유맵
 			-- 전체 몬스터 수)에서 O(그 존 몬스터 수)로 줄어든다.
 			local maxForThisMap = isCurrentMap and self.MaxMonstersPerMap or self.MaxMonstersPerMapBackground
+			-- 침식 범람: 존 동시 상한과 한 번에 나오는 수를 같은 배율로 올린다(상한이 20마리라 수만 늘리면 자리가 없다)
+			local swarmMult = _EndlessBurstLogic:GetSwarmMultiplier(mapIndex)
+			if swarmMult > 1 then maxForThisMap = math.ceil(maxForThisMap * swarmMult) end
 			local existingCount = #self:GetMonstersInZone(mapIndex)
 			local puzzleHalfSpawn = mapIndex==183 and not _Ep4Map5EasterEggLogic.PuzzleComplete
 		
@@ -1644,6 +1701,7 @@ script MonsterSpawner extends Logic
 				if self._elapsedPlayTime >= self.DoubleSpawnAfterSeconds then
 					count = math.ceil(count * self.DoubleSpawnMultiplier)
 				end
+				if swarmMult > 1 then count = math.ceil(count * swarmMult) end
 			end
 		
 			-- 이미 이 맵에 몬스터가 상한만큼 쌓여있으면 이번 스폰은 건너뛴다 (오래 방치된 맵 몬스터 무한 누적 방지)
@@ -1897,6 +1955,9 @@ script MonsterSpawner extends Logic
 		end
 		ai.MaxHp = eliteHp
 		ai.CurrentHp = eliteHp
+		-- 고정 체력으로 덮어써서 InitializeStats 때 받은 침식 강인 배율이 사라졌다 — "받은 배율"도 1로 되돌려
+		-- 다음 프레임 UpdateEndlessInvasionHealth가 다시 곱하게 한다(안 하면 엘리트만 강인을 덜 받는다)
+		ai:ResetEndlessHpMult()
 		if not _GameManager:HasEliteRoster() then return end
 		if map == nil or not isvalid(ai.Entity) then return end
 
@@ -2938,6 +2999,8 @@ script MonsterSpawner extends Logic
 	-- 몰려오기/엘리트 시계도 같이 넘겨야 지나간 횟수만큼 매 프레임 연달아 터지지 않는다.
 	@ExecSpace("ServerOnly")
 	method void CheatSetElapsedPlayTime(number seconds)
+		-- 시간을 뒤로 되돌리지는 않는다(P 연타 시 클리어가 계속 밀리던 문제, 2026-10-30)
+		if seconds <= self._elapsedPlayTime then return end
 		self._elapsedPlayTime = seconds
 		while self._nextSwarmTime <= seconds do self._nextSwarmTime = self._nextSwarmTime + self.SwarmInterval end
 		while self._nextEliteClockTime <= seconds do self._nextEliteClockTime = self._nextEliteClockTime + self.EliteClockInterval end
@@ -2979,8 +3042,8 @@ script MonsterSpawner extends Logic
 		-- 동반 보스 파티(에피2 1번) 추적도 같이 초기화 — 안 지우면 다음 런에서 "이미 1마리 죽은 상태"로 시작한다
 		self._bossPartner = nil
 		self._bossPartyAlive = 0
-		-- 보스 타이머를 처음부터 다시 세는 것과 짝을 맞춰, 보스 순번도 1번(블루 머쉬맘)부터 다시 시작한다
-		self._bossIndex = 1
+		-- 보스 타이머를 처음부터 다시 세는 것과 짝을 맞춰, 보스 가방도 새 런 기준으로 비운다(첫 보스부터 다시 랜덤)
+		self:ResetBossOrder()
 		-- 이전 런에서 소환됐던 부하/호위병 참조도 비운다(엔티티는 ClearAllMonsters가 이미 정리)
 		self._bossMinions = {}
 		self._minionZoneIndex = -1

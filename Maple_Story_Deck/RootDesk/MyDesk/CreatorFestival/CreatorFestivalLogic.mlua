@@ -1,0 +1,320 @@
+@Logic
+script CreatorFestivalLogic extends Logic
+
+	-- 메W 크리에이터 페스티벌 2026 월드코인 이벤트(2026-11-05 11:00 ~ 11-25 10:59 KST).
+	--   · 플랫폼 미션 1개「초보 모험가 미션 10개 달성」 — 아래 10개 중 달성한 개수(1~10)를 진행도로 보낸다.
+	--     ① 몬스터 100마리 처치 ② 레벨 5 달성 ③ 스킬 카드 3회 선택 ④ 스킬 1개 Lv.3 강화 ⑤ 포션 카드 1회 선택
+	--     ⑥ 아이템 1개 획득(잡템 포함) ⑦ 엘리트 3마리 처치 ⑧ 패시브 스킬 2회 선택 ⑨ 몬스터 150마리 처치
+	--     ⑩ 에피소드 1 첫 보스 처치
+	--   · 기간 안(서버 시간)에 한 것만 센다. 판을 넘어 누적, 유저별 저장소 키 "CF2026"에 저장(월드 DB 필수 조건).
+	--   · 진행도가 오르면 _PlatformEventService:SetProgressAndWait(profileCode, EventId, MissionCode, 달성 수)를 부른다.
+	--     플랫폼에 마지막으로 확인된 값(sent)도 저장해 두고, 입장 시 sent < 달성 수면 다시 보낸다.
+	--   · 모든 호출과 결과는 "[CF2026]" 로그로 남긴다(유저 문의 대응용 — 운영 가이드 권장).
+	-- ⚠ 운영 규칙: 이벤트 진행 중 메이플W와 합의 없이 수정·중단 금지. 이벤트가 끝나면 이 파일과
+	--   "[CF2026]" 주석이 붙은 호출부(MonsterAI / GameManager / CardManager / PlayerInventory)를 전부 삭제한다.
+
+	property string EventId = "GC_261105_05"
+	property string MissionCode = "GC_261105_05_22"
+	property string StorageKey = "CF2026"
+	property number SaveInterval = 10
+	property number RetryDelay = 30
+	property integer MaxRetries = 5
+	-- 메이커 플레이 테스트에서만 기간 검사를 건너뛴다(퍼블리싱에서는 무시됨)
+	property boolean DebugIgnorePeriod = false
+
+	property integer _startMs = 0
+	property integer _endMs = 0
+	property boolean _loaded = false
+	property string _profileCode = ""
+	property table _stats = {}
+	property integer _sent = 0
+	property boolean _dirty = false
+	property number _saveTimer = 0
+	property boolean _sendBusy = false
+	property boolean _sendStopped = false
+	property integer _retryCount = 0
+	property number _retryTimer = 0
+
+	@ExecSpace("ServerOnly")
+	method void OnBeginPlay()
+		-- 기간: 11/05 11:00 KST = 02:00 UTC 부터, 11/25 10:59 KST = 01:59 UTC 까지(그 1분 포함)
+		self._startMs = DateTime(2026, 11, 5, 2, 0, 0).Elapsed
+		self._endMs = DateTime(2026, 11, 25, 2, 0, 0).Elapsed
+		log("[VRF] CreatorFestivalLogic begin inPeriod=" .. tostring(self:IsInPeriod()))
+	end
+
+	-- ── 기간 / 진행도 계산 ───────────────────────────────────────────────────
+	@ExecSpace("ServerOnly")
+	method boolean IsInPeriod()
+		-- 서버 시간이 이벤트 기간 안인가
+		if self.DebugIgnorePeriod and Environment:IsMakerPlay() then return true end
+		local now = DateTime.UtcNow.Elapsed
+		return now >= self._startMs and now < self._endMs
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer GetStat(string key)
+		-- 저장된 카운터(없으면 0)
+		local v = self._stats[key]
+		if v == nil then return 0 end
+		return v
+	end
+
+	@ExecSpace("ServerOnly")
+	method table GetMissionFlags()
+		-- 미션 10개 달성 여부(① ~ ⑩ 순서)
+		return {
+			self:GetStat("kill") >= 100,
+			self:GetStat("maxlv") >= 5,
+			self:GetStat("skillpick") >= 3,
+			self:GetStat("lv3") >= 1,
+			self:GetStat("potionpick") >= 1,
+			self:GetStat("item") >= 1,
+			self:GetStat("elite") >= 3,
+			self:GetStat("passivepick") >= 2,
+			self:GetStat("kill") >= 150,
+			self:GetStat("ep1boss") >= 1,
+		}
+	end
+
+	@ExecSpace("ServerOnly")
+	method integer GetProgress()
+		-- 달성한 미션 수(플랫폼에 보내는 진행도)
+		local n = 0
+		for _, done in ipairs(self:GetMissionFlags()) do
+			if done then n = n + 1 end
+		end
+		return n
+	end
+
+	@ExecSpace("ServerOnly")
+	method string GetFlagText()
+		-- 로그용 "1101000000" 형태
+		local s = ""
+		for _, done in ipairs(self:GetMissionFlags()) do
+			if done then s = s .. "1" else s = s .. "0" end
+		end
+		return s
+	end
+
+	-- ── 로드 / 저장 ───────────────────────────────────────────────────────
+	@ExecSpace("ServerOnly")
+	@EventSender("Service", "UserService")
+	handler HandleUserEnterEvent(UserEnterEvent event)
+		-- 입장 시 1회 로드. 기간 안이고 플랫폼에 덜 보낸 진행도가 있으면 다시 보낸다
+		local user = _UserService:GetUserEntityByUserId(event.UserId)
+		if user == nil then return end
+		self._profileCode = user.PlayerComponent.ProfileCode
+		self._stats = {}
+		self._sent = 0
+		local ds = _DataStorageService:GetUserDataStorage(self._profileCode)
+		local code, raw = ds:GetAndWait(self.StorageKey)
+		if code == 0 and raw ~= nil and raw ~= "" then
+			local ok, t = pcall(function() return _HttpService:JSONDecode(raw) end)
+			if ok and t ~= nil then
+				if t["s"] ~= nil then
+					for k, v in pairs(t["s"]) do
+						if k ~= "_v" then self._stats[k] = math.floor(tonumber(v) or 0) end
+					end
+				end
+				self._sent = math.floor(tonumber(t["sent"]) or 0)
+			end
+		elseif code ~= 0 and code ~= 1000002 then
+			log_warning("[CF2026] load failed code=" .. tostring(code))
+		end
+		self._loaded = true
+		self._sendStopped = false
+		self._retryCount = 0
+		log("[CF2026] loaded profile=" .. self._profileCode .. " progress=" .. self:GetProgress() .. " sent=" .. self._sent .. " flags=" .. self:GetFlagText())
+		self:TrySend()
+	end
+
+	@ExecSpace("ServerOnly")
+	method string EncodeState()
+		-- 저장용 JSON(빈 테이블은 JSONEncode가 못 다뤄서 버전 키를 항상 넣는다)
+		local s = {}
+		for k, v in pairs(self._stats) do s[k] = v end
+		s["_v"] = 1
+		local t = {}
+		t["s"] = s
+		t["sent"] = self._sent
+		return _HttpService:JSONEncode(t)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void Save()
+		-- 더티일 때만 비동기 저장(실패하면 다음 주기에 다시)
+		if not self._dirty or not self._loaded or self._profileCode == "" then return end
+		self._dirty = false
+		local ds = _DataStorageService:GetUserDataStorage(self._profileCode)
+		ds:SetAsync(self.StorageKey, self:EncodeState(), function(code, key)
+			if code ~= 0 then
+				self._dirty = true
+				log_warning("[CF2026] save failed code=" .. tostring(code))
+			end
+		end)
+	end
+
+	@ExecSpace("ServerOnly")
+	@EventSender("Service", "UserService")
+	handler HandleUserLeaveEvent(UserLeaveEvent event)
+		-- 나갈 때 남은 변경을 확실히 저장
+		if not self._dirty or not self._loaded or self._profileCode == "" then return end
+		self._dirty = false
+		local ds = _DataStorageService:GetUserDataStorage(self._profileCode)
+		local code = ds:SetAndWait(self.StorageKey, self:EncodeState())
+		if code ~= 0 then log_warning("[CF2026] leave save failed code=" .. tostring(code)) end
+	end
+
+	-- ── 카운터 갱신 ───────────────────────────────────────────────────────
+	@ExecSpace("ServerOnly")
+	method void Add(string key, integer amount)
+		-- 기간 안일 때만 누적. 미션 달성 수가 바뀌면 플랫폼에 보낸다
+		if not self._loaded or amount <= 0 then return end
+		if not self:IsInPeriod() then return end
+		local before = self:GetProgress()
+		self._stats[key] = self:GetStat(key) + amount
+		self._dirty = true
+		local after = self:GetProgress()
+		if after ~= before then
+			log("[CF2026] mission progress " .. before .. " -> " .. after .. " flags=" .. self:GetFlagText() .. " by=" .. key)
+			self:TrySend()
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void SetMax(string key, integer value)
+		-- 최고기록형(레벨) — 더 클 때만
+		if value <= self:GetStat(key) then return end
+		self:Add(key, value - self:GetStat(key))
+	end
+
+	-- ── 게임 곳곳에서 부르는 훅([CF2026] 주석이 붙은 호출부) ─────────────────────
+	@ExecSpace("ServerOnly")
+	method void OnMonsterKilled(boolean isElite)
+		-- MonsterAI.Die — ①⑨ 처치 수, ⑦ 엘리트
+		self:Add("kill", 1)
+		if isElite then self:Add("elite", 1) end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnLevelUp(integer level)
+		-- GameManager.LevelUp — ② 레벨 5
+		self:SetMax("maxlv", level)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnLevelUpChoice(boolean isPotion, boolean isPassive)
+		-- CardManager.SelectLevelUpChoice — ③ 스킬 카드 / ⑤ 포션 카드 / ⑧ 패시브 선택
+		if isPotion then
+			self:Add("potionpick", 1)
+		elseif isPassive then
+			self:Add("passivepick", 1)
+		else
+			self:Add("skillpick", 1)
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnSkillLevel3()
+		-- CardManager.ApplyCardUpgrade — ④ 스킬이 Lv.3에 막 도달
+		self:Add("lv3", 1)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnItemAcquired()
+		-- PlayerInventory.AddItem(잡템) / GameManager 장비·주문서 지급 — ⑥
+		self:Add("item", 1)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnBossDefeated()
+		-- GameManager.OnBossDefeated — ⑩ 에피소드 1 보스(첫 보스가 5분에 먼저 나온다)
+		if _GameManager:GetSelectedEpisode() ~= 1 then return end
+		self:Add("ep1boss", 1)
+	end
+
+	-- ── 플랫폼 이벤트 API 호출 ─────────────────────────────────────────────
+	@ExecSpace("ServerOnly")
+	method void TrySend()
+		-- 보낼 게 있으면 별도 타이머 문맥에서 호출(게임 코드 흐름을 Wait로 막지 않게)
+		if self._sendBusy or self._sendStopped or not self._loaded or self._profileCode == "" then return end
+		if not self:IsInPeriod() then return end
+		if self:GetProgress() <= self._sent then return end
+		self._sendBusy = true
+		_TimerService:SetTimerOnce(function() self:DoSend() end, 0.1)
+	end
+
+	@ExecSpace("ServerOnly")
+	method void DoSend()
+		-- SetProgressAndWait 1회. 결과 코드에 따라 저장/재시도/중단
+		local progress = self:GetProgress()
+		local profile = self._profileCode
+		log("[CF2026] SetProgress request profile=" .. profile .. " progress=" .. progress .. " sent=" .. self._sent)
+		local ok, result = pcall(function()
+			return _PlatformEventService:SetProgressAndWait(profile, self.EventId, self.MissionCode, progress)
+		end)
+		self._sendBusy = false
+		if not ok then
+			log_warning("[CF2026] SetProgress error profile=" .. profile .. " progress=" .. progress .. " err=" .. tostring(result))
+			self._sendStopped = true
+			return
+		end
+		local code = math.floor(tonumber(result) or -1)
+		log("[CF2026] SetProgress result profile=" .. profile .. " progress=" .. progress .. " code=" .. code)
+		if code == 0 or code == 1 or code == 2 or code == 3 or code == 4 then
+			-- 0 반영 / 1 이미 완료 / 2·3 플랫폼 값이 이미 같거나 높음 / 4 더 최신 요청이 처리됨 — 모두 확인 완료
+			if progress > self._sent then
+				self._sent = progress
+				self._dirty = true
+				self:Save()
+			end
+			self._retryCount = 0
+			-- 기다리는 동안 진행도가 더 올랐으면 이어서 보낸다
+			self:TrySend()
+		elseif code == -1 or code == 500 or code == 501 then
+			-- 일시 오류 — 잠시 뒤 재시도(횟수 제한)
+			self._retryCount = self._retryCount + 1
+			if self._retryCount > self.MaxRetries then
+				self._sendStopped = true
+				log_warning("[CF2026] retry limit reached, stop until next enter")
+			else
+				self._retryTimer = self.RetryDelay
+			end
+		else
+			-- 100/101/102 잘못된 ID · 200 참여 조건 미충족 · 10000 퍼블리싱 아님 · 10001 인자 오류 — 이번 접속에서는 그만 보낸다
+			self._sendStopped = true
+		end
+	end
+
+	@ExecSpace("ServerOnly")
+	method void OnUpdate(number delta)
+		-- 재시도 대기 + 주기 저장
+		if not self._loaded then return end
+		if self._retryTimer > 0 then
+			self._retryTimer = self._retryTimer - delta
+			if self._retryTimer <= 0 then
+				self._retryTimer = 0
+				self:TrySend()
+			end
+		end
+		self._saveTimer = self._saveTimer + delta
+		if self._saveTimer >= self.SaveInterval then
+			self._saveTimer = 0
+			self:Save()
+		end
+	end
+
+	-- 테스트 전용(서버 스크립트에서 직접 호출) — 카운터/보낸 값 초기화
+	@ExecSpace("ServerOnly")
+	method void DebugReset()
+		self._stats = {}
+		self._sent = 0
+		self._sendStopped = false
+		self._retryCount = 0
+		self._dirty = true
+		self:Save()
+		log("[CF2026] debug reset")
+	end
+
+end
